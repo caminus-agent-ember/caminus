@@ -58,3 +58,21 @@ func TestBridgeRejectsPathIDsAndIgnoresPredictableTempSymlink(t *testing.T) {
 		t.Fatalf("bridge mode: %o", info.Mode().Perm())
 	}
 }
+
+func TestSSHWarningDoesNotBecomeProtocolOutput(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf 'ControlSocket already exists; disabling multiplexing\\n' >&2\nprintf 'agent\\n'\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	m := envModel{user: "agent", key: "fixture"}
+	msg := probeCmd(m)().(probeMsg)
+	if !msg.ok || msg.err != "" {
+		t.Fatalf("warning broke successful probe: %+v", msg)
+	}
+	output, err := sshOutput(sshCmd(m, "jobs", "fixture"))
+	if err != nil || output != "agent\n" {
+		t.Fatalf("diagnostic entered protocol output: %q %v", output, err)
+	}
+}

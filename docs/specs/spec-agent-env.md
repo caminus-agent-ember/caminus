@@ -102,8 +102,13 @@ the Q/A to the agent's `~/MEMORY.md`. Answer files and audit lines use the same 
 `audit.py`, so `caminus env watch` / `audit` and the TUI are interchangeable.
 
 For scripts and tests, everything is callable without the TUI: `caminus env reqs --json`, `caminus env answer ID
-approved|edited TEXT|denied|answered TEXT [--json]`, `jobs --json`, `notes --json`, `ctx --json`, `audit --json`,
+approved|edited TEXT|denied|answered TEXT [--json] [--digest HASH]`, `jobs --json`, `notes --json`, `ctx --json`, `audit --json`,
 `memory` (print the agent's ~/MEMORY.md), `remember TEXT` (append to it). Go tests: panel/envui_test.go.
+
+Root `approved` and `edited` decisions require `--digest HASH`: copy the `_digest`
+from the same `env reqs --json` object whose command you reviewed. A changed request
+is rejected instead of executing a replacement. The interactive watch and panel
+retain and validate that reviewed snapshot automatically.
 
 ## 8. Detached processes and multiple terminals
 

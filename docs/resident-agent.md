@@ -77,6 +77,9 @@ exact reviewed request under a shared lock before approving it, then save an
 execution claim before starting sudo. A claim that wins before cancellation is
 already committed; cancellation reports its ID and does not erase its result.
 An interrupted claim requires human inspection and is never automatically rerun.
+For scriptable root approvals, pass the reviewed request's `_digest` from
+`env reqs --json` as `env answer ID approved --digest HASH`. Approving by ID alone
+is rejected. An edited command still requires its reviewed request digest.
 
 | Exit | State |
 |---|---|

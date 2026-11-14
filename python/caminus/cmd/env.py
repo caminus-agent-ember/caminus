@@ -93,6 +93,7 @@ def _parser():
 
     p = sub.add_parser('answer', help='answer one request: approved | edited TEXT | denied | answered TEXT')
     p.add_argument('--json', action='store_true')
+    p.add_argument('--digest',help='the reviewed _digest from env reqs --json; required for approved/edited root decisions')
     p.add_argument('id')
     p.add_argument('decision', choices=['approved', 'edited', 'denied', 'answered'])
     p.add_argument('text', nargs='?')
@@ -509,6 +510,12 @@ def _answer_pending(a, tr):
         print(f'caminus env answer: no pending request {a.id} (caminus env reqs)', file=sys.stderr)
         return 2
     req = reqs[a.id]
+    if a.decision in ('approved','edited') and not a.digest:
+        print('caminus env answer: root approval requires --digest from the request you reviewed (env reqs --json)',file=sys.stderr)
+        return 2
+    if a.digest is not None and a.digest!=req['_digest']:
+        print('caminus env answer: request changed since review; review it again',file=sys.stderr)
+        return 2
     ap = settings.audit_path()
     if a.decision == 'denied':
         bridge.answer(settings.bridge_dir(), a.id, 'denied', me,request=req)

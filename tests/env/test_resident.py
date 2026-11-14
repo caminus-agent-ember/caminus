@@ -423,6 +423,28 @@ class Resident(unittest.TestCase):
             self.assertEqual(cmd_env.main(['answer','review','approved','--json'],transport=transport),2)
         self.assertEqual(calls,[])
 
+    def test_cli_approval_requires_the_snapshot_actually_reviewed(self):
+        import contextlib,io
+        from unittest.mock import patch
+        from caminus.cmd import env as cmd_env
+        self.bridge.mkdir(exist_ok=True);(self.bridge/'req').mkdir();(self.bridge/'res').mkdir()
+        path=self.bridge/'req/review.json'
+        value=dict(id='review',kind='root',cmd='printf harmless',user='fixture',ts=0)
+        path.write_text(json.dumps(value));reviewed=approval.snapshot(self.bridge,'review')
+        value['cmd']='printf replacement';path.write_text(json.dumps(value))
+        calls=[]
+        def transport(argv,**kw):
+            calls.append(argv);return subprocess.CompletedProcess(argv,0,'fixture result','')
+        env=dict(CAMINUS_ENV_BRIDGE=str(self.bridge),CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))
+        with patch.dict(os.environ,env),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_env.main(['answer','review','approved','--json'],transport=transport),2)
+            self.assertEqual(cmd_env.main(['answer','review','approved','--digest',reviewed['_digest'],'--json'],transport=transport),2)
+            self.assertEqual(calls,[])
+            fresh=approval.snapshot(self.bridge,'review')
+            self.assertEqual(cmd_env.main(['answer','review','approved','--digest',fresh['_digest'],'--json'],transport=transport),0)
+        self.assertEqual(calls,[['sudo','sh','-c','printf replacement']])
+        self.assertEqual(approval.response(self.bridge,'review')['out'],'fixture result')
+
 
 result=unittest.main(argv=[sys.argv[0]],exit=False).result
 print('RESULT','PASS' if result.wasSuccessful() else 'FAIL')

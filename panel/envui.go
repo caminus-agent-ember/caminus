@@ -22,6 +22,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -187,16 +188,32 @@ func sshCmd(m envModel, what, script string) *exec.Cmd {
 
 func sshRun(m envModel, what, script string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := sshCmd(m, what, script).CombinedOutput()
-		return sshOutMsg{what: what, out: string(out), err: err}
+		out, err := sshOutput(sshCmd(m, what, script))
+		return sshOutMsg{what: what, out: out, err: err}
 	}
+}
+
+func sshOutput(cmd *exec.Cmd) (string, error) {
+	var diagnostics bytes.Buffer
+	cmd.Stderr = &diagnostics
+	out, err := cmd.Output()
+	if err != nil {
+		return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(diagnostics.String()))
+	}
+	return string(out), nil
 }
 
 func probeCmd(m envModel) tea.Cmd {
 	return func() tea.Msg {
-		out, err := sshCmd(m, "probe", "id -un").CombinedOutput()
-		ok := err == nil && strings.TrimSpace(string(out)) == m.user
-		return probeMsg{ok: ok, n: m.sshN + 1, err: strings.TrimSpace(string(out))}
+		out, err := sshOutput(sshCmd(m, "probe", "id -un"))
+		ok := err == nil && strings.TrimSpace(out) == m.user
+		detail := ""
+		if err != nil {
+			detail = err.Error()
+		} else if !ok {
+			detail = "unexpected user: " + strings.TrimSpace(out)
+		}
+		return probeMsg{ok: ok, n: m.sshN + 1, err: detail}
 	}
 }
 
