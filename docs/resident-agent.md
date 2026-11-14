@@ -160,3 +160,8 @@ window. The comparison runner never starts, stops or preempts the model server.
 Its timeout terminates only the CLI's process group; durable resident terminal
 workers may need an explicit goal cancellation afterward. CPU fixture tests
 validate the comparison procedure, not live-model speed or correctness.
+
+The model's output-limit stop reason pauses a goal instead of reporting it
+completed or executing partial tool calls. Increase its output budget and resume
+that goal. Malformed tool arguments become durable tool errors so the daemon can
+continue working rather than restart on the same action.

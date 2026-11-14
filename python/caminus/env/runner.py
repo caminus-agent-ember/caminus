@@ -35,6 +35,13 @@ def run_shell(cmd, transport=subprocess.run, **kw):
     return _call(cmd, transport, **kw)
 
 
+def run_shell_stream(cmd, transport=subprocess.Popen):
+    """Keep JSONL live over SSH; payload remains stdin, output inherits the caller."""
+    process=transport(ssh_base()+['bash','-s'],stdin=subprocess.PIPE,text=True)
+    process.communicate(cmd)
+    return subprocess.CompletedProcess(process.args,process.returncode)
+
+
 def shell():
     """replace this process by an interactive SSH session as the agent user (run any agent by hand)"""
     os.execvp('ssh', ssh_base() + ['-t'])

@@ -62,7 +62,7 @@ CAMINUS_INSTALL
         import uuid
         delimiter='CAMINUS_REQUEST_'+uuid.uuid4().hex
         script='exec python3 -I "$HOME/bin/caminus-agent" request <<\''+delimiter+"'\n"+payload+'\n'+delimiter+'\n'
-        result=runner.run_shell(script,transport=transport)
+        result=runner.run_shell_stream(script) if '--jsonl' in args else runner.run_shell(script,transport=transport)
     sys.stdout.write(result.stdout or '')
     sys.stderr.write(result.stderr or '')
     return result.returncode

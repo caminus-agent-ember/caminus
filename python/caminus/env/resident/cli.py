@@ -176,13 +176,19 @@ def main(argv=None,stdin=None):
                          deadline=time.time()+a.max_seconds if a.max_seconds else None,error='')
             emit(summary(store,gid),a.json);store.close();return 0
         elif a.op=='cancel':
-            gid=a.goal_id;store.goal(gid);store.update(gid,state='cancelled')
-            for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name='terminal'",(gid,)):
-                args=json.loads(act['args']);session=args.get('session') or act['id']
-                if not isinstance(session,str) or len(session)!=32 or any(c not in '0123456789abcdef' for c in session):continue
-                job=home/'jobs'/session
-                if job.is_dir():atomic_json(job/'control'/(uuid.uuid4().hex+'.json'),dict(signal='TERM'))
-            store.event('cancelled',{},gid);emit(summary(store,gid),a.json);store.close();return 0
+            gid=a.goal_id
+            with store.transaction():
+                store.goal(gid);store.update(gid,state='cancelled')
+                for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name='terminal'",(gid,)):
+                    try:args=json.loads(act['args'])
+                    except ValueError:continue
+                    if not isinstance(args,dict):continue
+                    session=args.get('session') or act['id']
+                    if not isinstance(session,str) or len(session)!=32 or any(c not in '0123456789abcdef' for c in session):continue
+                    job=home/'jobs'/session
+                    if job.is_dir():atomic_json(job/'control'/(uuid.uuid4().hex+'.json'),dict(signal='TERM'))
+                store.event('cancelled',{},gid)
+            emit(summary(store,gid),a.json);store.close();return 0
         else:
             gid=None
         store.close()

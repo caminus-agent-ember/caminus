@@ -47,8 +47,8 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         key=self.path.split('/')[1];self.seen.append((key,body))
         q=self.queues[key]
         if not q:self.respond(dict(error='fixture exhausted'),500);return
-        msg=q.popleft()
-        self.respond(dict(choices=[dict(message=msg)],usage=dict(prompt_tokens=30,completion_tokens=10)))
+        msg=dict(q.popleft());reason=msg.pop('_finish_reason','stop')
+        self.respond(dict(choices=[dict(message=msg,finish_reason=reason)],usage=dict(prompt_tokens=30,completion_tokens=10)))
 
 
 class Resident(unittest.TestCase):
@@ -270,6 +270,62 @@ class Resident(unittest.TestCase):
             self.assertEqual(result['state'],'completed');self.assertGreater(model.summaries,1)
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
+
+    def test_truncation_never_completes_or_executes_partial_tools(self):
+        partial=call('terminal',dict(command='touch forbidden'))
+        partial['_finish_reason']='length'
+        self.replies(partial,call('finish',dict(summary='Resumed with a complete answer.')))
+        first=self.cmd('once',['--goal','Complete this task.'],code=22)
+        self.assertEqual(first['state'],'paused');self.assertFalse((self.home/'forbidden').exists())
+        self.assertEqual(first['pending'],[])
+        self.cmd('once',['--goal-id',first['id']])
+
+    def test_malformed_tools_are_results_not_daemon_crashes(self):
+        self.replies(call('terminal',dict(session='0'*32,stdin=None)),call('send_message',dict(to='peer',text='hello',recipient_goal=[])),
+                     call('finish',dict(summary='Recovered from malformed calls.')))
+        result=self.cmd('once',['--goal','Keep working after tool validation errors.'])
+        self.assertEqual(result['state'],'completed')
+        errors=[e['data']['result']['error'] for e in self.cmd('events') if e['kind']=='tool_result' and 'error' in e['data']['result']]
+        self.assertEqual(len(errors),2)
+
+    def test_cancel_during_compaction_does_not_revive_goal(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Cancel during compaction.')
+            def compact(gid,messages):
+                self.cmd('cancel',[gid])
+                return messages
+            rt._compact=compact
+            rt.tick(gid)
+            self.assertEqual(rt.store.goal(gid)['state'],'cancelled')
+            self.assertEqual(rt.store.goal(gid)['steps'],0)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_cancel_before_action_preparation_never_launches(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Cancel before command.')
+            rt.store.model_reply(gid,call('terminal',dict(command='touch forbidden')))
+            action=rt.store.actions(gid)[0]
+            self.cmd('cancel',[gid])
+            rt._action(action)
+            self.assertFalse((self.home/'jobs'/action['id']).exists())
+            self.assertFalse((self.home/'forbidden').exists())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_remote_jsonl_streams_before_ssh_finishes(self):
+        bindir=self.home/'fake-bin';bindir.mkdir()
+        ssh=bindir/'ssh'
+        ssh.write_text('#!'+sys.executable+'\nimport sys,time\nsys.stdin.read()\nprint(\'{"type":"event","kind":"started"}\',flush=True)\ntime.sleep(1)\nprint(\'{"type":"result","state":"completed"}\',flush=True)\n')
+        ssh.chmod(0o700)
+        argv=self.argv('once',['--stdin','--jsonl']);argv.remove('--local')
+        env=dict(os.environ,PATH=str(bindir)+os.pathsep+os.environ['PATH'])
+        p=subprocess.Popen(argv,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        self.processes.append(p);p.stdin.write('Goal sent on stdin.');p.stdin.close()
+        event=json.loads(p.stdout.readline())
+        self.assertEqual(event['type'],'event');self.assertIsNone(p.poll(),'SSH output was buffered until exit')
+        self.assertEqual(json.loads(p.stdout.readline())['type'],'result')
+        self.assertEqual(p.wait(timeout=5),0,p.stderr.read())
 
 
 result=unittest.main(argv=[sys.argv[0]],exit=False).result

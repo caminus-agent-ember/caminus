@@ -10,6 +10,12 @@ class ModelError(Exception):
     pass
 
 
+class ModelTruncated(ModelError):
+    def __init__(self, partial):
+        super().__init__('model output budget exhausted; increase --max-tokens and resume this goal')
+        self.partial = partial
+
+
 class Model:
     def __init__(self, config, opener=urllib.request.urlopen):
         self.config, self.opener = config, opener
@@ -54,6 +60,8 @@ class Model:
         self.last_usage = result.get('usage') or {}
         try:
             m = result['choices'][0]['message']
+            if result['choices'][0].get('finish_reason') == 'length':
+                raise ModelTruncated(m)
             out = dict(role='assistant', content=m.get('content') or '')
             calls = m.get('tool_calls') or []
             if calls:

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import time
 
-from .model import Model, ModelError
+from .model import Model, ModelError, ModelTruncated
 from .store import Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
@@ -131,20 +131,42 @@ class Runtime:
             if not isinstance(args, dict):
                 raise ValueError('tool arguments must be an object')
             name = action['name']
+            schemas = {t['function']['name']:t['function']['parameters'] for t in TOOLS}
+            schema = schemas.get(name)
+            if schema is None:
+                raise ValueError('unknown tool '+name)
+            if set(schema['required'])-set(args) or set(args)-set(schema['properties']):
+                raise ValueError('missing required or unknown tool arguments')
+            types = dict(string=str,integer=int,array=list)
+            for key,value in args.items():
+                prop = schema['properties'][key]
+                if not isinstance(value,types[prop['type']]) or isinstance(value,bool):
+                    raise ValueError('invalid argument type for '+key)
+                if 'enum' in prop and value not in prop['enum']:
+                    raise ValueError('invalid value for '+key)
+                if prop['type']=='array' and any(not isinstance(v,str) for v in value):
+                    raise ValueError('invalid array item for '+key)
+            # Serialize action preparation with cancel. Polling stays outside
+            # the transaction so a long command cannot block a human decision.
+            with self.store.transaction():
+                if self.store.goal(action['goal'])['state']=='cancelled':return True
+                if name == 'terminal':
+                    result = self.terminal.call(action['id'],{**args,'yield_ms':0})
+                elif name == 'peers':
+                    result = dict(peers=self.mail.peers())
+                elif name == 'send_message':
+                    result = self.mail.send(sender_goal=action['goal'], message_id=action['id'], **args)
+                elif name in ('ask_user', 'ask_root'):
+                    result = self._bridge(action, args)
+                    if result is None:return False
+                elif name == 'finish':
+                    if len(self.store.actions(action['goal']))>1:
+                        raise ValueError('finish must follow all other pending actions')
+                    result = dict(summary=args['summary'])
             if name == 'terminal':
-                result = self.terminal.call(action['id'], args)
-            elif name == 'peers':
-                result = dict(peers=self.mail.peers())
-            elif name == 'send_message':
-                result = self.mail.send(sender_goal=action['goal'], message_id=action['id'], **args)
-            elif name in ('ask_user', 'ask_root'):
-                result = self._bridge(action, args)
-                if result is None:
-                    return False
-            elif name == 'finish':
-                result = dict(summary=args['summary'])
-            else:
-                raise ValueError('unknown tool ' + name)
+                # Preparation already launched or queued input. Polling must not
+                # relaunch a worker if cancellation raced after preparation.
+                result = self.terminal.call(action['id'], {k:v for k,v in args.items() if k not in ('command','stdin','signal','cwd')} | {'session':result['session']})
         except (OSError, ValueError, KeyError, TypeError) as e:
             result = dict(error=str(e))
         self.store.action_result(action, result)
@@ -174,6 +196,7 @@ class Runtime:
         transcript = json.dumps(messages[1:start],ensure_ascii=False)
         summary, pos = '', 0
         while pos < len(transcript):
+            if self.store.goal(gid)['state']=='cancelled':return messages
             take = min(len(transcript)-pos, max(128,size*2))
             while True:
                 request = [instruction,dict(role='user',content='Prior memory:\n'+summary+'\nNext transcript fragment:\n'+transcript[pos:pos+take])]
@@ -214,7 +237,9 @@ class Runtime:
                     self.store.update(gid,messages=messages)
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])
             messages = self._compact(gid,messages)
-            self.store.update(gid,state='working')
+            with self.store.transaction():
+                if self.store.goal(gid)['state']=='cancelled':return True
+                self.store.update(gid,state='working')
             if hasattr(self.model,'config'):
                 self.model.config['timeout'] = max(.1,min(self.base_timeout,g['deadline']-time.time())) if g['deadline'] else self.base_timeout
             reply = self.model.complete([self.system(),*messages],TOOLS,
@@ -231,12 +256,16 @@ class Runtime:
                         self.store.event('finished',dict(summary=reply['content']),gid)
             return True
         except ModelError as e:
-            if self.store.goal(gid)['state']=='cancelled':
-                return True
-            attempt=self.retry.get(gid,(0,0))[1]+1
-            self.retry[gid]=(time.time()+min(30,2**min(attempt,5)),attempt)
-            self.store.update(gid,state='waiting_model',error=str(e))
-            self.store.event('model_unavailable',dict(error=str(e)),gid)
+            with self.store.transaction():
+                if self.store.goal(gid)['state']=='cancelled':return True
+                if isinstance(e,ModelTruncated):
+                    self.store.update(gid,state='paused',error=str(e))
+                    self.store.event('model_truncated',dict(error=str(e),partial=e.partial),gid)
+                    return True
+                attempt=self.retry.get(gid,(0,0))[1]+1
+                self.retry[gid]=(time.time()+min(30,2**min(attempt,5)),attempt)
+                self.store.update(gid,state='waiting_model',error=str(e))
+                self.store.event('model_unavailable',dict(error=str(e)),gid)
             return False
 
     def run(self, target=None, stop=None, poll=.2, observe=None):
