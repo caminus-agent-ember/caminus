@@ -8,6 +8,9 @@ work runs as the second user over SSH; root waits for your approval.
   caminus env shell                  an interactive session as the agent user (run any agent by hand)
   caminus env prompt                 print ROBOTS.md, the agent environment's own instructions
   caminus env ui                     the TUI: queued root requests + the live audit log (caminus-panel env)
+  caminus env spawn --name N -- CMD...   start CMD detached in the agent user (log ~/env-logs/N.log, pid ~/env-jobs/N.pid)
+  caminus env jobs                   the detached jobs (name, pid, alive, log)
+  caminus env stop NAME              kill a detached job
   caminus env ask-root CMD...        agent side: file a root request and wait for your answer
   caminus env watch [--once]         answer the queued root requests (approve / edit / deny)
   caminus env audit [--tail N]       the audit log
@@ -20,7 +23,7 @@ import subprocess
 import sys
 import time
 
-from ..env import agent_side, audit, bridge, runner, settings
+from ..env import agent_side, audit, bridge, jobs, runner, settings
 
 
 def _parser():
@@ -41,6 +44,15 @@ def _parser():
     sub.add_parser('prompt', help="print ROBOTS.md, the agent environment's own instructions")
 
     sub.add_parser('ui', help='the TUI: queued root requests + the live audit log (caminus-panel env)')
+
+    p = sub.add_parser('spawn', help='start a command detached in the agent user')
+    p.add_argument('--name', '-n', required=True)
+    p.add_argument('cmd', nargs=argparse.REMAINDER)
+
+    sub.add_parser('jobs', help='list the detached jobs')
+
+    p = sub.add_parser('stop', help='kill a detached job')
+    p.add_argument('name')
 
     p = sub.add_parser('ask-root', help='agent side: ask for a root command and wait for the answer')
     p.add_argument('--timeout', type=float, default=3600.0)
@@ -74,6 +86,17 @@ def main(rest, transport=None):
         return 0
     if a.sub == 'ui':
         return _ui()
+    if a.sub == 'spawn':
+        return _spawn(a, tr)
+    if a.sub == 'jobs':
+        r = runner.run_shell(jobs.jobs_script(), transport=tr)
+        sys.stdout.write(r.stdout or '')
+        return r.returncode
+    if a.sub == 'stop':
+        r = runner.run_shell(jobs.stop_script(a.name), transport=tr)
+        sys.stdout.write(r.stdout or '')
+        audit.log(settings.audit_path(), {'event': 'stop', 'job': a.name})
+        return r.returncode
     if a.sub == 'ask-root':
         return _ask_root(a)
     if a.sub == 'watch':
@@ -115,7 +138,7 @@ def _setup(a, tr):
         from ..env import prompt
         r = runner.run_shell(agent_side.install_command(settings.bridge_dir(), settings.agent_bin(),
                                                         prompt.text(), settings.robots_path()), transport=tr)
-        print(f'ask-root and ROBOTS.md installed as {settings.user()} ({settings.agent_bin()}, {robots_path}): exit {r.returncode}'
+        print(f'ask-root and ROBOTS.md installed as {settings.user()} ({settings.agent_bin()}, {settings.robots_path()}): exit {r.returncode}'
               + ('' if r.returncode == 0 else f' ({(r.stderr or "").strip()})'), file=sys.stderr)
     return _status(tr)
 
@@ -138,7 +161,7 @@ def _status(tr):
     b = settings.bridge_dir()
     check(f'bridge {b}', os.path.isdir(b) and os.access(b, os.W_OK),
           '' if os.path.isdir(b) else 'missing (caminus env setup)')
-    r = runner.run_argv(['test', '-x', settings.agent_bin()], transport=tr)
+    r = runner.run_shell(f'test -x {settings.agent_bin()}', transport=tr)   # shell: ~ must expand remotely
     check('ask-root installed', r.returncode == 0, 'run: caminus env setup --agent-side' if r.returncode else '')
     return 0 if all(ok for _, ok, _ in checks) else 1
 
@@ -152,6 +175,25 @@ def _ui():
         return 1
     os.execve(b, [b, 'env', '--user', settings.user(), '--bridge', settings.bridge_dir(),
                   '--audit', settings.audit_path(), '--key', settings.key_path()], dict(os.environ))
+
+
+def _spawn(a, tr):
+    cmd = a.cmd
+    if cmd and cmd[0] == '--':
+        cmd = cmd[1:]
+    if not cmd:
+        print('caminus env spawn: no command', file=sys.stderr)
+        return 2
+    try:
+        script = jobs.spawn_script(a.name, cmd)
+    except ValueError as e:
+        print(f'caminus env spawn: {e}', file=sys.stderr)
+        return 2
+    audit.log(settings.audit_path(), {'event': 'spawn', 'name': a.name, 'cmd': ' '.join(cmd)})
+    r = runner.run_shell(script, transport=tr)
+    sys.stdout.write(r.stdout or '')
+    sys.stderr.write(r.stderr or '')
+    return r.returncode
 
 
 def _run(a, tr):

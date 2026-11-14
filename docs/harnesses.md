@@ -120,6 +120,9 @@ caminus env shell                # interactive session as the agent user: run an
 caminus env run -- git status    # one command as the agent user
 caminus env ui                   # the TUI: queued root requests + the live audit log
 caminus env watch                # same, in plain text (approve / edit / deny queued root commands)
+caminus env spawn -n build -- make -j4   # long work, detached (log ~/env-logs/build.log)
+caminus env jobs                 # the detached jobs
+caminus env stop build           # kill one
 caminus env audit --tail 20      # everything the environment did
 ```
 

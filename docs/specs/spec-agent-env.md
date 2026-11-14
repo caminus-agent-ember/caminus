@@ -93,7 +93,16 @@ terminal via `tea.ExecProcess`, so your password prompt works; output is teed to
 JSON schema as `bridge.py` / `audit.py`, so `caminus env watch` and `caminus env audit` read what the TUI writes and
 both can run at once. Go tests: panel/envui_test.go.
 
-## 8. Security properties, honestly
+## 8. Detached processes and multiple terminals
+
+`caminus env spawn --name N -- CMD...` starts CMD detached in the agent user (`nohup setsid`, log
+`~/env-logs/N.log`, pid `~/env-jobs/N.pid`) and returns the pid; `caminus env jobs` lists them (alive or dead, with
+the log path); `caminus env stop N` kills one. Job names are `[A-Za-z0-9_.-]+`. Everything survives logout (linger).
+Inside its own session the agent uses the same conventions directly (`nohup ... &`, `tmux`): each `caminus env run`
+is a separate short-lived SSH exec (multiplexed over the one ControlMaster connection), and each `caminus env shell`
+is its own PTY. ROBOTS.md section "Long-running work and more terminals" tells the agent all of this.
+
+## 9. Security properties, honestly
 
 - Protects: your files, credentials and processes from the agent user and from anything that injects into it; root
   entirely (the agent user has no sudo; elevation needs your password on a command you saw).

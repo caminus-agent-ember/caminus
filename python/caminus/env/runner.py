@@ -22,7 +22,7 @@ def ssh_base():
 
 def _call(script, transport, **kw):
     """run a shell script as the agent user: `ssh ... bash -s` with the script on stdin"""
-    return transport(ssh_base() + ['bash', '-s'], input=script.encode(), capture_output=True, text=True, **kw)
+    return transport(ssh_base() + ['bash', '-s'], input=script, capture_output=True, text=True, **kw)
 
 
 def run_argv(argv, transport=subprocess.run, **kw):
@@ -41,7 +41,6 @@ def shell():
 
 
 def probe(transport=subprocess.run):
-    """(ok, detail): can the harness log in as the agent user with its key?"""
+    """(ok, detail): can the harness log in as the agent user with its key? (stdout names the user; stderr is detail)"""
     r = run_argv(['id', '-un'], transport=transport)
-    out = (r.stdout or '') + (r.stderr or '')
-    return r.returncode == 0 and out.strip() == settings.user(), out.strip() or f'exit {r.returncode}'
+    return r.returncode == 0 and (r.stdout or '').strip() == settings.user(), (r.stderr or '').strip() or f'exit {r.returncode}'

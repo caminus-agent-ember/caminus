@@ -50,7 +50,7 @@ def main():
     os.environ.update(CAMINUS_STATE_DIR=state, CAMINUS_ENV_BRIDGE=bridge_dir,
                       CAMINUS_ENV_AUDIT=os.path.join(state, 'env-audit.jsonl'),
                       CAMINUS_ENV_USER='test-agent', CAMINUS_ENV_KEY=os.path.join(S, 'key'))
-    from caminus.env import agent_side, audit, bridge, prompt, runner, settings
+    from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, settings
     from caminus.cmd import env as cmd_env
 
     # settings: environment first
@@ -67,9 +67,9 @@ def main():
     check(any(x == 'BatchMode=yes' for x in argv) and any(x == 'ControlMaster=auto' for x in argv)
           and any(x.startswith('ControlPath=') for x in argv), 'runner: batch mode and the ControlMaster socket')
     check(argv[-2:] == ['bash', '-s'], 'runner: the command runs as `bash -s`')
-    check(kw['input'].decode() == "echo 'a b' --flag", 'runner: argv is shlex-quoted into the stdin script')
+    check(kw['input'] == "echo 'a b' --flag", 'runner: argv is shlex-quoted into the stdin script')
     r = runner.run_shell('make -j4 && echo done', transport=tr)
-    check(tr.calls[1][1]['input'].decode() == 'make -j4 && echo done', 'runner: a shell string travels verbatim on stdin')
+    check(tr.calls[1][1]['input'] == 'make -j4 && echo done', 'runner: a shell string travels verbatim on stdin')
     ok, detail = runner.probe(transport=tr)
     check(ok, f'runner.probe accepts the agent user ({detail.strip()})')
     ok, _ = runner.probe(transport=FakeTransport(out='someone-else\n'))
@@ -148,13 +148,42 @@ def main():
     check('env' in __main__.COMMANDS, 'cli: env is a command')
     tr3 = FakeTransport(rc=0, out='hi\n')
     rc = cmd_env.main(['run', '--', 'echo', 'hi'], transport=tr3)
-    check(rc == 0 and tr3.calls[0][1]['input'].decode() == 'echo hi', 'cli: env run executes as the agent user and returns its code')
+    check(rc == 0 and tr3.calls[0][1]['input'] == 'echo hi', 'cli: env run executes as the agent user and returns its code')
     check(audit.tail(settings.audit_path(), 1)[0]['event'] == 'run', 'cli: env run writes the audit log')
     rc = cmd_env.main(['audit', '--tail', '5'])
     check(rc == 0, 'cli: env audit prints the log')
     rc = cmd_env.main(['run', '--shell', 'echo hi'], transport=tr3)
-    check(tr3.calls[-1][1]['input'].decode() == 'echo hi', 'cli: env run --shell takes one shell string')
+    check(tr3.calls[-1][1]['input'] == 'echo hi', 'cli: env run --shell takes one shell string')
     check(cmd_env._parser().parse_args(['ui']).sub == 'ui', 'cli: env ui is a subcommand (the TUI)')
+
+    # jobs: detached-process script builders
+    s = jobs.spawn_script('build', ['make', '-j4', 'a b'])
+    check('nohup setsid' in s and "bash -c 'make -j4 '\"'\"'a b'\"'\"''" in s and '~/env-logs/build.log' in s
+          and '~/env-jobs/build.pid' in s, 'jobs: spawn script detaches with nohup+setsid, log and pid files')
+    check('kill -0' in jobs.jobs_script() and 'alive' in jobs.jobs_script(), 'jobs: jobs script probes liveness')
+    check('kill "$pid"' in jobs.stop_script('build'), 'jobs: stop script kills the pid')
+    for bad in ('', 'a/b', 'x;rm -rf /', 'a b'):
+        try:
+            jobs.check_name(bad)
+            check(False, f'jobs: name {bad!r} accepted')
+        except ValueError:
+            pass
+    check(True, 'jobs: bad names rejected')
+    check(cmd_env._parser().parse_args(['spawn', '-n', 'x', '--', 'make']).sub == 'spawn'
+          and cmd_env._parser().parse_args(['jobs']).sub == 'jobs'
+          and cmd_env._parser().parse_args(['stop', 'x']).sub == 'stop', 'cli: spawn/jobs/stop subcommands')
+
+    # pending() distinguishes a missing bridge from an unreadable one
+    unreadable = os.path.join(S, 'noperm')
+    os.makedirs(os.path.join(unreadable, 'req'))
+    os.chmod(os.path.join(unreadable, 'req'), 0)
+    try:
+        bridge.pending(unreadable)
+        check(False, 'bridge: pending raises on an unreadable bridge dir')
+    except PermissionError:
+        check(True, 'bridge: pending raises on an unreadable bridge dir')
+    finally:
+        os.chmod(os.path.join(unreadable, 'req'), 0o700)
 
     print(f'RESULT {"PASS" if not FAILS else "FAIL"} ({len(FAILS)} failed)')
     return 1 if FAILS else 0

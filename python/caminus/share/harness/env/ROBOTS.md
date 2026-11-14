@@ -14,6 +14,16 @@ any IO that user can do. This file is your standing instruction; read it before 
   around that, and do not go looking for the human's credentials — they are not readable, and exfiltrating anything
   you can read is still not okay.
 
+## Long-running work and more terminals
+
+- A command that runs long should not hold your session: `nohup CMD > ~/env-logs/NAME.log 2>&1 &` (make the log
+  dir first: `mkdir -p ~/env-logs ~/env-jobs`). Your side can do the same with `caminus env spawn --name NAME -- CMD...`,
+  then watch it with `caminus env jobs`, read the log, and stop it with `caminus env stop NAME`.
+- Everything you start keeps running after your session ends.
+- One terminal is not a limit: run `tmux` inside your session (`tmux new -d -s work`, `tmux attach -t work`), or ask
+  for another `caminus env shell` — each is a separate session on this machine. From your harness side, every
+  `caminus env run -- CMD` is its own short-lived session too, so parallel one-shot commands are fine.
+
 ## Root
 
 You cannot become root, and `sudo` will never work for you. When a task needs root, ask the human instead:

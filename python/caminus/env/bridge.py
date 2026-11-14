@@ -46,10 +46,13 @@ def submit(bridge, cmd, cwd=None, timeout=3600.0, poll=0.2):
 
 
 def pending(bridge):
-    """harness side: the requests without an answer yet, oldest first"""
+    """harness side: the requests without an answer yet, oldest first (raises when the bridge dir exists but
+    cannot be read — e.g. this session predates the bridge group)"""
     reqd, resd = _dirs(bridge)
     out = []
     if not os.path.isdir(reqd):
+        if os.path.exists(reqd):
+            raise PermissionError(f'{reqd} exists but is not readable (re-login to pick up the bridge group)')
         return out
     for name in sorted(os.listdir(reqd)):
         if not name.endswith('.json'):
