@@ -11,12 +11,23 @@ work runs as the second user over SSH; root waits for your approval.
   caminus env spawn --name N -- CMD...   start CMD detached in the agent user (log ~/env-logs/N.log, pid ~/env-jobs/N.pid)
   caminus env jobs                   the detached jobs (name, pid, alive, log)
   caminus env stop NAME              kill a detached job
+  caminus env ask TEXT [CHOICE...]   agent side: ask you a question and wait for the answer
+  caminus env reqs [--json]          the pending bridge requests (scriptable)
+  caminus env answer ID DECISION [TEXT] [--json]   answer one: approved | edited TEXT | denied | answered TEXT
+  caminus env say TEXT               leave a steering note for the agent (its env-note drains them)
+  caminus env notes [--json]         the undrained notes
+  caminus env ctx [--json]           the running servers and the context window each reports
+  caminus env memory                 the agent's ~/MEMORY.md (its persistent memory)
+  caminus env remember TEXT          append a line to the agent's ~/MEMORY.md
+  caminus env jobs [--json]          same as jobs, machine-readable
   caminus env ask-root CMD...        agent side: file a root request and wait for your answer
   caminus env watch [--once]         answer the queued root requests (approve / edit / deny)
   caminus env audit [--tail N]       the audit log
 """
 import argparse
+import base64
 import getpass
+import json
 import os
 import pwd
 import subprocess
@@ -49,10 +60,38 @@ def _parser():
     p.add_argument('--name', '-n', required=True)
     p.add_argument('cmd', nargs=argparse.REMAINDER)
 
-    sub.add_parser('jobs', help='list the detached jobs')
+    p = sub.add_parser('jobs', help='list the detached jobs')
+    p.add_argument('--json', action='store_true')
 
     p = sub.add_parser('stop', help='kill a detached job')
     p.add_argument('name')
+
+    p = sub.add_parser('ask', help='agent side: ask a question and wait for the answer')
+    p.add_argument('--timeout', type=float, default=3600.0)
+    p.add_argument('args', nargs=argparse.REMAINDER)
+
+    p = sub.add_parser('say', help='leave a steering note for the agent')
+    p.add_argument('text')
+
+    p = sub.add_parser('notes', help='list the undrained steering notes')
+    p.add_argument('--json', action='store_true')
+
+    p = sub.add_parser('ctx', help='the running servers and their context windows')
+    p.add_argument('--json', action='store_true')
+
+    p = sub.add_parser('reqs', help='the pending bridge requests (scriptable)')
+    p.add_argument('--json', action='store_true')
+
+    p = sub.add_parser('answer', help='answer one request: approved | edited TEXT | denied | answered TEXT')
+    p.add_argument('--json', action='store_true')
+    p.add_argument('id')
+    p.add_argument('decision', choices=['approved', 'edited', 'denied', 'answered'])
+    p.add_argument('text', nargs='?')
+
+    sub.add_parser('memory', help="print the agent's ~/MEMORY.md")
+
+    p = sub.add_parser('remember', help="append a line to the agent's ~/MEMORY.md")
+    p.add_argument('text')
 
     p = sub.add_parser('ask-root', help='agent side: ask for a root command and wait for the answer')
     p.add_argument('--timeout', type=float, default=3600.0)
@@ -63,6 +102,7 @@ def _parser():
 
     p = sub.add_parser('audit', help='print the audit log')
     p.add_argument('--tail', type=int, default=20)
+    p.add_argument('--json', action='store_true')
     return ap
 
 
@@ -90,20 +130,77 @@ def main(rest, transport=None):
         return _spawn(a, tr)
     if a.sub == 'jobs':
         r = runner.run_shell(jobs.jobs_script(), transport=tr)
-        sys.stdout.write(r.stdout or '')
+        if getattr(a, 'json', False):
+            out = []
+            for line in (r.stdout or '').splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    out.append({'name': parts[0], 'pid': parts[1].split('=')[1], 'state': parts[2],
+                                'log': parts[3].split('=', 1)[1]})
+            print(json.dumps(out))
+        else:
+            sys.stdout.write(r.stdout or '')
         return r.returncode
     if a.sub == 'stop':
         r = runner.run_shell(jobs.stop_script(a.name), transport=tr)
         sys.stdout.write(r.stdout or '')
         audit.log(settings.audit_path(), {'event': 'stop', 'job': a.name})
         return r.returncode
+    if a.sub == 'ask':
+        return _ask(a)
+    if a.sub == 'say':
+        nid = bridge.say(settings.bridge_dir(), a.text, getpass.getuser())
+        audit.log(settings.audit_path(), {'event': 'note', 'id': nid, 'text': a.text})
+        print(f'note {nid} left for {settings.user()}')
+        return 0
+    if a.sub == 'notes':
+        ns = bridge.notes(settings.bridge_dir())
+        if a.json:
+            print(json.dumps(ns))
+        else:
+            for n in ns:
+                print(f"[{n.get('from', '?')}] {n.get('text', '')}")
+        return 0
+    if a.sub == 'reqs':
+        reqs = bridge.pending(settings.bridge_dir())
+        if a.json:
+            print(json.dumps(reqs))
+        else:
+            for r in reqs:
+                body = r.get('cmd') if r.get('kind', 'root') == 'root' else r.get('text', '')
+                print(f"{r['id']} [{r.get('kind', 'root')}] from {r.get('user')}: {body}")
+        return 0
+    if a.sub == 'answer':
+        return _answer(a, tr)
+    if a.sub == 'memory':
+        r = runner.run_shell(f'cat {settings.memory_path()} 2>/dev/null || echo "(no MEMORY.md yet)"', transport=tr)
+        sys.stdout.write(r.stdout or '')
+        return 0
+    if a.sub == 'remember':
+        return _remember(a, tr)
+    if a.sub == 'ctx':
+        from ..env import ctx
+        rows = ctx.servers()
+        if a.json:
+            print(json.dumps(rows))
+            return 0
+        if not rows:
+            print('no server running on 127.0.0.1:8092-8101')
+            return 0
+        for s in rows:
+            print(f"127.0.0.1:{s['port']}  {s['model']}  context {s['n_ctx']}")
+        return 0
     if a.sub == 'ask-root':
         return _ask_root(a)
     if a.sub == 'watch':
         return _watch(a, tr)
     if a.sub == 'audit':
-        for ev in audit.tail(settings.audit_path(), a.tail):
-            print(ev)
+        evs = audit.tail(settings.audit_path(), a.tail)
+        if a.json:
+            print(json.dumps(evs))
+        else:
+            for ev in evs:
+                print(ev)
         return 0
     return 2
 
@@ -116,14 +213,14 @@ sudo passwd -l {user}
 sudo groupadd -f {group}
 sudo usermod -aG render,video,{group} {user}          # GPU access for the agent work; {you} joins the bridge group
 sudo usermod -aG {group} {you}
-sudo mkdir -p {bridge}/req {bridge}/res
-sudo chown root:{group} {bridge} {bridge}/req {bridge}/res
-sudo chmod 770 {bridge} {bridge}/req {bridge}/res
+sudo mkdir -p {bridge}/req {bridge}/res {bridge}/notes
+sudo chown root:{group} {bridge} {bridge}/req {bridge}/res {bridge}/notes
+sudo chmod 770 {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo loginctl enable-linger {user}                   # its long-running servers survive logout
 ssh-keygen -t ed25519 -f {key} -N '' -C caminus-env   # if {key} does not exist yet
 # then add this line to {user_home}/.ssh/authorized_keys (dir 700, file 600, owned by {user}):
 from="127.0.0.1,::1",no-agent-forwarding,no-X11-forwarding,no-port-forwarding {pubkey}
-# finally: caminus env setup --agent-side   (installs ~/bin/ask-root and ~/ROBOTS.md as the agent user)
+# finally: caminus env setup --agent-side   (installs ~/bin/ask-root + env-ask + env-note, ~/ROBOTS.md, ~/MEMORY.md)
 """
 
 
@@ -136,9 +233,11 @@ def _setup(a, tr):
                            user_home=f"/home/{settings.user()}"))
     if a.agent_side and os.path.exists(key):
         from ..env import prompt
-        r = runner.run_shell(agent_side.install_command(settings.bridge_dir(), settings.agent_bin(),
-                                                        prompt.text(), settings.robots_path()), transport=tr)
-        print(f'ask-root and ROBOTS.md installed as {settings.user()} ({settings.agent_bin()}, {settings.robots_path()}): exit {r.returncode}'
+        r = runner.run_shell(agent_side.install_command(settings.bridge_dir(), settings.agent_bin(), prompt.text(),
+                                                        settings.robots_path(), prompt.MEMORY_TEMPLATE,
+                                                        settings.memory_path()), transport=tr)
+        print(f'agent-side files installed as {settings.user()} ({settings.agent_bin()}, {settings.robots_path()}, '
+              f'{settings.memory_path()}): exit {r.returncode}'
               + ('' if r.returncode == 0 else f' ({(r.stderr or "").strip()})'), file=sys.stderr)
     return _status(tr)
 
@@ -218,7 +317,7 @@ def _ask_root(a):
         print('caminus env ask-root: no command', file=sys.stderr)
         return 2
     try:
-        res = bridge.submit(settings.bridge_dir(), cmd, timeout=a.timeout)
+        res = bridge.submit(settings.bridge_dir(), 'root', cmd=cmd, timeout=a.timeout)
     except TimeoutError as e:
         print(f'caminus env ask-root: {e}', file=sys.stderr)
         return 124
@@ -230,6 +329,26 @@ def _ask_root(a):
     return res.get('rc') if res.get('rc') is not None else 0
 
 
+def _ask(a):
+    args = list(a.args)
+    if args and args[0] == '--':
+        args = args[1:]
+    if not args:
+        print('caminus env ask: TEXT [CHOICE...]', file=sys.stderr)
+        return 2
+    text, choices = args[0], args[1:]
+    try:
+        res = bridge.submit(settings.bridge_dir(), 'question', text=text, choices=choices or None, timeout=a.timeout)
+    except TimeoutError as e:
+        print(f'caminus env ask: {e}', file=sys.stderr)
+        return 124
+    if res['decision'] == 'denied':
+        print(f"caminus env ask: denied by {res.get('approved_by', '?')}", file=sys.stderr)
+        return 126
+    print(res.get('answer') or '')
+    return 0
+
+
 def _watch(a, tr):
     os.umask(0o007)          # bridge files must stay readable by the agent user
     me = getpass.getuser()
@@ -239,8 +358,24 @@ def _watch(a, tr):
         reqs = [r for r in bridge.pending(settings.bridge_dir()) if r['id'] not in seen]
         for req in reqs:
             seen.add(req['id'])
-            audit.log(ap, {'event': 'root_request', 'id': req['id'], 'from': req.get('user'), 'cmd': req['cmd']})
-            print(f"\nroot request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})")
+            kind = req.get('kind', 'root')
+            audit.log(ap, {'event': 'request', 'id': req['id'], 'kind': kind, 'from': req.get('user')})
+            print(f"\n{kind} request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})")
+            if kind == 'question':
+                print(f"  {req.get('text', '')}")
+                if req.get('choices'):
+                    print('  choices: ' + ' | '.join(f'{i + 1}) {c}' for i, c in enumerate(req['choices'])))
+                ans = input('answer (text, or choice number; empty denies): ')
+                if not ans.strip():
+                    bridge.answer(settings.bridge_dir(), req['id'], 'denied', me)
+                    audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'denied', 'by': me})
+                else:
+                    if req.get('choices') and ans.strip().isdigit() and 1 <= int(ans) <= len(req['choices']):
+                        ans = req['choices'][int(ans) - 1]
+                    bridge.answer(settings.bridge_dir(), req['id'], 'answered', me, answer_text=ans)
+                    audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'answered', 'by': me, 'answer': ans})
+                    _remember_qa(req.get('text', ''), ans, tr)
+                continue
             print(f"  {req['cmd']}")
             choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
             if choice == 's':
@@ -266,3 +401,59 @@ def _watch(a, tr):
         if a.once:
             return 0
         time.sleep(0.5)
+
+
+def _answer(a, tr):
+    """answer one pending request non-interactively (for scripts and tests); approved/edited run sudo"""
+    me = getpass.getuser()
+    reqs = {r['id']: r for r in bridge.pending(settings.bridge_dir())}
+    if a.id not in reqs:
+        print(f'caminus env answer: no pending request {a.id} (caminus env reqs)', file=sys.stderr)
+        return 2
+    req = reqs[a.id]
+    ap = settings.audit_path()
+    if a.decision == 'denied':
+        bridge.answer(settings.bridge_dir(), a.id, 'denied', me)
+        audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'denied', 'by': me})
+        res = {'id': a.id, 'decision': 'denied'}
+    elif a.decision == 'answered':
+        if not a.text:
+            print('caminus env answer: answered needs TEXT', file=sys.stderr)
+            return 2
+        bridge.answer(settings.bridge_dir(), a.id, 'answered', me, answer_text=a.text)
+        audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'answered', 'by': me, 'answer': a.text})
+        _remember_qa(req.get('text', ''), a.text, tr)
+        res = {'id': a.id, 'decision': 'answered', 'answer': a.text}
+    else:
+        cmd = a.text if a.decision == 'edited' else req.get('cmd', '')
+        if not cmd:
+            print('caminus env answer: no command to run', file=sys.stderr)
+            return 2
+        r = bridge.execute_root(cmd, runner=tr)
+        bridge.answer(settings.bridge_dir(), a.id, a.decision, me, cmd=cmd, rc=r.returncode,
+                      out=r.stdout or '', err=r.stderr or '')
+        audit.log(ap, {'event': 'root_result', 'id': a.id, 'decision': a.decision, 'by': me,
+                       'cmd': cmd, 'rc': r.returncode})
+        sys.stdout.write(r.stdout or '')
+        sys.stderr.write(r.stderr or '')
+        res = {'id': a.id, 'decision': a.decision, 'cmd': cmd, 'rc': r.returncode}
+    if a.json:
+        print(json.dumps(res))
+    return 0
+
+
+def _remember_qa(question, answer, tr):
+    """append a Q/A block to the agent's MEMORY.md (the learn loop), over ssh, base64-safe"""
+    payload = base64.b64encode(f'Q: {question}\nA: {answer}\n---\n'.encode()).decode()
+    runner.run_shell(f"printf %s {payload} | base64 -d >> {settings.memory_path()}", transport=tr)
+
+
+def _remember(a, tr):
+    payload = base64.b64encode((a.text.rstrip('\n') + '\n').encode()).decode()
+    r = runner.run_shell(f"printf %s {payload} | base64 -d >> {settings.memory_path()}", transport=tr)
+    audit.log(settings.audit_path(), {'event': 'remember', 'text': a.text})
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr or '')
+        return r.returncode
+    print(f'appended to {settings.user()}:{settings.memory_path()}')
+    return 0

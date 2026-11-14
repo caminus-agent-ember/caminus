@@ -123,6 +123,12 @@ caminus env watch                # same, in plain text (approve / edit / deny qu
 caminus env spawn -n build -- make -j4   # long work, detached (log ~/env-logs/build.log)
 caminus env jobs                 # the detached jobs
 caminus env stop build           # kill one
+caminus env say "focus on TP now"   # leave the agent a steering note (its env-note drains them)
+caminus env reqs --json          # pending root/question requests, machine-readable
+caminus env answer ID answered "yes"   # answer one from a script (approved/edited/denied/answered)
+caminus env memory               # the agent's ~/MEMORY.md (its persistent memory)
+caminus env remember "TP wins at these shapes"   # append to it
+caminus env ctx                  # running servers and the context window each reports
 caminus env audit --tail 20      # everything the environment did
 ```
 

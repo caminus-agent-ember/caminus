@@ -48,7 +48,7 @@ func TestWriteAnswerAtomicAndSchema(t *testing.T) {
 	bridge := t.TempDir()
 	writeReq(t, bridge, "x", "id -u", 1)
 	rc := 0
-	if err := writeAnswer(bridge, "human", envReq{ID: "x"}, "approved", "id -u", &rc, "0\n", ""); err != nil {
+	if err := writeAnswer(bridge, "human", envReq{ID: "x"}, "approved", "id -u", &rc, "0\n", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(bridge, "res", "x.json"))
@@ -132,12 +132,21 @@ func TestViewShowsQueueAndAudit(t *testing.T) {
 	}
 	m := envModel{user: "agent", bridge: bridge, auditPath: audit, key: "k",
 		seen: map[string]bool{}, mode: "normal", width: 120, height: 40, msg: "hello"}
-	m.refresh()
+	m.refreshLocal()
 	v := m.render()
-	for _, want := range []string{"CAMINUS ENV", "systemctl restart foo", `"event":"run"`, "a approve", "ssh:"} {
+	for _, want := range []string{"CAMINUS ENV", "systemctl restart foo", "a approve", "ssh:", "requests", "jobs", "audit"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("view missing %q:\n%s", want, v)
 		}
+	}
+	m.tab = 5
+	v = m.render()
+	if !strings.Contains(v, `"event":"run"`) {
+		t.Fatalf("audit tab missing the event:\n%s", v)
+	}
+	m.tab = 4
+	if !strings.Contains(m.render(), "SERVERS") {
+		t.Fatal("ctx tab missing")
 	}
 }
 
@@ -147,7 +156,7 @@ func TestKeyDenyAndSkip(t *testing.T) {
 	audit := filepath.Join(t.TempDir(), "a.jsonl")
 	m := envModel{user: "agent", bridge: bridge, auditPath: audit, key: "k",
 		seen: map[string]bool{}, mode: "normal", width: 120, height: 40}
-	m.refresh()
+	m.refreshLocal()
 	// deny
 	mm, _ := m.onKey("d")
 	m = mm.(envModel)
@@ -161,7 +170,7 @@ func TestKeyDenyAndSkip(t *testing.T) {
 	}
 	// skip keeps it on disk but hides it this session
 	writeReq(t, bridge, "r2", "later", 2)
-	m.refresh()
+	m.refreshLocal()
 	if len(m.reqs) != 1 || m.reqs[0].ID != "r2" {
 		t.Fatalf("want r2 only, got %+v", m.reqs)
 	}
@@ -177,7 +186,7 @@ func TestKeyDenyAndSkip(t *testing.T) {
 	writeReq(t, bridge, "r3", "cmd3", 3)
 	m = envModel{user: "agent", bridge: bridge, auditPath: audit, key: "k",
 		seen: map[string]bool{"r2": true}, mode: "normal", width: 120, height: 40}
-	m.refresh()
+	m.refreshLocal()
 	if len(m.reqs) != 1 || m.reqs[0].ID != "r3" {
 		t.Fatalf("want r3 selected, got %+v", m.reqs)
 	}
@@ -199,4 +208,111 @@ func TestKeyDenyAndSkip(t *testing.T) {
 	if m.mode != "normal" {
 		t.Fatal("esc did not leave edit mode")
 	}
+}
+
+func TestQuestionFlow(t *testing.T) {
+	bridge := t.TempDir()
+	writeReq(t, bridge, "q1", "", 1)
+	// overwrite as a question
+	q := envReq{ID: "q1", Pid: 7, User: "agent", CWD: "/home/agent", Kind: "question",
+		Text: "which model?", Choices: []string{"coder", "swift"}, Ts: 1}
+	data, _ := json.Marshal(q)
+	if err := os.WriteFile(filepath.Join(bridge, "req", "q1.json"), data, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	audit := filepath.Join(t.TempDir(), "a.jsonl")
+	m := envModel{user: "agent", bridge: bridge, auditPath: audit, key: "k",
+		seen: map[string]bool{}, mode: "normal", width: 120, height: 40}
+	m.refreshLocal()
+	if len(m.reqs) != 1 || m.reqs[0].kind() != "question" {
+		t.Fatalf("question not loaded: %+v", m.reqs)
+	}
+	v := m.render()
+	if !strings.Contains(v, "ASK") || !strings.Contains(v, "which model?") || !strings.Contains(v, "coder | swift") {
+		t.Fatalf("view missing question:\n%s", v)
+	}
+	mm, _ := m.onKey("a")
+	m = mm.(envModel)
+	if m.mode != "answer" {
+		t.Fatalf("a on a question should open answer mode, mode=%s", m.mode)
+	}
+	mm, _ = m.onKey("2")
+	m = mm.(envModel)
+	mm, _ = m.onKey("enter")
+	m = mm.(envModel)
+	if m.mode != "normal" || len(m.reqs) != 0 {
+		t.Fatalf("after enter: mode=%s reqs=%+v", m.mode, m.reqs)
+	}
+	res, err := os.ReadFile(filepath.Join(bridge, "res", "q1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ans map[string]any
+	if json.Unmarshal(res, &ans) != nil {
+		t.Fatal("bad res json")
+	}
+	if ans["decision"] != "answered" || ans["answer"] != "swift" {
+		t.Fatalf("choice 2 should map to swift: %v", ans)
+	}
+}
+
+func TestParseJobsNotesServers(t *testing.T) {
+	js := parseJobs("build|123|alive|~/env-logs/build.log\nold|99|dead|~/env-logs/old.log\n")
+	if len(js) != 2 || js[0].Name != "build" || js[0].State != "alive" || js[1].State != "dead" {
+		t.Fatalf("parseJobs: %+v", js)
+	}
+	ns := parseNotes(`{"id":"n1","from":"human","text":"focus on TP"}` + "\n" + `{"id":"n2","from":"human","text":"x"}` + "\n")
+	if len(ns) != 2 || ns[0].Text != "focus on TP" {
+		t.Fatalf("parseNotes: %+v", ns)
+	}
+	ss := parseServers("PORT 8092\n" + `{"model_alias":"coder","n_ctx":262144}` + "\nPORT 8093\n" + `{"model":"x"}` + "\n")
+	if len(ss) != 2 || ss[0].Port != 8092 || ss[0].Model != "coder" || ss[0].Nctx != "262144" || ss[1].Nctx != "<nil>" {
+		t.Fatalf("parseServers: %+v", ss)
+	}
+}
+
+func TestWriteNote(t *testing.T) {
+	bridge := t.TempDir()
+	id, err := writeNote(bridge, "human", "remember this")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := parseNotes(mustRead(t, filepath.Join(bridge, "notes", id+".json")) + "\n")
+	if len(ns) != 1 || ns[0].From != "human" || ns[0].Text != "remember this" {
+		t.Fatalf("writeNote roundtrip: %+v", ns)
+	}
+}
+
+func mustRead(t *testing.T, p string) string {
+	t.Helper()
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestTabsAndJobKeys(t *testing.T) {
+	m := envModel{seen: map[string]bool{}, width: 120, height: 40}
+	mm, _ := m.onKey("tab")
+	if mm.(envModel).tab != 1 {
+		t.Fatal("tab should move to 1")
+	}
+	mm, _ = mm.(envModel).onKey("3")
+	if mm.(envModel).tab != 2 {
+		t.Fatal("key 3 should select procs tab")
+	}
+	// jobs tab: K on a selected job builds a kill script (via returned cmd; just check no panic and selection moves)
+	m = mm.(envModel)
+	m.tab = 1
+	m.jobs = []job{{Name: "build", Pid: "123", State: "alive", Log: "~/env-logs/build.log"}}
+	mm, _ = m.onKey("down")
+	if mm.(envModel).jobSel != 0 {
+		t.Fatal("jobSel should stay 0 with one job")
+	}
+	mm, cmd := m.onKey("K")
+	if cmd == nil {
+		t.Fatal("K on a job should return the kill command")
+	}
+	_ = mm
 }

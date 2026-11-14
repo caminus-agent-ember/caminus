@@ -28,12 +28,19 @@ def _write_atomic(path, obj):
     os.replace(tmp, path)
 
 
-def submit(bridge, cmd, cwd=None, timeout=3600.0, poll=0.2):
-    """agent side: file a root request and block until the human answers; returns the result dict
+def submit(bridge, kind, cmd=None, text=None, choices=None, cwd=None, timeout=3600.0, poll=0.2):
+    """agent side: file a request and block until the human answers; returns the result dict.
+    kind 'root' carries cmd, kind 'question' carries text and optional choices.
     (raises TimeoutError when nobody answers within timeout seconds)"""
     reqd, resd = _dirs(bridge)
     rid = uuid.uuid4().hex[:16]
-    req = {'id': rid, 'pid': os.getpid(), 'user': _user(), 'cwd': cwd or os.getcwd(), 'cmd': cmd, 'ts': time.time()}
+    req = {'id': rid, 'pid': os.getpid(), 'user': _user(), 'cwd': cwd or os.getcwd(), 'kind': kind, 'ts': time.time()}
+    if kind == 'root':
+        req['cmd'] = cmd
+    if kind == 'question':
+        req['text'] = text
+        if choices:
+            req['choices'] = list(choices)
     _write_atomic(os.path.join(reqd, rid + '.json'), req)
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -42,7 +49,7 @@ def submit(bridge, cmd, cwd=None, timeout=3600.0, poll=0.2):
             with open(p) as f:
                 return json.load(f)
         time.sleep(poll)
-    raise TimeoutError(f'no answer to root request {rid} within {timeout:g}s')
+    raise TimeoutError(f'no answer to {kind} request {rid} within {timeout:g}s')
 
 
 def pending(bridge):
@@ -65,11 +72,44 @@ def pending(bridge):
     return out
 
 
-def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err=''):
-    """harness side: write the answer file; decision is 'approved', 'edited' or 'denied'"""
+def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err='', answer_text=''):
+    """harness side: write the answer file; decision is 'approved', 'edited', 'denied' or 'answered'"""
     _write_atomic(os.path.join(_dirs(bridge)[1], rid + '.json'),
                   {'id': rid, 'decision': decision, 'cmd': cmd, 'approved_by': actor,
-                   'rc': rc, 'out': out, 'err': err, 'ts': time.time()})
+                   'rc': rc, 'out': out, 'err': err, 'answer': answer_text, 'ts': time.time()})
+
+
+def say(bridge, text, actor):
+    """harness side: leave a steering note for the agent (notes/<id>.json; the agent's env-note drains them)"""
+    nid = uuid.uuid4().hex[:16]
+    _write_atomic(os.path.join(bridge, 'notes', nid + '.json'),
+                  {'id': nid, 'from': actor, 'text': text, 'ts': time.time()})
+    return nid
+
+
+def notes(bridge):
+    """the undrained steering notes, oldest first"""
+    nd = os.path.join(bridge, 'notes')
+    out = []
+    if not os.path.isdir(nd):
+        return out
+    for name in sorted(os.listdir(nd)):
+        if name.endswith('.json'):
+            with open(os.path.join(nd, name)) as f:
+                out.append(json.load(f))
+    return out
+
+
+def drain_notes(bridge):
+    """agent side: read and remove all pending notes; returns them oldest first"""
+    nd = os.path.join(bridge, 'notes')
+    out = notes(bridge)
+    for n in out:
+        try:
+            os.remove(os.path.join(nd, n['id'] + '.json'))
+        except OSError:
+            pass
+    return out
 
 
 def execute_root(cmd, runner=subprocess.run):

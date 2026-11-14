@@ -82,7 +82,7 @@ def main():
 
     def agent():
         try:
-            got['res'] = bridge.submit(bridge_dir, 'systemctl restart foo', timeout=10)
+            got['res'] = bridge.submit(bridge_dir, 'root', cmd='systemctl restart foo', timeout=10)
         except TimeoutError as e:
             got['timeout'] = str(e)
 
@@ -105,7 +105,7 @@ def main():
     t.join(5)
     check(got.get('res', {}).get('decision') == 'denied', 'bridge: a denial reaches the agent side')
     try:
-        bridge.submit(bridge_dir, 'never answered', timeout=0.4, poll=0.05)
+        bridge.submit(bridge_dir, 'root', cmd='never answered', timeout=0.4, poll=0.05)
         check(False, 'bridge: submit times out without an answer')
     except TimeoutError:
         check(True, 'bridge: submit times out without an answer')
@@ -127,9 +127,15 @@ def main():
     check(bridge_dir in src, 'agent_side: the bridge path is baked into ask-root')
     compile(src, 'ask-root', 'exec')
     check(True, 'agent_side: ask-root compiles')
-    cmd = agent_side.install_command(bridge_dir, settings.agent_bin(), prompt.text(), settings.robots_path())
-    check('base64 -d' in cmd and settings.agent_bin() in cmd and settings.robots_path() in cmd,
-          'agent_side: install command carries ask-root and ROBOTS.md base64')
+    cmd = agent_side.install_command(bridge_dir, settings.agent_bin(), prompt.text(), settings.robots_path(),
+                                     prompt.MEMORY_TEMPLATE, settings.memory_path())
+    check('base64 -d' in cmd and settings.agent_bin() in cmd and settings.robots_path() in cmd
+          and settings.memory_path() in cmd,
+          'agent_side: install command carries ask-root, ROBOTS.md and MEMORY.md base64')
+    for name, src in (('env-ask', agent_side.ENV_ASK_SOURCE), ('env-note', agent_side.ENV_NOTE_SOURCE)):
+        baked = src.replace('{bridge!r}', repr(bridge_dir))
+        compile(baked, name, 'exec')
+        check(f'/{name}' in cmd, f'agent_side: install command carries {name}')
 
     # the agent's own instructions
     text = prompt.text()
@@ -155,6 +161,50 @@ def main():
     rc = cmd_env.main(['run', '--shell', 'echo hi'], transport=tr3)
     check(tr3.calls[-1][1]['input'] == 'echo hi', 'cli: env run --shell takes one shell string')
     check(cmd_env._parser().parse_args(['ui']).sub == 'ui', 'cli: env ui is a subcommand (the TUI)')
+
+    # bridge: typed requests, steering notes
+    got2 = {}
+    before = {r['id'] for r in bridge.pending(bridge_dir)}
+    t = threading.Thread(target=lambda: got2.update(res=bridge.submit(bridge_dir, 'question',
+                                                                       text='which model?', choices=['coder', 'swift'], timeout=10)))
+    t.start()
+    deadline = time.time() + 5
+    q = None
+    while time.time() < deadline:
+        fresh = [r for r in bridge.pending(bridge_dir) if r['id'] not in before]
+        if fresh:
+            q = fresh[0]
+            break
+        time.sleep(0.05)
+    check(q is not None, 'bridge: the question request appeared')
+    check(q['kind'] == 'question' and q['text'] == 'which model?' and q['choices'] == ['coder', 'swift'],
+          'bridge: question requests carry text and choices')
+    bridge.answer(bridge_dir, q['id'], 'answered', 'human', answer_text='swift')
+    t.join(5)
+    check(got2.get('res', {}).get('answer') == 'swift' and got2['res']['decision'] == 'answered',
+          'bridge: the answer reaches the asker')
+    nid = bridge.say(bridge_dir, 'focus on TP', 'human')
+    check([n['text'] for n in bridge.notes(bridge_dir)] == ['focus on TP'], 'bridge: say leaves a note')
+    drained = bridge.drain_notes(bridge_dir)
+    check(len(drained) == 1 and drained[0]['id'] == nid and bridge.notes(bridge_dir) == [],
+          'bridge: drain_notes reads and clears the inbox')
+
+    # ctx: parses /props with a fake opener
+    from caminus.env import ctx
+    import io
+    class FakeResp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    def fake_opener(url, timeout=0):
+        port = int(url.rsplit(':', 1)[1].split('/')[0])
+        if port != 8092:
+            raise OSError('no server')
+        return FakeResp(json.dumps({'model_alias': 'coder', 'n_ctx': 262144}).encode())
+    rows = ctx.servers(opener=fake_opener)
+    check(rows == [{'port': 8092, 'model': 'coder', 'n_ctx': 262144}], 'ctx: reads model and n_ctx from /props')
+
+    for sub in (['ask', 'q?'], ['say', 'note'], ['notes'], ['ctx'], ['reqs'], ['answer', 'x', 'denied'], ['memory'], ['remember', 'm']):
+        check(cmd_env._parser().parse_args(sub).sub == sub[0], f'cli: env {sub[0]} is a subcommand')
 
     # jobs: detached-process script builders
     s = jobs.spawn_script('build', ['make', '-j4', 'a b'])

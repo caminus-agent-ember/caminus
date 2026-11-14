@@ -84,14 +84,20 @@ root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the l
 `caminus env prompt` prints it; `caminus env setup --agent-side` installs it as the agent user's `~/ROBOTS.md`;
 `caminus env shell` points at it when opening a session.
 
-## 7. The TUI (`caminus env ui`)
+## 7. The TUI (`caminus env ui`) and the scriptable CLI
 
 `caminus env ui` execs `caminus-panel env --user ... --bridge ... --audit ... --key ...` (panel/envui.go, same binary
-and build as the control panel). Left pane: the queued root requests, keys `a` approve (sudo runs attached to the
-terminal via `tea.ExecProcess`, so your password prompt works; output is teed to a temp file for the answer),
-`e` edit, `d` deny, `s` skip, `q` quit. Right pane: the live audit tail. Answer files and audit lines use the same
-JSON schema as `bridge.py` / `audit.py`, so `caminus env watch` and `caminus env audit` read what the TUI writes and
-both can run at once. Go tests: panel/envui_test.go.
+and build as the control panel). Six live tabs (tab / 1-6): **requests** (ROOT: `a` approve — sudo runs attached to
+the terminal via `tea.ExecProcess` so your password prompt works, output teed to a temp file; `e` edit, `d` deny,
+`s` skip — ASK: `a` answer, a number picks a choice), **jobs** (detached processes in the agent user: `K` kill,
+`l` tail the log, `n` new job), **procs** (the agent user's busiest processes), **notes** (steering inbox: `n` new,
+`d` delete), **ctx** (servers and their `/props` windows), **audit** (log tail). Answering a question also appends
+the Q/A to the agent's `~/MEMORY.md`. Answer files and audit lines use the same JSON schema as `bridge.py` /
+`audit.py`, so `caminus env watch` / `audit` and the TUI are interchangeable.
+
+For scripts and tests, everything is callable without the TUI: `caminus env reqs --json`, `caminus env answer ID
+approved|edited TEXT|denied|answered TEXT [--json]`, `jobs --json`, `notes --json`, `ctx --json`, `audit --json`,
+`memory` (print the agent's ~/MEMORY.md), `remember TEXT` (append to it). Go tests: panel/envui_test.go.
 
 ## 8. Detached processes and multiple terminals
 
@@ -102,7 +108,27 @@ Inside its own session the agent uses the same conventions directly (`nohup ... 
 is a separate short-lived SSH exec (multiplexed over the one ControlMaster connection), and each `caminus env shell`
 is its own PTY. ROBOTS.md section "Long-running work and more terminals" tells the agent all of this.
 
-## 9. Security properties, honestly
+## 9. Questions, steering notes, context
+
+The bridge carries typed requests, not just root: `kind: "root"` (cmd) and `kind: "question"` (text, choices).
+Agent side: `~/bin/env-ask TEXT CHOICE...` prints the human's answer (a number picks a choice); `caminus env ask`
+when the package is installed in that user. Harness side: `caminus env watch` prompts for the answer, the TUI opens
+an answer line on `a`; both write `decision: "answered"` with the `answer` field, same schema otherwise.
+
+Steering runs the other way through a notes inbox (`<bridge>/notes/`): `caminus env say TEXT` leaves a note
+(audited), `caminus env notes` lists them, and the agent's `~/bin/env-note` prints and clears them between steps.
+
+Memory: the agent's `~/MEMORY.md` (seeded by `setup --agent-side` from `env/prompt.py`'s MEMORY_TEMPLATE) is its
+persistent, self-writable memory; ROBOTS.md tells it to read it every task and append learnings. `caminus env
+memory` / `remember TEXT` read/append it from the harness side, and every answered question is auto-appended as a
+Q/A block (watch, TUI and `answer answered` all do this) — the learn loop.
+
+Context: `caminus env ctx` probes 127.0.0.1:8092-8101 `/props` and prints each running server's model and `n_ctx`
+(the real window, sized to the cards). The agent reads the same `/props` from inside its user and compacts itself
+before the window fills (ROBOTS.md "Your context window"); Caminus already refuses over-long requests, and tools
+like Qwen Code compact automatically against this number.
+
+## 10. Security properties, honestly
 
 - Protects: your files, credentials and processes from the agent user and from anything that injects into it; root
   entirely (the agent user has no sudo; elevation needs your password on a command you saw).

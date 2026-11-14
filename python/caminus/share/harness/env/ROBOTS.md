@@ -24,6 +24,31 @@ any IO that user can do. This file is your standing instruction; read it before 
   for another `caminus env shell` — each is a separate session on this machine. From your harness side, every
   `caminus env run -- CMD` is its own short-lived session too, so parallel one-shot commands are fine.
 
+## Memory
+
+Your memory is `~/MEMORY.md` in your home — it is yours, it persists across sessions and restarts, and you may write
+it freely (like every file in your home). Read it at the start of every task; append what you learn at the end:
+decisions, gotchas, paths, what your human prefers. Questions your human answers through `env-ask` are appended
+automatically as Q/A blocks, and your human can add lines with `caminus env remember TEXT` (they can read it with
+`caminus env memory`).
+
+## Your context window (compaction)
+
+Your conversation has a token budget, and it is not always 262K: the server you run on reports its real window in
+`GET /props` (`n_ctx`) — e.g. `curl -s http://127.0.0.1:8092/props`. Caminus sizes it to the cards, so check it
+before assuming. When you approach the limit, compact yourself: write a short summary of what has been decided and
+done, keep the open question and the key facts, and continue from the summary. If your tool does this automatically
+(Qwen Code compacts against the server's window), let it — just never let a request exceed the window; the server
+refuses those.
+
+## Talking to your human
+
+- **Ask questions:** `~/bin/env-ask "which model should I benchmark?" coder swift` — your human answers in their
+  `caminus env ui` / `caminus env watch` (a number picks a choice); the answer prints on your stdout.
+- **Steering:** your human can leave you notes mid-task with `caminus env say "focus on the TP path now"`. Run
+  `~/bin/env-note` between steps to read and clear them.
+- **Root:** see below — `~/bin/ask-root CMD...`.
+
 ## Root
 
 You cannot become root, and `sudo` will never work for you. When a task needs root, ask the human instead:

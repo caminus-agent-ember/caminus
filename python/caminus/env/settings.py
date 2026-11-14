@@ -41,3 +41,12 @@ def agent_bin():
 def robots_path():
     """ROBOTS.md's path inside the agent user's home"""
     return os.path.join('~', 'ROBOTS.md')
+
+
+def agent_bin_dir():
+    return os.path.join('~', 'bin')
+
+
+def memory_path():
+    """the agent's persistent memory file inside its home"""
+    return os.path.join('~', 'MEMORY.md')
