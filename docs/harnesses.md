@@ -118,7 +118,8 @@ caminus env setup --agent-side   # one-time provisioning (prints the sudo comman
 caminus env status               # user, key, ssh login, bridge, ask-root all OK?
 caminus env shell                # interactive session as the agent user: run any agent here
 caminus env run -- git status    # one command as the agent user
-caminus env watch                # approve / edit / deny queued root commands
+caminus env ui                   # the TUI: queued root requests + the live audit log
+caminus env watch                # same, in plain text (approve / edit / deny queued root commands)
 caminus env audit --tail 20      # everything the environment did
 ```
 

@@ -154,6 +154,7 @@ def main():
     check(rc == 0, 'cli: env audit prints the log')
     rc = cmd_env.main(['run', '--shell', 'echo hi'], transport=tr3)
     check(tr3.calls[-1][1]['input'].decode() == 'echo hi', 'cli: env run --shell takes one shell string')
+    check(cmd_env._parser().parse_args(['ui']).sub == 'ui', 'cli: env ui is a subcommand (the TUI)')
 
     print(f'RESULT {"PASS" if not FAILS else "FAIL"} ({len(FAILS)} failed)')
     return 1 if FAILS else 0

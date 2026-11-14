@@ -7,6 +7,7 @@ work runs as the second user over SSH; root waits for your approval.
   caminus env run [--shell] CMD...   run CMD as the agent user (argv, or one shell string with --shell)
   caminus env shell                  an interactive session as the agent user (run any agent by hand)
   caminus env prompt                 print ROBOTS.md, the agent environment's own instructions
+  caminus env ui                     the TUI: queued root requests + the live audit log (caminus-panel env)
   caminus env ask-root CMD...        agent side: file a root request and wait for your answer
   caminus env watch [--once]         answer the queued root requests (approve / edit / deny)
   caminus env audit [--tail N]       the audit log
@@ -39,6 +40,8 @@ def _parser():
 
     sub.add_parser('prompt', help="print ROBOTS.md, the agent environment's own instructions")
 
+    sub.add_parser('ui', help='the TUI: queued root requests + the live audit log (caminus-panel env)')
+
     p = sub.add_parser('ask-root', help='agent side: ask for a root command and wait for the answer')
     p.add_argument('--timeout', type=float, default=3600.0)
     p.add_argument('cmd', nargs=argparse.REMAINDER)
@@ -69,6 +72,8 @@ def main(rest, transport=None):
         from ..env import prompt
         sys.stdout.write(prompt.text())
         return 0
+    if a.sub == 'ui':
+        return _ui()
     if a.sub == 'ask-root':
         return _ask_root(a)
     if a.sub == 'watch':
@@ -136,6 +141,17 @@ def _status(tr):
     r = runner.run_argv(['test', '-x', settings.agent_bin()], transport=tr)
     check('ask-root installed', r.returncode == 0, 'run: caminus env setup --agent-side' if r.returncode else '')
     return 0 if all(ok for _, ok, _ in checks) else 1
+
+
+def _ui():
+    from .manage import panel_binary
+    b = panel_binary()
+    if b is None:
+        print('caminus env ui: caminus-panel is not installed (build it: cd panel && go build -o caminus-panel .; '
+              'or set CAMINUS_PANEL)', file=sys.stderr)
+        return 1
+    os.execve(b, [b, 'env', '--user', settings.user(), '--bridge', settings.bridge_dir(),
+                  '--audit', settings.audit_path(), '--key', settings.key_path()], dict(os.environ))
 
 
 def _run(a, tr):

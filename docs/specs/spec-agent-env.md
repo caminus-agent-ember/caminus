@@ -84,7 +84,16 @@ root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the l
 `caminus env prompt` prints it; `caminus env setup --agent-side` installs it as the agent user's `~/ROBOTS.md`;
 `caminus env shell` points at it when opening a session.
 
-## 7. Security properties, honestly
+## 7. The TUI (`caminus env ui`)
+
+`caminus env ui` execs `caminus-panel env --user ... --bridge ... --audit ... --key ...` (panel/envui.go, same binary
+and build as the control panel). Left pane: the queued root requests, keys `a` approve (sudo runs attached to the
+terminal via `tea.ExecProcess`, so your password prompt works; output is teed to a temp file for the answer),
+`e` edit, `d` deny, `s` skip, `q` quit. Right pane: the live audit tail. Answer files and audit lines use the same
+JSON schema as `bridge.py` / `audit.py`, so `caminus env watch` and `caminus env audit` read what the TUI writes and
+both can run at once. Go tests: panel/envui_test.go.
+
+## 8. Security properties, honestly
 
 - Protects: your files, credentials and processes from the agent user and from anything that injects into it; root
   entirely (the agent user has no sudo; elevation needs your password on a command you saw).

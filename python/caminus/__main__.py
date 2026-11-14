@@ -18,7 +18,7 @@
   kv-cache  the prompt cache's disk tier: list / purge
   guard     run any command under the guard: caminus guard LOG SECS CMD... (--lines: the cards and their kill lines)
   env       the agent environment (experimental): work as a second user on this machine over SSH, root only with your
-            approval (caminus env setup | status | run | shell | ask-root | watch | audit)
+            approval (caminus env setup | status | run | shell | prompt | ui | ask-root | watch | audit)
   version   the package version and its code objects' provenance
 
 Paths come from the environment, ~/.config/caminus/config.toml, then the XDG defaults (caminus.config; caminus doctor prints
