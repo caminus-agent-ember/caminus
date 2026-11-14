@@ -59,10 +59,11 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-9b', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'],
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-9b', 'qwen35-own-9b-tp', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'],
           f'archs: the six served and the dense own line\'s two-card form ({sorted(arch.ARCHS)})')
     check(arch.ARCHS['qwen35-own'].variant(2) is arch.ARCHS['qwen35-own-tp'] and arch.ARCHS['qwen35-own'].variant(1) is arch.ARCHS['qwen35-own']
-          and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own'] and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp'},
+          and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own'] and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp', 'qwen35-own-9b': 'qwen35-own-9b-tp'}
+          and arch.ARCHS['qwen35-own-9b'].variant(2) is arch.ARCHS['qwen35-own-9b-tp'],
           'variant: --cards 2 names the dense own line\'s two-card entry; 1 / None its own')
     try:
         arch.ARCHS['qwen3moe'].variant(2); refused = False
@@ -74,7 +75,8 @@ def main():
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
                     'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
-                    'qwen35-own-tp': ('tp', 2, 1, None), 'qwen35-own-9b': ('one-card', 1, 1, 'mtp')},
+                    'qwen35-own-tp': ('tp', 2, 1, None), 'qwen35-own-9b': ('one-card', 1, 1, 'mtp'),
+                    'qwen35-own-9b-tp': ('tp', 2, 1, None)},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
           'archs: the own-code qwen35 entry takes the own tokenizer, AREX-2\'s entry keeps its own')
@@ -221,7 +223,7 @@ def main():
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
         check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
-                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP', 'qwen35-own-9b': 'Dense35Own'},
+                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP', 'qwen35-own-9b': 'Dense35Own', 'qwen35-own-9b-tp': 'Dense35TP'},
               f'engine_class: every entry\'s engine imports ({names})')
         # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
         # engine served greedy requests without them and failed its first sampled one on the card)

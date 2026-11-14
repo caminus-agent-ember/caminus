@@ -3,6 +3,7 @@
 Run only through the repository guard / GPU window. Device math against FP64,
 T-token rows versus independent rows, output canaries. No model-quality claim.
 """
+import argparse
 import sys
 from pathlib import Path
 import numpy as np
@@ -12,6 +13,9 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'python'))
 from caminus.engine import k3
 from caminus.device import capacity
 
+ap=argparse.ArgumentParser()
+ap.add_argument('--decode-module',choices=('k3_q35_9b','k3_q35_9b_tp'),default='k3_q35_9b')
+args=ap.parse_args()
 capacity.check([0],[128],'9B op gate buffers')
 rng=np.random.default_rng(871)
 for rows,K in ((5,64),(17,256),(32,4096),(16,8192)):
@@ -48,7 +52,7 @@ def run(module,T,pos,qr):
 for start in (0,28,32,39):
     four=run('k3_q35_9b_ver',4,start,Q)
     for t in range(4):
-        one=run('k3_q35_9b',1,start+t,Q[t*H*D:(t+1)*H*D])[0]
+        one=run(args.decode_module,1,start+t,Q[t*H*D:(t+1)*H*D])[0]
         assert np.array_equal(one,four[t]),'verify attention not bitwise decode'
         for h in range(H):
             kh=h//4;k=cache[:start+t+1,0,kh].astype(np.float64);v=cache[:start+t+1,1,kh].astype(np.float64)

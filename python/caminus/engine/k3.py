@@ -100,7 +100,7 @@ Q35TDF_MODULES = ('k3_q35_tcap_dflash',)
 Q35TM_MODULES = ('k3_q35_tcap_mtp',)   # (kernels/k3_q35_tcap_mtp.hip: ThinkingCap's MTP drafter: its Q6_K block, Q8_0 head, IQ2_S embedding)   # (kernels/k3_q35_tcap_dflash.hip: the DFlash 2 drafter on ThinkingCap's module: its IQ2_S embedding, Q8_0 head)   # (kernels/k3_q35_tcap_ver.hip: ThinkingCap's module with its T-token tiles, kernels/own_quant_tcap_mt.h)
 Q35R_MODULES = ('k3_q35_gsq',)   # (kernels/k3_q35_gsq.hip: the Qwen3.8-27B GSQ-RCO files; ThinkingCap's module + K3_Q35_GSQ's formats)
 Q35T_MODULES = ('k3_q35_tcap', 'k3_q35_tcap_trace', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_trace', 'k3_q35_tcap_tp_ver') + Q35TV_MODULES + Q35TDF_MODULES + Q35TM_MODULES + Q35R_MODULES   # (kernels/k3_q35_tcap.hip: ThinkingCap's formats on the same tape; kernels/k3_q35t_ops.h)
-Q35_9B_MODULES = ('k3_q35_9b', 'k3_q35_9b_ver', 'k3_q35_9b_mtp')
+Q35_9B_MODULES = ('k3_q35_9b', 'k3_q35_9b_ver', 'k3_q35_9b_mtp', 'k3_q35_9b_tp')
 Q35MF_MODULES = ('k3_q35_9b_mtp',)
 Q35M_MODULES = ('k3_q35_swift_mtp',) + Q35MF_MODULES   # (kernels/k3_q35_swift_mtp.hip: Swift's multi-token-prediction block, the drafter: engine/q35_mtp.py)
 Q35DF_MODULES = ('k3_q35_dflash',)   # (kernels/k3_q35_dflash.hip: the DFlash 2 drafter on Swift's ops + kernels/k3_df_own_ops.h: engine/q35_dflash.py)
@@ -109,7 +109,7 @@ Q35M_ALL = Q35M_MODULES + Q35TM_MODULES   # (the MTP drafter modules of both lin
 Q35TPV_MODULES = ('k3_q35_swift_tp_ver', 'k3_q35_tcap_tp_ver')   # (kernels/k3_q35_{swift,tcap}_tp_ver.hip: the two-card modules with the verify T-token forms, for two-card verify passes: engine/q35_dense_verify_tp.py)
 Q35V_MODULES = Q35SV_MODULES + Q35TV_MODULES + Q35TDF_MODULES + Q35TM_MODULES + Q35TPV_MODULES   # (every module with the T-token forms: Swift's and ThinkingCap's verify modules, the drafters)
 Q35DF_ALL = Q35DF_MODULES + Q35TDF_MODULES   # (the DFlash drafter modules of both lines)
-Q35S_MODULES = ('k3_q35_9b', 'k3_q35_swift', 'k3_q35_swift_trace', 'k3_q35_swift_tp', 'k3_q35_swift_tp_trace', 'k3_q35_swift_tp_ver') + Q35SV_MODULES   # (kernels/k3_q35_swift.hip: the dense qwen35 line's decode tape on own ops, no ggml headers; Q35S_OPS below)
+Q35S_MODULES = ('k3_q35_9b', 'k3_q35_9b_tp', 'k3_q35_swift', 'k3_q35_swift_trace', 'k3_q35_swift_tp', 'k3_q35_swift_tp_trace', 'k3_q35_swift_tp_ver') + Q35SV_MODULES   # (kernels/k3_q35_swift.hip: the dense qwen35 line's decode tape on own ops, no ggml headers; Q35S_OPS below)
 # kernels/k3_q3m_iq.hip: the lean module's ops plus the codebook formats' tiles (docs/dev/iq-quant-study.md; a study module)
 Q3M_IQ_MODULES = ('k3_q3m_iq', 'k3_q3m_iq_trace')
 Q3M_RS_MODULES = {'k3_q3m_rs4': 'RS4', 'k3_q3m_rs2': 'RS2'}   # (the row-scale study's: module -> its one format; OWN_RS_FMT below)
@@ -275,7 +275,7 @@ OP_OWN_MVF16 = 56   # raw F16 weights and activations, 9B MTP only
 MODULE_CAPS.update({m: (MODULE_CAPS['k3_q35_swift_mtp'] - {('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_MV', 'Q4_0/a16_1rt_mt')}) | {('OWN_MVF16', 'F16/a16')} for m in Q35MF_MODULES})
 Q35_MODULES = Q35S_MODULES + Q35T_MODULES   # (the two dense qwen35 own modules: the same op set, Q35S_OPS; kernels/k3_q35t_ops.h dispatches it too)
 # their two-card builds (K3_TP: kernels/k3_xchg.h's OP_XCHG; engine/q35_dense_tp.py): one-card module -> two-card module
-Q35_TP_OF = {'k3_q35_swift': 'k3_q35_swift_tp', 'k3_q35_tcap': 'k3_q35_tcap_tp', 'k3_q35_swift_trace': 'k3_q35_swift_tp_trace',
+Q35_TP_OF = {'k3_q35_9b': 'k3_q35_9b_tp', 'k3_q35_swift': 'k3_q35_swift_tp', 'k3_q35_tcap': 'k3_q35_tcap_tp', 'k3_q35_swift_trace': 'k3_q35_swift_tp_trace',
              'k3_q35_tcap_trace': 'k3_q35_tcap_tp_trace'}
 Q35_TP_MODULES = tuple(Q35_TP_OF.values())
 # the two-card modules' verify builds (K3_TP + K3_Q3M_VER): two-card module -> its verify module

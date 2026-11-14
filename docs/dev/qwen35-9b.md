@@ -14,7 +14,9 @@ metadata-only MTP projections count the widened bytes. The target's Q6_K head
 is shared with the drafter. No model file is rewritten or requantized.
 
 For a compatible local GGUF, select MTP explicitly with `--draft mtp`. Default
-drafting stays off pending served measurements. DFlash and a two-card9B variant
+drafting stays off pending served measurements. Two-card plain decoding selects
+`k3_q35_9b_tp` with `--cards 2 --draft off`, using the existing dense tensor
+parallel loader, split planner, exchange and prefill. DFlash and two-card MTP
 are not advertised. Native context comes from the file; context placement still
 checks the target, verify records, MTP cache, adapter and prefill workspace before
 allocation. Advertising a context does not prove useful at-depth generation.

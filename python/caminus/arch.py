@@ -725,8 +725,9 @@ class TwoCardTP(Arch):
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
                              Q3MoE('qwen3moe', 'qwen3-30b-a3b'), Dense35('qwen35-own', 'swift-1.5'),
                              TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'),
-                             Dense35Nine('qwen35-own-9b', 'deepseek-qwen3.5-9b'))}
-TWO_CARD = {'qwen35-own': 'qwen35-own-tp'}   # (a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2)
+                             Dense35Nine('qwen35-own-9b', 'deepseek-qwen3.5-9b'),
+                             Dense35TP('qwen35-own-9b-tp', 'deepseek-qwen3.5-9b'))}
+TWO_CARD = {'qwen35-own': 'qwen35-own-tp', 'qwen35-own-9b': 'qwen35-own-9b-tp'}   # (a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2)
 CODER = ARCHS['qwen4exp']
 
 
