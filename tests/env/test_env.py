@@ -127,6 +127,30 @@ def main():
     check(bridge_dir in src, 'agent_side: the bridge path is baked into ask-root')
     compile(src, 'ask-root', 'exec')
     check(True, 'agent_side: ask-root compiles')
+
+    # The standalone helper must share requests with the human even when the
+    # bridge's group differs from the agent process's primary group.
+    helper_bridge=os.path.join(S,'helper-bridge')
+    helper_group=next((g for g in os.getgroups() if g!=os.getgid()),os.getgid())
+    for name in ('req','res'):
+        path=os.path.join(helper_bridge,name);os.makedirs(path,mode=0o770)
+        os.chown(path,-1,helper_group)
+    helper=os.path.join(S,'ask-root-helper.py')
+    with open(helper,'w') as f:f.write(agent_side.ask_root_source(helper_bridge))
+    process=subprocess.Popen([sys.executable,'-I',helper,'fixture-command-never-executed'],
+                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
+                             env=dict(os.environ,CAMINUS_ENV_TIMEOUT='5'))
+    deadline=time.monotonic()+3;requests=[]
+    while time.monotonic()<deadline and not requests:
+        requests=bridge.pending(helper_bridge)
+        if not requests:time.sleep(.02)
+    check(bool(requests),'agent_side: standalone request appears')
+    if requests:
+        rid=requests[0]['id'];info=os.stat(os.path.join(helper_bridge,'req',rid+'.json'))
+        check(info.st_gid==helper_group and info.st_mode&0o777==0o660,'agent_side: request has bridge group and mode660')
+        bridge.answer(helper_bridge,rid,'denied','fixture-human')
+    out,err=process.communicate(timeout=6)
+    check(process.returncode==126,'agent_side: standalone denial returns without executing root')
     cmd = agent_side.install_command(bridge_dir, settings.agent_bin(), prompt.text(), settings.robots_path(),
                                      prompt.MEMORY_TEMPLATE, settings.memory_path())
     check('base64 -d' in cmd and settings.agent_bin() in cmd and settings.robots_path() in cmd
