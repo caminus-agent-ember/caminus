@@ -97,7 +97,8 @@ class Resident(unittest.TestCase):
                 return call('terminal',dict(session=result['session'],yield_ms=1000))
             return call('finish',dict(summary='Created and read proof.'))
         self.replies(call('terminal',dict(command='while [ ! -e release ]; do sleep .02; done; printf worked > proof; cat proof',yield_ms=0)),after_terminal)
-        result=self.cmd('once',['--stdin'],stdin='Create a proof file and verify it.')
+        try:result=self.cmd('once',['--stdin'],stdin='Create a proof file and verify it.')
+        finally:(self.home/'release').write_text('go')
         self.assertEqual(result['state'],'completed');self.assertEqual((self.home/'proof').read_text(),'worked')
         events=self.cmd('events')
         outputs=[e['data']['result'] for e in events if e['kind']=='tool_result' and e['data']['name']=='terminal']
@@ -351,13 +352,17 @@ class Resident(unittest.TestCase):
         try:
             terminal=Terminal(self.home);sid=uuid.uuid4().hex
             out=terminal.call(sid,dict(command='pwd; printf correct > proof',yield_ms=1000))
-            while out['running']:out=terminal.call(uuid.uuid4().hex,dict(session=sid,yield_ms=1000))
+            deadline=time.monotonic()+8
+            while out['running'] and time.monotonic()<deadline:out=terminal.call(uuid.uuid4().hex,dict(session=sid,yield_ms=1000))
+            self.assertFalse(out['running'],out)
             self.assertEqual(out['exit_code'],0,out)
             self.assertEqual(out['output'].strip(),str(self.home))
             self.assertEqual((self.home/'proof').read_text(),'correct')
             self.assertTrue((elsewhere/'startup-marker').exists())
             self.assertFalse((elsewhere/'proof').exists())
         finally:
+            if 'out' in locals() and out.get('running'):
+                terminal.call(uuid.uuid4().hex,dict(session=sid,signal='TERM',yield_ms=1000))
             if prior is None:os.environ.pop('BASH_ENV',None)
             else:os.environ['BASH_ENV']=prior
 
