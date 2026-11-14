@@ -50,7 +50,7 @@ def main():
     os.environ.update(CAMINUS_STATE_DIR=state, CAMINUS_ENV_BRIDGE=bridge_dir,
                       CAMINUS_ENV_AUDIT=os.path.join(state, 'env-audit.jsonl'),
                       CAMINUS_ENV_USER='test-agent', CAMINUS_ENV_KEY=os.path.join(S, 'key'))
-    from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, settings
+    from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, sessions, settings
     from caminus.cmd import env as cmd_env
 
     # settings: environment first
@@ -203,7 +203,7 @@ def main():
     rows = ctx.servers(opener=fake_opener)
     check(rows == [{'port': 8092, 'model': 'coder', 'n_ctx': 262144}], 'ctx: reads model and n_ctx from /props')
 
-    for sub in (['ask', 'q?'], ['say', 'note'], ['notes'], ['ctx'], ['reqs'], ['answer', 'x', 'denied'], ['memory'], ['remember', 'm']):
+    for sub in (['ask', 'q?'], ['say', 'note'], ['notes'], ['ctx'], ['reqs'], ['answer', 'x', 'denied'], ['memory'], ['remember', 'm'], ['new', 's', '--', 'bash'], ['sessions'], ['send', 's', 'hi'], ['attach', 's']):
         check(cmd_env._parser().parse_args(sub).sub == sub[0], f'cli: env {sub[0]} is a subcommand')
 
     # jobs: detached-process script builders
@@ -219,6 +219,22 @@ def main():
         except ValueError:
             pass
     check(True, 'jobs: bad names rejected')
+
+    # sessions: tmux script builders
+    import shlex as _shlex
+    s = sessions.new_script('coder', ['qwen', '-p', 'hi there'])
+    want = 'tmux new-session -d -s coder bash -lc ' + _shlex.quote('qwen -p ' + _shlex.quote('hi there'))
+    check(s == want, 'sessions: new starts a detached named session with the quoted command')
+    s = sessions.send_script('coder', 'do X; rm nothing')
+    want = 'tmux send-keys -t coder -l ' + _shlex.quote('do X; rm nothing') + ' && tmux send-keys -t coder Enter'
+    check(s == want, 'sessions: send types the text literally then Enter')
+    check(sessions.attach_argv('coder', ['ssh', 'x']) == ['ssh', 'x', '-t', 'tmux', 'attach', '-t', 'coder'],
+          'sessions: attach is ssh -t tmux attach')
+    try:
+        sessions.check_name('a; b')
+        check(False, 'sessions: bad session name accepted')
+    except ValueError:
+        check(True, 'sessions: bad session names rejected')
     check(cmd_env._parser().parse_args(['spawn', '-n', 'x', '--', 'make']).sub == 'spawn'
           and cmd_env._parser().parse_args(['jobs']).sub == 'jobs'
           and cmd_env._parser().parse_args(['stop', 'x']).sub == 'stop', 'cli: spawn/jobs/stop subcommands')

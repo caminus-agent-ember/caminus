@@ -24,6 +24,17 @@ any IO that user can do. This file is your standing instruction; read it before 
   for another `caminus env shell` — each is a separate session on this machine. From your harness side, every
   `caminus env run -- CMD` is its own short-lived session too, so parallel one-shot commands are fine.
 
+## How your human gives you work
+
+- One-shot: `caminus env run -- CMD...` runs CMD as you, synchronously.
+- Detached: `caminus env spawn -n NAME -- CMD...` (log `~/env-logs/NAME.log`, `caminus env jobs` / `stop`).
+- Interactive: `caminus env new NAME -- AGENT-CLI...` starts a named tmux session running your CLI
+  (`caminus env sessions` lists them). Your human can then `caminus env send NAME "new instruction"` to type into
+  your session live, or `caminus env attach NAME` to sit in the same terminal. Inside a session, use tmux freely
+  (more panes: `tmux split-window`, `tmux new-window`).
+- Mid-task steering while you work: notes via `caminus env say` (run `~/bin/env-note` between steps) and questions
+  via `~/bin/env-ask`.
+
 ## Memory
 
 Your memory is `~/MEMORY.md` in your home — it is yours, it persists across sessions and restarts, and you may write

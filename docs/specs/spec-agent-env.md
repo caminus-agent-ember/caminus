@@ -128,7 +128,16 @@ Context: `caminus env ctx` probes 127.0.0.1:8092-8101 `/props` and prints each r
 before the window fills (ROBOTS.md "Your context window"); Caminus already refuses over-long requests, and tools
 like Qwen Code compact automatically against this number.
 
-## 10. Security properties, honestly
+## 10. Named sessions: how the human tells the agent to do something
+
+tmux inside the agent user is the interactive channel. `caminus env new NAME -- CMD...` starts a detached named
+session running CMD (an agent CLI, a shell); `caminus env sessions` lists them; `caminus env send NAME TEXT` types
+TEXT+Enter into the session (a live instruction — audited); `caminus env attach NAME` execs `ssh -t ... tmux attach
+-t NAME` so the human drops into the same terminal to watch and type. Names are `[A-Za-z0-9_.-]+` like job names.
+One-shots stay `env run`, long detached work stays `env spawn`/`jobs`/`stop` (section 8); `env say`/`env-note` stay
+the mid-task note channel (section 9).
+
+## 11. Security properties, honestly
 
 - Protects: your files, credentials and processes from the agent user and from anything that injects into it; root
   entirely (the agent user has no sudo; elevation needs your password on a command you saw).

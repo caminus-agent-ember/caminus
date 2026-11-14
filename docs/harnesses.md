@@ -128,6 +128,10 @@ caminus env reqs --json          # pending root/question requests, machine-reada
 caminus env answer ID answered "yes"   # answer one from a script (approved/edited/denied/answered)
 caminus env memory               # the agent's ~/MEMORY.md (its persistent memory)
 caminus env remember "TP wins at these shapes"   # append to it
+caminus env new coder -- qwen    # a named session running your agent CLI (tmux, in the agent user)
+caminus env sessions             # the sessions
+caminus env send coder "run the TP benchmarks"   # type an instruction into it, live
+caminus env attach coder         # sit in the same terminal
 caminus env ctx                  # running servers and the context window each reports
 caminus env audit --tail 20      # everything the environment did
 ```

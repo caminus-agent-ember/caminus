@@ -19,6 +19,10 @@ work runs as the second user over SSH; root waits for your approval.
   caminus env ctx [--json]           the running servers and the context window each reports
   caminus env memory                 the agent's ~/MEMORY.md (its persistent memory)
   caminus env remember TEXT          append a line to the agent's ~/MEMORY.md
+  caminus env new NAME -- CMD...     a named tmux session in the agent user running CMD (an agent CLI)
+  caminus env sessions               the tmux sessions
+  caminus env send NAME TEXT         type TEXT into the session (a live instruction)
+  caminus env attach NAME            drop into the session's terminal
   caminus env jobs [--json]          same as jobs, machine-readable
   caminus env ask-root CMD...        agent side: file a root request and wait for your answer
   caminus env watch [--once]         answer the queued root requests (approve / edit / deny)
@@ -34,7 +38,7 @@ import subprocess
 import sys
 import time
 
-from ..env import agent_side, audit, bridge, jobs, runner, settings
+from ..env import agent_side, audit, bridge, jobs, runner, sessions, settings
 
 
 def _parser():
@@ -92,6 +96,19 @@ def _parser():
 
     p = sub.add_parser('remember', help="append a line to the agent's ~/MEMORY.md")
     p.add_argument('text')
+
+    p = sub.add_parser('new', help='a named tmux session running CMD in the agent user')
+    p.add_argument('name')
+    p.add_argument('cmd', nargs=argparse.REMAINDER)
+
+    sub.add_parser('sessions', help='the tmux sessions in the agent user')
+
+    p = sub.add_parser('send', help='type TEXT + Enter into session NAME (a live instruction)')
+    p.add_argument('name')
+    p.add_argument('text')
+
+    p = sub.add_parser('attach', help="drop into session NAME's terminal (watch and type)")
+    p.add_argument('name')
 
     p = sub.add_parser('ask-root', help='agent side: ask for a root command and wait for the answer')
     p.add_argument('--timeout', type=float, default=3600.0)
@@ -178,6 +195,31 @@ def main(rest, transport=None):
         return 0
     if a.sub == 'remember':
         return _remember(a, tr)
+    if a.sub == 'new':
+        cmd = a.cmd
+        if cmd and cmd[0] == '--':
+            cmd = cmd[1:]
+        if not cmd:
+            print('caminus env new: no command', file=sys.stderr)
+            return 2
+        audit.log(settings.audit_path(), {'event': 'new_session', 'name': a.name, 'cmd': ' '.join(cmd)})
+        r = runner.run_shell(sessions.new_script(a.name, cmd), transport=tr)
+        sys.stderr.write(r.stderr or '')
+        print(f'session {a.name} started' if r.returncode == 0 else f'failed: {(r.stderr or "").strip()}')
+        return r.returncode
+    if a.sub == 'sessions':
+        r = runner.run_shell(sessions.sessions_script(), transport=tr)
+        sys.stdout.write(r.stdout or '')
+        return 0
+    if a.sub == 'send':
+        audit.log(settings.audit_path(), {'event': 'send', 'session': a.name, 'text': a.text})
+        r = runner.run_shell(sessions.send_script(a.name, a.text), transport=tr)
+        if r.returncode != 0:
+            sys.stderr.write(r.stderr or '')
+        return r.returncode
+    if a.sub == 'attach':
+        import os as _os
+        _os.execvp('ssh', sessions.attach_argv(a.name, runner.ssh_base()))
     if a.sub == 'ctx':
         from ..env import ctx
         rows = ctx.servers()
