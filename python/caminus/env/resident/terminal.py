@@ -1,0 +1,179 @@
+"""Persistent PTY jobs: the agent can use the operating system through a shell.
+
+The worker owns the terminal independently of the conversation process. Its
+start marker and lock prevent a recovered action from launching its command twice.
+"""
+import fcntl
+import json
+import os
+from pathlib import Path
+import pty
+import select
+import signal
+import subprocess
+import sys
+import time
+
+from .store import atomic_json
+
+LOG_LIMIT = 16 * 1024 * 1024
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def read_state(job):
+    p = Path(job) / 'state.json'
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def worker(job):
+    job = Path(job)
+    with (job / 'worker.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        if (job / 'state.json').exists():
+            return 0                      # a durable start was already recorded: never replay
+        req = json.loads((job / 'request.json').read_text())
+        state = dict(phase='starting', worker=os.getpid(), started=time.time(), cwd=req['cwd'])
+        atomic_json(job / 'state.json', state)
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(req['cwd'])
+                os.execv('/bin/bash', ['bash', '-lc', req['command']])
+            except BaseException as e:
+                os.write(2, str(e).encode())
+                os._exit(127)
+        state.update(phase='running', pid=pid)
+        atomic_json(job / 'state.json', state)
+        os.set_blocking(fd, False)
+        (job / 'control').mkdir(exist_ok=True)
+        (job / 'ack').mkdir(exist_ok=True)
+        used, truncated, exit_status = 0, False, None
+        try:
+            with (job / 'output.log').open('ab', buffering=0) as log:
+                while exit_status is None:
+                    for p in sorted((job / 'control').glob('*.json')):
+                        ack = job / 'ack' / p.name
+                        if ack.exists():
+                            continue
+                        op = json.loads(p.read_text())
+                        # Record uncertainty before a non-idempotent terminal write.
+                        atomic_json(ack, dict(state='sending'))
+                        try:
+                            if 'stdin' in op:
+                                data = op['stdin'].encode()
+                                end = time.monotonic() + 2
+                                while data and time.monotonic() < end:
+                                    if select.select([], [fd], [], .05)[1]:
+                                        n = os.write(fd, data)
+                                        data = data[n:]
+                                if data:
+                                    raise TimeoutError('terminal input was not fully delivered')
+                            if op.get('signal'):
+                                os.killpg(pid, getattr(signal, 'SIG' + op['signal']))
+                            atomic_json(ack, dict(state='sent'))
+                        except (OSError, TimeoutError) as e:
+                            atomic_json(ack, dict(state='error', error=str(e)))
+                    if select.select([fd], [], [], .05)[0]:
+                        try:
+                            data = os.read(fd, 65536)
+                            take = max(0, LOG_LIMIT - used)
+                            log.write(data[:take])
+                            used += min(take, len(data))
+                            truncated |= len(data) > take
+                        except OSError:
+                            pass
+                    done, code = os.waitpid(pid, os.WNOHANG)
+                    if done:
+                        exit_status = os.waitstatus_to_exitcode(code)
+                # Drain bytes already emitted before exit.
+                while True:
+                    try:
+                        data = os.read(fd, 65536)
+                        if not data:
+                            break
+                        take = max(0, LOG_LIMIT - used)
+                        log.write(data[:take]); used += min(take, len(data))
+                        truncated |= len(data) > take
+                    except (OSError, BlockingIOError):
+                        break
+        finally:
+            os.close(fd)
+            if exit_status is None:
+                state.update(phase='interrupted', error='worker interrupted; command effects may already exist')
+            else:
+                state.update(phase='finished', exit_code=exit_status, truncated=truncated, ended=time.time())
+            atomic_json(job / 'state.json', state)
+        return 0
+
+
+class Terminal:
+    def __init__(self, home, launch=None):
+        self.home = Path(home)
+        self.jobs = self.home / 'jobs'
+        self.jobs.mkdir(exist_ok=True)
+        self.launch = launch or self._launch
+
+    @staticmethod
+    def _launch(job):
+        # Works from a checkout, installed package, and the uploaded stdlib zipapp.
+        package_root = str(Path(__file__).resolve().parents[3])
+        boot = ('import sys;sys.path.insert(0,sys.argv[1]);'
+                'from caminus.env.resident.terminal import worker;sys.exit(worker(sys.argv[2]))')
+        with (job / 'worker.log').open('ab') as log:
+            subprocess.Popen([sys.executable, '-I', '-c', boot, package_root, str(job)],
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+
+    def call(self, action, args):
+        session = args.get('session') or action
+        if len(session) != 32 or any(c not in '0123456789abcdef' for c in session):
+            raise ValueError('invalid terminal session')
+        job = self.jobs / session
+        if args.get('command'):
+            if args.get('session'):
+                raise ValueError('use stdin to send commands to an existing terminal')
+            cwd = Path(args.get('cwd') or self.home).expanduser().resolve()
+            if not cwd.is_dir():
+                raise ValueError('cwd is not a directory')
+            job.mkdir(exist_ok=True)
+            if not (job / 'request.json').exists():
+                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd)))
+            if not read_state(job):
+                self.launch(job)
+        elif not job.is_dir():
+            raise ValueError('unknown terminal session')
+        if 'stdin' in args or args.get('signal'):
+            if args.get('signal') not in (None, 'INT', 'TERM', 'KILL', 'HUP'):
+                raise ValueError('signal must be INT, TERM, KILL or HUP')
+            if len(args.get('stdin', '').encode()) > 65536:
+                raise ValueError('send terminal input in chunks of at most65536bytes')
+            p = job / 'control' / (action + '.json')
+            if not p.exists():
+                atomic_json(p, {k: args[k] for k in ('stdin', 'signal') if k in args})
+        wait = min(10000, max(0, int(args.get('yield_ms', 1000)))) / 1000
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            if read_state(job).get('phase') in ('finished', 'interrupted'):
+                break
+            time.sleep(.02)
+        state = read_state(job)
+        if state.get('phase') in ('starting', 'running') and not alive(state.get('worker')):
+            state.update(phase='interrupted', error='worker disappeared; inspect effects before repeating the command')
+        log = job / 'output.log'
+        offset = max(0, int(args.get('offset', 0)))
+        data = b''
+        if log.exists():
+            with log.open('rb') as f:
+                f.seek(offset)
+                data = f.read(min(32768, max(1, int(args.get('max_output', 8192)))))
+        return dict(session=session, **state, output=data.decode(errors='replace'), next_offset=offset + len(data),
+                    running=state.get('phase') not in ('finished', 'interrupted'))

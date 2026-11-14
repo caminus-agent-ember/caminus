@@ -5,7 +5,8 @@ can do any IO that user can do. The boundary is Unix, not a sandbox: your home, 
 protected by file ownership and permissions, and root is not in the agent's reach at all — a root command waits in a
 bridge until you approve it, and only your side executes it.
 
-Status: experimental, CPU-tested only (tests/env/test_env.py; no live SSH in CI). Not wired to the panel yet.
+Status: experimental. The environment, resident loop and panel have CPU integration tests;
+CI uses local HTTP fixtures and real PTYs, without GPU inference or live SSH.
 
 **Code:**
 - `python/caminus/env/settings.py`: the names and paths (`CAMINUS_ENV_USER`, `CAMINUS_ENV_KEY`, `CAMINUS_ENV_BRIDGE`, `CAMINUS_ENV_AUDIT`, then defaults).
@@ -16,6 +17,11 @@ Status: experimental, CPU-tested only (tests/env/test_env.py; no live SSH in CI)
 - `python/caminus/cmd/env.py`: the `caminus env` command.
 
 **Tests:** tests/env/test_env.py (suite `env` in tests/ci_cpu.py).
+
+The native resident loop, scriptable oneshot contract, peer mail and comparison
+benchmark are described in [Resident agents](../resident-agent.md). CPU suites
+`resident` and `resident_compare` cover these additions. Existing environment
+commands remain available for external CLIs and manual sessions.
 
 ## 1. The model
 
@@ -87,7 +93,7 @@ root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the l
 ## 7. The TUI (`caminus env ui`) and the scriptable CLI
 
 `caminus env ui` execs `caminus-panel env --user ... --bridge ... --audit ... --key ...` (panel/envui.go, same binary
-and build as the control panel). Six live tabs (tab / 1-6): **requests** (ROOT: `a` approve — sudo runs attached to
+and build as the control panel). Seven live tabs (tab / 1-7), starting on **agent** (goals and activity): **requests** (ROOT: `a` approve — sudo runs attached to
 the terminal via `tea.ExecProcess` so your password prompt works, output teed to a temp file; `e` edit, `d` deny,
 `s` skip — ASK: `a` answer, a number picks a choice), **jobs** (detached processes in the agent user: `K` kill,
 `l` tail the log, `n` new job), **procs** (the agent user's busiest processes), **notes** (steering inbox: `n` new,

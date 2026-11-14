@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -47,6 +48,7 @@ type envReq struct {
 	Cmd     string   `json:"cmd"`
 	Text    string   `json:"text"`
 	Choices []string `json:"choices"`
+	Reason  string   `json:"reason"`
 	Ts      float64  `json:"ts"`
 }
 
@@ -71,26 +73,30 @@ type server struct {
 	Nctx  string
 }
 
-var tabs = []string{"requests", "jobs", "procs", "notes", "ctx", "audit"}
+var tabs = []string{"requests", "jobs", "procs", "notes", "ctx", "audit", "agent"}
 
 type envModel struct {
-	user      string
-	bridge    string
-	auditPath string
-	key       string
-	cli       []string
+	user           string
+	bridge         string
+	auditPath      string
+	key            string
+	cli            []string
+	agentName      string
+	resident       residentStatus
+	residentEvents []residentEvent
+	goalSel        int
 
-	tab    int
-	reqs   []envReq
-	sel    int
-	seen   map[string]bool
-	jobs   []job
-	jobSel int
-	procs  []string
-	notes  []note
+	tab     int
+	reqs    []envReq
+	sel     int
+	seen    map[string]bool
+	jobs    []job
+	jobSel  int
+	procs   []string
+	notes   []note
 	noteSel int
 	servers []server
-	events []string
+	events  []string
 	logName string
 	logView string
 
@@ -98,11 +104,11 @@ type envModel struct {
 	edit   string
 	newJob string
 
-	msg   string
-	sshOK bool
-	sshN  int
-	tickN int
-	width int
+	msg    string
+	sshOK  bool
+	sshN   int
+	tickN  int
+	width  int
 	height int
 }
 
@@ -136,6 +142,7 @@ func envMain(args []string) {
 	audit := fs.String("audit", "", "the audit log path")
 	key := fs.String("key", "", "the harness ssh key")
 	cli := fs.String("cli", "", "JSON argv of the caminus CLI (for starting server jobs)")
+	agent := fs.String("agent", "resident", "resident agent name")
 	fs.Parse(args)
 	if *user == "" || *bridge == "" || *audit == "" || *key == "" {
 		fmt.Fprintln(os.Stderr, "caminus-panel env: --user --bridge --audit --key are all required")
@@ -149,7 +156,7 @@ func envMain(args []string) {
 		}
 	}
 	m := envModel{user: *user, bridge: *bridge, auditPath: *audit, key: *key, cli: cliArgv,
-		seen: map[string]bool{}, mode: "normal", width: 110, height: 32}
+		agentName: *agent, tab: 6, seen: map[string]bool{}, mode: "normal", width: 110, height: 32}
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "caminus-panel env:", err)
@@ -159,6 +166,7 @@ func envMain(args []string) {
 
 func (m envModel) Init() tea.Cmd {
 	cmds := append([]tea.Cmd{tickCmd(), probeCmd(m)}, sshRefresh(m)...)
+	cmds = append(cmds, residentRefresh(m))
 	return tea.Batch(cmds...)
 }
 
@@ -239,6 +247,9 @@ func loadRequests(bridge string) ([]envReq, error) {
 		if r.ID == "" {
 			r.ID = id
 		}
+		if !validBridgeID(id) || r.ID != id {
+			continue
+		}
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ts < out[j].Ts })
@@ -246,6 +257,9 @@ func loadRequests(bridge string) ([]envReq, error) {
 }
 
 func writeAnswer(bridge, actor string, r envReq, decision, cmd string, rc *int, out, errText, answer string) error {
+	if !validBridgeID(r.ID) {
+		return fmt.Errorf("invalid bridge request id")
+	}
 	res := map[string]any{"id": r.ID, "decision": decision, "cmd": cmd, "approved_by": actor,
 		"rc": rc, "out": out, "err": errText, "answer": answer, "ts": float64(time.Now().UnixMilli()) / 1000}
 	data, _ := json.Marshal(res)
@@ -253,11 +267,55 @@ func writeAnswer(bridge, actor string, r envReq, decision, cmd string, rc *int, 
 	if err := os.MkdirAll(dir, 0o770); err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, r.ID+".json.tmp")
-	if err := os.WriteFile(tmp, data, 0o660); err != nil {
+	return writeBridgeJSON(filepath.Join(dir, r.ID+".json"), data)
+}
+
+func validBridgeID(s string) bool {
+	if len(s) < 1 || len(s) > 128 {
+		return false
+	}
+	for i, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		if i > 0 && (r == '_' || r == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func writeBridgeJSON(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".bridge-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, r.ID+".json"))
+	defer os.Remove(f.Name())
+	defer f.Close()
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if err = f.Chmod(0o660); err != nil {
+		return err
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		if err = f.Chown(-1, int(stat.Gid)); err != nil {
+			return err
+		}
+	}
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func writeNote(bridge, actor, text string) (string, error) {
@@ -267,11 +325,7 @@ func writeNote(bridge, actor, text string) (string, error) {
 	if err := os.MkdirAll(dir, 0o770); err != nil {
 		return "", err
 	}
-	tmp := filepath.Join(dir, id+".json.tmp")
-	if err := os.WriteFile(tmp, data, 0o660); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, id+".json")); err != nil {
+	if err := writeBridgeJSON(filepath.Join(dir, id+".json"), data); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -404,6 +458,9 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.tickN%4 == 0 {
 			cmds = append(cmds, sshRefresh(m)...)
+			if m.tab == 6 {
+				cmds = append(cmds, residentRefresh(m))
+			}
 		}
 		return m, tea.Batch(cmds...)
 	case probeMsg:
@@ -424,6 +481,19 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case serversMsg:
 		m.servers = msg
 		return m, nil
+	case residentMsg:
+		if msg.err != "" {
+			m.msg = msg.err
+		} else {
+			m.resident, m.residentEvents = msg.status, msg.events
+			if m.goalSel >= len(m.resident.Goals) {
+				m.goalSel = max(0, len(m.resident.Goals)-1)
+			}
+		}
+		return m, nil
+	case residentActionMsg:
+		m.msg = msg.text
+		return m, residentRefresh(m)
 	case sshOutMsg:
 		switch msg.what {
 		case "jobs":
@@ -511,12 +581,12 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.tab = (m.tab + len(tabs) - 1) % len(tabs)
 		return m, nil
-	case "1", "2", "3", "4", "5", "6":
+	case "1", "2", "3", "4", "5", "6", "7":
 		m.tab = int(k[0] - '1')
 		return m, nil
 	case "r":
 		m.refreshLocal()
-		return m, tea.Batch(sshRefresh(m)...)
+		return m, tea.Batch(append(sshRefresh(m), residentRefresh(m))...)
 	}
 	switch m.tab {
 	case 0:
@@ -525,12 +595,25 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 		return m.jobKeys(k)
 	case 3:
 		return m.noteKeys(k)
+	case 6:
+		return m.residentKeys(k)
 	}
 	return m, nil
 }
 
 func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 	switch m.mode {
+	case "agentgoal":
+		text := m.edit
+		m.mode, m.edit = "normal", ""
+		if strings.TrimSpace(text) == "" {
+			return m, nil
+		}
+		return m, residentAction(m, []string{"send", m.agentName, "--stdin", "--json"}, text)
+	case "agentname":
+		m.agentName = strings.TrimSpace(m.edit)
+		m.mode, m.edit, m.goalSel = "normal", "", 0
+		return m, residentRefresh(m)
 	case "answer":
 		if m.sel >= len(m.reqs) {
 			m.mode = "normal"
@@ -551,7 +634,7 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		m.msg = "answered " + r.ID
 		m.refreshLocal()
 		payload := base64.StdEncoding.EncodeToString([]byte("Q: " + r.Text + "\nA: " + ans + "\n---\n"))
-		return m, sshRun(m, "mem", "printf %s " + payload + " | base64 -d >> ~/MEMORY.md")
+		return m, sshRun(m, "mem", "printf %s "+payload+" | base64 -d >> ~/MEMORY.md")
 	case "edit":
 		cmd := m.edit
 		m.mode, m.edit = "normal", ""
@@ -780,6 +863,10 @@ func (m envModel) render() string {
 	b.WriteString("\n\n")
 	b.WriteString(envBorder.Render(m.pane()))
 	switch m.mode {
+	case "agentgoal":
+		b.WriteString("\n\n" + envWarn.Render("goal for "+m.agentName+" (enter sends, esc cancels):") + "\n" + m.edit + "█")
+	case "agentname":
+		b.WriteString("\n\n" + envWarn.Render("resident agent name:") + "\n" + m.edit + "█")
 	case "edit":
 		b.WriteString("\n\n" + envWarn.Render("edit root command (enter runs it under sudo, esc cancels):") + "\n" + m.edit + "█")
 	case "answer":
@@ -791,13 +878,13 @@ func (m envModel) render() string {
 	case "serve1":
 		b.WriteString("\n\n" + envWarn.Render("new server job — model name (enter, esc cancels):") + "\n" + m.edit + "█")
 	case "serve2":
-		b.WriteString("\n\n" + envWarn.Render("server " + m.newJob + " — placement auto|0|1|2 (enter=auto, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("server "+m.newJob+" — placement auto|0|1|2 (enter=auto, esc cancels):") + "\n" + m.edit + "█")
 	case "newjob2":
-		b.WriteString("\n\n" + envWarn.Render("new job " + m.newJob + " — command (enter spawns it detached, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("new job "+m.newJob+" — command (enter spawns it detached, esc cancels):") + "\n" + m.edit + "█")
 	}
 	status := fmt.Sprintf("ssh: %s  requests: %d  jobs: %d  msg: %s", map[bool]string{true: "OK", false: "FAIL"}[m.sshOK], len(m.reqs), len(m.jobs), m.msg)
 	b.WriteString("\n\n" + envDim.Render(status))
-	b.WriteString("\n" + envDim.Render("tab/1-6 panes · q quit · requests: a/e/d/s · jobs: K kill, l log, n new, S new server · notes: n new, d del · r refresh"))
+	b.WriteString("\n" + envDim.Render("tab/1-7 panes · q quit · agent: n goal, s start, x stop, c cancel, m name · requests: a/e/d/s · r refresh"))
 	return b.String()
 }
 
@@ -813,6 +900,8 @@ func (m envModel) pane() string {
 		return m.notesPane()
 	case 4:
 		return m.ctxPane()
+	case 6:
+		return m.residentPane()
 	default:
 		return m.auditPane()
 	}

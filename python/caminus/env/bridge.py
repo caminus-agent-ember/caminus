@@ -10,6 +10,8 @@ import os
 import subprocess
 import time
 import uuid
+import re
+import tempfile
 
 REQ, RES = 'req', 'res'
 
@@ -20,12 +22,23 @@ def _dirs(bridge):
 
 def _write_atomic(path, obj):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f'{path}.tmp.{os.getpid()}'
-    with open(tmp, 'w') as f:
-        json.dump(obj, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=os.path.dirname(path), prefix='.bridge-', delete=False) as f:
+            tmp=f.name
+            os.fchmod(f.fileno(),0o660)
+            os.fchown(f.fileno(),-1,os.stat(os.path.dirname(path)).st_gid)
+            json.dump(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp and os.path.exists(tmp):os.unlink(tmp)
+
+
+def check_id(rid):
+    if not isinstance(rid,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}',rid):
+        raise ValueError('invalid bridge request id')
 
 
 def submit(bridge, kind, cmd=None, text=None, choices=None, cwd=None, timeout=3600.0, poll=0.2):
@@ -65,15 +78,19 @@ def pending(bridge):
         if not name.endswith('.json'):
             continue
         rid = name[:-len('.json')]
+        try:check_id(rid)
+        except ValueError:continue
         if os.path.exists(os.path.join(resd, rid + '.json')):
             continue
         with open(os.path.join(reqd, name)) as f:
-            out.append(json.load(f))
+            value=json.load(f)
+            if value.get('id')==rid:out.append(value)
     return out
 
 
 def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err='', answer_text=''):
     """harness side: write the answer file; decision is 'approved', 'edited', 'denied' or 'answered'"""
+    check_id(rid)
     _write_atomic(os.path.join(_dirs(bridge)[1], rid + '.json'),
                   {'id': rid, 'decision': decision, 'cmd': cmd, 'approved_by': actor,
                    'rc': rc, 'out': out, 'err': err, 'answer': answer_text, 'ts': time.time()})
