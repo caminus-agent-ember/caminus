@@ -12,6 +12,7 @@ import time
 import uuid
 import re
 import tempfile
+from .resident import approval
 
 REQ, RES = 'req', 'res'
 
@@ -60,7 +61,8 @@ def submit(bridge, kind, cmd=None, text=None, choices=None, cwd=None, timeout=36
         p = os.path.join(resd, rid + '.json')
         if os.path.exists(p):
             with open(p) as f:
-                return json.load(f)
+                result=json.load(f)
+            if result.get('decision')!='executing':return result
         time.sleep(poll)
     raise TimeoutError(f'no answer to {kind} request {rid} within {timeout:g}s')
 
@@ -82,18 +84,20 @@ def pending(bridge):
         except ValueError:continue
         if os.path.exists(os.path.join(resd, rid + '.json')):
             continue
-        with open(os.path.join(reqd, name)) as f:
-            value=json.load(f)
-            if value.get('id')==rid:out.append(value)
+        try:out.append(approval.snapshot(bridge,rid))
+        except ValueError:continue
     return out
 
 
-def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err='', answer_text=''):
+def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err='', answer_text='',request=None):
     """harness side: write the answer file; decision is 'approved', 'edited', 'denied' or 'answered'"""
     check_id(rid)
-    _write_atomic(os.path.join(_dirs(bridge)[1], rid + '.json'),
-                  {'id': rid, 'decision': decision, 'cmd': cmd, 'approved_by': actor,
-                   'rc': rc, 'out': out, 'err': err, 'answer': answer_text, 'ts': time.time()})
+    return approval.answer(bridge,request or approval.snapshot(bridge,rid),decision,actor,
+                           cmd=cmd,rc=rc,out=out,err=err,answer=answer_text)
+
+
+claim=approval.claim
+finish=approval.finish
 
 
 def say(bridge, text, actor):

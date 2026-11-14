@@ -15,6 +15,7 @@ from .runtime import Runtime, EXIT, PAUSED, runtime_lock
 from .store import Store, agent_home, atomic_json
 from .terminal import alive
 from .mail import Mail
+from . import approval
 
 
 def parser():
@@ -177,8 +178,16 @@ def main(argv=None,stdin=None):
             emit(summary(store,gid),a.json);store.close();return 0
         elif a.op=='cancel':
             gid=a.goal_id
+            in_flight=[]
             with store.transaction():
-                store.goal(gid);store.update(gid,state='cancelled')
+                store.goal(gid)
+                bridge=Path(json.loads((home/'config.json').read_text())['bridge']).expanduser()
+                for act in store.db.execute("SELECT id,bridge_id FROM actions WHERE goal=? AND name IN ('ask_root','ask_user') AND state!='done'",(gid,)):
+                    rid=act['bridge_id'] or act['id'][:16]
+                    if (bridge/'req'/(rid+'.json')).exists():
+                        result=approval.withdraw(bridge,rid,gid)
+                        if result.get('decision')=='executing':in_flight.append(rid)
+                store.update(gid,state='cancelled')
                 for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name='terminal'",(gid,)):
                     try:args=json.loads(act['args'])
                     except ValueError:continue
@@ -188,7 +197,7 @@ def main(argv=None,stdin=None):
                     job=home/'jobs'/session
                     if job.is_dir():atomic_json(job/'control'/(uuid.uuid4().hex+'.json'),dict(signal='TERM'))
                 store.event('cancelled',{},gid)
-            emit(summary(store,gid),a.json);store.close();return 0
+            emit({**summary(store,gid),'root_already_claimed':in_flight},a.json);store.close();return 0
         else:
             gid=None
         store.close()

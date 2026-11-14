@@ -36,7 +36,9 @@ def _ask(kind, extra):
         p = os.path.join(BRIDGE, 'res', rid + '.json')
         if os.path.exists(p):
             with open(p) as f:
-                return json.load(f)
+                result = json.load(f)
+            if result.get('decision') != 'executing':
+                return result
         time.sleep(0.2)
     print(f'no answer within {TIMEOUT:g}s (request {rid})', file=sys.stderr)
     return None
@@ -54,7 +56,7 @@ def main():
     res = _ask('root', {'cmd': cmd})
     if res is None:
         return 124
-    if res['decision'] == 'denied':
+    if res['decision'] in ('denied','withdrawn'):
         print(f"ask-root: denied by {res.get('approved_by', '?')}: {cmd}", file=sys.stderr)
         return 126
     sys.stdout.write(res.get('out') or '')
@@ -78,7 +80,7 @@ def main():
     res = _ask('question', {'text': text, 'choices': choices})
     if res is None:
         return 124
-    if res['decision'] == 'denied':
+    if res['decision'] in ('denied','withdrawn'):
         print(f"env-ask: denied by {res.get('approved_by', '?')}", file=sys.stderr)
         return 126
     ans = res.get('answer') or ''

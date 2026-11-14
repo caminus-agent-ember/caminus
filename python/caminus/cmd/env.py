@@ -428,6 +428,15 @@ def _ask(a):
     return 0
 
 
+def _root_result(req,decision,cmd,actor,tr):
+    token=bridge.claim(settings.bridge_dir(),req,decision,actor,cmd)
+    audit.log(settings.audit_path(),dict(event='root_claim',id=req['id'],decision=decision,by=actor,cmd=cmd))
+    try:r=bridge.execute_root(cmd,runner=tr)
+    except (OSError,ValueError) as e:r=subprocess.CompletedProcess(['sudo','sh','-c',cmd],127,'',str(e))
+    bridge.finish(settings.bridge_dir(),req['id'],token,r.returncode,r.stdout or '',r.stderr or '')
+    return r
+
+
 def _watch(a, tr):
     os.umask(0o007)          # bridge files must stay readable by the agent user
     me = getpass.getuser()
@@ -436,53 +445,63 @@ def _watch(a, tr):
     while True:
         reqs = [r for r in bridge.pending(settings.bridge_dir()) if r['id'] not in seen]
         for req in reqs:
-            seen.add(req['id'])
-            kind = req.get('kind', 'root')
-            audit.log(ap, {'event': 'request', 'id': req['id'], 'kind': kind, 'from': req.get('user')})
-            print(f"\n{kind} request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})")
-            if kind == 'question':
-                print(f"  {req.get('text', '')}")
-                if req.get('choices'):
-                    print('  choices: ' + ' | '.join(f'{i + 1}) {c}' for i, c in enumerate(req['choices'])))
-                ans = input('answer (text, or choice number; empty denies): ')
-                if not ans.strip():
-                    bridge.answer(settings.bridge_dir(), req['id'], 'denied', me)
-                    audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'denied', 'by': me})
-                else:
-                    if req.get('choices') and ans.strip().isdigit() and 1 <= int(ans) <= len(req['choices']):
-                        ans = req['choices'][int(ans) - 1]
-                    bridge.answer(settings.bridge_dir(), req['id'], 'answered', me, answer_text=ans)
-                    audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'answered', 'by': me, 'answer': ans})
-                    _remember_qa(req.get('text', ''), ans, tr)
-                continue
-            print(f"  {req['cmd']}")
-            choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
-            if choice == 's':
-                continue
-            if choice == 'd':
-                bridge.answer(settings.bridge_dir(), req['id'], 'denied', me)
-                audit.log(ap, {'event': 'root_decision', 'id': req['id'], 'decision': 'denied', 'by': me})
-                print('denied.')
-                continue
-            cmd = req['cmd']
-            if choice == 'e':
-                cmd = input('root command: ').strip()
-                if not cmd:
+            try:
+                seen.add(req['id'])
+                kind = req.get('kind', 'root')
+                audit.log(ap, {'event': 'request', 'id': req['id'], 'kind': kind, 'from': req.get('user')})
+                print(f"\n{kind} request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})")
+                if kind == 'question':
+                    print(f"  {req.get('text', '')}")
+                    if req.get('choices'):
+                        print('  choices: ' + ' | '.join(f'{i + 1}) {c}' for i, c in enumerate(req['choices'])))
+                    ans = input('answer (text, or choice number; empty denies): ')
+                    if not ans.strip():
+                        bridge.answer(settings.bridge_dir(), req['id'], 'denied', me,request=req)
+                        audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'denied', 'by': me})
+                    else:
+                        if req.get('choices') and ans.strip().isdigit() and 1 <= int(ans) <= len(req['choices']):
+                            ans = req['choices'][int(ans) - 1]
+                        bridge.answer(settings.bridge_dir(), req['id'], 'answered', me, answer_text=ans,request=req)
+                        audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'answered', 'by': me, 'answer': ans})
+                        _remember_qa(req.get('text', ''), ans, tr)
                     continue
-            r = bridge.execute_root(cmd, runner=tr)
-            bridge.answer(settings.bridge_dir(), req['id'],
-                          'edited' if cmd != req['cmd'] else 'approved', me, cmd=cmd,
-                          rc=r.returncode, out=r.stdout or '', err=r.stderr or '')
-            audit.log(ap, {'event': 'root_result', 'id': req['id'], 'decision': 'approved' if cmd == req['cmd'] else 'edited',
-                           'by': me, 'cmd': cmd, 'rc': r.returncode})
-            sys.stdout.write(r.stdout or '')
-            sys.stderr.write(r.stderr or '')
+                print(f"  {req['cmd']}")
+                choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
+                if choice not in ('a','e','d'):
+                    continue
+                if choice == 'd':
+                    bridge.answer(settings.bridge_dir(), req['id'], 'denied', me,request=req)
+                    audit.log(ap, {'event': 'root_decision', 'id': req['id'], 'decision': 'denied', 'by': me})
+                    print('denied.')
+                    continue
+                cmd = req['cmd']
+                if choice == 'e':
+                    cmd = input('root command: ').strip()
+                    if not cmd:
+                        continue
+                try:r = _root_result(req,'edited' if cmd != req['cmd'] else 'approved',cmd,me,tr)
+                except (OSError,ValueError) as e:
+                    print('request not executed: '+str(e),file=sys.stderr)
+                    continue
+                audit.log(ap, {'event': 'root_result', 'id': req['id'], 'decision': 'approved' if cmd == req['cmd'] else 'edited',
+                               'by': me, 'cmd': cmd, 'rc': r.returncode})
+                sys.stdout.write(r.stdout or '')
+                sys.stderr.write(r.stderr or '')
+            except (OSError,ValueError) as e:
+                print('request processing stopped: '+str(e),file=sys.stderr)
         if a.once:
             return 0
         time.sleep(0.5)
 
 
 def _answer(a, tr):
+    try:return _answer_pending(a,tr)
+    except (OSError,ValueError) as e:
+        print('caminus env answer: '+str(e),file=sys.stderr)
+        return 2
+
+
+def _answer_pending(a, tr):
     """answer one pending request non-interactively (for scripts and tests); approved/edited run sudo"""
     me = getpass.getuser()
     reqs = {r['id']: r for r in bridge.pending(settings.bridge_dir())}
@@ -492,14 +511,17 @@ def _answer(a, tr):
     req = reqs[a.id]
     ap = settings.audit_path()
     if a.decision == 'denied':
-        bridge.answer(settings.bridge_dir(), a.id, 'denied', me)
+        bridge.answer(settings.bridge_dir(), a.id, 'denied', me,request=req)
         audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'denied', 'by': me})
         res = {'id': a.id, 'decision': 'denied'}
     elif a.decision == 'answered':
+        if req.get('kind','root')!='question':
+            print('caminus env answer: a root request needs a root decision',file=sys.stderr)
+            return 2
         if not a.text:
             print('caminus env answer: answered needs TEXT', file=sys.stderr)
             return 2
-        bridge.answer(settings.bridge_dir(), a.id, 'answered', me, answer_text=a.text)
+        bridge.answer(settings.bridge_dir(), a.id, 'answered', me, answer_text=a.text,request=req)
         audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'answered', 'by': me, 'answer': a.text})
         _remember_qa(req.get('text', ''), a.text, tr)
         res = {'id': a.id, 'decision': 'answered', 'answer': a.text}
@@ -508,9 +530,7 @@ def _answer(a, tr):
         if not cmd:
             print('caminus env answer: no command to run', file=sys.stderr)
             return 2
-        r = bridge.execute_root(cmd, runner=tr)
-        bridge.answer(settings.bridge_dir(), a.id, a.decision, me, cmd=cmd, rc=r.returncode,
-                      out=r.stdout or '', err=r.stderr or '')
+        r = _root_result(req,a.decision,cmd,me,tr)
         audit.log(ap, {'event': 'root_result', 'id': a.id, 'decision': a.decision, 'by': me,
                        'cmd': cmd, 'rc': r.returncode})
         sys.stdout.write(r.stdout or '')

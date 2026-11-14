@@ -41,6 +41,7 @@ func TestBridgeRejectsPathIDsAndIgnoresPredictableTempSymlink(t *testing.T) {
 	os.MkdirAll(filepath.Join(bridge, "res"), 0o770)
 	target := filepath.Join(root, "protected")
 	os.WriteFile(target, []byte("unchanged"), 0o600)
+	writeReq(t, bridge, "ok", "id -u", 1)
 	os.Symlink(target, filepath.Join(bridge, "res", "ok.json.tmp"))
 	if err := writeAnswer(bridge, "human", envReq{ID: "../protected"}, "denied", "", nil, "", "", ""); err == nil {
 		t.Fatal("path ID accepted")

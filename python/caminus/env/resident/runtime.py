@@ -11,6 +11,7 @@ from .model import Model, ModelError, ModelTruncated
 from .store import Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
+from . import approval
 
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
 EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24}
@@ -114,6 +115,12 @@ class Runtime:
             self.store.event('approval_requested' if kind == 'root' else 'question', value, action['goal'])
         if res.exists():
             result = json.loads(res.read_text())
+            if result.get('id')==rid and result.get('decision')=='executing':
+                self.store.update(action['goal'],state='waiting_root')
+                return None
+            if result.get('id')==rid and result.get('decision')=='withdrawn':
+                self.store.update(action['goal'],state='cancelled')
+                return result
             if result.get('id') != rid or result.get('decision') not in ('approved','edited','denied','answered'):
                 raise ValueError('invalid human response')
             if kind == 'root' and result['decision'] == 'answered':
@@ -221,13 +228,17 @@ class Runtime:
         if g['state']=='waiting_model' and self.retry.get(gid,(0,0))[0]>time.time():
             return False
         if g['deadline'] and time.time() >= g['deadline']:
-            self.store.update(gid,state='paused',error='oneshot time budget reached')
+            with self.store.transaction():
+                if self.store.goal(gid)['state']=='cancelled':return False
+                self.store.update(gid,state='paused',error='oneshot time budget reached')
             return True
         actions = self.store.actions(gid)
         if actions:
             return self._action(actions[0])
         if g['step_limit'] is not None and g['steps'] >= g['step_limit']:
-            self.store.update(gid,state='paused',error='oneshot model-step budget reached')
+            with self.store.transaction():
+                if self.store.goal(gid)['state']=='cancelled':return False
+                self.store.update(gid,state='paused',error='oneshot model-step budget reached')
             return True
         try:
             with self.store.transaction():

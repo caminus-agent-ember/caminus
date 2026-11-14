@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -48,7 +49,8 @@ def worker(job):
         if pid == 0:
             try:
                 os.chdir(req['cwd'])
-                os.execv('/bin/bash', ['bash', '-lc', req['command']])
+                script='builtin cd -- '+shlex.quote(req['cwd'])+' || exit 127\n'+req['command']
+                os.execv('/bin/bash', ['bash', '-lc', script])
             except BaseException as e:
                 os.write(2, str(e).encode())
                 os._exit(127)

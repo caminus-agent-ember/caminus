@@ -73,6 +73,19 @@ jobs:
           python -m build --sdist --outdir "$RUNNER_TEMP/sdist" .
           python -m twine check --strict "$RUNNER_TEMP"/sdist/*
 
+      - name: Resident failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, same pin as build.yml
+        with:
+          name: resident-failure-evidence
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/ci/resident.log
+            ${{ runner.temp }}/ci/resident/
+            ${{ runner.temp }}/ci/env.log
+            ${{ runner.temp }}/ci/resident_compare.log
+
       - name: Vendored code (gguf-py at upstream llama.cpp 5aeac37a35; ggml's MMQ at the ignite-llama fork commit e4e3f8eda)
         # kernels/ggml_mmq's headers name the fork's development commit 842653396, published as e4e3f8eda with identical
         # ggml/, common/ and src/: vendor_mmq reads the files at e4e3f8eda and compares them with headers labelled 842653396.

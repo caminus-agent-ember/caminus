@@ -40,6 +40,7 @@ import (
 )
 
 type envReq struct {
+	Digest  string   `json:"-"`
 	ID      string   `json:"id"`
 	Pid     int      `json:"pid"`
 	User    string   `json:"user"`
@@ -100,9 +101,10 @@ type envModel struct {
 	logName string
 	logView string
 
-	mode   string // "normal", "edit", "answer", "note", "newjob1", "newjob2"
-	edit   string
-	newJob string
+	mode        string // "normal", "edit", "answer", "note", "newjob1", "newjob2"
+	edit        string
+	editRequest *envReq
+	newJob      string
 
 	msg    string
 	sshOK  bool
@@ -123,6 +125,7 @@ type procsMsg []string
 type notesMsg []note
 type serversMsg []server
 type execDoneMsg struct {
+	claim    string
 	id       string
 	decision string
 	cmd      string
@@ -250,6 +253,7 @@ func loadRequests(bridge string) ([]envReq, error) {
 		if !validBridgeID(id) || r.ID != id {
 			continue
 		}
+		r.Digest = requestDigest(data)
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ts < out[j].Ts })
@@ -267,7 +271,12 @@ func writeAnswer(bridge, actor string, r envReq, decision, cmd string, rc *int, 
 	if err := os.MkdirAll(dir, 0o770); err != nil {
 		return err
 	}
-	return writeBridgeJSON(filepath.Join(dir, r.ID+".json"), data)
+	return withBridgeLock(bridge, r.ID, func() error {
+		if _, err := checkPendingRequest(bridge, r); err != nil {
+			return err
+		}
+		return writeBridgeJSON(filepath.Join(dir, r.ID+".json"), data)
+	})
 }
 
 func validBridgeID(s string) bool {
@@ -518,12 +527,14 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case execDoneMsg:
-		rc := msg.rc
-		_ = writeAnswer(m.bridge, currentUser(), envReq{ID: msg.id}, msg.decision, msg.cmd, &rc, msg.out, "", "")
+		err := finishRoot(m.bridge, msg.id, msg.claim, msg.rc, msg.out)
 		_ = appendAudit(m.auditPath, map[string]any{"event": "root_result", "id": msg.id,
 			"decision": msg.decision, "cmd": msg.cmd, "rc": msg.rc})
 		m.seen[msg.id] = true
 		m.msg = fmt.Sprintf("%s: exit %d", msg.decision, msg.rc)
+		if err != nil {
+			m.msg += "; " + err.Error()
+		}
 		m.refreshLocal()
 		return m, tickCmd()
 	case tea.KeyPressMsg:
@@ -557,6 +568,7 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 			return m.submitInput()
 		case "esc":
 			m.mode, m.edit, m.newJob = "normal", "", ""
+			m.editRequest = nil
 			return m, nil
 		case "backspace":
 			if len(m.edit) > 0 {
@@ -615,11 +627,12 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		m.mode, m.edit, m.goalSel = "normal", "", 0
 		return m, residentRefresh(m)
 	case "answer":
-		if m.sel >= len(m.reqs) {
+		if m.editRequest == nil {
 			m.mode = "normal"
 			return m, nil
 		}
-		r := m.reqs[m.sel]
+		r := *m.editRequest
+		m.editRequest = nil
 		ans := m.edit
 		if len(r.Choices) > 0 {
 			if n, err := strconv.Atoi(strings.TrimSpace(ans)); err == nil && n >= 1 && n <= len(r.Choices) {
@@ -627,7 +640,11 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 			}
 		}
 		m.mode, m.edit = "normal", ""
-		_ = writeAnswer(m.bridge, currentUser(), r, "answered", "", nil, "", "", ans)
+		if err := writeAnswer(m.bridge, currentUser(), r, "answered", "", nil, "", "", ans); err != nil {
+			m.msg = err.Error()
+			m.refreshLocal()
+			return m, nil
+		}
 		_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID,
 			"decision": "answered", "by": currentUser(), "answer": ans})
 		m.seen[r.ID] = true
@@ -638,17 +655,25 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 	case "edit":
 		cmd := m.edit
 		m.mode, m.edit = "normal", ""
-		if cmd == "" || m.sel >= len(m.reqs) {
+		if cmd == "" || m.editRequest == nil {
 			return m, nil
 		}
-		r := m.reqs[m.sel]
+		r := *m.editRequest
+		m.editRequest = nil
 		c, tmp, err := execRoot(cmd)
 		if err != nil {
 			m.msg = err.Error()
 			return m, nil
 		}
+		token, err := claimRoot(m.bridge, currentUser(), r, "edited", cmd)
+		if err != nil {
+			os.Remove(tmp)
+			m.msg = err.Error()
+			m.refreshLocal()
+			return m, nil
+		}
 		m.msg = "running under sudo (approve with your password)..."
-		return m, tea.ExecProcess(c, execCallback(r.ID, "edited", cmd, tmp))
+		return m, tea.ExecProcess(c, execCallback(r.ID, "edited", cmd, tmp, token))
 	case "note":
 		text := m.edit
 		m.mode, m.edit = "normal", ""
@@ -704,7 +729,7 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func execCallback(id, decision, cmd, tmp string) func(error) tea.Msg {
+func execCallback(id, decision, cmd, tmp, claim string) func(error) tea.Msg {
 	return func(err error) tea.Msg {
 		rc := 0
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -714,7 +739,7 @@ func execCallback(id, decision, cmd, tmp string) func(error) tea.Msg {
 		}
 		out, _ := os.ReadFile(tmp)
 		os.Remove(tmp)
-		return execDoneMsg{id: id, decision: decision, cmd: cmd, rc: rc, out: string(out)}
+		return execDoneMsg{id: id, decision: decision, cmd: cmd, rc: rc, out: string(out), claim: claim}
 	}
 }
 
@@ -731,7 +756,11 @@ func (m envModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 	case "d":
 		if m.sel < len(m.reqs) {
 			r := m.reqs[m.sel]
-			_ = writeAnswer(m.bridge, currentUser(), r, "denied", r.Cmd, nil, "", "", "")
+			if err := writeAnswer(m.bridge, currentUser(), r, "denied", r.Cmd, nil, "", "", ""); err != nil {
+				m.msg = err.Error()
+				m.refreshLocal()
+				return m, nil
+			}
 			_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID,
 				"decision": "denied", "by": currentUser()})
 			m.seen[r.ID] = true
@@ -748,6 +777,7 @@ func (m envModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 			r := m.reqs[m.sel]
 			if r.kind() == "question" {
 				m.mode, m.edit = "answer", ""
+				m.editRequest = &r
 				return m, nil
 			}
 			c, tmp, err := execRoot(r.Cmd)
@@ -755,12 +785,21 @@ func (m envModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 				m.msg = err.Error()
 				return m, nil
 			}
+			token, err := claimRoot(m.bridge, currentUser(), r, "approved", r.Cmd)
+			if err != nil {
+				os.Remove(tmp)
+				m.msg = err.Error()
+				m.refreshLocal()
+				return m, nil
+			}
 			m.msg = "running under sudo (approve with your password)..."
-			return m, tea.ExecProcess(c, execCallback(r.ID, "approved", r.Cmd, tmp))
+			return m, tea.ExecProcess(c, execCallback(r.ID, "approved", r.Cmd, tmp, token))
 		}
 	case "e":
 		if m.sel < len(m.reqs) && m.reqs[m.sel].kind() == "root" {
 			m.mode, m.edit = "edit", m.reqs[m.sel].Cmd
+			r := m.reqs[m.sel]
+			m.editRequest = &r
 		}
 	}
 	return m, nil

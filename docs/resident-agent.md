@@ -72,6 +72,12 @@ sends TERM to the goal's terminal sessions. Root and clarification waits survive
 process exit. Resuming uses the same goal and pending action, without submitting
 the original command again. Finished or cancelled goals cannot be replayed.
 
+Cancellation withdraws the goal's pending `ask_root` and `ask_user` requests. The CLI and panel recheck the
+exact reviewed request under a shared lock before approving it, then save an
+execution claim before starting sudo. A claim that wins before cancellation is
+already committed; cancellation reports its ID and does not erase its result.
+An interrupted claim requires human inspection and is never automatically rerun.
+
 | Exit | State |
 |---|---|
 | 0 | completed |

@@ -24,6 +24,8 @@ from caminus.env.resident.runtime import Runtime,runtime_lock
 from caminus.env.resident.terminal import Terminal
 from caminus.env.agent_host import bundle
 from caminus.env.resident.mail import Mail
+from caminus.env.resident import approval
+from caminus.env import bridge as human_bridge
 
 ap=argparse.ArgumentParser();ap.add_argument('--scratch',required=True);A=ap.parse_args()
 S=Path(A.scratch).resolve();S.mkdir(parents=True,exist_ok=True)
@@ -47,7 +49,7 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         key=self.path.split('/')[1];self.seen.append((key,body))
         q=self.queues[key]
         if not q:self.respond(dict(error='fixture exhausted'),500);return
-        msg=dict(q.popleft());reason=msg.pop('_finish_reason','stop')
+        value=q.popleft();msg=dict(value(body) if callable(value) else value);reason=msg.pop('_finish_reason','stop')
         self.respond(dict(choices=[dict(message=msg,finish_reason=reason)],usage=dict(prompt_tokens=30,completion_tokens=10)))
 
 
@@ -85,12 +87,25 @@ class Resident(unittest.TestCase):
         self.fail('condition did not become true')
 
     def test_oneshot_actual_shell_and_json(self):
-        self.replies(call('terminal',dict(command='printf worked > proof; cat proof',yield_ms=1000)),call('finish',dict(summary='Created and read proof.')))
+        # The model fixture must observe completion, not assume worker startup
+        # takes less than one second on a busy CI runner.
+        def after_terminal(body):
+            result=json.loads(body['messages'][-1]['content'])
+            if result.get('running'):
+                (self.home/'release').write_text('go')
+                Endpoint.queues[self.key].appendleft(after_terminal)
+                return call('terminal',dict(session=result['session'],yield_ms=1000))
+            return call('finish',dict(summary='Created and read proof.'))
+        self.replies(call('terminal',dict(command='while [ ! -e release ]; do sleep .02; done; printf worked > proof; cat proof',yield_ms=0)),after_terminal)
         result=self.cmd('once',['--stdin'],stdin='Create a proof file and verify it.')
         self.assertEqual(result['state'],'completed');self.assertEqual((self.home/'proof').read_text(),'worked')
         events=self.cmd('events')
-        outputs=[e['data']['result'] for e in events if e['kind']=='tool_result']
-        self.assertEqual(outputs[0]['output'],'worked');self.assertEqual(outputs[0]['exit_code'],0)
+        outputs=[e['data']['result'] for e in events if e['kind']=='tool_result' and e['data']['name']=='terminal']
+        self.assertGreaterEqual(len(outputs),2);self.assertTrue(outputs[0]['running'])
+        self.assertEqual(outputs[-1]['output'],'worked');self.assertEqual(outputs[-1]['exit_code'],0)
+        store=Store(self.home)
+        try:self.assertEqual(sum('command' in json.loads(r[0]) for r in store.db.execute("SELECT args FROM actions WHERE name='terminal'")),1)
+        finally:store.close()
 
     def test_clarification_pause_then_resume(self):
         self.replies(call('ask_user',dict(question='Which directory?',choices=['src','docs'])),call('finish',dict(summary='Used docs.')))
@@ -326,6 +341,82 @@ class Resident(unittest.TestCase):
         self.assertEqual(event['type'],'event');self.assertIsNone(p.poll(),'SSH output was buffered until exit')
         self.assertEqual(json.loads(p.stdout.readline())['type'],'result')
         self.assertEqual(p.wait(timeout=5),0,p.stderr.read())
+
+    def test_terminal_restores_cwd_after_shell_startup(self):
+        elsewhere=self.home/'elsewhere';elsewhere.mkdir()
+        startup=self.home/'startup.sh'
+        import shlex
+        startup.write_text('cd -- '+shlex.quote(str(elsewhere))+'\nprintf started > startup-marker\n')
+        prior=os.environ.get('BASH_ENV');os.environ['BASH_ENV']=str(startup)
+        try:
+            terminal=Terminal(self.home);sid=uuid.uuid4().hex
+            out=terminal.call(sid,dict(command='pwd; printf correct > proof',yield_ms=1000))
+            while out['running']:out=terminal.call(uuid.uuid4().hex,dict(session=sid,yield_ms=1000))
+            self.assertEqual(out['exit_code'],0,out)
+            self.assertEqual(out['output'].strip(),str(self.home))
+            self.assertEqual((self.home/'proof').read_text(),'correct')
+            self.assertTrue((elsewhere/'startup-marker').exists())
+            self.assertFalse((elsewhere/'proof').exists())
+        finally:
+            if prior is None:os.environ.pop('BASH_ENV',None)
+            else:os.environ['BASH_ENV']=prior
+
+    def test_cancel_withdraws_root_and_rejects_stale_human_approval(self):
+        self.replies(call('ask_root',dict(command='touch root-proof',reason='fixture')))
+        first=self.cmd('once',['--goal','Request approval.'],code=21)
+        rid=first['pending'][0]['request_id'];reviewed=approval.snapshot(self.bridge,rid)
+        self.cmd('cancel',[first['id']])
+        self.assertEqual(human_bridge.pending(str(self.bridge)),[])
+        self.assertEqual(approval.response(self.bridge,rid)['decision'],'withdrawn')
+        with self.assertRaises(ValueError):approval.claim(self.bridge,reviewed,'approved','human',reviewed['cmd'])
+        with self.assertRaises(ValueError):human_bridge.answer(str(self.bridge),rid,'approved','human',rc=0)
+        self.assertFalse((self.home/'root-proof').exists())
+
+    def test_approval_claim_wins_once_and_cancel_does_not_erase_it(self):
+        self.replies(call('ask_root',dict(command='id -u',reason='fixture')))
+        first=self.cmd('once',['--goal','Request approval.'],code=21)
+        rid=first['pending'][0]['request_id'];reviewed=approval.snapshot(self.bridge,rid)
+        token=approval.claim(self.bridge,reviewed,'approved','human','id -u')
+        with self.assertRaises(ValueError):approval.claim(self.bridge,reviewed,'approved','human','id -u')
+        cancelled=self.cmd('cancel',[first['id']])
+        self.assertEqual(cancelled['root_already_claimed'],[rid])
+        self.assertEqual(approval.response(self.bridge,rid)['decision'],'executing')
+        approval.finish(self.bridge,rid,token,0,'fixture result','')
+        self.assertEqual(approval.response(self.bridge,rid)['decision'],'approved')
+        self.assertEqual(self.cmd('status')['goals'][0]['state'],'cancelled')
+
+    def test_changed_request_and_recovered_withdrawal_are_not_executed(self):
+        self.replies(call('ask_root',dict(command='id -u',reason='fixture')))
+        first=self.cmd('once',['--goal','Request approval.'],code=21)
+        rid=first['pending'][0]['request_id'];reviewed=approval.snapshot(self.bridge,rid)
+        p=self.bridge/'req'/(rid+'.json');value=json.loads(p.read_text());value['cmd']='different';p.write_text(json.dumps(value))
+        with self.assertRaises(ValueError):approval.claim(self.bridge,reviewed,'edited','human','id -u')
+        # Simulate a crash after the tombstone but before database cancellation.
+        approval.withdraw(self.bridge,rid,first['id'])
+        result=self.cmd('once',['--goal-id',first['id']],code=23)
+        self.assertEqual(result['state'],'cancelled')
+
+    def test_cli_watch_rejects_unknown_choice_and_withdrawn_cached_request(self):
+        import contextlib,io
+        from unittest.mock import patch
+        from caminus.cmd import env as cmd_env
+        self.bridge.mkdir(exist_ok=True);(self.bridge/'req').mkdir();(self.bridge/'res').mkdir()
+        value=dict(id='review',kind='root',cmd='must-never-execute',user='fixture',ts=0)
+        (self.bridge/'req/review.json').write_text(json.dumps(value))
+        calls=[]
+        def transport(argv,**kw):
+            calls.append(argv);return subprocess.CompletedProcess(argv,0,'','')
+        def cancelled_input(prompt):
+            approval.withdraw(self.bridge,'review','fixture-goal')
+            return 'a'
+        env=dict(CAMINUS_ENV_BRIDGE=str(self.bridge),CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))
+        with patch.dict(os.environ,env),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+            with patch('builtins.input',return_value='typo'):
+                self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
+            with patch('builtins.input',side_effect=cancelled_input):
+                self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
+            self.assertEqual(cmd_env.main(['answer','review','approved','--json'],transport=transport),2)
+        self.assertEqual(calls,[])
 
 
 result=unittest.main(argv=[sys.argv[0]],exit=False).result
