@@ -78,6 +78,7 @@ type envModel struct {
 	bridge    string
 	auditPath string
 	key       string
+	cli       []string
 
 	tab    int
 	reqs   []envReq
@@ -134,12 +135,20 @@ func envMain(args []string) {
 	bridge := fs.String("bridge", "", "the bridge directory")
 	audit := fs.String("audit", "", "the audit log path")
 	key := fs.String("key", "", "the harness ssh key")
+	cli := fs.String("cli", "", "JSON argv of the caminus CLI (for starting server jobs)")
 	fs.Parse(args)
 	if *user == "" || *bridge == "" || *audit == "" || *key == "" {
 		fmt.Fprintln(os.Stderr, "caminus-panel env: --user --bridge --audit --key are all required")
 		os.Exit(2)
 	}
-	m := envModel{user: *user, bridge: *bridge, auditPath: *audit, key: *key,
+	var cliArgv []string
+	if *cli != "" {
+		if err := json.Unmarshal([]byte(*cli), &cliArgv); err != nil {
+			fmt.Fprintln(os.Stderr, "caminus-panel env: bad --cli JSON:", err)
+			os.Exit(2)
+		}
+	}
+	m := envModel{user: *user, bridge: *bridge, auditPath: *audit, key: *key, cli: cliArgv,
 		seen: map[string]bool{}, mode: "normal", width: 110, height: 32}
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
@@ -433,6 +442,9 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = appendAudit(m.auditPath, map[string]any{"event": "spawn", "pid": strings.TrimSpace(msg.out), "cmd": m.newJob})
 		case "log":
 			m.logView = msg.out
+		case "serve":
+			m.msg = strings.TrimSpace(msg.out)
+			_ = appendAudit(m.auditPath, map[string]any{"event": "serve_ui", "out": strings.TrimSpace(msg.out)})
 		}
 		return m, nil
 	case execDoneMsg:
@@ -583,6 +595,28 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		script := fmt.Sprintf("mkdir -p ~/env-jobs ~/env-logs; nohup setsid bash -c %s > ~/env-logs/%s.log 2>&1 & echo $! > ~/env-jobs/%s.pid; cat ~/env-jobs/%s.pid",
 			shQuote(cmd), shQuote(name), shQuote(name), shQuote(name))
 		return m, sshRun(m, "newjob", script)
+	case "serve1":
+		model := strings.TrimSpace(m.edit)
+		m.mode, m.edit, m.newJob = "serve2", "", model
+		return m, nil
+	case "serve2":
+		model := m.newJob
+		placement := strings.TrimSpace(m.edit)
+		m.mode, m.edit, m.newJob = "normal", "", ""
+		if model == "" {
+			return m, nil
+		}
+		if placement == "" {
+			placement = "auto"
+		}
+		name := model
+		args := append(append([]string{}, m.cli...), "env", "serve", name, model, "--placement", placement)
+		m.msg = "caminus env serve " + model + " --placement " + placement + " ..."
+		return m, func() tea.Msg {
+			c := exec.Command(args[0], args[1:]...)
+			out, err := c.CombinedOutput()
+			return sshOutMsg{what: "serve", out: string(out), err: err}
+		}
 	}
 	return m, nil
 }
@@ -671,6 +705,12 @@ func (m envModel) jobKeys(k string) (tea.Model, tea.Cmd) {
 		}
 	case "n":
 		m.mode, m.edit = "newjob1", ""
+	case "S":
+		if len(m.cli) == 0 {
+			m.msg = "no --cli passed: start servers with `caminus env serve`"
+		} else {
+			m.mode, m.edit = "serve1", ""
+		}
 	}
 	return m, nil
 }
@@ -748,12 +788,16 @@ func (m envModel) render() string {
 		b.WriteString("\n\n" + envWarn.Render("note for the agent (enter leaves it, esc cancels):") + "\n" + m.edit + "█")
 	case "newjob1":
 		b.WriteString("\n\n" + envWarn.Render("new detached job — name (enter, esc cancels):") + "\n" + m.edit + "█")
+	case "serve1":
+		b.WriteString("\n\n" + envWarn.Render("new server job — model name (enter, esc cancels):") + "\n" + m.edit + "█")
+	case "serve2":
+		b.WriteString("\n\n" + envWarn.Render("server " + m.newJob + " — placement auto|0|1|2 (enter=auto, esc cancels):") + "\n" + m.edit + "█")
 	case "newjob2":
 		b.WriteString("\n\n" + envWarn.Render("new job " + m.newJob + " — command (enter spawns it detached, esc cancels):") + "\n" + m.edit + "█")
 	}
 	status := fmt.Sprintf("ssh: %s  requests: %d  jobs: %d  msg: %s", map[bool]string{true: "OK", false: "FAIL"}[m.sshOK], len(m.reqs), len(m.jobs), m.msg)
 	b.WriteString("\n\n" + envDim.Render(status))
-	b.WriteString("\n" + envDim.Render("tab/1-6 panes · q quit · requests: a/e/d/s · jobs: K kill, l log, n new · notes: n new, d del · r refresh"))
+	b.WriteString("\n" + envDim.Render("tab/1-6 panes · q quit · requests: a/e/d/s · jobs: K kill, l log, n new, S new server · notes: n new, d del · r refresh"))
 	return b.String()
 }
 
@@ -797,7 +841,7 @@ func (m envModel) reqPane() string {
 }
 
 func (m envModel) jobsPane() string {
-	lines := []string{envHead.Render("DETACHED JOBS in the agent user (K kill, l tail log, n new job)")}
+	lines := []string{envHead.Render("JOBS in the agent user (K kill, l tail log, n new job, S new model server)")}
 	if len(m.jobs) == 0 {
 		lines = append(lines, envDim.Render("  none"))
 	}

@@ -137,7 +137,22 @@ TEXT+Enter into the session (a live instruction — audited); `caminus env attac
 One-shots stay `env run`, long detached work stays `env spawn`/`jobs`/`stop` (section 8); `env say`/`env-note` stay
 the mid-task note channel (section 9).
 
-## 11. Security properties, honestly
+## 11. Server jobs (`caminus env serve`) — one job per agent, each with its own home
+
+`caminus env serve NAME MODEL [--placement auto|0|1|2] [--ctx N] [--port P] [--dry-run] [-- serve flags...]`
+starts a model server as an agent-user job: placement is resolved with the same code as `caminus start`
+(`manage.pick_cards` / `serve_argv`) — `auto` uses the model's own card count, `0`/`1` force one card (a model
+that needs two gets no one-card option, refused with the reason; pair rules like "the Coder needs a 24 GB card 0"
+apply; VRAM held by non-Caminus processes refuses with "stop it first"), `2` splits across both cards. The next
+free port from 8092 is allocated. Every stateful path goes under the agent user's `~/homes/NAME/`
+(state, kv, flight, qwen-home, XDG dirs — its own session home), model/drafter paths are remapped to the models
+bind-mount (`CAMINUS_ENV_MODELS`), and the server starts in a named tmux session running a generated
+`~/homes/NAME/run.sh` (guard + HIP_VISIBLE_DEVICES + `caminus serve ...`). `--dry-run` prints the launcher and the
+session command. In the TUI, `S` in the jobs tab runs this flow (model, then placement). `env stop NAME` kills
+the job and the session. Provisioning for agent-user servers: the bind-mount lines in `caminus env setup`
+(`/opt/caminus-runtime/{conda,src,models}` + `CAMINUS_ENV_PYTHON` / `CAMINUS_ENV_PKG` / `CAMINUS_ENV_MODELS`).
+
+## 12. Security properties, honestly
 
 - Protects: your files, credentials and processes from the agent user and from anything that injects into it; root
   entirely (the agent user has no sudo; elevation needs your password on a command you saw).

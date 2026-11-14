@@ -50,7 +50,7 @@ def main():
     os.environ.update(CAMINUS_STATE_DIR=state, CAMINUS_ENV_BRIDGE=bridge_dir,
                       CAMINUS_ENV_AUDIT=os.path.join(state, 'env-audit.jsonl'),
                       CAMINUS_ENV_USER='test-agent', CAMINUS_ENV_KEY=os.path.join(S, 'key'))
-    from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, sessions, settings
+    from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, serve, sessions, settings
     from caminus.cmd import env as cmd_env
 
     # settings: environment first
@@ -203,7 +203,7 @@ def main():
     rows = ctx.servers(opener=fake_opener)
     check(rows == [{'port': 8092, 'model': 'coder', 'n_ctx': 262144}], 'ctx: reads model and n_ctx from /props')
 
-    for sub in (['ask', 'q?'], ['say', 'note'], ['notes'], ['ctx'], ['reqs'], ['answer', 'x', 'denied'], ['memory'], ['remember', 'm'], ['new', 's', '--', 'bash'], ['sessions'], ['send', 's', 'hi'], ['attach', 's']):
+    for sub in (['ask', 'q?'], ['say', 'note'], ['notes'], ['ctx'], ['reqs'], ['answer', 'x', 'denied'], ['memory'], ['remember', 'm'], ['new', 's', '--', 'bash'], ['sessions'], ['send', 's', 'hi'], ['attach', 's'], ['serve', 'x', 'coder', '--dry-run']):
         check(cmd_env._parser().parse_args(sub).sub == sub[0], f'cli: env {sub[0]} is a subcommand')
 
     # jobs: detached-process script builders
@@ -235,6 +235,59 @@ def main():
         check(False, 'sessions: bad session name accepted')
     except ValueError:
         check(True, 'sessions: bad session names rejected')
+
+    # serve: placement resolution, port allocation, per-name home, launcher
+    from caminus.cmd import manage as _manage
+    from caminus import models as _models
+
+    class FakeModel:
+        def __init__(self, name, cards):
+            self.name, self.cards, self.arch, self.alias = name, cards, 'qwen4exp', name
+    fake_two = FakeModel('coder', 2)
+    fake_one = FakeModel('swift-1.5', 1)
+    old_by, old_entry, old_all, old_alive, old_pick, old_busy = (_models.BY_NAME, _manage.model_entry,
+        _manage.all_servers, _manage.alive, _manage.pick_cards, _manage.busy_elsewhere)
+    _models.BY_NAME = {'coder': fake_two, 'swift-1.5': fake_one}
+    _manage.model_entry = lambda m: {'present': True, 'path': '/m.gguf', 'paths': {}}
+    _manage.all_servers = lambda: []
+    _manage.alive = lambda pid: False
+    _manage.pick_cards = lambda m, e, card, held, ctx=None, cards=None: [0] if (cards or m.cards) == 1 else [0, 1]
+    _manage.busy_elsewhere = lambda devs: []
+    try:
+        try:
+            serve.resolve('coder', '0')
+            check(False, 'serve: a two-card model must refuse a one-card placement')
+        except serve.ServeError as e:
+            check('no one-card option' in str(e), 'serve: two-card model refuses one-card placement with the reason')
+        m, e, devs, nc = serve.resolve('coder', '2')
+        check(devs == [0, 1] and nc == 2, 'serve: placement 2 splits across both cards')
+        m, e, devs, nc = serve.resolve('swift-1.5', 'auto')
+        check(devs == [0] and nc == 1, 'serve: auto uses the model\'s own card count')
+        try:
+            serve.resolve('nope')
+            check(False, 'serve: unknown model refused')
+        except serve.ServeError:
+            check(True, 'serve: unknown model refused')
+    finally:
+        _models.BY_NAME, _manage.model_entry, _manage.all_servers = old_by, old_entry, old_all
+        _manage.alive, _manage.pick_cards, _manage.busy_elsewhere = old_alive, old_pick, old_busy
+    p = serve.alloc_port(8092, taken={8092, 8093})
+    check(p == 8094, 'serve: alloc_port skips taken ports')
+    env = serve.home_env('coder')
+    check(env['CAMINUS_QWEN_HOME'] == '~/homes/coder/qwen-home' and env['XDG_STATE_HOME'] == '~/homes/coder/state',
+          'serve: every stateful path lives under the server\'s own home')
+    _manage.card_view = lambda: [{'index': 0, 'hip': 1, 'name': 'XTX', 'pci': 'p0'}, {'index': 1, 'hip': 2, 'name': 'XT', 'pci': 'p1'}]
+    lc = serve.launcher('coder', ['--model', '/m.gguf', '--port', '8092'], [0, 1], runtime='python3 -I',
+                        pkg='/opt/pkg', guard='/opt/guard.sh')
+    check('HIP_VISIBLE_DEVICES=1,2' in lc and 'PYTHONPATH=/opt/pkg' in lc and "CAMINUS_QWEN_HOME='~/homes/coder/qwen-home'" in lc
+          and lc.rstrip().endswith('serve --model /m.gguf --port 8092') and 'bash /opt/guard.sh' in lc,
+          'serve: launcher has placement, per-name env, guard and serve argv')
+    args = serve.remap_paths(['--model', '/models/m.gguf', '--drafter', '/models/d.gguf'],
+                             '/models', '/opt/caminus-runtime/models')
+    check(args[1] == '/opt/caminus-runtime/models/m.gguf' and args[3] == '/opt/caminus-runtime/models/d.gguf',
+          'serve: remap_paths moves model/drafter paths under the models mount')
+    args = cmd_env._repoint(['--cache-dir', '/cache/kv/x', '--flight-dir', '/y'], '~/homes/x')
+    check(args[1] == '~/homes/x/kv' and args[3] == '~/homes/x/flight', 'serve: _repoint moves cache/flight into the server home')
     check(cmd_env._parser().parse_args(['spawn', '-n', 'x', '--', 'make']).sub == 'spawn'
           and cmd_env._parser().parse_args(['jobs']).sub == 'jobs'
           and cmd_env._parser().parse_args(['stop', 'x']).sub == 'stop', 'cli: spawn/jobs/stop subcommands')

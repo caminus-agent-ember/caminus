@@ -19,6 +19,8 @@ work runs as the second user over SSH; root waits for your approval.
   caminus env ctx [--json]           the running servers and the context window each reports
   caminus env memory                 the agent's ~/MEMORY.md (its persistent memory)
   caminus env remember TEXT          append a line to the agent's ~/MEMORY.md
+  caminus env serve NAME MODEL [--placement auto|0|1|2] [--ctx N] [--port P] [--dry-run] [-- serve flags...]
+                                     a model server as a job: own home, port, tmux session, cards resolved
   caminus env new NAME -- CMD...     a named tmux session in the agent user running CMD (an agent CLI)
   caminus env sessions               the tmux sessions
   caminus env send NAME TEXT         type TEXT into the session (a live instruction)
@@ -38,7 +40,7 @@ import subprocess
 import sys
 import time
 
-from ..env import agent_side, audit, bridge, jobs, runner, sessions, settings
+from ..env import agent_side, audit, bridge, jobs, runner, serve, sessions, settings
 
 
 def _parser():
@@ -97,6 +99,16 @@ def _parser():
     p = sub.add_parser('remember', help="append a line to the agent's ~/MEMORY.md")
     p.add_argument('text')
 
+    p = sub.add_parser('serve', help='start a model server as an agent-user job (own home/port/session)')
+    p.add_argument('name')
+    p.add_argument('model')
+    p.add_argument('--placement', default='auto', choices=serve.PLACEMENTS,
+                   help="auto: the model's own card count; 0/1: that one card; 2: split across both")
+    p.add_argument('--ctx')
+    p.add_argument('--port', type=int)
+    p.add_argument('--dry-run', action='store_true', help='print the launcher and session command, start nothing')
+    p.add_argument('extra', nargs='*')   # (everything after -- is passed to serve; see main)
+
     p = sub.add_parser('new', help='a named tmux session running CMD in the agent user')
     p.add_argument('name')
     p.add_argument('cmd', nargs=argparse.REMAINDER)
@@ -124,7 +136,14 @@ def _parser():
 
 
 def main(rest, transport=None):
+    extra_serve = None
+    if rest[:1] == ['serve'] and '--' in rest:
+        i = rest.index('--')
+        extra_serve = rest[i + 1:]
+        rest = rest[:i]
     a = _parser().parse_args(rest)
+    if extra_serve is not None:
+        a.extra = extra_serve
     tr = transport or subprocess.run
     if a.sub == 'setup':
         return _setup(a, tr)
@@ -159,10 +178,11 @@ def main(rest, transport=None):
             sys.stdout.write(r.stdout or '')
         return r.returncode
     if a.sub == 'stop':
-        r = runner.run_shell(jobs.stop_script(a.name), transport=tr)
+        script = jobs.stop_script(a.name) + f'; tmux kill-session -t {a.name} 2>/dev/null; true'
+        r = runner.run_shell(script, transport=tr)
         sys.stdout.write(r.stdout or '')
         audit.log(settings.audit_path(), {'event': 'stop', 'job': a.name})
-        return r.returncode
+        return 0
     if a.sub == 'ask':
         return _ask(a)
     if a.sub == 'say':
@@ -195,6 +215,8 @@ def main(rest, transport=None):
         return 0
     if a.sub == 'remember':
         return _remember(a, tr)
+    if a.sub == 'serve':
+        return _serve(a, tr)
     if a.sub == 'new':
         cmd = a.cmd
         if cmd and cmd[0] == '--':
@@ -259,6 +281,13 @@ sudo mkdir -p {bridge}/req {bridge}/res {bridge}/notes
 sudo chown root:{group} {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo chmod 770 {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo loginctl enable-linger {user}                   # its long-running servers survive logout
+# optional, for `caminus env serve` (the server runs as the agent user and must read python+torch+caminus):
+sudo mkdir -p /opt/caminus-runtime && sudo mount --bind "$HOME/miniforge3" /opt/caminus-runtime/conda 2>/dev/null || true
+sudo mount --bind "$HOME/src" /opt/caminus-runtime/src 2>/dev/null || true
+sudo mount --bind "$HOME/.local/share/caminus/models" /opt/caminus-runtime/models 2>/dev/null || true
+# then: export CAMINUS_ENV_PYTHON='/opt/caminus-runtime/conda/envs/drafter/bin/python -I'
+#       export CAMINUS_ENV_PKG=/opt/caminus-runtime/src/caminus/public/python
+#       export CAMINUS_ENV_MODELS=/opt/caminus-runtime/models
 ssh-keygen -t ed25519 -f {key} -N '' -C caminus-env   # if {key} does not exist yet
 # then add this line to {user_home}/.ssh/authorized_keys (dir 700, file 600, owned by {user}):
 from="127.0.0.1,::1",no-agent-forwarding,no-X11-forwarding,no-port-forwarding {pubkey}
@@ -314,8 +343,10 @@ def _ui():
         print('caminus env ui: caminus-panel is not installed (build it: cd panel && go build -o caminus-panel .; '
               'or set CAMINUS_PANEL)', file=sys.stderr)
         return 1
+    from .manage import cli_argv
     os.execve(b, [b, 'env', '--user', settings.user(), '--bridge', settings.bridge_dir(),
-                  '--audit', settings.audit_path(), '--key', settings.key_path()], dict(os.environ))
+                  '--audit', settings.audit_path(), '--key', settings.key_path(),
+                  '--cli', json.dumps(cli_argv())], dict(os.environ))
 
 
 def _spawn(a, tr):
@@ -499,3 +530,60 @@ def _remember(a, tr):
         return r.returncode
     print(f'appended to {settings.user()}:{settings.memory_path()}')
     return 0
+
+
+def _serve(a, tr):
+    """caminus env serve: resolve placement, build the launcher, start the tmux session (or just print with --dry-run)"""
+    import base64 as _b64
+    from ..cmd import manage
+    extra = list(getattr(a, 'extra', []) or [])
+    try:
+        m, e, devs, nc = serve.resolve(a.model, a.placement, ctx=a.ctx)
+    except serve.ServeError as ex:
+        print(f'caminus env serve: {ex}', file=sys.stderr)
+        return 2
+    running = [s for s in manage.all_servers() if manage.alive(s.get('guard_pid'))]
+    port = a.port or serve.alloc_port(taken={s['port'] for s in running})
+    from .. import config
+    serve_args = manage.serve_argv(m, e, a.name, port, a.ctx, extra)
+    serve_args = serve.remap_paths(serve_args, config.model_dir(), os.environ.get('CAMINUS_ENV_MODELS', ''))
+    home = f'~/homes/{a.name}'
+    serve_args = _repoint(serve_args, home)          # --cache-dir/--flight-dir into the server's own home
+    if nc != m.cards:
+        serve_args += ['--cards', str(nc)]
+    script = serve.launcher(a.name, serve_args, devs)
+    cards = '+'.join(str(d) for d in devs)
+    summary = (f'{a.name}: {m.name} on card(s) {cards} at http://127.0.0.1:{port} '
+               f'(home ~/homes/{a.name}, session {a.name})')
+    if a.dry_run:
+        print(summary)
+        print('--- run.sh ---')
+        print(script, end='')
+        print('--- session ---')
+        print('caminus env new', a.name, '-- bash ~/homes/%s/run.sh' % a.name)
+        return 0
+    payload = _b64.b64encode(script.encode()).decode()
+    prep = (f'mkdir -p {home} && printf %s {payload} | base64 -d > {home}/run.sh && chmod 700 {home}/run.sh')
+    r = runner.run_shell(prep, transport=tr)
+    if r.returncode != 0:
+        print(f'caminus env serve: writing the launcher failed: {(r.stderr or "").strip()}', file=sys.stderr)
+        return 1
+    r = runner.run_shell(sessions.new_script(a.name, ['bash', f'{home}/run.sh']), transport=tr)
+    if r.returncode != 0:
+        print(f'caminus env serve: starting the session failed: {(r.stderr or "").strip()}', file=sys.stderr)
+        return 1
+    audit.log(settings.audit_path(), {'event': 'serve', 'name': a.name, 'model': m.name,
+                                       'cards': devs, 'port': port})
+    print(summary + '  (watch: caminus env sessions / attach ' + a.name + '; logs ~/homes/%s/serve.log)' % a.name)
+    return 0
+
+
+def _repoint(serve_args, home):
+    """--cache-dir/--flight-dir values into the server's own home (the launcher runs as the agent user)"""
+    out = list(serve_args)
+    for i, a in enumerate(out[:-1]):
+        if a == '--cache-dir':
+            out[i + 1] = f'{home}/kv'
+        elif a == '--flight-dir':
+            out[i + 1] = f'{home}/flight'
+    return out

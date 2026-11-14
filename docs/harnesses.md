@@ -128,6 +128,8 @@ caminus env reqs --json          # pending root/question requests, machine-reada
 caminus env answer ID answered "yes"   # answer one from a script (approved/edited/denied/answered)
 caminus env memory               # the agent's ~/MEMORY.md (its persistent memory)
 caminus env remember "TP wins at these shapes"   # append to it
+caminus env serve coder coder --placement 2   # a model server as a job: own home/port/session, split on both cards
+caminus env serve swift swift-1.5 --placement 0  # one small model on the 24 GB card (S in `caminus env ui` does this)
 caminus env new coder -- qwen    # a named session running your agent CLI (tmux, in the agent user)
 caminus env sessions             # the sessions
 caminus env send coder "run the TP benchmarks"   # type an instruction into it, live
