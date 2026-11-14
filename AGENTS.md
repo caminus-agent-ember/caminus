@@ -132,6 +132,7 @@ CLAUDE.md imports this file.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
   Session monitoring filters by the selected server's alias before applying its six-session limit; shared Qwen homes
   must not let another model's newer logs hide this server's sessions.
+- `env/`: the agent environment (`caminus env`, docs/specs/spec-agent-env.md): agent work as a second user on this machine over SSH, root only through a human-approved bridge; stdlib only, no GPU, CPU tests only.
 - `panel/openrgb.go`: optional agent-state lighting over backwards-compatible SDK v3. Active per-LED modes need no
   mode change; `openrgb.switch_modes` opts into temporary Direct/Custom/Static mode changes. Restore the first-seen
   colors and complete mode payload on exit, using freshly discovered identities and matching layouts after reconnects.

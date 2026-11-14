@@ -105,3 +105,23 @@ Caminus keeps your conversation in a prompt cache, so each new turn only reads w
 on an 11K-token conversation with `coder`. Short side requests from your tool (titles, summaries) run beside the
 conversation without pushing it out. A conversation you leave for 8 hours, or one that was live when the server stopped,
 is saved to disk and comes back in about a second.
+
+## An agent with its own user (experimental)
+
+Instead of a fixed tool list, an agent can get an environment: a second user on this machine (`caminus-agent` by
+default) that it reaches over SSH and can do anything in. Your own files, keys and processes stay out of its reach by
+Unix permissions, and root is never in its hands: a root command waits in a queue until you approve it in
+`caminus env watch`, and only your side runs it under sudo.
+
+```bash
+caminus env setup --agent-side   # one-time provisioning (prints the sudo commands to run yourself)
+caminus env status               # user, key, ssh login, bridge, ask-root all OK?
+caminus env shell                # interactive session as the agent user: run any agent here
+caminus env run -- git status    # one command as the agent user
+caminus env watch                # approve / edit / deny queued root commands
+caminus env audit --tail 20      # everything the environment did
+```
+
+Inside the agent user, `ask-root CMD...` asks you to run CMD as root and waits for the answer. The full design is in
+[spec-agent-env.md](specs/spec-agent-env.md). This is an environment, not a sandbox: the agent user still has the
+network and the GPU, so give it only scoped credentials in its own environment.
