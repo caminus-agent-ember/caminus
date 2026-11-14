@@ -325,8 +325,9 @@ class Resident(unittest.TestCase):
             return dict(choices=[dict(message=dict(content='Fits.'),finish_reason='stop')])
         model.request=request
         model.tokens=lambda messages,tools:16000
-        model.complete([dict(role='user',content='bounded')],max_tokens=4096)
+        model.complete([dict(role='user',content='bounded')],max_tokens=4096,model='summary-alias')
         self.assertEqual(sent[0]['max_tokens'],128)
+        self.assertEqual(sent[0]['model'],'summary-alias')
         sent.clear();model.tokens=lambda messages,tools:17000
         with self.assertRaises(ModelContextError):model.complete([dict(role='user',content='too large')])
         self.assertEqual(sent,[])

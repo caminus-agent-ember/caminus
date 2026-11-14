@@ -54,11 +54,11 @@ class Model:
             raise ModelError('backend must report a positive context window, or set --context explicitly')
         return self.context
 
-    def complete(self, messages, tools=None, max_tokens=None):
+    def complete(self, messages, tools=None, max_tokens=None, model=None):
         remaining = self.context_size() - self.tokens(messages, tools or []) - 256
         if remaining < 1:
             raise ModelContextError('request exceeds the model context; compact or shorten the goal')
-        body = dict(model=self.config['model'], messages=messages, stream=False,
+        body = dict(model=model or self.config['model'], messages=messages, stream=False,
                     max_tokens=min(max_tokens or int(self.config.get('max_tokens', 4096)), remaining),
                     temperature=float(self.config.get('temperature', .6)))
         for name in ('top_k','top_p','min_p','presence_penalty'):

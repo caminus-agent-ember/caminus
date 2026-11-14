@@ -34,6 +34,7 @@ def parser():
             p.add_argument('--max-tokens',type=int,default=4096)
             p.add_argument('--compact-threshold',type=float,default=.85)
             p.add_argument('--compact-target-ratio',type=float,default=.2)
+            p.add_argument('--compaction-model',help='optional model alias for summaries on the same endpoint')
             p.add_argument('--api-key-env',default='CAMINUS_AGENT_API_KEY')
             p.add_argument('--bus',help='shared agent-side SQLite mail bus; defaults under ~/.local/share/caminus/agents')
         if op=='message':
@@ -106,7 +107,8 @@ def main(argv=None,stdin=None):
             home.mkdir(parents=True,exist_ok=True,mode=0o700)
             cfg=dict(name=a.name,model=a.model,endpoint=a.endpoint.rstrip('/'),bridge=a.bridge,
                      context=a.context,max_tokens=a.max_tokens,api_key_env=a.api_key_env,bus=a.bus,
-                     compact_threshold=a.compact_threshold,compact_target_ratio=a.compact_target_ratio)
+                     compact_threshold=a.compact_threshold,compact_target_ratio=a.compact_target_ratio,
+                     compaction_model=a.compaction_model)
             if not cfg['endpoint'].endswith('/v1'):cfg['endpoint']+='/v1'
             from .model import Model
             Model(cfg)                     # validate before persisting

@@ -184,3 +184,5 @@ The original goal remains pinned. An oversized goal or persistent memory pauses
 the run instead of sending a request that cannot fit. Compaction events record
 the before/after token counts and targets. Every generation also reserves output
 room against the model window.
+`--compaction-model` selects a summary alias on the same endpoint; a no-thinking
+alias can summarize without using the summary budget for hidden reasoning.

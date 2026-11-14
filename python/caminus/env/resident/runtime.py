@@ -232,7 +232,8 @@ class Runtime:
                 if take <= 1:
                     raise ModelContextError('working memory cannot fit the model context')
                 take = max(1,take//2)
-            summary = self.model.complete(request,max_tokens=summary_limit)['content']
+            summary_options = dict(model=self.config['compaction_model']) if self.config.get('compaction_model') else {}
+            summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
         after_tokens = self.model.tokens([system,*compacted],TOOLS)
