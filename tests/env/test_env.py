@@ -50,7 +50,7 @@ def main():
     os.environ.update(CAMINUS_STATE_DIR=state, CAMINUS_ENV_BRIDGE=bridge_dir,
                       CAMINUS_ENV_AUDIT=os.path.join(state, 'env-audit.jsonl'),
                       CAMINUS_ENV_USER='test-agent', CAMINUS_ENV_KEY=os.path.join(S, 'key'))
-    from caminus.env import agent_side, audit, bridge, runner, settings
+    from caminus.env import agent_side, audit, bridge, prompt, runner, settings
     from caminus.cmd import env as cmd_env
 
     # settings: environment first
@@ -127,8 +127,21 @@ def main():
     check(bridge_dir in src, 'agent_side: the bridge path is baked into ask-root')
     compile(src, 'ask-root', 'exec')
     check(True, 'agent_side: ask-root compiles')
-    cmd = agent_side.install_command(bridge_dir, settings.agent_bin())
-    check('base64 -d' in cmd and settings.agent_bin() in cmd, 'agent_side: install command carries the script base64')
+    cmd = agent_side.install_command(bridge_dir, settings.agent_bin(), prompt.text(), settings.robots_path())
+    check('base64 -d' in cmd and settings.agent_bin() in cmd and settings.robots_path() in cmd,
+          'agent_side: install command carries ask-root and ROBOTS.md base64')
+
+    # the agent's own instructions
+    text = prompt.text()
+    check(os.path.exists(prompt.ROBOTS), 'prompt: ROBOTS.md ships with the package')
+    check('ask-root' in text and 'whoami' in text and 'sudo' in text,
+          'prompt: ROBOTS.md tells the agent what it is, that it cannot sudo, and how to ask for root')
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cmd_env.main(['prompt'])
+    check(rc == 0 and buf.getvalue() == text, 'cli: env prompt prints ROBOTS.md')
 
     # CLI wiring
     from caminus import __main__

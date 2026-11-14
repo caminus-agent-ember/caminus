@@ -36,3 +36,8 @@ def control_path():
 def agent_bin():
     """the ask-root script's path inside the agent user's home"""
     return os.path.join('~', 'bin', 'ask-root')
+
+
+def robots_path():
+    """ROBOTS.md's path inside the agent user's home"""
+    return os.path.join('~', 'ROBOTS.md')

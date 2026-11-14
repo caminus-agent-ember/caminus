@@ -62,8 +62,11 @@ def ask_root_source(bridge):
     return ASK_ROOT_SOURCE.replace('{bridge!r}', repr(bridge))
 
 
-def install_command(bridge, bin_path):
-    """the shell string that installs ask-root into the agent user's home over SSH (base64: no quoting crosses the wire)"""
-    payload = base64.b64encode(ask_root_source(bridge).encode()).decode()
-    d = os.path.dirname(bin_path)
-    return f"mkdir -p {d} && printf %s {payload} | base64 -d > {bin_path} && chmod 700 {bin_path}"
+def install_command(bridge, bin_path, robots_source, robots_path):
+    """the shell string that installs ask-root and ROBOTS.md into the agent user's home over SSH
+    (base64: no quoting crosses the wire)"""
+    ask = base64.b64encode(ask_root_source(bridge).encode()).decode()
+    robots = base64.b64encode(robots_source.encode()).decode()
+    return (f"mkdir -p {os.path.dirname(bin_path)} {os.path.dirname(robots_path)}"
+            f" && printf %s {ask} | base64 -d > {bin_path} && chmod 700 {bin_path}"
+            f" && printf %s {robots} | base64 -d > {robots_path} && chmod 600 {robots_path}")

@@ -2,10 +2,11 @@
 work runs as the second user over SSH; root waits for your approval.
 
   caminus env setup [--agent-side]   the sudo commands to provision the machine, then status; --agent-side also
-                                     installs ask-root into the agent user's ~/bin
+                                     installs ~/bin/ask-root and ~/ROBOTS.md as the agent user
   caminus env status                 is it working? (user, key, ssh login, bridge, ask-root)
   caminus env run [--shell] CMD...   run CMD as the agent user (argv, or one shell string with --shell)
   caminus env shell                  an interactive session as the agent user (run any agent by hand)
+  caminus env prompt                 print ROBOTS.md, the agent environment's own instructions
   caminus env ask-root CMD...        agent side: file a root request and wait for your answer
   caminus env watch [--once]         answer the queued root requests (approve / edit / deny)
   caminus env audit [--tail N]       the audit log
@@ -34,7 +35,9 @@ def _parser():
     p.add_argument('--shell', '-s', action='store_true', help='CMD is one shell string, not an argv')
     p.add_argument('cmd', nargs=argparse.REMAINDER)
 
-    sub.add_parser('shell', help='interactive SSH session as the agent user')
+    sub.add_parser('shell', help='interactive SSH session as the agent user (its instructions: ~/ROBOTS.md)')
+
+    sub.add_parser('prompt', help="print ROBOTS.md, the agent environment's own instructions")
 
     p = sub.add_parser('ask-root', help='agent side: ask for a root command and wait for the answer')
     p.add_argument('--timeout', type=float, default=3600.0)
@@ -58,7 +61,14 @@ def main(rest, transport=None):
     if a.sub == 'run':
         return _run(a, tr)
     if a.sub == 'shell':
+        print(f'agent environment: you are {settings.user()} on this machine; your instructions are in '
+              f'~/ROBOTS.md (`caminus env prompt` prints them from the harness side); root: ~/bin/ask-root CMD...',
+              file=sys.stderr)
         runner.shell()          # never returns
+    if a.sub == 'prompt':
+        from ..env import prompt
+        sys.stdout.write(prompt.text())
+        return 0
     if a.sub == 'ask-root':
         return _ask_root(a)
     if a.sub == 'watch':
@@ -85,7 +95,7 @@ sudo loginctl enable-linger {user}                   # its long-running servers 
 ssh-keygen -t ed25519 -f {key} -N '' -C caminus-env   # if {key} does not exist yet
 # then add this line to {user_home}/.ssh/authorized_keys (dir 700, file 600, owned by {user}):
 from="127.0.0.1,::1",no-agent-forwarding,no-X11-forwarding,no-port-forwarding {pubkey}
-# finally: caminus env setup --agent-side   (installs ~/bin/ask-root as the agent user)
+# finally: caminus env setup --agent-side   (installs ~/bin/ask-root and ~/ROBOTS.md as the agent user)
 """
 
 
@@ -97,8 +107,10 @@ def _setup(a, tr):
                            pubkey=(open(pub).read().strip() if os.path.exists(pub) else '<contents of ' + pub + '>'),
                            user_home=f"/home/{settings.user()}"))
     if a.agent_side and os.path.exists(key):
-        r = runner.run_shell(agent_side.install_command(settings.bridge_dir(), settings.agent_bin()), transport=tr)
-        print(f'ask-root installed as {settings.user()}:{settings.agent_bin()}: exit {r.returncode}'
+        from ..env import prompt
+        r = runner.run_shell(agent_side.install_command(settings.bridge_dir(), settings.agent_bin(),
+                                                        prompt.text(), settings.robots_path()), transport=tr)
+        print(f'ask-root and ROBOTS.md installed as {settings.user()} ({settings.agent_bin()}, {robots_path}): exit {r.returncode}'
               + ('' if r.returncode == 0 else f' ({(r.stderr or "").strip()})'), file=sys.stderr)
     return _status(tr)
 

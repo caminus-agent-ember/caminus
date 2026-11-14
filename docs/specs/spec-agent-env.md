@@ -75,7 +75,16 @@ One JSON line per event in the state dir (`env-audit.jsonl`, writable only by yo
 request, decision and result. `caminus env audit --tail N` prints the last N. sudo's own log in
 `/var/log/auth.log` is the second record of every root execution.
 
-## 6. Security properties, honestly
+## 6. The agent's own instructions: ROBOTS.md
+
+`share/harness/env/ROBOTS.md` (package data) is the environment's system prompt, in the soul.md / QWEN.md tradition:
+it tells the agent what it is (a dedicated user on the human's real machine, not a sandbox), what it can do (full
+shell, network, GPU, its own home, persistent processes), what it cannot (the human's files and root), how to ask for
+root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the local model servers listen.
+`caminus env prompt` prints it; `caminus env setup --agent-side` installs it as the agent user's `~/ROBOTS.md`;
+`caminus env shell` points at it when opening a session.
+
+## 7. Security properties, honestly
 
 - Protects: your files, credentials and processes from the agent user and from anything that injects into it; root
   entirely (the agent user has no sudo; elevation needs your password on a command you saw).

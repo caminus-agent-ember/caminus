@@ -122,6 +122,8 @@ caminus env watch                # approve / edit / deny queued root commands
 caminus env audit --tail 20      # everything the environment did
 ```
 
-Inside the agent user, `ask-root CMD...` asks you to run CMD as root and waits for the answer. The full design is in
+Inside the agent user, `ask-root CMD...` asks you to run CMD as root and waits for the answer, and `~/ROBOTS.md` is
+its standing instruction — what it is, what it can do, and how root works (`caminus env prompt` prints it from your
+side). The full design is in
 [spec-agent-env.md](specs/spec-agent-env.md). This is an environment, not a sandbox: the agent user still has the
 network and the GPU, so give it only scoped credentials in its own environment.
