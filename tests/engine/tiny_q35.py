@@ -136,7 +136,10 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False):
             mat(p + 'attn_qkv.weight', fm['attn_qkv'], CH, D); mat(p + 'attn_gate.weight', fm['attn_gate'], NV * S, D)
             mat(p + 'ssm_out.weight', fm['ssm_out'], D, NV * S)
             vec(p + 'ssm_conv1d.weight', f32(CH, DC, sc=0.5)); vec(p + 'ssm_dt.bias', f32(NV)); vec(p + 'ssm_a', -np.abs(f32(NV)))
-            (bvec if tc else vec)(p + 'ssm_alpha.weight', f32(NV, D, sc=0.05)); (bvec if tc else vec)(p + 'ssm_beta.weight', f32(NV, D, sc=0.05))
+            if variant == 'nine':
+                mat(p + 'ssm_alpha.weight', 'Q4_K', NV, D); mat(p + 'ssm_beta.weight', 'Q4_K', NV, D)
+            else:
+                (bvec if tc else vec)(p + 'ssm_alpha.weight', f32(NV, D, sc=0.05)); (bvec if tc else vec)(p + 'ssm_beta.weight', f32(NV, D, sc=0.05))
             vec(p + 'ssm_norm.weight', 1 + f32(S, sc=0.1))
         else:
             mat(p + 'attn_q.weight', fm['attn_q'], H * 2 * HD, D); mat(p + 'attn_k.weight', fm['attn_k'], HKV * HD, D)

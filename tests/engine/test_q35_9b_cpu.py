@@ -13,10 +13,12 @@ sys.path.insert(0, str(ROOT / 'python'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tiny_q35
 from caminus import arch
+from caminus.device import hip
 from caminus.engine import k3
 from caminus.engine.q35_dense import Dense35Own
 from caminus.engine.q35_dense_verify import Dense35Verify
 from caminus.engine.q35_mtp import Mtp35, block_bytes
+from caminus.prefill import attn, gdn, glue, q35own
 
 ap = argparse.ArgumentParser(); ap.add_argument('--scratch', required=True); args = ap.parse_args()
 scratch = Path(args.scratch); scratch.mkdir(parents=True, exist_ok=True)
@@ -30,6 +32,9 @@ with contextlib.ExitStack() as st:
     st.enter_context(patch.object(torch.cuda, 'current_device', return_value=0))
     st.enter_context(patch.object(torch.cuda, 'get_device_properties', return_value=NS(multi_processor_count=42)))
     st.enter_context(patch.object(torch.cuda, 'Event', side_effect=lambda *a, **k: NS()))
+    st.enter_context(patch.object(torch.cuda, 'current_stream', return_value=NS(device=torch.device('cuda:0'))))
+    for mod in (attn, gdn, glue, hip):
+        st.enter_context(patch.object(mod, 'Module', side_effect=lambda name: NS(name=name)))
     st.enter_context(patch.object(k3, 'resident_grid', return_value=84))
     zeros, to = torch.zeros, torch.Tensor.to
     st.enter_context(patch.object(torch, 'zeros', side_effect=lambda *a, **kw: zeros(*a, **{k:v for k,v in kw.items() if k not in ('device','pin_memory')})))
@@ -46,6 +51,9 @@ with contextlib.ExitStack() as st:
         assert v.module not in k3.ATTN_PACK_MODULES
         assert all(s.team == T for s in v.E.segs) if T > 1 else True
     d = Mtp35(m,k=3,vram_check=False)
+    m.mtp35 = d
+    pf = q35own.Q35OwnPrefill(m, chunk=16, check=False)
+    assert pf.export_h and pf.O.attn_wm_ok(m.nh,m.nkv,m.hd)
     assert d.f16 and d.module == 'k3_q35_9b_mtp'
     assert all(w['fmt']=='F16' and w['w'].dtype==torch.float16 for w in d.W.values())
     assert all(n.dtype==torch.float32 for n in d.N.values())
