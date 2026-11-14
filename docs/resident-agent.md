@@ -174,3 +174,13 @@ The model's output-limit stop reason pauses a goal instead of reporting it
 completed or executing partial tool calls. Increase its output budget and resume
 that goal. Malformed tool arguments become durable tool errors so the daemon can
 continue working rather than restart on the same action.
+
+Context management counts the full prompt, including the system and tool schemas.
+`agent init --compact-threshold .85 --compact-target-ratio .2` starts compaction
+at 85% of the configured context and requires the resulting prompt to fit within
+20%. It may compact earlier to reserve the next response. Recent assistant/tool
+groups are retained together when they fit; larger observations enter the summary.
+The original goal remains pinned. An oversized goal or persistent memory pauses
+the run instead of sending a request that cannot fit. Compaction events record
+the before/after token counts and targets. Every generation also reserves output
+room against the model window.

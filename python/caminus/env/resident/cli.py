@@ -32,6 +32,8 @@ def parser():
             p.add_argument('--bridge',default=os.environ.get('CAMINUS_ENV_BRIDGE','/srv/caminus-env-bridge'))
             p.add_argument('--context',type=int)
             p.add_argument('--max-tokens',type=int,default=4096)
+            p.add_argument('--compact-threshold',type=float,default=.85)
+            p.add_argument('--compact-target-ratio',type=float,default=.2)
             p.add_argument('--api-key-env',default='CAMINUS_AGENT_API_KEY')
             p.add_argument('--bus',help='shared agent-side SQLite mail bus; defaults under ~/.local/share/caminus/agents')
         if op=='message':
@@ -97,11 +99,14 @@ def main(argv=None,stdin=None):
             raise ValueError('test budgets must be positive')
         home=agent_home(a.name,a.home)
         if a.op=='init':
+            if not 0 < a.compact_target_ratio < a.compact_threshold < 1:
+                raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
             if a.max_tokens<1 or a.context is not None and a.context<1024:
                 raise ValueError('invalid model context or output budget')
             home.mkdir(parents=True,exist_ok=True,mode=0o700)
             cfg=dict(name=a.name,model=a.model,endpoint=a.endpoint.rstrip('/'),bridge=a.bridge,
-                     context=a.context,max_tokens=a.max_tokens,api_key_env=a.api_key_env,bus=a.bus)
+                     context=a.context,max_tokens=a.max_tokens,api_key_env=a.api_key_env,bus=a.bus,
+                     compact_threshold=a.compact_threshold,compact_target_ratio=a.compact_target_ratio)
             if not cfg['endpoint'].endswith('/v1'):cfg['endpoint']+='/v1'
             from .model import Model
             Model(cfg)                     # validate before persisting

@@ -287,6 +287,50 @@ class Resident(unittest.TestCase):
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
+    def test_million_token_compaction_targets_twenty_percent_with_large_recent_tools(self):
+        class BoundedModel:
+            def context_size(self):return 1048574
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None):
+                assert self.tokens(messages,tools)+max_tokens<self.context_size()
+                return dict(role='assistant',content='Keep the original goal, verified files, and pending investigation.')
+        rt=Runtime(self.home,model=BoundedModel())
+        try:
+            gid=rt.store.enqueue('Investigate these offline artifacts.')
+            original=rt.store.goal(gid)['messages']
+            below=original+[dict(role='assistant',content='x'*200000)]
+            self.assertIs(rt._compact(gid,below),below)
+            history=list(original)
+            for i in range(10):
+                msg=call('terminal',dict(command='inspect artifact'))
+                history += [msg,dict(role='tool',tool_call_id=msg['tool_calls'][0]['id'],content='x'*400000)]
+            compacted=rt._compact(gid,history)
+            self.assertEqual(compacted[0],original[0])
+            self.assertLessEqual(rt.model.tokens([rt.system(),*compacted],[]),int(1048574*.2))
+            seen=set()
+            for msg in compacted:
+                seen.update(tc['id'] for tc in msg.get('tool_calls',[]))
+                if msg['role']=='tool':self.assertIn(msg['tool_call_id'],seen)
+            event=next(e for e in rt.store.events() if e['kind']=='compacted')['data']
+            self.assertGreaterEqual(event['before_tokens'],event['trigger_tokens'])
+            self.assertLessEqual(event['after_tokens'],event['target_tokens'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_transport_refuses_oversized_prompt_and_reserves_output_room(self):
+        from caminus.env.resident.model import Model,ModelContextError
+        model=Model(dict(endpoint='http://127.0.0.1:1/v1',model='fixture',context=16384))
+        sent=[]
+        def request(url,body=None):
+            sent.append(body)
+            return dict(choices=[dict(message=dict(content='Fits.'),finish_reason='stop')])
+        model.request=request
+        model.tokens=lambda messages,tools:16000
+        model.complete([dict(role='user',content='bounded')],max_tokens=4096)
+        self.assertEqual(sent[0]['max_tokens'],128)
+        sent.clear();model.tokens=lambda messages,tools:17000
+        with self.assertRaises(ModelContextError):model.complete([dict(role='user',content='too large')])
+        self.assertEqual(sent,[])
+
     def test_truncation_never_completes_or_executes_partial_tools(self):
         partial=call('terminal',dict(command='touch forbidden'))
         partial['_finish_reason']='length'
