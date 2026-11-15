@@ -1122,6 +1122,16 @@ for line in sys.stdin:
                               'inside the timeout the question waits for the human')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_waiting_question_times_out_when_the_goal_is_run_again(self):
+        self.replies(call('ask_user',dict(question='Keep going?',choices=['yes','no'],recommended='yes')),
+                     call('finish',dict(summary='Carried on.')))
+        first=self.cmd('once',['--goal','Ask, then carry on.'],code=20)
+        self.assertEqual(first['state'],'waiting_user')
+        conf=json.loads((self.home/'config.json').read_text());conf['question_timeout']=0
+        (self.home/'config.json').write_text(json.dumps(conf))
+        out=self.cmd('once',['--goal-id',first['id']])
+        self.assertEqual(out['state'],'completed','a run after the timeout carries on without the human')
+
     def test_an_unanswered_question_goes_to_the_advisor_when_there_is_one(self):
         rt=Runtime(self.home)
         try:
