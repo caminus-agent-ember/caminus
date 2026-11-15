@@ -266,6 +266,11 @@ window, output cap, thinking and effort levels; DeepInfra's gives window, prices
 `reasoning_effort`. In the panel, `/model` opens the list (Enter picks) and `/effort LEVEL` sets the depth; a running
 resident takes either at its next turn.
 
+A paid brain resends its whole context every turn, so it compacts early: at 38 % of its window, keeping the newest
+7.6 % (on a 1M window about 400K and 80K). Set `paid_compact_threshold` and `paid_compact_target_ratio` (fractions of
+the window) in the resident's config to change it; the local server keeps `compact_threshold` / `compact_target_ratio`
+(85 % / 20 %).
+
 ## The advisor and two brains
 
 `caminus env agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the

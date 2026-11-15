@@ -34,6 +34,9 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
+# A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
+# target_ratio 0.20 of the threshold: on a 1M window it compacts at ~400K and keeps the newest ~80K).
+PAID_COMPACT = (.38, .38 * .20)
 QUESTION_TIMEOUT = 900   # seconds a question or root request waits before the resident carries on without it
 SUMMARY_TOKENS = 2048    # a compaction summary's output allowance
 TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
@@ -180,10 +183,11 @@ class Runtime:
         self.store = Store(home)
         self.home = self.store.home
         self.config = json.loads((self.home / 'config.json').read_text())
-        trigger = self.config.get('compact_threshold', .85)
-        target = self.config.get('compact_target_ratio', .2)
-        if not 0 < target < trigger < 1:
-            raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
+        for trigger, target in ((self.config.get('compact_threshold', .85), self.config.get('compact_target_ratio', .2)),
+                                (self.config.get('paid_compact_threshold', PAID_COMPACT[0]),
+                                 self.config.get('paid_compact_target_ratio', PAID_COMPACT[1]))):
+            if not 0 < target < trigger < 1:
+                raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
         for cfg in (self.config, self.config.get('fallback'), self.config.get('advisor')):
             if isinstance(cfg, dict) and cfg.get('prices'):
                 remember_prices(cfg.get('model'), cfg['prices'])   # a catalog model is metered like a built-in one
@@ -318,7 +322,7 @@ class Runtime:
             return ''
         if size <= 0 or not 0 <= tokens <= size:
             return ''
-        trigger = self.config.get('compact_threshold',.85)
+        trigger, _ = self.compaction_ratios()
         trigger_tokens = int(size * trigger)
         reserve = min(int(self.config.get('max_tokens',4096)),size // 4)
         limit = min(trigger_tokens,size - reserve)
@@ -803,8 +807,8 @@ class Runtime:
         size = self.free.window(gid, self.model.context_size())   # free time keeps inside the server's side slot
         reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
         before_tokens = self.model.tokens([system, *messages, *tail], self.tools)
-        trigger_tokens = int(size * self.config.get('compact_threshold', .85))
-        target_tokens = int(size * self.config.get('compact_target_ratio', .2))
+        trigger, target = self.compaction_ratios()
+        trigger_tokens, target_tokens = int(size * trigger), int(size * target)
         if not force and before_tokens < trigger_tokens and before_tokens + reserve < size:
             self.context_note(gid, before_tokens, size)
             return messages, False
@@ -938,6 +942,17 @@ class Runtime:
             self.store.update(gid, state='paused', error=message)
             self.store.event('watchdog', dict(reason=reason or 'stopped', **(detail or {})), gid)
         return True
+
+    def compaction_ratios(self):
+        """(trigger, target) as fractions of the window. A paid brain resends its whole context every turn, so it
+        compacts earlier: by default at 38 % of the window and down to 7.6 % (the owner's Hermes setting: on a 1M
+        window ~400K, keeping the newest ~80K), unless paid_compact_threshold / paid_compact_target_ratio (both
+        fractions of the window) say otherwise.
+        A local brain keeps compact_threshold / compact_target_ratio (85 % / 20 %)."""
+        if getattr(self.model, 'remote', False):
+            return (float(self.config.get('paid_compact_threshold', PAID_COMPACT[0])),
+                    float(self.config.get('paid_compact_target_ratio', PAID_COMPACT[1])))
+        return float(self.config.get('compact_threshold', .85)), float(self.config.get('compact_target_ratio', .2))
 
     MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
                   'provider', 'provider_kind', 'api_key_env', 'temperature')
