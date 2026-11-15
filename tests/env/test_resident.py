@@ -1502,6 +1502,26 @@ for line in sys.stdin:
             self.assertIn('request_answered',[e['kind'] for e in rt.store.events()])
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_per_turn_gate_skips_read_only_commands_and_backs_off_a_slow_gate(self):
+        from caminus.env.resident import runtime as R
+        for c in ('ls -la','git status && git diff --stat','grep -rn foo src | head','cat a.txt; wc -l a.txt'):
+            self.assertTrue(R.read_only_command(c),c)
+        for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b'):
+            self.assertFalse(R.read_only_command(c),c)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Slow gate.')
+            rt.store.update(gid,gate='sleep 3; false')
+            old=R.GATE_TURN_TIMEOUT;R.GATE_TURN_TIMEOUT=1
+            try:
+                rt._gate_dirty.add(gid);rt._gate_check(gid,rt.store.goal(gid))
+            finally:R.GATE_TURN_TIMEOUT=old
+            inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertIn('no longer runs after each step',inbox[-1])
+            n=len(inbox);rt._gate_dirty.add(gid);rt._gate_check(gid,rt.store.goal(gid))
+            self.assertEqual(len(list(rt.store.db.execute('SELECT 1 FROM inbox WHERE goal=?',(gid,)))),n,'off for this goal')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

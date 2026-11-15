@@ -44,11 +44,11 @@ Answer with one JSON object and nothing else:
 {"verdict": "met" | "not_yet" | "wait" | "impossible", "reason": "one or two sentences naming the evidence, what is missing, or what to wait for"}'''
 
 
-def run_gate(home, gate):
+def run_gate(home, gate, timeout=GATE_TIMEOUT):
     try:
-        p = subprocess.run(['bash', '-lc', gate], cwd=home, capture_output=True, text=True, timeout=GATE_TIMEOUT)
+        p = subprocess.run(['bash', '-lc', gate], cwd=home, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, f'the gate did not finish in {GATE_TIMEOUT} s'
+        return False, f'the gate did not finish in {timeout} s'
     out = (p.stdout + p.stderr)[-4000:]
     return p.returncode == 0, f'exit {p.returncode}\n{out}'.strip()
 
