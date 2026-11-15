@@ -13,11 +13,14 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"testing"
 )
 
 // notifyRun shows one notification; tests replace it.
 var notifyRun = func(urgency, title, body string) {
-	if os.Getenv("CAMINUS_PANEL_NOTIFY") == "0" {
+	// Never from a test binary: the suite drives fake root requests and goals, and each one reached the owner's
+	// desktop as a real notification.
+	if os.Getenv("CAMINUS_PANEL_NOTIFY") == "0" || testing.Testing() || demoMode {
 		return
 	}
 	if path, err := exec.LookPath("notify-send"); err == nil {
