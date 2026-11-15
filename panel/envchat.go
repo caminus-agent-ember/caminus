@@ -53,7 +53,10 @@ func (m *envModel) initChat() {
 	c.compose.SetHeight(3)
 	c.compose.Focus()
 	c.transcript = viewport.New()
-	c.transcript.SoftWrap = true
+	// Wrap once when events or terminal width change. Viewport soft wrapping
+	// recomputes ANSI widths across the entire history even for AtBottom/View,
+	// turning every editor keystroke and cursor blink into a full transcript scan.
+	c.transcript.SoftWrap = false
 	m.chat = c
 }
 
@@ -130,7 +133,7 @@ func (m *envModel) syncChat() {
 	changed := m.chat.rendered != len(m.residentEvents)
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		if block := m.chat.eventBlock(e); block != "" {
-			m.chat.content += block + "\n\n"
+			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)

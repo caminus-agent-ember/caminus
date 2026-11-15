@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -216,5 +217,35 @@ func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
 	m = next.(envModel)
 	if m.tab != 7 || m.pageScroll != 0 {
 		t.Fatal("opening sessions retained another page's scroll offset")
+	}
+}
+
+func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
+	m := chatFixture()
+	text := "start_" + strings.Repeat("A", 160) + strings.Repeat("界🙂", 40) + "_end"
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": text}}}}})
+	for _, width := range []int{90, 40, 120} {
+		m.width = width
+		m.syncChat()
+		plain := ansi.Strip(m.chat.content)
+		if !utf8.ValidString(plain) {
+			t.Fatal("wrapping split a UTF-8 character")
+		}
+		if !strings.Contains(strings.Join(strings.Fields(plain), ""), text) {
+			t.Fatal("long output disappeared during wrapping/resize")
+		}
+		for _, line := range strings.Split(m.chat.content, "\n") {
+			if ansi.StringWidth(line) > width {
+				t.Fatalf("history line exceeds %d cells", width)
+			}
+		}
+		m.chat.compose.SetValue("draft")
+		before := m.chat.content
+		next, _ := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+		m = next.(envModel)
+		_ = m.View()
+		if m.chat.content != before || m.chat.compose.Value() != "draftx" {
+			t.Fatal("typing replaced history or lost input")
+		}
 	}
 }
