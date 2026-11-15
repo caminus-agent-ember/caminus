@@ -1466,7 +1466,8 @@ for line in sys.stdin:
             def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                 assert self.tokens(messages,tools)+max_tokens<self.context_size(),'compaction overflow'
                 seen.append(max_tokens)
-                raise ModelTruncated(dict(role='assistant',content='## Working memory\nverified: the parser; next: tests'))
+                raise ModelTruncated(dict(role='assistant',content='## Working memory\nverified: the parser; next: tests'
+                                          +' detail'*1500))   # about as long as the full allowance
         rt=Runtime(self.home,model=BoundedModel())
         try:
             rt.config['compact_target_ratio']=.2
