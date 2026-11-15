@@ -9,8 +9,9 @@ When a graded goal calls finish (after define_done and verify), two things run b
    answers met, not_yet or impossible. not_yet refuses the finish with the reason; impossible pauses the goal and tells
    the human. After JUDGE_LIMIT refusals the goal pauses instead of looping (agent and judge disagree: a person decides).
 
-The judge runs on the advisor's model when one is configured (an independent reviewer, on the advisor's own budget);
-otherwise, or when that call fails, on the agent's own model, in a fresh context. A reply that is not the JSON asked
+The judge runs on the agent's own model in a fresh context by default, so it costs nothing on a local brain. With config
+`judge_model: "advisor"` it runs on the advisor's model instead (an independent reviewer, paid from the advisor's daily
+budget; faster than a busy local model), falling back to the agent's own model when that call cannot be made. A reply that is not the JSON asked
 for is asked once more, strictly; a second unreadable reply lets the finish through, marked unchecked, so a broken
 judge cannot trap a goal. Every verdict records the model that gave it, and unread ones are counted (judged events
 with verdict "unread"), so a model that answers loosely shows up in the evals instead of quietly turning the judge off.
@@ -95,16 +96,18 @@ def review(rt, gid, result):
     messages = [dict(role='system', content=SYSTEM),
                 dict(role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', '')))]
     def ask(msgs):
-        try:
-            return rt.advisor.raw(gid, msgs, 600)       # an independent reviewer when there is one
-        except Exception:
-            reply = rt.model.complete(msgs, tools=None, max_tokens=600)
+        if rt.config.get('judge_model') == 'advisor':
             try:
-                rt.brains.account(gid)
+                return rt.advisor.raw(gid, msgs, 600)   # the owner chose an independent, paid reviewer
             except Exception:
                 pass
-            name = (getattr(rt.model, 'config', None) or {}).get('model') or rt.config.get('model', '')
-            return (reply.get('content') if isinstance(reply, dict) else '') or '', name
+        reply = rt.model.complete(msgs, tools=None, max_tokens=600)
+        try:
+            rt.brains.account(gid)
+        except Exception:
+            pass
+        name = (getattr(rt.model, 'config', None) or {}).get('model') or rt.config.get('model', '')
+        return (reply.get('content') if isinstance(reply, dict) else '') or '', name
     try:
         text, who = ask(messages)
         v = verdict(text)

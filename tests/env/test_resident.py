@@ -516,7 +516,7 @@ class Resident(unittest.TestCase):
             self.assertEqual([e['verdict'] for e in ev],['unread']);self.assertEqual(ev[0]['model'],'fixture')
         finally:store.close()
 
-    def test_the_judge_prefers_the_advisor_and_falls_back_to_its_own_model(self):
+    def test_the_judge_is_free_by_default_and_uses_the_advisor_only_when_configured(self):
         from caminus.env.resident import judge
         class Own:
             config=dict(model='own-model');calls=0
@@ -526,6 +526,9 @@ class Resident(unittest.TestCase):
         try:
             gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x')
             seen=[]
+            rt.advisor.raw=lambda *a,**k:self.fail('by default the judge must not spend advisor money')
+            self.assertIn('met: own model',judge.review(rt,gid,dict(summary='Done.'))['judge'])
+            Own.calls=0;rt.config['judge_model']='advisor'
             rt.advisor.raw=lambda g,msgs,n,who='judge':(seen.append(msgs) or ('{"verdict":"not_yet","reason":"advisor says no"}','claude-opus-5-5'))
             out=judge.review(rt,gid,dict(summary='Done.'))
             self.assertIn('advisor says no',out['error']);self.assertEqual(Own.calls,0,'the advisor judged, not the agent\'s model')
@@ -534,7 +537,7 @@ class Resident(unittest.TestCase):
             rt.advisor.raw=down
             self.assertIn('met: own model',judge.review(rt,gid,dict(summary='Done.'))['judge'])
             models=[e['data']['model'] for e in rt.store.events() if e['kind']=='judged']
-            self.assertEqual(models,['claude-opus-5-5','own-model'],'every verdict records who gave it')
+            self.assertEqual(models,['own-model','claude-opus-5-5','own-model'],'every verdict records who gave it')
         finally:rt.mail.close();rt.store.close()
 
     def test_a_loose_first_reply_is_rescued_by_the_strict_retry(self):
