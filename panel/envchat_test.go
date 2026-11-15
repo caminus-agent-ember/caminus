@@ -461,7 +461,7 @@ func TestLiveTailShowsThinkingToolsAndTextThenYieldsToTheDurableBlock(t *testing
 		t.Fatal("the live tail did not start")
 	}
 	live := ansi.Strip(m.liveBlock(m.width))
-	for _, want := range []string{"THINKING", "Weighing options.", "RUN · terminal", "Half"} {
+	for _, want := range []string{g.agent + " agent", "Weighing options.", g.tool + " terminal", "Half", "live"} {
 		if !strings.Contains(live, want) {
 			t.Fatalf("live tail missing %q:\n%s", want, live)
 		}
@@ -681,7 +681,7 @@ func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
 	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
 		reasoning: strings.Repeat("thinking line ", 200), reset: true})
 	m = next.(envModel)
-	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "THINKING · live") {
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), g.agent+" thinking") || !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "live ·") {
 		t.Fatalf("the live window is not following:\n%s", ansi.Strip(m.liveBlock(m.width)))
 	}
 	m.scrollLive(-8)

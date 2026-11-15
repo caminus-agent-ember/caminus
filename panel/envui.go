@@ -643,7 +643,7 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.reset || msg.turn != m.chat.live.turn {
 			m.chat.live = residentLive{turn: msg.turn, text: msg.text, reasoning: msg.reasoning,
-				tools: msg.tools, active: true}
+				tools: msg.tools, active: true, wrapText: &wrapCache{}, wrapThink: &wrapCache{}}
 		} else {
 			m.chat.live.text += msg.text
 			m.chat.live.reasoning += msg.reasoning

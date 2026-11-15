@@ -58,6 +58,33 @@ type residentLive struct {
 	tools                 []string
 	active, hold          bool
 	top                   int
+	wrapText, wrapThink   *wrapCache // finished lines wrapped once per turn (body)
+}
+
+// wrapCache keeps the wrapped, styled lines of a growing text's finished part (everything up to its last newline),
+// so a snapshot wraps only what arrived since the last one and the partial line at the end. A streamed reply only
+// grows within a turn; anything else (a new width, a shorter text) starts over.
+type wrapCache struct {
+	width, done int
+	lines       []string
+}
+
+func (c *wrapCache) wrap(s string, width int, style func(string) string) []string {
+	cut := strings.LastIndexByte(s, '\n') + 1
+	if c.width != width || cut < c.done {
+		c.width, c.done, c.lines = width, 0, nil
+	}
+	if cut > c.done {
+		for _, ln := range strings.Split(ansi.Hardwrap(strings.TrimSuffix(s[c.done:cut], "\n"), width, true), "\n") {
+			c.lines = append(c.lines, style(ln))
+		}
+		c.done = cut
+	}
+	out := slices.Clip(c.lines)
+	for _, ln := range strings.Split(ansi.Hardwrap(s[cut:], width, true), "\n") {
+		out = append(out, style(ln))
+	}
+	return out
 }
 
 // highlightLive colors the inline code spans of a streaming line, so live text reads like the rendered
@@ -89,17 +116,19 @@ func (l residentLive) appendText(delta string) residentLive { l.text += delta; r
 func (l residentLive) body(width int) []string {
 	var out []string
 	if l.reasoning != "" {
-		for _, ln := range strings.Split(ansi.Hardwrap(l.reasoning, width, true), "\n") {
-			out = append(out, envThink.Render(ln))
+		if l.wrapThink == nil {
+			l.wrapThink = &wrapCache{} // (a fixture without one; the live handler gives each turn its own)
 		}
+		out = append(out, l.wrapThink.wrap(l.reasoning, width, func(s string) string { return envThink.Render(s) })...)
 	}
 	for _, name := range l.tools {
-		out = append(out, envDim.Render("RUN · ")+envTool.Render(residentText(name))+envDim.Render(" …"))
+		out = append(out, envDim.Render(g.collapsed+" ")+envTool.Render(g.tool+" "+residentText(name))+envDim.Render(" …"))
 	}
 	if l.text != "" {
-		for _, ln := range strings.Split(ansi.Hardwrap(l.text, width, true), "\n") {
-			out = append(out, highlightLive(ln))
+		if l.wrapText == nil {
+			l.wrapText = &wrapCache{}
 		}
+		out = append(out, l.wrapText.wrap(l.text, width, highlightLive)...)
 	}
 	if len(out) == 0 {
 		out = []string{envDim.Render("generating…")}
@@ -296,14 +325,16 @@ func (m envModel) liveBlock(w int) string {
 	body := l.body(inner)
 	height := m.liveHeight()
 	top := m.liveTop(len(body))
-	label := "THINKING · live · Ctrl+T hold · Alt+↑/↓ scroll"
-	if l.reasoning == "" {
-		label = "AGENT · live · Ctrl+T hold · Alt+↑/↓ scroll"
+	spin := g.spinner[m.tickN%len(g.spinner)]
+	who := g.agent + " agent"
+	if l.reasoning != "" && l.text == "" {
+		who = g.agent + " thinking"
 	}
+	hint := "  live · Ctrl+T hold · Alt+↑/↓ scroll"
 	if l.hold {
-		label = fmt.Sprintf("LIVE · held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
+		hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
 	}
-	rows := []string{envDim.Render(label)}
+	rows := []string{bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)}
 	rows = append(rows, body[top:min(top+height-1, len(body))]...)
 	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
 }
