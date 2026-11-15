@@ -246,6 +246,7 @@ def recipe(opt, log=print):
         raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
     opt['arch'] = A.name
     draft = 'off' if opt.get('no_drafter') else opt.get('draft')
+    defaulted = draft is None
     if draft is None:
         draft = A.default_draft(opt)
         if draft != 'off':
@@ -258,7 +259,12 @@ def recipe(opt, log=print):
             opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
         if A.cards != 1:
             raise ValueError('--draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off')
-        if not os.path.isfile(opt['drafter']):
+        if not os.path.isfile(opt['drafter']) and defaulted:
+            # (the default drafter's file is optional: without it the default is plain decoding, not a refusal)
+            log(f'caminus serve: --draft off (the default drafter file {opt["drafter"]} is not here: caminus pull fetches it)',
+                flush=True)
+            draft, own_dflash = 'off', False
+        elif not os.path.isfile(opt['drafter']):
             raise ValueError(f'the DFlash2 GGUF {opt["drafter"]} does not exist (pass --drafter)')
     elif draft == 'dflash' and A.drafter != 'dflash':
         raise ValueError(f'--draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})')
@@ -273,8 +279,29 @@ def recipe(opt, log=print):
     elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter'] and 'dflash' not in getattr(A, 'drafters', ()):
         log(f'caminus serve: --drafter not used: --draft {draft} (the DFlash file loads with --draft dflash)', flush=True)
     opt['draft'] = draft
+    opt['draft_defaulted'] = defaulted
     if A.drafter == 'dflash': opt['no_drafter'] = draft == 'off'
     return A
+
+
+def keep_default_draft(A, opt, place, log=print):
+    """a default (not asked for) one-card drafter stays only when the cards still hold the context with it: the
+    explicit --max-ctx, or MIN_CTX for auto (a smaller context would not take a harness's long requests). Otherwise
+    the serve is plain, with the full context; --draft dflash asks for the drafter anyway. place(fits) raises
+    host.PlacementError when no cards fit"""
+    if not opt.get('draft_defaulted') or opt.get('draft') != 'dflash' or A.drafter == 'dflash':
+        return
+    c = ctx_arg(opt.get('max_ctx'))
+    want = _arch.MIN_CTX if c == 'auto' else c
+    from ..device import host as _host
+    try:
+        place(lambda cs: A.fits(dict(opt, max_ctx=want), cs))
+    except _host.PlacementError:
+        log(f'caminus serve: --draft off (with the default drafter fewer than {want} positions fit these cards; '
+            f'--draft dflash runs it anyway, with less context)', flush=True)
+        opt['draft'] = 'off'
+        return
+    opt['draft_floor'] = want    # (the real placement and max_ctx auto keep this floor: Dense35.min_ctx)
 
 
 def fit_report(argv):
@@ -287,6 +314,7 @@ def fit_report(argv):
         opt['max_ctx'] = ctx_arg(opt['max_ctx'])
         if opt.get('kv_host'):
             raise ValueError('fit currently reports native device-memory context; host KV requires a separate host-memory projection')
+        keep_default_draft(A, opt, lambda fits: host.place(A.cards, fits=fits, split_of=A.split), log=lambda *a, **kw: None)
         placement = host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
         plan = A.context_fit(opt, placement['cards'])
         if opt['max_ctx'] != 'auto' and opt['max_ctx'] > plan.native_ctx:
@@ -328,6 +356,7 @@ def main(argv=None):
     # the cards, chosen before the GPU runtime starts (D-292; caminus.device.host): by PCI address, the bigger card first for a
     # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
     from ..device import host as _host
+    keep_default_draft(A, opt, lambda fits: _host.place(A.cards, fits=fits, split_of=A.split))
     try:
         pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
     except _host.PlacementError as e:
