@@ -118,6 +118,19 @@ def worker(job):
         return 0
 
 
+def worker_env(home):
+    """The daemon's environment without the model API key: the model's commands run in this worker, and a key
+    it could print is a key it could leak. (A key in a file this account can read is not protected by this.)"""
+    env = dict(os.environ)
+    try:
+        name = json.loads((Path(home) / 'config.json').read_text()).get('api_key_env', 'CAMINUS_AGENT_API_KEY')
+    except (OSError, ValueError, AttributeError):
+        name = 'CAMINUS_AGENT_API_KEY'
+    for var in {name, 'CAMINUS_AGENT_API_KEY', 'ANTHROPIC_API_KEY'}:
+        env.pop(var, None)
+    return env
+
+
 class Terminal:
     def __init__(self, home, launch=None):
         self.home = Path(home)
@@ -133,7 +146,8 @@ class Terminal:
                 'from caminus.env.resident.terminal import worker;sys.exit(worker(sys.argv[2]))')
         with (job / 'worker.log').open('ab') as log:
             subprocess.Popen([sys.executable, '-I', '-c', boot, package_root, str(job)],
-                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                             env=worker_env(job.parent.parent))
 
     def call(self, action, args):
         session = args.get('session') or action
