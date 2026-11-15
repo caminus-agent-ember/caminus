@@ -33,7 +33,8 @@ func TestChatRetainsTranscriptAndScrollAnchorOnRefresh(t *testing.T) {
 	if m.chat.transcript.YOffset() != 0 || ansi.Strip(m.chat.transcript.View()) != before {
 		t.Fatal("new activity moved the reader")
 	}
-	if !strings.Contains(m.chat.content, "Observation 2 stays") || !strings.Contains(m.chat.content, "new activity") {
+	plain := ansi.Strip(m.chat.content)
+	if !strings.Contains(plain, "Observation 2 stays") || !strings.Contains(plain, "new activity") {
 		t.Fatal("old or new transcript disappeared")
 	}
 	if m.chat.compose.Value() != "a draft survives" {
