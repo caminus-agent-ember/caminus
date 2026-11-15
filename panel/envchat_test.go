@@ -1499,3 +1499,36 @@ func TestSteeringViews(t *testing.T) {
 		t.Fatal("Esc while a reply is written interrupts the turn")
 	}
 }
+
+func TestSeveralRootRequestsShareOneCard(t *testing.T) {
+	m := chatFixture(t)
+	bridge := t.TempDir()
+	writeReq(t, bridge, "r1", "apt-get install -y jq", 1)
+	writeReq(t, bridge, "r2", "systemctl restart foo", 2)
+	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
+	m.refreshLocal()
+	v := ansi.Strip(m.renderChat())
+	if !strings.Contains(v, "2 ROOT REQUESTS WAITING") || !strings.Contains(v, "1  apt-get install -y jq") || !strings.Contains(v, "2  systemctl restart foo") {
+		t.Fatalf("one card lists both:\n%s", v)
+	}
+	if m.reqs[m.pendingRoot()].ID != "r2" {
+		t.Fatal("the keys act on the newest by default")
+	}
+	m.chat.compose.Blur()
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: '[', Text: "["})
+	m = next.(envModel)
+	if m.reqs[m.pendingRoot()].ID != "r1" {
+		t.Fatal("[ moves to the older request")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	m = next.(envModel)
+	if data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json")); err != nil || !strings.Contains(string(data), `"denied"`) {
+		t.Fatalf("d denies the highlighted one: %s %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(bridge, "res", "r2.json")); err == nil {
+		t.Fatal("the other request is untouched")
+	}
+	if strings.Contains(ansi.Strip(m.renderChat()), "ROOT REQUESTS WAITING") {
+		t.Fatal("one request left: no shared card")
+	}
+}
