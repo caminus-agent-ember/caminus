@@ -549,6 +549,37 @@ class Resident(unittest.TestCase):
         try:self.assertEqual([e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged'],['met'])
         finally:store.close()
 
+    def test_web_search_through_ddgs_and_web_fetch_as_text(self):
+        from caminus.env.resident import web
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Look something up.')
+            rt.config['search_python']=str(self.home/'missing'/'python')
+            with unittest.mock.patch.object(Path,'home',return_value=self.home/'nohome'),unittest.mock.patch.object(web.sys,'executable',str(self.home/'nopython')):
+                with self.assertRaises(ValueError) as c:web.search(rt,'rdna3 wmma')
+            self.assertIn('ddgs is not installed',str(c.exception))
+            venv=self.home/'venv';subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True)
+            site=next(venv.glob('lib/python*/site-packages'));(site/'ddgs').mkdir()
+            (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        return [dict(title="RDNA3 ISA",href="https://example.org/isa",body="the guide for "+q)]*min(2,k["max_results"])\n')
+            rt.config['search_python']=str(venv/'bin'/'python')
+            out=web.search(rt,'rdna3 wmma',max_results=5)
+            self.assertEqual(out['results'][0],dict(title='RDNA3 ISA',url='https://example.org/isa',snippet='the guide for rdna3 wmma'))
+            with self.assertRaises(ValueError):web.search(rt,'x',timelimit='z')
+            class Resp:
+                status=200;headers={'Content-Type':'text/html; charset=utf-8'}
+                def __init__(self,body):self.body=body
+                def read(self,n):return self.body[:n]
+                def geturl(self):return 'https://example.org/page'
+                def __enter__(self):return self
+                def __exit__(self,*a):return False
+            page=b'<html><head><title>WMMA notes</title><script>evil()</script></head><body><h1>Tiles</h1><p>16x16 &amp; fp16.</p><p>'+b'x'*5000+b'</p></body></html>'
+            rt.web_opener=lambda req,timeout:Resp(page)
+            f=web.fetch(rt,'https://example.org/page',max_chars=1000)
+            self.assertEqual(f['title'],'WMMA notes');self.assertIn('Tiles',f['text']);self.assertIn('16x16 & fp16.',f['text'])
+            self.assertNotIn('evil',f['text']);self.assertIn('more characters',f['more'])
+            with self.assertRaises(ValueError):web.fetch(rt,'file:///etc/passwd')
+        finally:rt.mail.close();rt.store.close()
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)
