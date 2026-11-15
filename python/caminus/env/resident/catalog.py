@@ -25,6 +25,9 @@ KINDS = ('local', 'anthropic', 'deepinfra', 'openai')
 TIMEOUT = 20
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
+# DeepInfra's metadata.max_tokens repeats the context length (checked 11-15: 1048576 on 1M models); its docs give a hard
+# output cap of 16384 tokens for most models, so that is the cap where the metadata says more.
+DEEPINFRA_OUTPUT_CAP = 16384
 
 
 def _get(url, headers, opener):
@@ -66,10 +69,13 @@ def deepinfra_entries(data, provider):
         if meta and 'chat' not in tags and 'vlm' not in tags:
             continue                                     # embeddings, images, speech: not a brain
         p = meta.get('pricing') or {}
-        prices = dict(input=p['input_tokens'], output=p['output_tokens'],
-                      cache_read=p.get('cache_read_tokens')) if 'input_tokens' in p and 'output_tokens' in p else None
+        r = lambda v: None if v is None else round(float(v), 6)
+        prices = dict(input=r(p['input_tokens']), output=r(p['output_tokens']),
+                      cache_read=r(p.get('cache_read_tokens'))) if 'input_tokens' in p and 'output_tokens' in p else None
+        cap = meta.get('max_tokens')
+        cap = min(cap, DEEPINFRA_OUTPUT_CAP) if isinstance(cap, int) else DEEPINFRA_OUTPUT_CAP
         out.append(dict(id=m['id'], name=m['id'], provider=provider, context=meta.get('context_length'),
-                        max_output=meta.get('max_tokens'),
+                        max_output=cap,
                         efforts=list(DEEPINFRA_EFFORTS) if 'reasoning_effort' in tags else [],
                         thinking='toggle' if 'reasoning' in tags or 'reasoning_effort' in tags else '',
                         vision='vision' in tags, prices=prices))

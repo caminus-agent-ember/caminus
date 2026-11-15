@@ -1184,7 +1184,7 @@ for line in sys.stdin:
         'http://relay/deepinfra/v1/openai/models': dict(object='list',data=[
             dict(id='zai-org/GLM-5.2',object='model',created=1,owned_by='deepinfra',root='zai-org/GLM-5.2',
                  metadata=dict(description='x',tags=['chat','reasoning','reasoning_effort','prompt_cache'],context_length=202752,
-                               max_tokens=16384,pricing=dict(input_tokens=0.6,output_tokens=2.2,cache_read_tokens=0.11))),
+                               max_tokens=202752,pricing=dict(input_tokens=0.6000000001,output_tokens=2.2,cache_read_tokens=0.11))),
             dict(id='BAAI/bge-m3',object='model',created=1,owned_by='deepinfra',root='BAAI/bge-m3',
                  metadata=dict(description='x',tags=['embed'],pricing=dict(input_tokens=0.01)))]),
         'http://127.0.0.1:8092/v1/models': dict(data=[dict(id='k3-coder')]),
