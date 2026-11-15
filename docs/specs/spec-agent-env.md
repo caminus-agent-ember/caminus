@@ -119,15 +119,15 @@ Inside its own session the agent uses the same conventions directly (`nohup ... 
 is a separate short-lived SSH exec (multiplexed over the one ControlMaster connection), and each `caminus env shell`
 is its own PTY. ROBOTS.md section "Long-running work and more terminals" tells the agent all of this.
 
-## 9. Questions, steering notes, context
+## 9. Questions, steering, context
 
 The bridge carries typed requests, not just root: `kind: "root"` (cmd) and `kind: "question"` (text, choices).
 Agent side: `~/bin/env-ask TEXT CHOICE...` prints the human's answer (a number picks a choice); `caminus env ask`
 when the package is installed in that user. Harness side: `caminus env watch` prompts for the answer, the TUI opens
 an answer line on `a`; both write `decision: "answered"` with the `answer` field, same schema otherwise.
 
-Steering runs the other way through a notes inbox (`<bridge>/notes/`): `caminus env say TEXT` leaves a note
-(audited), `caminus env notes` lists them, and the agent's `~/bin/env-note` prints and clears them between steps.
+Steering runs the other way through the resident's own channel: a message, `/steer` or `caminus env agent send
+--steer` reaches the running goal at its next step (the old notes inbox, `env say` / `env-note`, is gone).
 
 Memory: the agent's `~/MEMORY.md` (seeded by `setup --agent-side` from `env/prompt.py`'s MEMORY_TEMPLATE) is its
 persistent, self-writable memory; ROBOTS.md tells it to read it every task and append learnings. `caminus env
@@ -145,8 +145,8 @@ tmux inside the agent user is the interactive channel. `caminus env new NAME -- 
 session running CMD (an agent CLI, a shell); `caminus env sessions` lists them; `caminus env send NAME TEXT` types
 TEXT+Enter into the session (a live instruction — audited); `caminus env attach NAME` execs `ssh -t ... tmux attach
 -t NAME` so the human drops into the same terminal to watch and type. Names are `[A-Za-z0-9_.-]+` like job names.
-One-shots stay `env run`, long detached work stays `env spawn`/`jobs`/`stop` (section 8); `env say`/`env-note` stay
-the mid-task note channel (section 9).
+One-shots stay `env run`, long detached work stays `env spawn`/`jobs`/`stop` (section 8); mid-task steering goes
+through the resident (section 9).
 
 ## 11. Server jobs (`caminus env serve`) — one job per agent, each with its own home
 

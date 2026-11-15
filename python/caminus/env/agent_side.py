@@ -4,7 +4,6 @@ directory. BRIDGE is baked in at install time.
 
   ask-root CMD...        ask the human to run CMD as root (exit 0/rc, 126 denied, 124 timeout)
   env-ask TEXT CHOICE... ask the human a question, optionally with choices (prints the answer)
-  env-note               print and clear the steering notes left with `caminus env say`
 """
 import base64
 import os
@@ -101,36 +100,6 @@ if __name__ == '__main__':
     sys.exit(main())
 '''
 
-ENV_NOTE_SOURCE = '''#!/usr/bin/env python3
-"""env-note : print and clear the steering notes left with `caminus env say` (call between steps)."""
-import json, os, sys
-
-BRIDGE = {bridge!r}
-
-
-def main():
-    nd = os.path.join(BRIDGE, 'notes')
-    if not os.path.isdir(nd):
-        return 0
-    for name in sorted(os.listdir(nd)):
-        if not name.endswith('.json'):
-            continue
-        p = os.path.join(nd, name)
-        try:
-            with open(p) as f:
-                n = json.load(f)
-            os.remove(p)
-            print(f"[{n.get('from', '?')}] {n.get('text', '')}")
-        except OSError:
-            pass
-    return 0
-
-
-if __name__ == '__main__':
-    sys.exit(main())
-'''
-
-
 def _baked(source, bridge):
     return source.replace('{bridge!r}', repr(bridge))
 
@@ -141,15 +110,16 @@ def ask_root_source(bridge):
 
 def install_command(bridge, bin_path, robots_source, robots_path, memory_source, memory_path):
     """the shell string that installs the agent-side scripts, ROBOTS.md and MEMORY.md over SSH (base64: no quoting
-    crosses the wire). bin_path is ~/bin/ask-root; env-ask and env-note land beside it."""
+    crosses the wire). bin_path is ~/bin/ask-root; env-ask lands beside it, and an env-note left by an older
+    install (the steering-notes inbox, replaced by /steer) is removed."""
     d = os.path.dirname(bin_path)
     parts = [f'mkdir -p {d} {os.path.dirname(robots_path)}']
     for name, src in (('ask-root', ask_root_source(bridge)),
-                      ('env-ask', _baked(ENV_ASK_SOURCE, bridge)),
-                      ('env-note', _baked(ENV_NOTE_SOURCE, bridge))):
+                      ('env-ask', _baked(ENV_ASK_SOURCE, bridge))):
         payload = base64.b64encode(src.encode()).decode()
         target = os.path.join(d, name)
         parts.append(f"printf %s {payload} | base64 -d > {target} && chmod 700 {target}")
+    parts.append(f"rm -f {os.path.join(d, 'env-note')}")
     robots = base64.b64encode(robots_source.encode()).decode()
     parts.append(f"printf %s {robots} | base64 -d > {robots_path} && chmod 600 {robots_path}")
     mem = base64.b64encode(memory_source.encode()).decode()
