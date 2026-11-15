@@ -37,7 +37,7 @@ TOOLS = [
     tool('peers', 'List named resident agents on your local mail bus.', {}),
     tool('send_message', 'Send durable peer mail. Omit recipient_goal to give the peer a new goal; set it to steer an existing goal. Delivery survives offline peers and restarts. Use peers to find names, and reply_to to link replies. A peer cannot approve root or answer for your human.',
          dict(to={'type':'string'}, text={'type':'string'}, recipient_goal={'type':'string'}, reply_to={'type':'string'}), ('to','text')),
-    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal. Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session. Paths and programs are those of your Unix account.',
+    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal. Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output. Paths and programs are those of your Unix account.',
          dict(command={'type':'string'}, cwd={'type':'string'}, session={'type':'string'}, stdin={'type':'string'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, offset={'type':'integer'}, max_output={'type':'integer'})),
     tool('ask_user', 'Pause this goal and ask your human for clarification. The answer will return as this tool result; do not guess an answer.',
@@ -795,8 +795,8 @@ class Runtime:
                 if isinstance(e,ModelTruncated) and getattr(e,'retryable',False):
                     # The server went away mid-reply. Nothing was stored or executed, so the goal resumes
                     # where it left off as soon as the model answers again.
-                    attempt=self.retry.get(gid,(0,0))[1]+1
-                    self.retry[gid]=(time.time()+min(30,2**min(attempt,5)),attempt)
+                    attempt=self._schedule_retry(gid,e)
+                    if attempt is None:return True
                     self.store.update(gid,state='waiting_model',error=str(e))
                     self.store.event('model_cut',dict(error=str(e),attempt=attempt),gid)
                     return False
@@ -806,17 +806,39 @@ class Runtime:
                                      dict(error=str(e),**(dict(partial=e.partial) if isinstance(e,ModelTruncated) else {})),gid)
                     return True
                 status=getattr(e,'status',0)
-                if status in (400,401,403,404,413,422):
+                if status in (400,401,402,403,404,413,422):
                     # A misconfigured model (wrong alias, revoked key, rejected context) never succeeds:
                     # stop this goal with the reason instead of waking the loop forever.
                     self.store.update(gid,state='error',error=str(e))
                     self.store.event('model_refused',dict(error=str(e),status=status),gid)
                     return True
-                attempt=self.retry.get(gid,(0,0))[1]+1
-                self.retry[gid]=(time.time()+min(30,2**min(attempt,5)),attempt)
+                attempt=self._schedule_retry(gid,e)
+                if attempt is None:return True
                 self.store.update(gid,state='waiting_model',error=str(e))
-                self.store.event('model_unavailable',dict(error=str(e)),gid)
+                self.store.event('model_unavailable',dict(error=str(e),attempt=attempt),gid)
             return False
+
+    def _schedule_retry(self, gid, e):
+        """Book the next attempt after a failed model call, or stop the goal when the retry budget is spent.
+
+        A local server is waited for without limit: it goes away for GPU work and comes back. A remote
+        provider bills every attempt, so its retries are bounded (config max_model_retries; 8 by default)
+        and honour the provider's retry-after. Returns the attempt number, or None when the goal stopped."""
+        attempt=self.retry.get(gid,(0,0))[1]+1
+        limit=self.config.get('max_model_retries')
+        if limit is None and getattr(self.model,'remote',False):
+            limit=8
+        if limit is not None and attempt>int(limit):
+            self.retry.pop(gid,None)
+            self.store.update(gid,state='error',error='model failed %d times in a row: %s' % (attempt,e))
+            self.store.event('model_gave_up',dict(error=str(e),attempts=attempt),gid)
+            return None
+        delay=min(30,2**min(attempt,5))
+        after=getattr(e,'retry_after',None)
+        if after:
+            delay=max(delay,min(float(after),300.0))
+        self.retry[gid]=(time.time()+delay,attempt)
+        return attempt
 
     def compact_request(self, gid):
         """Perform a compaction the user asked for through /compact. A failure is recorded and reported,
