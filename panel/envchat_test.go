@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -96,10 +97,10 @@ func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
 	m.chat.compose.SetValue("/requests")
 	next, _ = m.submitCompose()
 	m = next.(envModel)
-	if m.tab != 0 {
-		t.Fatal("/requests did not open approvals")
+	if m.tab != 6 || !m.chat.approvals {
+		t.Fatal("/requests did not open the approvals overlay in the chat")
 	}
-	m.tab = 6
+	m.chat.approvals = false
 	m.chat.compose.SetValue("/unknown keep this")
 	next, cmd = m.submitCompose()
 	m = next.(envModel)
@@ -128,8 +129,54 @@ func TestChatPasteAndFrameStayWithinTerminal(t *testing.T) {
 				t.Fatalf("%v: line too wide: %q", size, ansi.Strip(line))
 			}
 		}
-		if !strings.Contains(ansi.Strip(frame), "Steer goal original") {
-			t.Fatal("bottom composer missing")
+		if !strings.Contains(ansi.Strip(frame), "to goal original") {
+			t.Fatal("bottom composer missing its target")
+		}
+	}
+}
+
+// The composer is the shell's: the target rides on its top border (the old label line, moved), one prompt mark sits on
+// the first line only, the hint says what Enter does now, and the frame still fits the terminal at both extremes.
+func TestComposerCarriesItsTargetOnTheBorder(t *testing.T) {
+	for _, size := range [][2]int{{40, 16}, {100, 30}} {
+		m := chatFixture(t) // the selected goal "original" is working
+		m.width, m.height = size[0], size[1]
+		m.syncChat()
+		frame := ansi.Strip(m.render())
+		if !strings.Contains(frame, "─ to goal original ─") {
+			t.Fatalf("%v: the composer's border does not name its goal:\n%s", size, frame)
+		}
+		box := ansi.Strip(m.chatComposer())
+		if n := strings.Count(box, g.user); n != 1 {
+			t.Fatalf("%v: the composer drew %d prompt marks, want one:\n%s", size, n, box)
+		}
+		if !strings.Contains(box, "message the agent") || !strings.Contains(box, "Enter nudges") || !strings.Contains(box, "/steer") {
+			t.Fatalf("%v: the hint does not say what Enter does:\n%s", size, box)
+		}
+		m.chat.compose.SetValue("first line\nsecond line")
+		box = ansi.Strip(m.chatComposer())
+		if n := strings.Count(box, g.user); n != 1 {
+			t.Fatalf("%v: a multi-line draft drew %d prompt marks:\n%s", size, n, box)
+		}
+		if !strings.Contains(box, "  second line") {
+			t.Fatalf("%v: the continuation line lost its indent:\n%s", size, box)
+		}
+		m.chat.newGoal, m.chat.target = true, ""
+		m.chat.compose.Reset()
+		m.syncChat()
+		box = ansi.Strip(m.chatComposer())
+		if !strings.Contains(box, "─ new goal ─") || !strings.Contains(box, "type a goal") || !strings.Contains(box, "Enter starts it") {
+			t.Fatalf("%v: a new goal does not say what Enter does:\n%s", size, box)
+		}
+		frame = ansi.Strip(m.render())
+		rows := strings.Split(frame, "\n")
+		if len(rows) > size[1] {
+			t.Fatalf("%v: %d rows overflow the terminal", size, len(rows))
+		}
+		for _, line := range rows {
+			if ansi.StringWidth(line) > size[0] {
+				t.Fatalf("%v: line too wide: %q", size, line)
+			}
 		}
 	}
 }
@@ -139,7 +186,7 @@ func TestChatDisplaysCommandArgumentsAndEscapesControls(t *testing.T) {
 	e := residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{"name": "terminal", "arguments": "{\"command\":\"printf hello #\\u001b[2K\\rhidden\"}"}}}}}
 	block := m.chat.eventBlock(e)
 	plain := ansi.Strip(block)
-	for _, want := range []string{"RUN", "terminal", "printf", `\x1b`, "hidden"} {
+	for _, want := range []string{g.tool + " terminal", "printf", `\x1b`, "hidden"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("missing %q in %q", want, plain)
 		}
@@ -205,34 +252,44 @@ func TestChatRejectsResponsesFromAnEarlierVisitToTheSameSession(t *testing.T) {
 }
 
 func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
-	m := envModel{tab: 5, width: 80, height: 24, mode: "normal"}
+	// The old audit page is an overlay over the chat now: it fits the terminal and Page Down scrolls it.
+	m := chatFixture(t)
+	m.width, m.height = 80, 24
+	next, _ := m.chatSlash("/audit") // (opening reads the audit file; the fixture fills the lines after)
+	m = next.(envModel)
 	for i := 0; i < 90; i++ {
 		m.events = append(m.events, fmt.Sprintf("audit entry %d with a long but readable message", i))
 	}
 	frame := m.render()
+	if m.tab != 6 || m.chat.page != 5 || !strings.Contains(ansi.Strip(frame), "AUDIT") {
+		t.Fatalf("/audit did not open the overlay:\n%s", ansi.Strip(frame))
+	}
 	if len(strings.Split(frame, "\n")) > m.height {
-		t.Fatal("audit page exceeded terminal height")
+		t.Fatal("audit overlay exceeded terminal height")
 	}
 	for _, line := range strings.Split(frame, "\n") {
 		if ansi.StringWidth(line) > m.width {
-			t.Fatal("audit page exceeded terminal width")
+			t.Fatal("audit overlay exceeded terminal width")
 		}
 	}
-	next, _ := m.onKey("pgdown")
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = next.(envModel)
-	if m.pageScroll == 0 || ansi.Strip(m.render()) == ansi.Strip(frame) {
-		t.Fatal("Page Down did not scroll audit")
+	if m.chat.pageTop == 0 || ansi.Strip(m.render()) == ansi.Strip(frame) {
+		t.Fatal("Page Down did not scroll the audit overlay")
 	}
-	next, _ = m.onKey("1")
-	m = next.(envModel)
-	if m.tab != 7 || m.pageScroll != 0 {
-		t.Fatal("opening sessions retained another page's scroll offset")
+	if _, cmd := m.chatKey(tea.KeyPressMsg{Code: 'q', Text: "q"}); cmd != nil {
+		t.Fatal("q must not quit inside an overlay")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if next.(envModel).chat.page != -1 {
+		t.Fatal("Esc must close the overlay")
 	}
 }
 
 func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
 	m := chatFixture(t)
 	text := "start_" + strings.Repeat("A", 160) + strings.Repeat("界🙂", 40) + "_end"
+	m.chat.expanded = true // output is folded by default; an open card must keep every character
 	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": text}}}}})
 	for _, width := range []int{90, 40, 120} {
 		m.width = width
@@ -270,13 +327,13 @@ func sortedCopy(in []string) []string {
 }
 
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
-	if got := slashMatches("/se"); fmt.Sprint(got) != "[/session /sessions]" {
+	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/session /sessions /settings]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); len(got) != 5 || got[0] != "/session" || got[4] != "/stop" {
+	if got := slashMatches("/s"); len(got) != 6 || got[0] != "/session" || got[5] != "/settings" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -285,7 +342,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /steer /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -391,8 +448,8 @@ func TestLaunchReopensLastSessionAndFallsBackWhenGone(t *testing.T) {
 	openLastSession(&m2)
 	next, _ = m2.Update(residentSessionsMsg{agent: "ghost", names: []string{"resident"}})
 	m2 = next.(envModel)
-	if m2.tab != 7 || m2.agentName != "resident" || !m2.chat.ready {
-		t.Fatal("a vanished session did not fall back to the homepage")
+	if m2.tab != 6 || !m2.chat.picker || m2.agentName != "resident" || !m2.chat.ready {
+		t.Fatal("a vanished session did not fall back to the chat with the session picker open")
 	}
 	m3 := envModel{agentName: "resident", defaultAgent: "resident", tab: 7, width: 90, height: 28}
 	m3.initChat()
@@ -402,8 +459,8 @@ func TestLaunchReopensLastSessionAndFallsBackWhenGone(t *testing.T) {
 	}
 	next, _ = m3.Update(residentSessionsMsg{agent: "ghost", err: "no such resident"})
 	m3 = next.(envModel)
-	if m3.tab != 7 || m3.agentName != "resident" || m3.pendingLast != "" {
-		t.Fatal("an unresolvable last session did not fall back to the homepage")
+	if m3.tab != 6 || !m3.chat.picker || m3.agentName != "resident" || m3.pendingLast != "" {
+		t.Fatal("an unresolvable last session did not fall back to the chat's session picker")
 	}
 }
 
@@ -459,7 +516,7 @@ func TestLiveTailShowsThinkingToolsAndTextThenYieldsToTheDurableBlock(t *testing
 		t.Fatal("the live tail did not start")
 	}
 	live := ansi.Strip(m.liveBlock(m.width))
-	for _, want := range []string{"THINKING", "Weighing options.", "RUN · terminal", "Half"} {
+	for _, want := range []string{g.agent + " agent", "Weighing options.", g.tool + " terminal", "Half", "live"} {
 		if !strings.Contains(live, want) {
 			t.Fatalf("live tail missing %q:\n%s", want, live)
 		}
@@ -476,7 +533,7 @@ func TestLiveTailShowsThinkingToolsAndTextThenYieldsToTheDurableBlock(t *testing
 		t.Fatal("the durable reply must end the live tail")
 	}
 	durable := ansi.Strip(m.chat.content)
-	if !strings.Contains(durable, "THINKING") || !strings.Contains(durable, "AGENT") || !strings.Contains(durable, "Half an answer.") {
+	if !strings.Contains(durable, g.collapsed+" thinking") || !strings.Contains(durable, g.agent+" agent") || !strings.Contains(durable, "Half an answer.") {
 		t.Fatalf("durable blocks missing:\n%s", durable)
 	}
 	if strings.Contains(ansi.Strip(m.liveBlock(m.width)), "Half an answer.") {
@@ -593,9 +650,13 @@ func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
 	m := chatFixture(t)
 	m.resident.ContextUsed = 891288 // at the trigger: hot
 	m.resident.TokPerS = 91.4       // the daemon's last measured decode speed
-	frame := ansi.Strip(m.render())
-	if !strings.Contains(frame, "ctx ") || !strings.Contains(frame, "85% of 1.0M · compact 85% · 91 tok/s") {
+	raw := m.render()
+	frame := ansi.Strip(raw)
+	if !strings.Contains(frame, "891K/1M") || !strings.Contains(frame, "91 tok/s") {
 		t.Fatalf("footer lost the measured bar:\n%s", frame)
+	}
+	if !strings.Contains(raw, envCtxHot.Render(strings.Repeat(g.bar, 7))) {
+		t.Fatal("at the compaction trigger the bar must be hot")
 	}
 	for _, row := range strings.Split(frame, "\n") {
 		if ansi.StringWidth(row) > m.width {
@@ -675,7 +736,7 @@ func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
 	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
 		reasoning: strings.Repeat("thinking line ", 200), reset: true})
 	m = next.(envModel)
-	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "THINKING · live") {
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), g.agent+" thinking") || !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "live ·") {
 		t.Fatalf("the live window is not following:\n%s", ansi.Strip(m.liveBlock(m.width)))
 	}
 	m.scrollLive(-8)
@@ -752,7 +813,7 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	lines := strings.Split(ansi.Strip(m.chat.content), "\n")
-	if !strings.HasPrefix(lines[0], "YOU · goal") {
+	if !strings.HasPrefix(lines[0], g.user+" you · goal") {
 		t.Fatalf("the first line is not the goal's label: %q", lines[0])
 	}
 	if !strings.HasPrefix(lines[1], "│ fix the build") {
@@ -760,7 +821,7 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	}
 	var seen bool
 	for _, ln := range lines {
-		if strings.HasPrefix(ln, "AGENT") {
+		if strings.HasPrefix(ln, g.agent+" agent") {
 			seen = true
 		}
 	}
@@ -1003,5 +1064,220 @@ func TestChatComposerHintsAboutPathsThematically(t *testing.T) {
 	m.chat.compose.SetValue("./zzz")
 	if view := m.chatComposer(); !strings.Contains(view, "no match") {
 		t.Fatalf("a dead path should announce itself:\n%s", view)
+	}
+}
+
+// The redesign's transcript: tool calls fold to one line until Ctrl+E opens every card; a failed call stays open
+// with its reason; a root request is the inline approval card.
+func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{
+			"name": "terminal", "arguments": `{"command":"make test\nmake lint"}`}}}}},
+		{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{
+			"output": "41 passed\nall green", "exit_code": float64(0)}}},
+		{Seq: 3, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "write", "result": map[string]any{
+			"error": "permission denied: /etc/hosts"}}},
+		{Seq: 4, Goal: "g1", Kind: "approval_requested", Data: map[string]any{"cmd": "apt-get install -y libcmocka-dev", "reason": "the test needs it"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	folded := ansi.Strip(m.chat.content)
+	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "a approve", "/deny TEXT"} {
+		if !strings.Contains(folded, want) {
+			t.Fatalf("folded transcript missing %q:\n%s", want, folded)
+		}
+	}
+	if strings.Contains(folded, "all green") || strings.Contains(folded, "make lint") {
+		t.Fatalf("a folded card showed its body:\n%s", folded)
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	m = next.(envModel)
+	open := ansi.Strip(m.chat.content)
+	if !m.chat.expanded || !strings.Contains(open, "all green") || !strings.Contains(open, "make lint") {
+		t.Fatalf("Ctrl+E did not open the cards:\n%s", open)
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	if next.(envModel).chat.expanded {
+		t.Fatal("a second Ctrl+E must fold them again")
+	}
+}
+
+// A waiting root request is decided in the chat through the Requests page's own handler: d writes the denial to the
+// bridge (and the audit), /deny TEXT denies and steers the goal with what to do instead.
+func TestChatDecidesRootRequestsInline(t *testing.T) {
+	for _, viaSlash := range []bool{false, true} {
+		m := chatFixture(t)
+		bridge := t.TempDir()
+		writeReq(t, bridge, "r1", "apt-get install -y libfoo-dev", 1)
+		m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
+		m.refreshLocal()
+		if m.pendingRoot() != 0 {
+			t.Fatal("the waiting request is not found")
+		}
+		var cmd tea.Cmd
+		if viaSlash {
+			var next tea.Model
+			next, cmd = m.chatSlash("/deny use the vendored copy in third_party/ instead")
+			m = next.(envModel)
+			if cmd == nil {
+				t.Fatal("/deny must also send the steer")
+			}
+		} else {
+			m.chat.compose.Blur()
+			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
+			m = next.(envModel)
+		}
+		data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json"))
+		if err != nil || !strings.Contains(string(data), `"denied"`) {
+			t.Fatalf("no denial in the bridge (slash=%v): %s %v", viaSlash, data, err)
+		}
+		if m.pendingRoot() != -1 {
+			t.Fatal("a decided request still shows as waiting")
+		}
+	}
+}
+
+// Approving runs a root command: one stray "a" while reading must not do it. The first press only arms it and names
+// the command; a second approves; any other key in between disarms.
+func TestChatApprovalNeedsASecondPress(t *testing.T) {
+	m := chatFixture(t)
+	bridge := t.TempDir()
+	writeReq(t, bridge, "r1", "rm -rf /var/cache/foo", 1)
+	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
+	m.refreshLocal()
+	m.chat.compose.Blur()
+	press := func(r rune) {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(envModel)
+	}
+	press('a')
+	if m.chat.armed != "r1" || !strings.Contains(m.msg, "rm -rf /var/cache/foo") || !strings.Contains(m.msg, "press a again") {
+		t.Fatalf("the first a must only arm and name the command: %q", m.msg)
+	}
+	press('j') // scrolling in between
+	if m.chat.armed != "" {
+		t.Fatal("another key must disarm the approval")
+	}
+	press('a')
+	if m.chat.armed != "r1" {
+		t.Fatal("a fresh a arms again")
+	}
+	m.chat.armedAt = m.chat.armedAt.Add(-11 * time.Second)
+	press('a')
+	if m.chat.armed != "r1" {
+		t.Fatal("a stale arm (over 10 s) only re-arms")
+	}
+	if _, err := os.Stat(filepath.Join(bridge, "res", "r1.json")); err == nil {
+		t.Fatal("nothing may be decided before a confirmed approval")
+	}
+}
+
+// An edit is a diff card, open while short; a read is one quiet line; their call cards are not repeated.
+func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{
+			"name": "edit", "arguments": `{"path":"src/parse.c","old":"n > len","new":"n >= len"}`}}}}},
+		{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "edit", "result": map[string]any{
+			"path": "src/parse.c", "added": float64(1), "removed": float64(1),
+			"diff": "@@ -1,3 +1,3 @@\n int f(void) {\n-    if (n > len) return -1;\n+    if (n >= len) return -1;"}}},
+		{Seq: 3, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
+			"path": "src/parse.c", "shown": "1-40", "text": "secret body"}}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "-    if (n > len) return -1;", "+    if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "@@") || strings.Contains(v, "secret body") || strings.Count(v, "src/parse.c") != 2 {
+		t.Fatalf("hunk headers, read bodies or a repeated call card leaked:\n%s", v)
+	}
+}
+
+// The selected goal's newest todo list is pinned above the composer while the goal is open; the frame still fits.
+func TestTodoIsPinnedAboveTheComposer(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 24
+	todo := func(items ...map[string]any) residentEvent {
+		raw := make([]any, len(items))
+		for i, it := range items {
+			raw[i] = it
+		}
+		return residentEvent{Seq: 9, Goal: "original", Kind: "todo", Data: map[string]any{"items": raw}}
+	}
+	m.residentEvents = append(m.residentEvents,
+		todo(map[string]any{"text": "stale", "state": "pending"}),
+		todo(map[string]any{"text": "find the test", "state": "done"}, map[string]any{"text": "fix the bounds", "state": "in_progress"},
+			map[string]any{"text": "run the gate", "state": "pending"}))
+	m.syncChat()
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "todo") || !strings.Contains(frame, "fix the bounds") || strings.Contains(frame, "stale") {
+		t.Fatalf("the newest todo list is not pinned:\n%s", frame)
+	}
+	if rows := strings.Split(frame, "\n"); len(rows) > m.height {
+		t.Fatalf("the pinned line pushed the frame past the terminal: %d rows", len(rows))
+	}
+	m.resident.Goals[0].State = "completed"
+	if strings.Contains(ansi.Strip(m.render()), "fix the bounds") {
+		t.Fatal("a finished goal's list must not stay pinned")
+	}
+}
+
+// A big output moved to a file says so on its card, with the whole size and the path.
+func TestSpilledOutputCardNamesTheFile(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 120
+	m.residentEvents = []residentEvent{{Seq: 1, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{
+		"output": "head\n… [90,000 characters omitted] …\ntail", "exit_code": float64(0),
+		"saved": []any{map[string]any{"field": "output", "path": "outputs/20261115-terminal-abc-output.txt", "lines": float64(6000)}}}}}}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	if v := ansi.Strip(m.chat.content); !strings.Contains(v, "exit 0 · 6000 lines → outputs/20261115-terminal-abc-output.txt") {
+		t.Fatalf("the card does not name the file:\n%s", v)
+	}
+}
+
+// A need_you report stands out as a turn; fyi, scheduling and waking are quiet notes.
+func TestReportsAndScheduleNotes(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "report", Data: map[string]any{"level": "need_you", "text": "the disk is full"}},
+		{Seq: 2, Goal: "g1", Kind: "report", Data: map[string]any{"level": "fyi", "text": "halfway there"}},
+		{Seq: 3, Goal: "g1", Kind: "scheduled", Data: map[string]any{"wake_at": float64(1794780000), "note": "check the build"}},
+		{Seq: 4, Goal: "g1", Kind: "woke", Data: map[string]any{"note": "check the build"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{"! needs you", "the disk is full", "fyi: halfway there", "parked until", "check the build", "woke up"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
+	}
+}
+
+// The gate and the judge show their verdicts: a pass is a quiet line, a refusal stays open with its reason.
+func TestGateAndJudgeVerdicts(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "gate", Data: map[string]any{"command": "make test", "passed": false, "output": "exit 2\n1 failed"}},
+		{Seq: 2, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "not_yet", "reason": "no test output shows the fix"}},
+		{Seq: 3, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "41 passed"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix", "judge: met  ·  41 passed"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
 	}
 }

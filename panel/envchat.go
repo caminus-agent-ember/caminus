@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -23,6 +24,9 @@ import (
 // append events; they never replace the transcript or steal an unfinished draft.
 type residentChat struct {
 	ready, sending, newGoal, help, forceNew bool
+	expanded                                bool      // Ctrl+E: every card open (tool calls, output, thinking)
+	armed                                   string    // the root request a first "a" armed; a second approves
+	armedAt                                 time.Time // when it was armed (10 s to confirm)
 	compose                                 textarea.Model
 	transcript                              viewport.Model
 	target, selectID                        string
@@ -38,6 +42,12 @@ type residentChat struct {
 	picker                                  bool
 	pickerQuery                             string
 	pickerSel                               int
+	approvals                               bool // the Approvals overlay is over the conversation
+	approvalSel                             int  // the row it has selected
+	approvalDetail                          bool // Enter opened the selected request in full
+	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
+	goalsSel                                int
+	page, pageTop                           int // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
 	slashToken, slashText                   string
 	pathIdx                                 int
@@ -54,6 +64,33 @@ type residentLive struct {
 	tools                 []string
 	active, hold          bool
 	top                   int
+	wrapText, wrapThink   *wrapCache // finished lines wrapped once per turn (body)
+}
+
+// wrapCache keeps the wrapped, styled lines of a growing text's finished part (everything up to its last newline),
+// so a snapshot wraps only what arrived since the last one and the partial line at the end. A streamed reply only
+// grows within a turn; anything else (a new width, a shorter text) starts over.
+type wrapCache struct {
+	width, done int
+	lines       []string
+}
+
+func (c *wrapCache) wrap(s string, width int, style func(string) string) []string {
+	cut := strings.LastIndexByte(s, '\n') + 1
+	if c.width != width || cut < c.done {
+		c.width, c.done, c.lines = width, 0, nil
+	}
+	if cut > c.done {
+		for _, ln := range strings.Split(ansi.Hardwrap(strings.TrimSuffix(s[c.done:cut], "\n"), width, true), "\n") {
+			c.lines = append(c.lines, style(ln))
+		}
+		c.done = cut
+	}
+	out := slices.Clip(c.lines)
+	for _, ln := range strings.Split(ansi.Hardwrap(s[cut:], width, true), "\n") {
+		out = append(out, style(ln))
+	}
+	return out
 }
 
 // highlightLive colors the inline code spans of a streaming line, so live text reads like the rendered
@@ -78,21 +115,26 @@ func highlightLive(line string) string {
 	}
 }
 
+// appendText adds a streamed delta to the reply (the text only ever grows within a turn).
+func (l residentLive) appendText(delta string) residentLive { l.text += delta; return l }
+
 // body is the live reply as wrapped lines: its reasoning, the tools it started, then the text.
 func (l residentLive) body(width int) []string {
 	var out []string
 	if l.reasoning != "" {
-		for _, ln := range strings.Split(ansi.Hardwrap(l.reasoning, width, true), "\n") {
-			out = append(out, envThink.Render(ln))
+		if l.wrapThink == nil {
+			l.wrapThink = &wrapCache{} // (a fixture without one; the live handler gives each turn its own)
 		}
+		out = append(out, l.wrapThink.wrap(l.reasoning, width, func(s string) string { return envThink.Render(s) })...)
 	}
 	for _, name := range l.tools {
-		out = append(out, envDim.Render("RUN · ")+envTool.Render(residentText(name))+envDim.Render(" …"))
+		out = append(out, envDim.Render(g.collapsed+" ")+envTool.Render(g.tool+" "+residentText(name))+envDim.Render(" …"))
 	}
 	if l.text != "" {
-		for _, ln := range strings.Split(ansi.Hardwrap(l.text, width, true), "\n") {
-			out = append(out, highlightLive(ln))
+		if l.wrapText == nil {
+			l.wrapText = &wrapCache{}
 		}
+		out = append(out, l.wrapText.wrap(l.text, width, highlightLive)...)
 	}
 	if len(out) == 0 {
 		out = []string{envDim.Render("generating…")}
@@ -109,10 +151,11 @@ func (m *envModel) initChat() {
 	if m.chat.ready {
 		return
 	}
-	c := residentChat{ready: true, newGoal: true}
+	c := residentChat{ready: true, newGoal: true, page: -1}
 	c.compose = textarea.New()
-	c.compose.Prompt = "› "
-	c.compose.Placeholder = "Give the agent a goal, or type /help"
+	// One prompt mark on the first line, an equal indent under it: the editor asks per display line, so a wrapped
+	// draft keeps the column its text starts in.
+	c.compose.SetPromptFunc(2, promptMark)
 	c.compose.ShowLineNumbers = false
 	c.compose.CharLimit = 0
 	c.compose.MaxHeight = 0 // long pasted goals scroll inside the visible editor
@@ -124,6 +167,25 @@ func (m *envModel) initChat() {
 	// turning every editor keystroke and cursor blink into a full transcript scan.
 	c.transcript.SoftWrap = false
 	m.chat = c
+	m.chatStyles()
+}
+
+// promptMark is the composer's prompt: the glyph on the first line, nothing on the lines under it (the editor pads
+// them to the same width, so the text stays in one column).
+func promptMark(info textarea.PromptInfo) string {
+	if info.LineNumber == 0 {
+		return g.user + " "
+	}
+	return ""
+}
+
+// chatStyles gives the composer the palette's prompt and placeholder styles. A style keeps the colour it was built
+// with, so a theme switch calls this again.
+func (m *envModel) chatStyles() {
+	s := m.chat.compose.Styles()
+	s.Focused.Prompt, s.Blurred.Prompt = envBusy, envBusy
+	s.Focused.Placeholder, s.Blurred.Placeholder = envDim, envDim
+	m.chat.compose.SetStyles(s)
 }
 
 func (m envModel) selectedResidentGoal() *residentGoal {
@@ -133,6 +195,9 @@ func (m envModel) selectedResidentGoal() *residentGoal {
 	g := m.resident.Goals[m.goalSel]
 	return &g
 }
+
+// maxResidentEvents bounds the events the panel keeps in memory for one conversation.
+const maxResidentEvents = 2000
 
 func (m *envModel) receiveResident(msg residentMsg) {
 	m.initChat()
@@ -146,6 +211,11 @@ func (m *envModel) receiveResident(msg residentMsg) {
 	}
 	for _, e := range msg.events {
 		if e.Seq > m.chat.seq {
+			if len(m.residentEvents) >= maxResidentEvents {
+				// Bounded: a resident that runs for days must not grow the panel without limit. The oldest
+				// events leave memory; the journal on the agent side keeps them.
+				m.residentEvents = append(m.residentEvents[:0:0], m.residentEvents[len(m.residentEvents)-maxResidentEvents/2:]...)
+			}
 			m.residentEvents = append(m.residentEvents, e)
 			m.chat.seq = e.Seq
 			if e.Kind == "assistant" {
@@ -184,7 +254,10 @@ func (m *envModel) targetSelectedGoal() {
 func (m *envModel) syncChat() {
 	m.initChat()
 	w, h := max(20, m.width), max(12, m.height)
-	m.chat.compose.SetWidth(w - 4)
+	// The composer's box is w-2 wide: four of those cells are its border and padding, so the editor gets w-6 and a
+	// full line never eats the frame.
+	m.chat.compose.SetWidth(w - 6)
+	m.chat.compose.Placeholder = m.composerHint()
 	m.chat.compose.SetHeight(min(3, max(1, h-10)))
 	if m.chat.question != nil {
 		m.chat.questionInput.SetWidth(w - 4)
@@ -217,14 +290,16 @@ func (m *envModel) syncChat() {
 	changed := m.chat.rendered != len(m.residentEvents)
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		if block := m.chat.eventBlock(e); block != "" {
-			m.chat.content += ansi.Hardwrap(eventCard(block), w, true) + "\n\n"
+			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
 	if changed || m.chat.transcript.TotalLineCount() == 0 {
 		body := strings.TrimRight(m.chat.content, "\n")
 		if body == "" {
-			body = "Your agent's conversation and commands will stay here.\n\nType a goal below. /help shows the controls."
+			body = mascotBeside(0, "", envTitle.Render("CAMINUS")+envDim.Render(" env"),
+				"Your agent's conversation and commands will stay here.",
+				envDim.Render("Type a goal below. /help shows the controls."))
 		}
 		m.chat.transcript.SetContent(body)
 	}
@@ -235,7 +310,8 @@ func (m *envModel) syncChat() {
 
 // bodyHeight is the space between the header and the footer, without the composer.
 func (m envModel) bodyHeight() int {
-	return max(4, max(12, m.height)-1-lipgloss.Height(m.chatBottom())-1)
+	// the header is two lines (title, rule); the footer one or two (chatFoot)
+	return max(4, max(12, m.height)-2-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(max(20, m.width))))
 }
 
 // liveHeight is the live window's content lines (its label included): half the body less the border, so the
@@ -280,14 +356,16 @@ func (m envModel) liveBlock(w int) string {
 	body := l.body(inner)
 	height := m.liveHeight()
 	top := m.liveTop(len(body))
-	label := "THINKING · live · Ctrl+T hold · Alt+↑/↓ scroll"
-	if l.reasoning == "" {
-		label = "AGENT · live · Ctrl+T hold · Alt+↑/↓ scroll"
+	spin := g.spinner[m.tickN%len(g.spinner)]
+	who := g.agent + " agent"
+	if l.reasoning != "" && l.text == "" {
+		who = g.agent + " thinking"
 	}
+	hint := "  live · Ctrl+T hold · Alt+↑/↓ scroll"
 	if l.hold {
-		label = fmt.Sprintf("LIVE · held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
+		hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
 	}
-	rows := []string{envDim.Render(label)}
+	rows := []string{bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)}
 	rows = append(rows, body[top:min(top+height-1, len(body))]...)
 	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
 }
@@ -347,55 +425,89 @@ func fenced(text, language string) string {
 	return fence + language + "\n" + text + "\n" + fence
 }
 
+// eventBlock draws one durable event in the shell's style (shell.go): the human's words and the agent's replies as
+// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+E expands them all), root
+// requests as the inline approval card. The result is final: syncChat caches it and never draws it again.
 func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
-	heading := func(label string, c color.Color) string {
-		return bold(c).Render(label)
+	w := max(20, c.renderWidth)
+	turn := func(mark, label string, col color.Color, body string) string {
+		return eventCard(bold(col).Render(mark+" "+label) + "\n" + body)
+	}
+	firstLine := func(s string) string {
+		s = strings.TrimSpace(residentText(s))
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[:i] + " …"
+		}
+		return s
+	}
+	lines := func(s string, limit int) []string {
+		all := strings.Split(strings.TrimRight(strings.ReplaceAll(residentText(s), "\r\n", "\n"), "\n"), "\n")
+		if len(all) > limit {
+			all = append([]string{fmt.Sprintf("… %d earlier lines", len(all)-limit)}, all[len(all)-limit:]...)
+		}
+		return all
 	}
 	switch e.Kind {
 	case "goal_queued":
-		return heading("YOU · goal "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(str("prompt"))
+		label := "you · goal " + shortGoal(e.Goal)
+		if k, _ := e.Data["kind"].(string); k == "free" || k == "dream" {
+			label = "free time · " + k // the resident's own hours: the invitation, not the human's words
+			return toolCard(k, "stretch "+shortGoal(e.Goal)+" started", "", true, c.expanded, lines(str("prompt"), 30), w)
+		}
+		return turn(g.user, label, cBlue, c.renderMarkdown(str("prompt")))
 	case "user_message", "peer_message":
 		text := str("text")
 		if text == "" {
 			return ""
 		}
-		return heading("YOU · steer "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(text)
+		return turn(g.user, "you · steer "+shortGoal(e.Goal), cBlue, c.renderMarkdown(text))
 	case "assistant":
 		var parts []string
 		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
 		// sent back to the model, so this block is display only.
 		if text := str("reasoning"); text != "" {
-			parts = append(parts, heading("THINKING", cMuted)+"\n"+c.renderMarkdown(text))
+			if c.expanded {
+				parts = append(parts, eventCard(envThink.Render(g.expanded+" thinking")+"\n"+envThink.Render(c.renderMarkdown(text))))
+			} else {
+				parts = append(parts, envDim.Render(g.collapsed+" thinking · "+fmt.Sprintf("%d lines", strings.Count(text, "\n")+1)))
+			}
 		}
 		if text := str("content"); text != "" {
-			parts = append(parts, heading("AGENT", cGreen)+"\n"+c.renderMarkdown(text))
+			parts = append(parts, turn(g.agent, "agent", cGreen, c.renderMarkdown(text)))
 		}
 		calls, _ := e.Data["tool_calls"].([]any)
 		for _, raw := range calls {
 			call, _ := raw.(map[string]any)
 			f, _ := call["function"].(map[string]any)
 			name, _ := f["name"].(string)
-			if name == "ask_user" {
+			if name == "ask_user" || name == "read" || name == "edit" || name == "write" {
 				continue
-			} // the durable question gets a native UI below
+			} // the durable question gets a native UI below; a file tool's result card says what it did
 			rawArgs, _ := f["arguments"].(string)
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
-				parts = append(parts, heading("RUN · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(command, "bash")))
-			} else {
-				var pretty any
-				text := rawArgs
-				if json.Unmarshal([]byte(rawArgs), &pretty) == nil {
-					if b, err := json.MarshalIndent(pretty, "", "  "); err == nil {
-						text = string(b)
-					}
-				}
-				parts = append(parts, heading("TOOL · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(text, "json")))
+				parts = append(parts, toolCard("terminal", firstLine(command), "", true, c.expanded, lines(command, 40), w))
+				continue
 			}
+			summary := ""
+			for _, key := range []string{"path", "question", "summary", "check", "evidence", "label", "id", "topic", "to", "until"} {
+				if v, ok := args[key].(string); ok && v != "" {
+					summary = firstLine(v)
+					break
+				}
+			}
+			var pretty any
+			text := rawArgs
+			if json.Unmarshal([]byte(rawArgs), &pretty) == nil {
+				if b, err := json.MarshalIndent(pretty, "", "  "); err == nil {
+					text = string(b)
+				}
+			}
+			parts = append(parts, toolCard(residentText(name), summary, "", true, c.expanded, lines(text, 40), w))
 		}
-		return strings.Join(parts, "\n\n")
+		return strings.Join(parts, "\n")
 	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
 		if str("name") == "ask_user" {
@@ -403,40 +515,102 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if answer == "" {
 				answer, _ = result["decision"].(string)
 			}
-			return heading("YOU · answer", cBlue) + "\n" + c.renderMarkdown(answer)
+			return turn(g.user, "you · answer", cBlue, c.renderMarkdown(answer))
 		}
-		if output, ok := result["output"].(string); ok && output != "" {
-			return heading("OUTPUT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(strings.ReplaceAll(output, "\r\n", "\n"), "text"))
+		if name := str("name"); (name == "edit" || name == "write") && result["error"] == nil {
+			// an edit is a diff card: open when it is short, folded (Ctrl+E) when it is long
+			path, _ := result["path"].(string)
+			added, _ := result["added"].(float64)
+			removed, _ := result["removed"].(float64)
+			meta := fmt.Sprintf("+%d −%d", int(added), int(removed))
+			if created, _ := result["created"].(bool); created {
+				note, _ := result["note"].(string)
+				meta = note
+			}
+			diff, _ := result["diff"].(string)
+			var body []string
+			for _, ln := range strings.Split(residentText(diff), "\n") {
+				if ln != "" && !strings.HasPrefix(ln, "@@") {
+					body = append(body, ln)
+				}
+			}
+			return toolCard("edit", residentText(path), meta, true, c.expanded || len(body) <= 12, body, w)
+		}
+		if str("name") == "read" && result["error"] == nil {
+			path, _ := result["path"].(string)
+			shown, _ := result["shown"].(string)
+			meta := "lines " + shown
+			if dir, _ := result["directory"].(bool); dir {
+				meta = "directory"
+			}
+			return toolCard("read", residentText(path), meta, true, false, nil, w)
 		}
 		if err, ok := result["error"].(string); ok {
-			return heading("TOOL ERROR", cRed) + "\n" + c.renderMarkdown(fenced(err, "text"))
+			// a failed call stays open: the reason is what the reader needs
+			return toolCard("error", residentText(str("name")), firstLine(err), false, true, lines(err, 12), w)
+		}
+		if output, ok := result["output"].(string); ok {
+			meta := fmt.Sprintf("%d lines", strings.Count(strings.TrimRight(output, "\n"), "\n")+1)
+			if code, ok := result["exit_code"].(float64); ok {
+				meta = fmt.Sprintf("exit %d · ", int(code)) + meta
+			} else if running, _ := result["running"].(bool); running {
+				meta = "running · " + meta
+			}
+			if strings.TrimSpace(output) == "" {
+				meta = strings.TrimSuffix(meta, " · 1 lines") + " · no output"
+			}
+			if saved, _ := result["saved"].([]any); len(saved) > 0 {
+				// a big output was moved to a file: the card says where, with the whole size
+				if first, _ := saved[0].(map[string]any); first != nil {
+					path, _ := first["path"].(string)
+					lines, _ := first["lines"].(float64)
+					meta = strings.Split(meta, " · ")[0] + fmt.Sprintf(" · %d lines → %s", int(lines), residentText(path))
+				}
+			}
+			code, _ := result["exit_code"].(float64)
+			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
 		}
 		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
-			return heading("RESULT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(string(b), "json"))
+			return toolCard("result", residentText(str("name")), "", true, c.expanded, lines(string(b), 30), w)
 		}
 	case "finished":
-		return heading("FINISHED", cGreen) + "\n" + c.renderMarkdown(str("summary"))
-	case "question", "approval_requested":
-		text := str("text")
-		label := "QUESTION"
-		if e.Kind == "approval_requested" {
-			text = str("reason") + "\n" + fenced(str("cmd"), "bash")
-			label = "ROOT REVIEW · /requests"
-		}
-		return heading(label, cYellow) + "\n" + c.renderMarkdown(text)
+		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
+	case "approval_requested":
+		return approvalCard("root", residentText(str("cmd")), residentText(str("reason")), w)
+	case "question":
+		return turn("?", "question", cYellow, c.renderMarkdown(str("text")))
 	case "compacted":
-		return heading("CONTEXT COMPACTED · conversation remains in this transcript", cYellow)
+		return toolCard("note", "context compacted", "the whole conversation stays in this transcript", true, false, nil, w)
 	case "cancelled":
-		return heading("GOAL CANCELLED · "+shortGoal(e.Goal), cYellow)
-	case "model_unavailable", "model_truncated", "context_refused":
-		text := str("error")
+		return toolCard("note", "goal "+shortGoal(e.Goal)+" cancelled", "", true, false, nil, w)
+	case "model_unavailable", "model_truncated", "context_refused", "model_refused", "model_gave_up":
+		text := residentText(str("error"))
+		body := lines(text, 12)
 		if partial, ok := e.Data["partial"].(map[string]any); ok {
 			if content, _ := partial["content"].(string); content != "" {
-				// Show what the model produced before it stopped, then why it stopped.
-				text = c.renderMarkdown(content) + "\n" + envDim.Render(residentText(text))
+				// what the model produced before it stopped, then why it stopped
+				body = append(lines(content, 20), "", text)
 			}
 		}
-		return heading(residentText(e.Kind), cRed) + "\n" + text
+		return toolCard("error", strings.ReplaceAll(e.Kind, "_", " "), firstLine(text), false, true, body, w)
+	case "judged":
+		v := str("verdict")
+		return toolCard("gate", "judge: "+strings.ReplaceAll(v, "_", " "), firstLine(str("reason")), v == "met" || v == "unread", v != "met", lines(str("reason"), 6), w)
+	case "gate":
+		ok, _ := e.Data["passed"].(bool)
+		return toolCard("gate", "gate: "+firstLine(str("command")), map[bool]string{true: "passed", false: "failed"}[ok], ok, !ok, lines(str("output"), 12), w)
+	case "report":
+		if str("level") == "need_you" {
+			return turn("!", "needs you", cRed, c.renderMarkdown(str("text")))
+		}
+		return toolCard("note", "fyi: "+firstLine(str("text")), "", true, c.expanded, lines(str("text"), 20), w)
+	case "scheduled":
+		at, _ := e.Data["wake_at"].(float64)
+		return toolCard("note", "parked until "+time.Unix(int64(at), 0).Format("15:04"), firstLine(str("note")), true, false, nil, w)
+	case "woke":
+		return toolCard("note", "woke up", firstLine(str("note")), true, false, nil, w)
+	case "brain":
+		return toolCard("note", "now answering: "+residentText(str("model")), str("brain"), true, false, nil, w)
 	}
 	return ""
 }
@@ -448,25 +622,12 @@ func shortGoal(id string) string {
 	return id
 }
 
+// chatComposer is where the human types: the shell's composer box (shell.go), its top border saying which goal the
+// draft goes to, the editor's one prompt mark on the first line, and a dim hint that says what Enter does now. The
+// Tab completion hint rides above the draft, inside the same box.
 func (m envModel) chatComposer() string {
 	if m.chat.question != nil && m.chat.questionArmed {
 		return m.questionBox()
-	}
-	label := "New goal"
-	if m.chat.question != nil && !m.chat.questionArmed {
-		label = "Question waiting · F2 to answer · your draft is preserved"
-	}
-	if !m.chat.newGoal && m.chat.question == nil {
-		label = "Steer goal " + shortGoal(m.chat.target)
-		if g := m.selectedResidentGoal(); g != nil && g.ID == m.chat.target && g.State == "completed" {
-			label = "Continue conversation · " + shortGoal(m.chat.target)
-		}
-	}
-	if m.chat.sending {
-		label = "Sending…"
-	}
-	if !m.chat.compose.Focused() {
-		label += " · browsing history; Enter to type"
 	}
 	input := m.chat.compose.View()
 	if (m.mode == "" || m.mode == "normal") && !m.chat.sending {
@@ -504,24 +665,88 @@ func (m envModel) chatComposer() string {
 			input = envClip(input, max(18, m.width-6)) + "\n" + input
 		}
 	}
-	if m.mode == "agentname" {
-		label = "Agent name · Enter selects · Esc cancels"
-		input = terminalText(m.edit, false) + "█"
+	return composerBox(input, m.composerTitle(), max(18, m.width-2))
+}
+
+// composerTitle is what the composer's top border says: which goal a message goes to, or that it starts a new one.
+// The old label's other facts (sending, a waiting question, browsing) keep their place there, shortened to a title.
+func (m envModel) composerTitle() string {
+	title := "new goal"
+	switch {
+	case m.chat.sending:
+		title = "sending…"
+	case m.chat.question != nil:
+		title = "question waiting · F2 answers"
+	case !m.chat.newGoal:
+		title = "to goal " + shortGoal(m.chat.target)
+		if g := m.selectedResidentGoal(); g != nil && g.ID == m.chat.target && g.State == "completed" {
+			title = "continue goal " + shortGoal(m.chat.target)
+		}
 	}
-	if m.mode == "agentgoal" || m.mode == "agentsteer" {
-		input = terminalText(m.edit, true) + "█"
+	if !m.chat.compose.Focused() && !m.chat.sending {
+		title += " · browsing"
 	}
-	return envBorder.Width(max(18, m.width-2)).Render(envDim.Render(label) + "\n" + input)
+	return title
+}
+
+// composerHint is the composer's placeholder: what Enter does with the draft now.
+func (m envModel) composerHint() string {
+	if !m.chat.compose.Focused() {
+		return "browsing history · Enter returns to typing"
+	}
+	if m.chat.newGoal {
+		return "type a goal · Enter starts it · /help"
+	}
+	return "message the agent · Enter nudges at the next step · /steer redirects"
 }
 
 // chatBottom renders whatever occupies the composer slot: the steering draft,
 // the inline question or the Ctrl+P session switcher. syncChat sizes the
 // transcript against its measured height.
 func (m envModel) chatBottom() string {
+	if box := m.promptBox(max(18, m.width-2)); box != "" {
+		return box
+	}
 	if m.chat.picker {
 		return m.pickerBox()
 	}
+	if line := m.todoPinned(); line != "" {
+		return line + "\n" + m.chatComposer()
+	}
 	return m.chatComposer()
+}
+
+// todoPinned is the selected goal's todo list (its newest todo event) as one line above the composer, while the goal
+// is open. bodyHeight measures chatBottom, so the line takes its row from the transcript.
+func (m envModel) todoPinned() string {
+	sel := m.selectedResidentGoal()
+	if sel == nil || sel.State == "completed" || sel.State == "cancelled" {
+		return ""
+	}
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != sel.ID || e.Kind != "todo" {
+			continue
+		}
+		raw, _ := e.Data["items"].([]any)
+		var items []todoItem
+		for _, r := range raw {
+			it, _ := r.(map[string]any)
+			text, _ := it["text"].(string)
+			state := map[string]string{"done": "done", "in_progress": "now"}[fmt.Sprint(it["state"])]
+			if state == "" {
+				state = "next"
+			}
+			if text != "" {
+				items = append(items, todoItem{residentText(text), state})
+			}
+		}
+		if len(items) == 0 {
+			return ""
+		}
+		return todoLine(items, max(20, m.width))
+	}
+	return ""
 }
 
 // contextBarSlots is the fixed width of the usage bar: readable at a glance,
@@ -619,54 +844,38 @@ func (m envModel) renderChat() string {
 	if m.resident.DaemonAlive {
 		state = "listening"
 	}
-	steps := 0
-	if g := m.selectedResidentGoal(); g != nil {
-		state = g.State
-		steps = g.Steps
-	}
-	indicator := "●"
-	if state == "working" || state == "queued" || state == "waiting_model" {
-		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		indicator = frames[m.tickN%len(frames)]
-	}
-	head := clip(envTitle.Render("CAMINUS") + " · " + residentText(m.agentName) +
-		"  " + contextStateStyle(state).Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
-	accent, ctxRest := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold, m.resident.TokPerS)
-	ctxStyle := envCtxOK
-	switch contextBarLevel(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold) {
-	case 1:
-		ctxStyle = envWarn
-	case 2:
-		ctxStyle = envCtxHot
-	}
-	status := []string{envDim.Render(residentText(m.resident.Model))}
-	if accent+ctxRest != "" {
-		status = append(status, ctxStyle.Render(accent)+envDim.Render(ctxRest))
-	}
-	status = append(status,
-		envDim.Render("SSH "+map[bool]string{true: "OK", false: "…"}[m.sshOK]),
-		envDim.Render(fmt.Sprintf("%d requests", len(m.reqs))),
-	)
-	if !m.chat.transcript.AtBottom() {
-		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
-	}
-	if m.chat.live.active {
-		hint := "live: Ctrl+T hold"
-		if m.chat.live.hold {
-			hint = "live: held · Ctrl+T follow"
+	steps, goalText := 0, ""
+	if sel := m.selectedResidentGoal(); sel != nil {
+		state = sel.State
+		steps = sel.Steps
+		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
+		if lipgloss.Width(goalText) > 48 {
+			goalText = ansi.Truncate(goalText, 47, "…")
 		}
-		status = append(status, envDim.Render(hint))
 	}
-	if m.chat.seq < m.resident.LastEvent {
-		status = append(status, envDim.Render("loading history"))
-	}
-	if m.msg != "" {
-		status = append(status, envDim.Render(terminalText(m.msg, false)))
-	}
-	status = append(status, envDim.Render("Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
-	foot := clip(strings.Join(status, " · "))
+	head := shellHeader(residentText(m.agentName), state, goalText, steps, w)
+	foot := m.chatFoot(w)
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
+		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /approvals · /remember TEXT · /memory · /context · /audit · /settings") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
+	}
+	if m.chat.approvals {
+		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
+		// small so a short terminal (with /help's extra lines) still gets a box inside the frame.
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.approvalOverlay(w, h) + "\n" + foot
+	}
+	if m.chat.goals {
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.goalsOverlay(w, h) + "\n" + foot
+	}
+	if m.chat.page >= 0 {
+		// a typed prompt opened from the page (a new note) sits under the overlay
+		prompt := m.promptBox(max(18, w-2))
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)-lipgloss.Height(prompt)+1)
+		if prompt != "" {
+			return head + "\n" + m.pageOverlay(w, h) + "\n" + prompt + "\n" + foot
+		}
+		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
 	body := []string{head, m.chat.transcript.View()}
 	if live := m.liveBlock(w); live != "" {
@@ -692,7 +901,8 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending {
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals {
+		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
 	}
 	return m, cmd
@@ -700,6 +910,15 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.initChat()
+	if m.chat.approvals {
+		return m.approvalKey(msg)
+	}
+	if m.chat.goals {
+		return m.goalsKey(msg)
+	}
+	if m.chat.page >= 0 {
+		return m.pageKey(msg)
+	}
 	if m.chat.picker {
 		return m.pickerKey(msg)
 	}
@@ -718,6 +937,17 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
+	case "ctrl+g":
+		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
+		m.chat.compose.Blur()
+		return m, nil
+	case "ctrl+a":
+		// The Approvals overlay over the conversation: the requests a person has to decide, in the one box every
+		// overlay uses. It owns the keys while it is open, so the composer lets go of them.
+		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
+		m.chat.armed = ""
+		m.chat.compose.Blur()
+		return m, nil
 	case "tab", "shift+tab":
 		if next, done := m.cycleSlash(); done {
 			return next, nil
@@ -725,7 +955,7 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if next, done := m.cyclePath(); done {
 			return next, nil
 		}
-		return m.onKey(k)
+		return m, nil // the chat is the only screen: Tab completes and does nothing else
 	case "pgup":
 		if m.chat.live.active {
 			m.scrollLive(-m.liveHeight())
@@ -743,6 +973,13 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false // follow the live tail again too
+		return m, nil
+	case "ctrl+e":
+		// open or fold every card; drawn blocks are final, so the transcript is drawn again once
+		m.chat.expanded = !m.chat.expanded
+		m.chat.content, m.chat.rendered = "", 0
+		m.msg = map[bool]string{true: "cards open · Ctrl+E folds", false: "cards folded · Ctrl+E opens"}[m.chat.expanded]
+		m.syncChat()
 		return m, nil
 	case "ctrl+t":
 		// Hold the live window where it is while the reply keeps arriving.
@@ -771,6 +1008,25 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !m.chat.compose.Focused() {
+		// A pending root request is decided right here, through the Requests page's own handler (the same sudo
+		// run, claim, audit entry and answer files): a approves, d denies, e opens it in the Requests editor.
+		// Approving runs a root command, so it takes two presses: the first a arms it and shows the exact
+		// command, a second a within 10 s approves. Any other key disarms. Denying runs nothing and needs one.
+		armed := m.chat.armed
+		m.chat.armed = ""
+		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "d" || k == "e") {
+			r := m.reqs[i]
+			if k == "a" && (armed != r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
+				m.chat.armed, m.chat.armedAt = r.ID, time.Now()
+				m.msg = "approve as root: " + terminalText(r.Cmd, false) + " ? press a again (any other key cancels)"
+				return m, nil
+			}
+			m.sel = i
+			return m.reqKeys(k) // e opens the edit prompt in the composer's slot
+		}
+		if armed != "" {
+			m.msg = "approval cancelled"
+		}
 		switch k {
 		case "enter", "t":
 			return m, m.chat.compose.Focus()
@@ -884,10 +1140,22 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 	case "/requests":
 		clear()
-		m.tab = 0
+		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
+		m.chat.armed = ""
+		m.chat.compose.Blur()
+	case "/approvals":
+		// The overlay over the conversation; /requests still opens the page that edits and answers.
+		clear()
+		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
+		m.chat.armed = ""
+		m.chat.compose.Blur()
+	case "/memory", "/context", "/audit", "/settings":
+		clear()
+		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
 		clear()
-		m.tab = 7
+		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
+		m.chat.compose.Blur()
 		return m, residentSessions(m)
 	case "/newsession":
 		if arg == "" {
@@ -905,12 +1173,8 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		return m, residentAction(m, []string{"memory", m.agentName, "--stdin", "--json"}, arg)
 	case "/goals":
 		clear()
-		m.chat.help = true
-		var goals []string
-		for _, g := range m.resident.Goals {
-			goals = append(goals, shortGoal(g.ID)+" "+g.State)
-		}
-		m.msg = strings.Join(goals, " · ")
+		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
+		m.chat.compose.Blur()
 	case "/goal":
 		var found []int
 		for i, g := range m.resident.Goals {
@@ -984,7 +1248,45 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.chat.markdown = nil
+		m.chatStyles() // the composer's prompt and hint keep the palette's colours
 		m.msg = "theme: " + name
+		m.syncChat()
+		return m, nil
+	case "/deny":
+		// "No, do this instead": deny the newest root request and send the text to its goal as a steer.
+		i := m.pendingRoot()
+		if i < 0 {
+			m.msg = "no root request is waiting"
+			return m, nil
+		}
+		text := strings.TrimSpace(arg)
+		if text == "" {
+			m.msg = "usage: /deny TEXT — denies the root request and tells the agent what to do instead"
+			return m, nil
+		}
+		r := m.reqs[i]
+		m.sel = i
+		next, _ := m.reqKeys("d")
+		m = next.(envModel)
+		clear()
+		goal := r.Goal
+		if goal == "" {
+			goal = m.chat.target
+		}
+		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--steer", "--stdin", "--json"},
+			"Your root request was denied. Instead: "+text)
+	case "/glyphs":
+		// The symbol set (shell.go): nerd needs a Nerd Font; unicode needs none; ascii is for anything else.
+		name := strings.TrimSpace(arg)
+		if name == "" {
+			name = glyphsNext()
+		}
+		if err := glyphsSet(name); err != nil {
+			m.msg = err.Error()
+			return m, nil
+		}
+		m.msg = "glyphs: " + name + "  " + g.working + " " + g.waiting + " " + g.done + " " + g.root + " " + g.model + " " + g.queue +
+			"  (boxes? pick /glyphs unicode)"
 		m.syncChat()
 		return m, nil
 	case "/resume":
@@ -1006,10 +1308,11 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 // chatSlash. The list stays in one place so the two never drift apart.
 var slashCommands = []struct{ name, hint string }{
 	{"/agent", "open another session NAME"},
+	{"/approvals", "open the approvals overlay (Ctrl+A)"},
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/goal", "select a goal by ID prefix"},
-	{"/goals", "list goals"},
+	{"/goals", "the goals overlay (Ctrl+G)"},
 	{"/help", "toggle the help footer"},
 	{"/new", "start a new goal"},
 	{"/newsession", "create a session NAME"},
@@ -1023,6 +1326,12 @@ var slashCommands = []struct{ name, hint string }{
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/stop", "stop this session's loop"},
 	{"/theme", "switch panel colors NAME; /theme lists"},
+	{"/glyphs", "symbols: nerd, unicode or ascii; alone, the next one"},
+	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
+	{"/memory", "memory and notes"},
+	{"/context", "what the agent's context holds"},
+	{"/audit", "the audit log"},
+	{"/settings", "this session's settings"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.
@@ -1217,8 +1526,6 @@ func (m envModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
-	case "tab", "shift+tab":
-		return m.onKey(k)
 	case "esc":
 		m.chat.picker = false
 		return m, m.chat.compose.Focus()
@@ -1288,4 +1595,61 @@ func (m envModel) pickerBox() string {
 	}
 	hint := "Enter opens · ↑/↓ choose · Esc cancels"
 	return envBorder.Width(w).Render(strings.Join(rows, "\n") + "\n" + envDim.Render(envClip(hint, w-4)))
+}
+
+// chatFoot is the status line (shell.go) and, when something is only sometimes true, a dim line under it; bodyHeight
+// measures it so the frame never outgrows the terminal.
+func (m envModel) chatFoot(w int) string {
+	clip := func(s string) string { return ansi.Truncate(s, w, "") }
+	queued := 0
+	for _, gl := range m.resident.Goals {
+		if gl.State == "queued" {
+			queued++
+		}
+	}
+	// The status line: brain, context, speed and queue, then the keys that matter now (shell.go). Everything that is
+	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
+	keys := []string{"esc browse", "^P sessions", "/help"}
+	if len(m.reqs) > 0 {
+		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
+	}
+	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
+		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: -1, tps: m.resident.TokPerS,
+		queue: queued, keys: keys}, w)
+	status := []string{}
+	if !m.sshOK {
+		status = append(status, envWarn.Render("SSH …"))
+	}
+	if !m.chat.transcript.AtBottom() {
+		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
+	}
+	if m.chat.live.active {
+		hint := "live: Ctrl+T hold"
+		if m.chat.live.hold {
+			hint = "live: held · Ctrl+T follow"
+		}
+		status = append(status, envDim.Render(hint))
+	}
+	if m.chat.seq < m.resident.LastEvent {
+		status = append(status, envDim.Render("loading history"))
+	}
+	if m.msg != "" {
+		status = append(status, envDim.Render(terminalText(m.msg, false)))
+	}
+	foot := statusBar
+	if len(status) > 0 {
+		foot += "\n" + clip(strings.Join(status, envDim.Render(" · ")))
+	}
+	return foot
+}
+
+// pendingRoot is the index in m.reqs of the newest root request from this resident still waiting, or -1.
+func (m envModel) pendingRoot() int {
+	for i := len(m.reqs) - 1; i >= 0; i-- {
+		r := m.reqs[i]
+		if r.kind() == "root" && (r.Agent == "" || r.Agent == m.agentName) {
+			return i
+		}
+	}
+	return -1
 }
