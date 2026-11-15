@@ -2819,7 +2819,43 @@ for line in sys.stdin:
         self.cmd('queue',['move',c,'--to','5'],code=1)
         self.cmd('queue',['remove',c],code=1)
 
-
+    def test_export_writes_the_goal_transcript_as_markdown(self):
+        from caminus.env.resident import export as export_mod
+        self.replies(call('define_done',dict(check='the roster is sorted')),
+                     call('todo',dict(items=[dict(text='write it',state='done')])),
+                     call('finish',dict(summary='ZRoster sorted.')))
+        goal=self.cmd('once',['--goal','ZEXPORT Sort the roster.'])
+        gid=goal['id']
+        out=self.cmd('export',[gid])
+        self.assertEqual(out['goal'],gid)
+        self.assertTrue(out['path'].startswith(str(self.home/'exports')),out['path'])
+        data=Path(out['path']).read_text()
+        self.assertEqual(out['bytes'],len(Path(out['path']).read_bytes()))
+        self.assertIn('ZEXPORT Sort the roster.',data)          # the prompt opens the file
+        self.assertIn('Done check: the roster is sorted',data)
+        self.assertIn('Finished: ZRoster sorted.',data)
+        self.assertIn('### tool: define_done',data)             # each tool call, as it was made
+        self.assertIn('```json',data)
+        self.assertIn('<result>',data)                          # and each truncated result
+        # a steer reads as the human's words under its own heading
+        g2=self.cmd('send',['ZSTEERED second goal.'])['id']
+        self.cmd('send',['use care here','--goal-id',g2,'--steer'])
+        self.replies(call('finish',dict(summary='done')))
+        self.cmd('once',['--goal-id',g2])
+        data2=Path(self.cmd('export',[g2])['path']).read_text()
+        self.assertIn('## You (steer)',data2)
+        self.assertIn('use care here',data2)
+        # --out writes where the caller asks
+        target=self.home/'custom'/'transcript.md'
+        out3=self.cmd('export',[gid,'--out',str(target)])
+        self.assertEqual(Path(out3['path']),target)
+        self.assertEqual(out3['bytes'],target.stat().st_size)
+        # oversize tool results carry an omission note, not silence
+        long_g=dict(id=gid,prompt='p',done_check='',summary='',state='working',
+                    messages=[dict(role='tool',content='x'*4100)])
+        text=export_mod.render(gid,long_g)
+        self.assertIn('100 characters omitted',text)
+        self.assertNotIn('x'*4001,text)
 
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
