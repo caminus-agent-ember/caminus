@@ -19,6 +19,7 @@ from .mail import Mail
 from . import approval
 from .discovery import TOPICS, discover
 from .prompt import render as render_prompt
+from . import planning
 
 
 def _current(cfg):
@@ -135,7 +136,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -243,6 +244,15 @@ def parser():
             p.add_argument('--goal')
             p.add_argument('--stdin',action='store_true',help='read goal text from stdin')
             p.add_argument('--goal-id',help='resume an existing goal, or send it a steering message')
+        if op in ('once','send'):
+            p.add_argument('--plan',action='store_true',
+                           help='plan-first: the goal starts in plan mode; the agent explores read-only and '
+                                'files a plan with propose_plan, and waits for your approval (agent plan)')
+
+        if op=='plan':
+            p.add_argument('goal_id')
+            p.add_argument('action',choices=('approve','reject'),help="approve the filed plan, or ask for a revision")
+            p.add_argument('--note',help='a short note: what was approved, or what to change')
         if op=='send':
             p.add_argument('--continue',dest='continue_goal',action='store_true',help='allow an explicit follow-up to a completed goal, preserving its conversation')
             p.add_argument('--steer',action='store_true',
@@ -563,6 +573,27 @@ def main(argv=None,stdin=None):
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0
+        if a.op=='plan':
+            gid=store.resolve(a.goal_id)
+            with store.transaction():
+                g=store.goal(gid)
+                if g.get('plan') == 0:
+                    raise ValueError(f'goal {gid[:8]} is not a plan goal')
+                if g['state'] in ('completed','cancelled'):
+                    raise ValueError(f'goal {gid[:8]} is {g["state"]}')
+                if a.action=='approve':
+                    store.update(gid,plan=2,state='working',error='')
+                    text=planning.approval_text(a.note)
+                    verdict='approved'
+                else:
+                    store.update(gid,state='working',error='')
+                    text=planning.rejection_text(a.note)
+                    verdict='revise'
+                store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,text,'nudge'))
+                store.event('plan_' + ('approved' if a.action=='approve' else 'rejected'),
+                            dict(note=(a.note or '').strip()),gid)
+            emit(dict(goal=gid,plan=verdict,state=store.goal(gid)['state']),a.json)
+            store.close();return 0
         if a.op=='queue':
             act=a.action
             if act=='move':
@@ -666,10 +697,12 @@ def main(argv=None,stdin=None):
                     resume_required=state in ('paused','error','waiting_user','waiting_root')
                 emit(dict(id=a.goal_id,queued=True,resume_required=resume_required),a.json);store.close();return 0
             if a.goal_id:
+                if a.plan:raise ValueError('--plan creates a new goal; --goal-id steers an existing one')
                 gid=a.goal_id
                 resume_goal(store,gid,a.max_steps,a.max_seconds)
             else:
-                gid=store.enqueue(text or '',getattr(a,'max_steps',None),getattr(a,'max_seconds',None))
+                gid=store.enqueue(text or '',getattr(a,'max_steps',None),getattr(a,'max_seconds',None),
+                                  plan=1 if a.plan else 0)
             if a.op=='send':
                 emit(dict(id=gid,state='queued'),a.json);store.close();return 0
         elif a.op=='resume':

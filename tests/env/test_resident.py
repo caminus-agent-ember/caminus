@@ -2627,6 +2627,53 @@ for line in sys.stdin:
             self.assertEqual((note['tps'],note['tokens'],note['goal']),(88.0,88,gid))
             self.assertEqual(self.cmd('status')['tok_per_s'],88.0)
         finally:rt.mail.close();rt.store.close()
+    def test_a_plan_first_goal_files_its_plan_and_waits_for_approval(self):
+        plan='1. read the roster\n2. write dist/report.md'
+        g=self.cmd('send',['plan goal','--plan'])
+        gid=g['id']
+        status=self.cmd('status')['goals'][0]
+        self.assertEqual((status['plan'],status['plan_text'] or ''),(1,''))
+        self.replies(call('propose_plan',dict(plan=plan)))
+        out=self.cmd('once',['--goal-id',gid],code=25)
+        self.assertEqual(out['state'],'waiting_plan')
+        self.assertIn('plan_proposed',[e['kind'] for e in self.cmd('events')])
+        r=self.cmd('plan',[gid,'approve','--note','ok, go'])
+        self.assertEqual(r,dict(goal=gid,plan='approved',state='working'))
+        status=self.cmd('status')['goals'][0]
+        self.assertEqual((status['plan'],status['plan_text']),(2,plan))
+        self.replies(call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal-id',gid])
+        self.assertEqual(out['state'],'completed')
+        self.assertIn('Plan approved: ok, go',json.dumps(Endpoint.seen[-1][1]))
+
+    def test_plan_mode_refuses_the_changing_tools_until_approved(self):
+        self.replies(call('write',dict(path='x.txt',content='hi')),
+                     call('ask_root',dict(command='touch x',reason='fixture')),
+                     call('propose_plan',dict(plan='p')))
+        g=self.cmd('once',['--plan','--goal','change the file'],code=25)
+        self.assertEqual(g['state'],'waiting_plan')
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result'
+                 and e['data']['name'] in ('write','ask_root')]
+        self.assertEqual(len(results),2)
+        self.assertTrue(all('plan mode' in (r.get('error') or '') for r in results))
+        self.assertFalse((self.home/'x.txt').exists())
+        # rejected: plan mode stays on, the revision note reaches the next turn
+        r=self.cmd('plan',[g['id'],'reject','--note','too broad'])
+        self.assertEqual(r,dict(goal=g['id'],plan='revise',state='working'))
+        self.assertEqual(self.cmd('status')['goals'][0]['plan'],1)
+        self.replies(call('propose_plan',dict(plan='narrower')))
+        self.cmd('once',['--goal-id',g['id']],code=25)
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('Plan rejected, revise it: too broad',body)
+        self.assertIn('PLAN MODE',body)
+        # a goal without --plan cannot be answered with plan approve/reject; --plan never steers
+        plain=self.cmd('send',['plain goal'])
+        self.cmd('plan',[plain['id'],'approve'],code=1)
+        self.cmd('once',['--plan','--goal-id','missing-goal'],code=1)  # unknown goal: refused before anything else
+        goals={g['id']:g for g in self.cmd('status')['goals']}
+        self.assertEqual(goals[plain['id']]['plan'],0)
+        self.assertEqual(goals[g['id']]['plan'],1)
+
     def test_the_goal_queue_lists_moves_and_removes_queued_goals(self):
         a=self.cmd('send',['first'])['id']
         b=self.cmd('send',['second'])['id']
