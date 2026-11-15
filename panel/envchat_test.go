@@ -285,7 +285,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /steer /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /steer /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -593,9 +593,13 @@ func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
 	m := chatFixture(t)
 	m.resident.ContextUsed = 891288 // at the trigger: hot
 	m.resident.TokPerS = 91.4       // the daemon's last measured decode speed
-	frame := ansi.Strip(m.render())
-	if !strings.Contains(frame, "ctx ") || !strings.Contains(frame, "85% of 1.0M · compact 85% · 91 tok/s") {
+	raw := m.render()
+	frame := ansi.Strip(raw)
+	if !strings.Contains(frame, "891K/1M") || !strings.Contains(frame, "91 tok/s") {
 		t.Fatalf("footer lost the measured bar:\n%s", frame)
+	}
+	if !strings.Contains(raw, envCtxHot.Render(strings.Repeat(g.bar, 7))) {
+		t.Fatal("at the compaction trigger the bar must be hot")
 	}
 	for _, row := range strings.Split(frame, "\n") {
 		if ansi.StringWidth(row) > m.width {

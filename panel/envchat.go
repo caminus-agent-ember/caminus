@@ -243,7 +243,8 @@ func (m *envModel) syncChat() {
 
 // bodyHeight is the space between the header and the footer, without the composer.
 func (m envModel) bodyHeight() int {
-	return max(4, max(12, m.height)-1-lipgloss.Height(m.chatBottom())-1)
+	// the header is two lines (title, rule); the footer one or two (chatFoot)
+	return max(4, max(12, m.height)-2-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(max(20, m.width))))
 }
 
 // liveHeight is the live window's content lines (its label included): half the body less the border, so the
@@ -620,52 +621,17 @@ func (m envModel) renderChat() string {
 	if m.resident.DaemonAlive {
 		state = "listening"
 	}
-	steps := 0
-	if g := m.selectedResidentGoal(); g != nil {
-		state = g.State
-		steps = g.Steps
-	}
-	indicator := "●"
-	if state == "working" || state == "queued" || state == "waiting_model" {
-		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		indicator = frames[m.tickN%len(frames)]
-	}
-	head := clip(envTitle.Render("CAMINUS") + " · " + residentText(m.agentName) +
-		"  " + contextStateStyle(state).Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
-	accent, ctxRest := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold, m.resident.TokPerS)
-	ctxStyle := envCtxOK
-	switch contextBarLevel(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold) {
-	case 1:
-		ctxStyle = envWarn
-	case 2:
-		ctxStyle = envCtxHot
-	}
-	status := []string{envDim.Render(residentText(m.resident.Model))}
-	if accent+ctxRest != "" {
-		status = append(status, ctxStyle.Render(accent)+envDim.Render(ctxRest))
-	}
-	status = append(status,
-		envDim.Render("SSH "+map[bool]string{true: "OK", false: "…"}[m.sshOK]),
-		envDim.Render(fmt.Sprintf("%d requests", len(m.reqs))),
-	)
-	if !m.chat.transcript.AtBottom() {
-		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
-	}
-	if m.chat.live.active {
-		hint := "live: Ctrl+T hold"
-		if m.chat.live.hold {
-			hint = "live: held · Ctrl+T follow"
+	steps, goalText := 0, ""
+	if sel := m.selectedResidentGoal(); sel != nil {
+		state = sel.State
+		steps = sel.Steps
+		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
+		if lipgloss.Width(goalText) > 48 {
+			goalText = ansi.Truncate(goalText, 47, "…")
 		}
-		status = append(status, envDim.Render(hint))
 	}
-	if m.chat.seq < m.resident.LastEvent {
-		status = append(status, envDim.Render("loading history"))
-	}
-	if m.msg != "" {
-		status = append(status, envDim.Render(terminalText(m.msg, false)))
-	}
-	status = append(status, envDim.Render("Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
-	foot := clip(strings.Join(status, " · "))
+	head := shellHeader(residentText(m.agentName), state, goalText, steps, w)
+	foot := m.chatFoot(w)
 	if m.chat.help {
 		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
 	}
@@ -988,6 +954,20 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.msg = "theme: " + name
 		m.syncChat()
 		return m, nil
+	case "/glyphs":
+		// The symbol set (shell.go): nerd needs a Nerd Font; unicode needs none; ascii is for anything else.
+		name := strings.TrimSpace(arg)
+		if name == "" {
+			name = glyphsNext()
+		}
+		if err := glyphsSet(name); err != nil {
+			m.msg = err.Error()
+			return m, nil
+		}
+		m.msg = "glyphs: " + name + "  " + g.working + " " + g.waiting + " " + g.done + " " + g.root + " " + g.model + " " + g.queue +
+			"  (boxes? pick /glyphs unicode)"
+		m.syncChat()
+		return m, nil
 	case "/resume":
 		g := m.selectedResidentGoal()
 		if g == nil {
@@ -1024,6 +1004,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/stop", "stop this session's loop"},
 	{"/theme", "switch panel colors NAME; /theme lists"},
+	{"/glyphs", "symbols: nerd, unicode or ascii; alone, the next one"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.
@@ -1289,4 +1270,50 @@ func (m envModel) pickerBox() string {
 	}
 	hint := "Enter opens · ↑/↓ choose · Esc cancels"
 	return envBorder.Width(w).Render(strings.Join(rows, "\n") + "\n" + envDim.Render(envClip(hint, w-4)))
+}
+
+// chatFoot is the status line (shell.go) and, when something is only sometimes true, a dim line under it; bodyHeight
+// measures it so the frame never outgrows the terminal.
+func (m envModel) chatFoot(w int) string {
+	clip := func(s string) string { return ansi.Truncate(s, w, "") }
+	queued := 0
+	for _, gl := range m.resident.Goals {
+		if gl.State == "queued" {
+			queued++
+		}
+	}
+	// The status line: brain, context, speed and queue, then the keys that matter now (shell.go). Everything that is
+	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
+	keys := []string{"esc browse", "^P sessions", "/help"}
+	if len(m.reqs) > 0 {
+		keys = append([]string{fmt.Sprintf("%s %d pending /requests", g.root, len(m.reqs))}, keys...)
+	}
+	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
+		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: -1, tps: m.resident.TokPerS,
+		queue: queued, keys: keys}, w)
+	status := []string{}
+	if !m.sshOK {
+		status = append(status, envWarn.Render("SSH …"))
+	}
+	if !m.chat.transcript.AtBottom() {
+		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
+	}
+	if m.chat.live.active {
+		hint := "live: Ctrl+T hold"
+		if m.chat.live.hold {
+			hint = "live: held · Ctrl+T follow"
+		}
+		status = append(status, envDim.Render(hint))
+	}
+	if m.chat.seq < m.resident.LastEvent {
+		status = append(status, envDim.Render("loading history"))
+	}
+	if m.msg != "" {
+		status = append(status, envDim.Render(terminalText(m.msg, false)))
+	}
+	foot := statusBar
+	if len(status) > 0 {
+		foot += "\n" + clip(strings.Join(status, envDim.Render(" · ")))
+	}
+	return foot
 }

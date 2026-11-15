@@ -81,7 +81,8 @@ func mockStudio(w, h int) string {
 // only checks that every piece renders inside the width in every tier.
 func TestShellMockups(t *testing.T) {
 	dir := os.Getenv("MOCKUP_DIR")
-	defer func() { g = glyphTiers["unicode"]; _ = themeLoad("caminus") }()
+	saved := g
+	defer func() { g = saved; _ = themeLoad("caminus") }()
 	for _, theme := range []string{"caminus", "tokyo-night"} {
 		if err := themeLoad(theme); err != nil {
 			t.Fatal(err)

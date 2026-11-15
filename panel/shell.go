@@ -7,6 +7,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -49,7 +51,54 @@ var glyphTiers = map[string]glyphs{
 		bar: "#", barEmpty: ".", spinner: []string{"|", "/", "-", "\\"}},
 }
 
-var g = glyphTiers["unicode"]
+var g = glyphTiers["nerd"]
+
+// glyphsInit applies the saved tier (CAMINUS_GLYPHS wins); nerd is the owner's default.
+func init() {
+	name := strings.TrimSpace(os.Getenv("CAMINUS_GLYPHS"))
+	if name == "" {
+		if p := glyphsSavePath(); p != "" {
+			if b, err := os.ReadFile(p); err == nil {
+				name = strings.TrimSpace(string(b))
+			}
+		}
+	}
+	if t, ok := glyphTiers[name]; ok {
+		g = t
+	}
+}
+
+// glyphsSet switches the tier and saves it, like themeSet does for colours.
+func glyphsSet(name string) error {
+	t, ok := glyphTiers[name]
+	if !ok {
+		return fmt.Errorf("unknown glyphs %q (nerd, unicode, ascii)", name)
+	}
+	g = t
+	if p := glyphsSavePath(); p != "" {
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, []byte(name+"\n"), 0o644)
+	}
+	return nil
+}
+
+func glyphsSavePath() string {
+	if d, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(d, "caminus", "panel-glyphs")
+	}
+	return ""
+}
+
+// glyphsNext is the tier after the current one, for /glyphs without a name.
+func glyphsNext() string {
+	order := []string{"nerd", "unicode", "ascii"}
+	for i, n := range order {
+		if n == g.name {
+			return order[(i+1)%len(order)]
+		}
+	}
+	return "nerd"
+}
 
 // ---------------------------------------------------------------- pieces
 
@@ -202,6 +251,7 @@ func composer(draft, hint string, w int) string {
 type status struct {
 	brain        string
 	used, window int
+	compact      float64 // the compaction threshold as a fraction of the window; the bar warms toward it
 	usd          float64
 	tps          float64
 	queue        int
@@ -214,19 +264,25 @@ func statusLine(s status, w int) string {
 		frac = float64(s.used) / float64(s.window)
 	}
 	cells := 8
-	full := int(frac*float64(cells) + 0.5)
+	full := min(cells, int(frac*float64(cells)+0.5))
+	trigger := s.compact
+	if trigger <= 0 || trigger > 1 {
+		trigger = .85
+	}
 	barSt := envCtxOK
-	if frac > .7 {
+	if frac >= trigger*.85 {
 		barSt = envWarn
 	}
-	if frac > .85 {
+	if frac >= trigger {
 		barSt = envCtxHot
 	}
 	bar := barSt.Render(strings.Repeat(g.bar, full)) + envDim.Render(strings.Repeat(g.barEmpty, cells-full))
 	segs := []string{
 		strings.TrimSpace(g.model + " " + s.brain),
 		envDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
-		strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd)),
+	}
+	if s.usd >= 0 {
+		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd)))
 	}
 	if s.tps > 0 {
 		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %.0f tok/s", g.speed, s.tps)))
