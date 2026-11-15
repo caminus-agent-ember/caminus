@@ -73,6 +73,9 @@ type streamState struct {
 }
 
 func residentCommand(m envModel, args []string, input string) *exec.Cmd {
+	if len(m.cli) == 0 {
+		return nil // the panel can run without --cli; callers report the missing CLI instead of panicking
+	}
 	argv := append(append([]string{}, m.cli[1:]...), "env", "agent")
 	argv = append(argv, args...)
 	c := exec.Command(m.cli[0], argv...)

@@ -223,3 +223,26 @@ func TestQuestionToolJSONIsReplacedByHumanQuestionAndAnswer(t *testing.T) {
 		t.Fatal("normal PTY newlines rendered as literal escapes")
 	}
 }
+
+func TestQuestionArrivingWhileBrowsingRequiresF2(t *testing.T) {
+	m := chatFixture(t)
+	m.bridge = t.TempDir()
+	m.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
+	m.resident.Goals[0].State = "waiting_user"
+	writeQuestion(t, m.bridge, envReq{ID: "question-browse", Agent: "resident", Goal: "original", User: "agent",
+		Kind: "question", Text: "Which approach should I use?", Choices: []string{"one", "two"}})
+	m.chat.compose.Blur() // Esc: browsing history, empty draft
+	m.refreshLocal()
+	m.syncChat()
+	if m.chat.questionArmed {
+		t.Fatal("a question that arrives while browsing must not arm itself")
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(envModel)
+	if !m.chat.compose.Focused() {
+		t.Fatal("Enter while browsing should return to typing")
+	}
+	if m.chat.questionArmed {
+		t.Fatal("Enter while browsing must not answer the question")
+	}
+}

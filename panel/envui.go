@@ -650,7 +650,7 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.msg += "; " + err.Error()
 		}
 		m.refreshLocal()
-		return m, tickCmd()
+		return m, nil // the running tick chain continues; a second one would double every poll
 	case tea.KeyPressMsg:
 		if m.tab != 6 {
 			// Leaving the conversation page ends its live reader; the next visit starts a fresh one.

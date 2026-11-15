@@ -806,8 +806,8 @@ func (m envModel) pickerBox() string {
 	if len(names) == 0 {
 		rows = append(rows, envDim.Render("no matching session"))
 	}
-	for idx, name := range names[first:min(maxRows, len(names))] {
-		idx += first
+	for idx := first; idx < min(first+maxRows, len(names)); idx++ {
+		name := names[idx]
 		mark := "  "
 		if idx == m.chat.pickerSel {
 			mark = "› "

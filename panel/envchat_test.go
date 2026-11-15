@@ -479,3 +479,30 @@ func TestLiveTailStaysBoundedAndRejectsAnotherVisit(t *testing.T) {
 		t.Fatal("a stream from an earlier visit painted the tail")
 	}
 }
+
+func TestQuickSwitcherScrollsPastTheFirstPageWithoutPanicking(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 12 // four visible rows, so a ten-session list needs paging
+	names := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	m.sessionNames = names
+	m.chat.picker = true
+	for sel := range names {
+		m.chat.pickerSel = sel
+		box := ansi.Strip(m.pickerBox()) // panicked with "slice bounds out of range" before the fix
+		if !strings.Contains(box, "› "+names[sel]) {
+			t.Fatalf("selection %d (%s) is not shown:\n%s", sel, names[sel], box)
+		}
+	}
+}
+
+func TestResidentCommandsWithoutTheCLIReportInsteadOfPanicking(t *testing.T) {
+	m := chatFixture(t)
+	m.cli = nil
+	if cmd := residentCommand(m, []string{"status", "resident", "--json"}, ""); cmd != nil {
+		t.Fatal("a missing --cli must not build a command")
+	}
+	msg := residentSessions(m)()
+	if sessions, ok := msg.(residentSessionsMsg); !ok || sessions.err == "" {
+		t.Fatalf("sessions without a CLI must report an error, got %#v", msg)
+	}
+}
