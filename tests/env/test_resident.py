@@ -2886,6 +2886,53 @@ for line in sys.stdin:
         self.assertIn('100 characters omitted',text)
         self.assertNotIn('x'*4001,text)
 
+    def test_diff_reports_the_repos_a_goal_touched(self):
+        def git(repo,*a,commit=False):
+            args=['git','-C',str(repo)]
+            if commit:args+=['-c','user.name=t','-c','user.email=t@t']
+            return subprocess.run([*args,*a],capture_output=True,text=True,check=True)
+        repo=self.home/'proj';(repo/'src').mkdir(parents=True)
+        git(repo,'init','-q')
+        (repo/'src'/'x.py').write_text('original\n')
+        git(repo,'add','.',commit=True);git(repo,'commit','-qm','base',commit=True)
+        (repo/'src'/'x.py').write_text('original\nadded line\n')
+        # a second repo holding a diff past the 200 KB cap
+        big=self.home/'big';big.mkdir()
+        git(big,'init','-q')
+        (big/'blob.txt').write_text('a'*300000)
+        git(big,'add','.',commit=True);git(big,'commit','-qm','base',commit=True)
+        (big/'blob.txt').write_text('a'*300000+'b'*300000)
+        # a third repo the goal never touched never appears
+        clean=self.home/'clean';clean.mkdir();git(clean,'init','-q')
+        self.replies(call('finish',dict(summary='done')))
+        gid=self.cmd('once',['--goal','ZDIFF goal.'])['id']
+        store=Store(self.home)
+        try:
+            for aid,call_id,name,args in (('da1','dc1','edit',{'path':'proj/src/x.py'}),
+                                          ('da2','dc2','edit',{'path':'proj/src/x.py'}),
+                                          ('da3','dc3','terminal',{'cwd':'proj'}),
+                                          ('da4','dc4','write',{'path':str(big/'blob.txt')})):
+                store.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
+                                 (aid,gid,call_id,name,json.dumps(args),'done'))
+        finally:store.close()
+        out=self.cmd('diff',[gid])
+        self.assertEqual(out['goal'],gid)
+        self.assertEqual(sorted(r['path'] for r in out['repos']),sorted([str(repo),str(big)]))
+        small=[r for r in out['repos'] if r['path']==str(repo)][0]
+        self.assertIn('src/x.py',small['stat'])
+        self.assertIn('+added line',small['diff'])
+        self.assertFalse(small['truncated'])
+        bigr=[r for r in out['repos'] if r['path']==str(big)][0]
+        self.assertTrue(bigr['truncated'])
+        self.assertLessEqual(len(bigr['diff'].encode()),200*1024)
+        self.assertNotIn(str(clean),json.dumps(out['repos']))  # the untouched repo never appears
+
+        self.assertEqual(self.cmd('diff')['goal'],gid)
+        # a goal with no tool actions lists no repos
+        self.replies(call('finish',dict(summary='done')))
+        other=self.cmd('once',['--goal','ZDIFF untouched.'])['id']
+        self.assertEqual(self.cmd('diff',[other]),dict(goal=other,repos=[]))
+
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
     def __init__(self,*answers):self.answers=deque(answers);self.requests=[]
