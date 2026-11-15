@@ -598,6 +598,31 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.chat.compose.Focus()
 	case bangDoneMsg:
 		return m.bangDone(msg), m.chat.compose.Focus()
+	case textViewMsg:
+		if msg.err != "" {
+			m.msg = msg.err
+			return m, nil
+		}
+		m.chat.view = textView{open: true, title: msg.title, lines: msg.lines, colourDiff: msg.diff}
+		m.msg = ""
+		return m, nil
+	case rewindListMsg:
+		if msg.goal == m.chat.rewind.goal {
+			m.chat.rewind.steps, m.chat.rewind.err = msg.steps, msg.err
+			m.chat.rewind.sel = max(0, len(msg.steps)-1)
+		}
+		return m, nil
+	case unsendMsg:
+		switch {
+		case msg.err != "":
+			m.msg = "pull back: " + msg.err
+		case msg.text == nil:
+			m.msg = "nothing to pull back: the agent has read your messages"
+		default:
+			m.chat.compose.SetValue(*msg.text)
+			m.msg = "pulled back: edit it and Enter to send again"
+		}
+		return m, nil
 	case recapMsg:
 		return m.receiveRecap(msg), nil
 	case studioMsg:

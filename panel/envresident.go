@@ -16,12 +16,14 @@ import (
 )
 
 type residentGoal struct {
-	ID      string `json:"id"`
-	Prompt  string `json:"prompt"`
-	State   string `json:"state"`
-	Summary string `json:"summary"`
-	Error   string `json:"error"`
-	Steps   int    `json:"steps"`
+	ID       string `json:"id"`
+	Prompt   string `json:"prompt"`
+	State    string `json:"state"`
+	Summary  string `json:"summary"`
+	Error    string `json:"error"`
+	Steps    int    `json:"steps"`
+	Plan     int    `json:"plan"`      // 0 a plain goal, 1 in plan mode, 2 its plan approved
+	PlanText string `json:"plan_text"` // the plan it proposed (state waiting_plan)
 }
 type residentStatus struct {
 	Name             string             `json:"name"`

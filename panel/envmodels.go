@@ -223,7 +223,7 @@ func (m envModel) modelsOverlay(w, h int) string {
 	if st.current.Model != "" {
 		title += "  ·  now " + st.current.Model
 	}
-	return overlayBox(title, body, "↑↓ move  ·  Enter pick  ·  Esc close", w, h)
+	return overlayBox(title, body, "↑↓ move  ·  Enter pick", w, h)
 }
 
 func (m envModel) modelsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

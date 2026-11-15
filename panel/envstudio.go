@@ -207,7 +207,7 @@ func (m envModel) studioOverlay(w, h int) string {
 			rows = append(rows, ansi.Truncate("   "+envDim.Render(label), inner, "…"))
 		}
 	}
-	return overlayBox(fmt.Sprintf("STUDIO  %d", len(st.list)), strings.Join(rows, "\n"), "↑↓ move  ·  Enter read  ·  Esc close", w, h)
+	return overlayBox(fmt.Sprintf("STUDIO  %d", len(st.list)), strings.Join(rows, "\n"), "↑↓ move  ·  Enter read", w, h)
 }
 
 func (m envModel) studioKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

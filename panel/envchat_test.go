@@ -342,7 +342,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /recap /studio /jobs /servers /agents /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -1442,5 +1442,61 @@ func TestComposerExtras(t *testing.T) {
 	}
 	if body, _ := expandCustom(customCommands()["/review"], "panel/shell.go"); body != "Review panel/shell.go for bugs." {
 		t.Fatalf("expanded: %q", body)
+	}
+}
+
+func TestSteeringViews(t *testing.T) {
+	m := chatFixture(t)
+	// /diff opens a coloured view
+	m.chat.view = textView{open: true, title: "DIFF", colourDiff: true, lines: []string{"### /work/repo", "+added line", "-removed line", "@@ -1 +1 @@"}}
+	view := ansi.Strip(m.renderChat())
+	for _, want := range []string{"DIFF", "+added line", "-removed line"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("diff view misses %q:\n%s", want, view)
+		}
+	}
+	next, _ := m.textKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(envModel)
+	if m.chat.view.open {
+		t.Fatal("Esc closes the view")
+	}
+	// /rewind takes two presses
+	m.chat.rewind = rewindState{open: true, goal: "goal1234abcd", steps: []rewindStep{{Step: 2, Label: "edit a.py"}, {Step: 5, Label: "write b.py"}}, sel: 1}
+	if v := ansi.Strip(m.renderChat()); !strings.Contains(v, "step   5  write b.py") || !strings.Contains(v, "side effects are not undone") {
+		t.Fatalf("rewind picker:\n%s", v)
+	}
+	next, cmd := m.rewindKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(envModel)
+	if cmd != nil || !strings.Contains(m.msg, "press Enter again") {
+		t.Fatalf("the first Enter only arms it: %q", m.msg)
+	}
+	next, cmd = m.rewindKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil || next.(envModel).chat.rewind.open {
+		t.Fatal("the second Enter rewinds and closes")
+	}
+	// a waiting plan is a card above the composer
+	m = chatFixture(t)
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "plan5678abcd", State: "waiting_plan", PlanText: "1. read the parser\n2. add the tests"})
+	if v := ansi.Strip(m.renderChat()); !strings.Contains(v, "PLAN · goal") || !strings.Contains(v, "2. add the tests") || !strings.Contains(v, "/plan approve") {
+		t.Fatalf("plan card:\n%s", v)
+	}
+	if _, cmd, ok := m.steerSlash("/plan", "approve"); !ok || cmd == nil {
+		t.Fatal("/plan approve decides the waiting plan")
+	}
+	// ↑ on an empty composer pulls back; Esc while a reply streams interrupts
+	m.chat.compose.SetValue("")
+	m.chat.newGoal = false
+	m.chat.target = "plan5678abcd"
+	if _, cmd := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyUp}); cmd == nil {
+		t.Fatal("↑ on an empty composer asks to pull back the last message")
+	}
+	text := "edited again"
+	next, _ = m.Update(unsendMsg{text: &text})
+	if next.(envModel).chat.compose.Value() != "edited again" {
+		t.Fatal("the pulled-back message is in the composer")
+	}
+	m.chat.live.active = true
+	if _, cmd := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyEscape}); cmd == nil {
+		t.Fatal("Esc while a reply is written interrupts the turn")
 	}
 }

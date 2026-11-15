@@ -112,7 +112,7 @@ func (m envModel) goalsOverlay(w, h int) string {
 	if len(detail) > 0 {
 		body += "\n\n" + strings.Join(detail, "\n")
 	} else {
-		body += "\n\n" + envDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  r resume  ·  n new goal", inner, "…"))
+		body += "\n\n" + envDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, "…"))
 	}
 	active := 0
 	for _, gl := range m.resident.Goals {
@@ -147,6 +147,36 @@ func (m envModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.goalsSel = min(max(0, len(order)-1), sel+1)
 	case "space", " ":
 		m.chat.goalsDetail = !m.chat.goalsDetail
+	case "shift+up", "shift+down", "K", "J":
+		// A queued goal moves one place in the run order (the queue runs oldest first; 1 runs next).
+		if len(order) == 0 {
+			return m, nil
+		}
+		gl := m.resident.Goals[order[sel]]
+		if gl.State != "queued" {
+			m.msg = "only a queued goal can move"
+			return m, nil
+		}
+		var queued []string
+		for _, q := range m.resident.Goals {
+			if q.State == "queued" {
+				queued = append(queued, q.ID)
+			}
+		}
+		pos := 0
+		for i, id := range queued {
+			if id == gl.ID {
+				pos = i + 1
+			}
+		}
+		to := pos - 1
+		if k == "shift+down" || k == "J" {
+			to = pos + 1
+		}
+		if to < 1 || to > len(queued) {
+			return m, nil
+		}
+		return m, moveQueued(m, gl.ID, to)
 	case "n":
 		closeIt()
 		m.chat.newGoal, m.chat.forceNew, m.chat.target = true, true, ""
