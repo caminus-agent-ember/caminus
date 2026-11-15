@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
+	"os"
 	"slices"
 	"strings"
 
@@ -39,6 +40,8 @@ type residentChat struct {
 	pickerSel                               int
 	slashIdx                                int
 	slashToken, slashText                   string
+	pathIdx                                 int
+	pathPrefix, pathPick                    string
 	live                                    residentLive
 	stream                                  *streamState
 }
@@ -474,6 +477,31 @@ func (m envModel) chatComposer() string {
 				lines = lines[:4]
 			}
 			input = envDim.Render(envClip("Tab completes · "+strings.Join(lines, "  "), max(18, m.width-6))) + "\n" + input
+		} else if token, ok := pathToken(value); ok {
+			// The path so far is rendered in the inline-code role, then what Tab
+			// can offer: directories in the navigation accent, files resting, and
+			// the absence of any match in the failure color so a typo shows itself.
+			input = envDim.Render("Tab completes · ") + envCode.Render(token)
+			if matches := pathMatches(token); len(matches) > 0 {
+				lines := matches
+				if len(lines) > 4 {
+					lines = lines[:4]
+				}
+				for i, l := range lines {
+					style := envDim
+					if strings.HasSuffix(l, "/") {
+						style = envTitle
+					}
+					if l == m.chat.pathPick && m.chat.pathIdx > 1 {
+						style = envSel
+					}
+					lines[i] = style.Render(l)
+				}
+				input += envDim.Render(" · " + strings.Join(lines, "  "))
+			} else {
+				input += envCtxHot.Render(" no match")
+			}
+			input = envClip(input, max(18, m.width-6)) + "\n" + input
 		}
 	}
 	if m.mode == "agentname" {
@@ -692,6 +720,9 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, residentSessions(m)
 	case "tab", "shift+tab":
 		if next, done := m.cycleSlash(); done {
+			return next, nil
+		}
+		if next, done := m.cyclePath(); done {
 			return next, nil
 		}
 		return m.onKey(k)
@@ -999,6 +1030,129 @@ func slashMatches(draft string) []string {
 		}
 	}
 	return out
+}
+
+// pathToken reports the trailing token of the draft when it is a path the user
+// is still typing: it contains a separator (/, ~/ , ./, ../) and the draft does
+// not end in whitespace, so a finished word never matches. A leading / alone is
+// left to slashMatches, which sees commands first; a path wins once the token
+// goes deeper than a bare command could (/home) or does not start with / at all.
+func pathToken(draft string) (string, bool) {
+	if draft == "" || strings.Contains(draft, "\n") || strings.HasSuffix(draft, " ") {
+		return "", false
+	}
+	token := draft
+	if i := strings.LastIndex(draft, " "); i >= 0 {
+		token = draft[i+1:]
+	}
+	if !strings.Contains(token, "/") {
+		return "", false
+	}
+	if strings.HasPrefix(token, "/") && !strings.HasPrefix(token, "//") {
+		if rest := token[1:]; !strings.Contains(rest, "/") {
+			// A bare /word still belongs to the command completer until no
+			// command could grow into it; /h stays /help, /home is a path.
+			if isCommandPrefix(rest) {
+				return "", false
+			}
+		}
+	}
+	return token, true
+}
+
+// isCommandPrefix reports whether the word after the leading slash could still
+// complete to any slash command.
+func isCommandPrefix(token string) bool {
+	for _, c := range slashCommands {
+		if strings.HasPrefix(c.name[1:], token) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathMatches lists what the typed path points at, directories first with
+// their trailing separator, so Tab keeps descending into a directory and the
+// same token prefix re-lists its children. Hidden entries only surface once
+// the typed prefix includes their dot. The list is capped so /usr/lib never
+// floods the hint line.
+func pathMatches(token string) []string {
+	dir, prefix := token, ""
+	if !strings.HasSuffix(token, "/") {
+		i := strings.LastIndex(token, "/")
+		prefix = token[i+1:]
+		dir = token[:i+1]
+	}
+	if dir == "~" {
+		dir = "~/"
+	}
+	fsDir := dir
+	if strings.HasPrefix(fsDir, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		fsDir = home + fsDir[1:]
+	}
+	entries, err := os.ReadDir(fsDir)
+	if err != nil {
+		return nil
+	}
+	var dirs, files []string
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
+			continue
+		}
+		if e.IsDir() {
+			dirs = append(dirs, dir+name+"/")
+		} else {
+			files = append(files, dir+name)
+		}
+	}
+	out := append(dirs, files...)
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return out
+}
+
+// cyclePath completes the trailing path token on Tab. The first Tab takes the
+// best match; later Tabs cycle the rest of that list; taking a directory puts
+// its separator on the draft, so the next Tab walks into it. A token that
+// already names exactly one thing leaves Tab free. picks state (pathPrefix,
+// pathPick, pathIdx) survives only while the token is untouched.
+func (m envModel) cyclePath() (tea.Model, bool) {
+	value := m.chat.compose.Value()
+	token, ok := pathToken(value)
+	if !ok {
+		return m, false
+	}
+	prefix, idx := token, 0
+	switch {
+	case token == m.chat.pathPick && strings.HasSuffix(token, "/"):
+		prefix, idx = token, 0
+		m.chat.pathIdx = 0
+	case token == m.chat.pathPrefix || token == m.chat.pathPick:
+		// pathIdx already points at the next pick of the running cycle.
+		prefix, idx = m.chat.pathPrefix, m.chat.pathIdx
+	}
+	matches := pathMatches(prefix)
+	if len(matches) == 0 {
+		return m, false
+	}
+	if len(matches) == 1 && matches[0] == token {
+		return m, false
+	}
+	pick := matches[idx%len(matches)]
+	m.chat.pathIdx = idx + 1
+	m.chat.pathPrefix = prefix
+	m.chat.pathPick = pick
+	m.chat.compose.SetValue(value[:len(value)-len(token)] + pick)
+	return m, true
 }
 
 // cycleSlash completes the draft to the next matching command on Tab without

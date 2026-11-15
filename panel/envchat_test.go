@@ -886,3 +886,112 @@ func TestThemeSetPersistsAndTheSlashCommandSwitches(t *testing.T) {
 		t.Fatalf("the choice was not persisted (err=%v): %q", err, saved)
 	}
 }
+
+func TestPathTokenDetectsPathsButLeavesCommandsAlone(t *testing.T) {
+	for _, want := range []string{"/home/ig", "~/src/", "./build/x", "../notes", "/home"} {
+		if _, ok := pathToken(want); !ok {
+			t.Fatalf("%q should be a path token", want)
+		}
+	}
+	for _, no := range []string{"", "hello", "/h", "goal one", "see /home later ", "a\nb /home"} {
+		if tok, ok := pathToken(no); ok {
+			t.Fatalf("%q should not be a path token (got %q)", no, tok)
+		}
+	}
+}
+
+func TestPathMatchesListsDirectoriesFirstAndHidesDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "zeta.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".hidden"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpha", "inner.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := dir + "/"
+	if got := pathMatches(d); len(got) != 2 || got[0] != d+"alpha/" || got[1] != d+"zeta.txt" {
+		t.Fatalf("unexpected matches: %v", got)
+	}
+	if got := pathMatches(d + "a"); len(got) != 1 || got[0] != d+"alpha/" {
+		t.Fatalf("prefix filter failed: %v", got)
+	}
+	if got := pathMatches(d + "."); len(got) != 1 || !strings.HasSuffix(got[0], ".hidden") {
+		t.Fatalf("dot entries should surface with a dot prefix: %v", got)
+	}
+	if got := pathMatches(dir + "/nowhere/"); len(got) != 0 {
+		t.Fatalf("an unreadable directory should match nothing: %v", got)
+	}
+}
+
+func TestTabCompletesAWalksIntoDirectoriesAndCyclesFiles(t *testing.T) {
+	themeFixture(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "walk", "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "beta.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gamma.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "walk", "alpha", "inner.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := chatFixture(t)
+	m.chat.compose.SetValue(dir + "/walk/a")
+	m.chat.compose.Focus()
+	next, _ := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(envModel)
+	if m.chat.compose.Value() != dir+"/walk/alpha/" {
+		t.Fatalf("first Tab should take the directory: %q", m.chat.compose.Value())
+	}
+	next, _ = m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(envModel)
+	if m.chat.compose.Value() != dir+"/walk/alpha/inner.txt" {
+		t.Fatalf("Tab in the directory should descend: %q", m.chat.compose.Value())
+	}
+	// From a files-only view cycling walks the matches in order; directories
+	// would have gone first.
+	files := t.TempDir()
+	if err := os.WriteFile(filepath.Join(files, "beta.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(files, "gamma.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reset := chatFixture(t)
+	reset.chat.compose.SetValue(files + "/")
+	for _, want := range []string{files + "/beta.txt", files + "/gamma.txt"} {
+		nx, _ := reset.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
+		reset = nx.(envModel)
+		if got := reset.chat.compose.Value(); got != want {
+			t.Fatalf("cycling files: got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestChatComposerHintsAboutPathsThematically(t *testing.T) {
+	themeFixture(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	m := chatFixture(t)
+	m.chat.compose.SetValue("./")
+	view := m.chatComposer()
+	if !strings.Contains(view, "Tab completes") || !strings.Contains(view, "sub/") {
+		t.Fatalf("a path in progress gets no completion hint:\n%s", view)
+	}
+	m.chat.compose.SetValue("./zzz")
+	if view := m.chatComposer(); !strings.Contains(view, "no match") {
+		t.Fatalf("a dead path should announce itself:\n%s", view)
+	}
+}
