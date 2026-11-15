@@ -50,8 +50,8 @@ READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd',
                        'free', 'uptime', 'sleep', 'true', 'diff'))
 READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files'))
 # Arguments that make a read-only program act: find's -exec / -execdir / -ok / -okdir / -delete / -fprint* / -fls,
-# git's --output, and any redirection, substitution or tee.
-CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b')
+# git's --output, rg's --pre (it runs a command on each file), and any redirection, substitution or tee.
+CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b|--pre\b')
 
 
 def read_only_command(cmd):

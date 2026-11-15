@@ -1513,7 +1513,7 @@ for line in sys.stdin:
         for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b',
                   'env rm -rf folder','find . -execdir rm {} +','find . -ok rm {} ;','find . -fprint out.txt',
                   'less notes.txt','tree -o out.txt','git branch -D main','git branch newname','git remote add x y',
-                  'git diff --output=patch.txt','ls & rm -rf x','xargs rm < list','timeout 5 rm x'):
+                  'git diff --output=patch.txt','ls & rm -rf x','xargs rm < list','timeout 5 rm x','rg --pre ./evil.sh foo','rg --pre=sh foo'):
             self.assertFalse(R.read_only_command(c),c)
         rt=Runtime(self.home)
         try:
