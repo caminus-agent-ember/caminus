@@ -19,6 +19,9 @@
 
 #define K3_OPS_NO_DISPATCH   // k3_q3m_ops.h's helpers and ops (seg_T, OP_F32_MV, the KV helpers, k3_own_ops.h) without its dispatch
 #include "k3_q3m_ops.h"
+#ifdef K3_Q35_KV_Q8
+#include "k3_q35_kvq8_ops.h"
+#endif
 #ifdef K3_TP   // (the two-card modules k3_q35_*_tp: OP_XCHG, its warm word and claim-time store)
 #include "k3_xchg.h"
 #endif
@@ -464,7 +467,12 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_GDN_SAVE) { q35_gdn_save_guarded(sg, t, sy); return true; }
     if (sg.op == OP_GDN_NORM16) { q35_op_gdn_norm16(sg, t); return true; }
     if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
+#ifdef K3_Q35_KV_Q8
+    if (sg.op == OP_KV_APPEND) { q35_op_kv_append_q8(sg, t); return true; }
+    if (sg.op == OP_HADAMARD) { q35_op_hadamard(sg, t); return true; }
+#else
     if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }
+#endif
 #ifdef K3_Q35_ATTN_SPLIT
     if (sg.op == OP_ATTN_PART) { ATTN_PART_FN(sg, t); return true; }   // (k3_attn_split.h: the packed PART in the verify modules)
     if (sg.op == OP_ATTN_COMB) { op_attn_comb(sg, t); return true; }
