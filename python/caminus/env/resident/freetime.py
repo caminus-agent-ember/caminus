@@ -30,6 +30,7 @@ appends it after the restored conversation, never before it, so the cached prefi
 """
 import datetime
 import json
+import re
 import time
 
 from .model import price
@@ -49,7 +50,11 @@ House rules for free time:
 - Leave nothing running when you stop.
 - If you make something your human might enjoy, put it in {for_you} with a short note. You may ask your human something with ask_user (at most {messages} times a day); if nobody answers within {afk} minutes, carry on and note the question in your journal.
 
-Before you stop, add a dated entry to {journal}: what you did, what you noticed, what you want to pick up next time. To stop, call finish with one line about the stretch, or simply reply in plain text to rest.{resume}'''
+What to do is yours to choose. Lean toward what is new and your own: rotate among exploring (research, reading), making (build or create something that did not exist), tending (improve one of your projects) and reflecting (journal, notes). Re-deriving or copying something you already made is not new.
+
+Big things are welcome. Keep your projects in {projects}, one line each: `- [active] NAME: what it is for (last: YYYY-MM-DD)`, with [paused] or [done] when that is true. Keep at most 3 active at once; finish or park one before starting another. Between stretches nothing of yours keeps running.
+
+Before you stop, add a dated entry to {journal}: what you did, what you noticed, what you want to pick up next time. To stop, call finish with one line about the stretch (name the project if it was one), or simply reply in plain text to rest.{past}{notes}{resume}'''
 
 DREAM = '''Night: a dream pass. Nothing is asked of you tonight except to consolidate.
 
@@ -178,7 +183,14 @@ class FreeTime:
         resume = ''
         if state.get('last_summary'):
             resume = '\n\nLast time: ' + str(state['last_summary'])[:400]
+        history = [h for h in state.get('history', []) if h.get('summary')]
+        past = ''
+        if history[:-1]:
+            past = '\n\nYour earlier stretches (oldest first):\n' + '\n'.join(
+                '- %s %s' % (time.strftime('%m-%d', time.localtime(h['ts'])), h['summary'][:120]) for h in history[-7:-1])
+        notes = ''.join('\n\n' + n for n in self.nudges(history, studio / 'PROJECTS.md'))
         values = dict(journal=str(journal) + '/', studio=str(studio) + '/', for_you=str(studio / 'for-you') + '/',
+                      projects=str(studio / 'PROJECTS.md'), past=past, notes=notes,
                       messages=cfg['messages_per_day'], afk=max(1, int(cfg['afk_seconds']) // 60), resume=resume)
         prompt = (DREAM if kind == 'dream' else INVITATION).format(**values)
         gid = self.rt.store.enqueue(prompt, max_steps=int(cfg['stretch_steps']),
@@ -189,6 +201,37 @@ class FreeTime:
         self._save(state)
         self.rt.store.event('free_time_start', dict(kind=kind), gid)
         return gid
+
+    @staticmethod
+    def active_projects(path):
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            return []
+        out = []
+        for line in lines:
+            m = re.match(r'\s*[-*]\s*\[active\]\s*([^:]+?)\s*(?::|$)', line, re.I)
+            if m:
+                out.append(m.group(1).strip())
+        return out
+
+    def nudges(self, history, projects_path):
+        """Notes for the next invitation, from the resident's own record (no model call): its last two stretches look
+        alike; three in a row went to the same project; more than three projects are active."""
+        out = []
+        summaries = [h['summary'] for h in history]
+        if len(summaries) >= 2 and similarity(summaries[-1], summaries[-2]) >= 0.5:
+            out.append('Note: your last two stretches look alike. Do something different this time.')
+        active = self.active_projects(projects_path)
+        for name in active:
+            if len(summaries) >= 3 and all(name.lower() in x.lower() for x in summaries[-3:]):
+                out.append('Note: your last three stretches went to %s. Finish it or park it, or try something new for a '
+                           'while.' % name)
+                break
+        if len(active) > 3:
+            out.append('Note: %d projects are active (%s). Finish or park some before starting another.'
+                       % (len(active), ', '.join(active)))
+        return out
 
     def _end(self, gid, why):
         with self.rt.store.transaction():
@@ -205,6 +248,11 @@ class FreeTime:
         state['last_end'] = time.time()
         if summary:
             state['last_summary'] = summary
+            try:
+                kind = self.rt.store.goal(gid).get('kind')
+            except ValueError:
+                kind = 'free'
+            state['history'] = (state.get('history', []) + [dict(ts=time.time(), kind=kind, summary=summary[:400])])[-20:]
         self._save(state)
 
     # ---- per turn ------------------------------------------------------------------------------------------
@@ -213,7 +261,8 @@ class FreeTime:
         """Price the turn that just ran, when it was free time on a remote model."""
         if not self.is_free(gid) or not getattr(self.rt.model, 'remote', False):
             return
-        usd = price(self.rt.config.get('model', ''), getattr(self.rt.model, 'last_usage', {}) or {}) or 0.0
+        served = (getattr(self.rt.model, 'last_call', None) or {}).get('served')
+        usd = price(self.rt.config.get('model', ''), getattr(self.rt.model, 'last_usage', {}) or {}, served) or 0.0
         state = self._state()
         day = self._day(state)
         day['usd'] = round(day['usd'] + usd, 6)
@@ -258,9 +307,25 @@ def recap(store, since=None):
     lines = ['While you were away (%d stretch%s):' % (len(rows), '' if len(rows) == 1 else 'es')]
     for r in rows:
         when = time.strftime('%H:%M', time.localtime(r['created']))
-        what = (r['summary'] or r['error'] or r['state']).strip().splitlines()[0][:200] if (r['summary'] or r['error']) else r['state']
+        what = first_sentences(r['summary'] or r['error'] or r['state'], 300)
         lines.append('- %s %s: %s' % (when, 'dream' if r['kind'] == 'dream' else 'free time', what))
     unanswered = [e for e in store.events() if e['kind'] == 'question_unanswered' and e['ts'] > since]
     if unanswered:
         lines.append('Questions it left for you: ' + '; '.join(str(e['data'].get('text', ''))[:120] for e in unanswered))
     return '\n'.join(lines)
+
+
+def first_sentences(text, limit):
+    """the text's opening up to `limit` characters, cut at a sentence end where there is one"""
+    t = ' '.join((text or '').split())
+    if len(t) <= limit:
+        return t
+    cut = max(t.rfind('. ', 0, limit), t.rfind('; ', 0, limit))
+    return t[:cut + 1] if cut > limit // 3 else t[:limit].rsplit(' ', 1)[0] + ' ...'
+
+
+def similarity(a, b):
+    """word-set overlap of two closing lines (0..1): cheap, and enough to notice a stretch repeating the last one"""
+    words = lambda x: {w for w in re.findall(r'[a-z0-9]+', (x or '').lower()) if len(w) > 3}
+    wa, wb = words(a), words(b)
+    return len(wa & wb) / len(wa | wb) if wa and wb else 0.0

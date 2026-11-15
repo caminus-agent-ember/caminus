@@ -1,6 +1,7 @@
 """The resident's durable goals, conversation, actions and observable event stream."""
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -330,3 +331,16 @@ class Store:
         goals = [dict(r) for r in self.db.execute('SELECT id,prompt,state,summary,error,steps,created,updated FROM goals ORDER BY created DESC LIMIT 50')]
         waiting = [dict(r) for r in self.db.execute("SELECT goal,name,bridge_id FROM actions WHERE state='waiting'")]
         return dict(goals=goals, waiting=waiting, last_event=self.db.execute('SELECT coalesce(max(seq),0) FROM events').fetchone()[0])
+
+
+def log_failure(home, record):
+    """Append one failed or refused model call to failures.jsonl in the resident home (mode 600). Every failure is kept
+    for debugging: the status, the provider's reason, the refusal category, fallback details and the request id. Never
+    raises: the log is a record, not a reason to lose the turn."""
+    try:
+        path = Path(home) / 'failures.jsonl'
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, 'a') as f:
+            f.write(json.dumps(dict(ts=time.strftime('%Y-%m-%dT%H:%M:%S'), **record), ensure_ascii=False, default=str) + '\n')
+    except (OSError, TypeError, ValueError):
+        pass

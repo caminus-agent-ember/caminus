@@ -24,7 +24,7 @@ from .prompt import render as render_prompt
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -61,6 +61,14 @@ def parser():
                            help='prompt tokens a goal may reach before the watchdog pauses it (0: off)')
             p.add_argument('--no-loop-gates',action='store_true',
                            help='record loop_gates false: a fixture agent that predates the done check and skips it')
+        if op=='advisor':
+            p.add_argument('--model',help='the advisor model, e.g. claude-opus-5-5 or claude-sonnet-5-5')
+            p.add_argument('--endpoint',help="Messages API root; the owner's own key relay keeps the advisor's key and cap separate")
+            p.add_argument('--api-key-env',help='key variable, when the endpoint is not a local relay that adds the key')
+            p.add_argument('--budget-usd',type=float,help='dollars per day the advisor may spend (default 1.00)')
+            p.add_argument('--calls-per-goal',type=int,help='advice calls one goal may make (default 5)')
+            p.add_argument('--effort',choices=('low','medium','high','xhigh','max'))
+            p.add_argument('--off',action='store_true',help='remove the advisor')
         if op=='heartbeat':
             p.add_argument('state',nargs='?',choices=('on','off','status','recap'),default='status',
                            help='free time: the resident lives in its account when no work is queued')
@@ -243,6 +251,31 @@ def main(argv=None,stdin=None):
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)
             return 0
         store=Store(home)
+        if a.op=='advisor':
+            from .advisor import Advisor, DEFAULTS
+            from .model import price
+            cfg=json.loads((home/'config.json').read_text())
+            adv=dict(cfg.get('advisor') or {})
+            if a.off:
+                adv={}
+            for flag in ('model','endpoint','api_key_env','budget_usd','calls_per_goal','effort'):
+                v=getattr(a,flag)
+                if v is not None:
+                    if isinstance(v,(int,float)) and v<0:raise ValueError('--'+flag.replace('_','-')+' must be 0 or more')
+                    adv[flag]=v.rstrip('/') if flag=='endpoint' else v
+            if adv.get('model') and price(adv['model'],{}) is None:
+                raise ValueError('no known price for %s, so its spend cannot be limited' % adv['model'])
+            if adv and not (adv.get('model') and adv.get('endpoint')):
+                raise ValueError('an advisor needs --model and --endpoint')
+            if adv!=(cfg.get('advisor') or {}):
+                if adv:cfg['advisor']=adv
+                else:cfg.pop('advisor',None)
+                atomic_json(home/'config.json',cfg)
+            state=json.loads((home/'advisor.json').read_text()) if (home/'advisor.json').exists() else {}
+            import datetime
+            emit(dict(advisor={**DEFAULTS,**adv} if adv else None,
+                      today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,calls=0))),a.json)
+            return 0
         if a.op=='heartbeat':
             from .freetime import settings
             cfg=json.loads((home/'config.json').read_text())

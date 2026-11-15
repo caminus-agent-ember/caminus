@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import unittest.mock
 import sys
 import threading
 import time
@@ -644,6 +645,117 @@ class Resident(unittest.TestCase):
             self.assertIn('While you were away (1 stretch)',text);self.assertIn('tide pools',text)
         finally:rt.mail.close();rt.store.close()
 
+    # ---- advisor ----------------------------------------------------------------------------------------------
+
+    def test_advisor_configured_priced_capped_and_known_to_the_agent(self):
+        self.assertIsNone(self.cmd('advisor')['advisor'])
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make the build pass.')
+            self.assertNotIn('ADVISOR',rt.context_message(gid)['content'],'no advisor: nothing advertised')
+            with self.assertRaises(ValueError) as c:rt.advisor.ask(gid,'what now?')
+            self.assertIn('no advisor is configured',str(c.exception))
+        finally:rt.mail.close();rt.store.close()
+        out=self.cmd('advisor',['--model','claude-opus-5-5','--endpoint','http://127.0.0.1:8766/v1','--budget-usd','0.05','--calls-per-goal','2'])
+        self.assertEqual((out['advisor']['model'],out['advisor']['budget_usd'],out['advisor']['calls_per_goal']),('claude-opus-5-5',0.05,2))
+        self.cmd('advisor',['--model','some-unpriced-model'],code=1)
+        rt=Runtime(self.home)
+        try:
+            rt.advisor_opener=wire=Wire(sse('Check the linker flags first; you have not verified -lm.',stop='end_turn'),
+                                        sse('Second opinion.'),sse('Third.'))
+            gid=rt.store.enqueue('Make the build pass.')
+            rt.store.update(gid,done_check='make exits 0')
+            self.assertIn('ADVISOR: claude-opus-5-5 is available',rt.context_message(gid)['content'])
+            self.assertIn('2 calls left',rt.context_message(gid)['content'])
+            got=rt.advisor.ask(gid,'The link step fails with undefined sqrt. What am I missing?')
+            self.assertIn('linker flags',got['advice']);self.assertEqual(got['calls_left'],1)
+            url,headers,body=wire.requests[0]
+            self.assertTrue(url.endswith('/v1/messages'));self.assertEqual(body['model'],'claude-opus-5-5')
+            self.assertNotIn('thinking',body,'Opus 5.5 refuses thinking off: the advisor leaves it adaptive')
+            self.assertNotIn('tools',body,'the advisor cannot run anything')
+            self.assertIn('make exits 0',json.dumps(body),'the brief carries the done check')
+            self.assertGreater(got['usd'],0)
+            self.assertTrue(any(e['kind']=='advice' for e in rt.store.events()))
+            rt.advisor.ask(gid,'And then?')
+            with self.assertRaises(ValueError) as c:rt.advisor.ask(gid,'A third?')
+            self.assertIn('used its 2 advisor calls',str(c.exception))
+            other=rt.store.enqueue('Another goal.')
+            state=json.loads((self.home/'advisor.json').read_text())
+            day=next(iter(state.values()));day['usd']=1.0;(self.home/'advisor.json').write_text(json.dumps(state))
+            with self.assertRaises(ValueError) as c:rt.advisor.ask(other,'Budget?')
+            self.assertIn('budget is spent',str(c.exception))
+        finally:rt.mail.close();rt.store.close()
+        self.assertIsNone(self.cmd('advisor',['--off'])['advisor'])
+
+    def test_advisor_fallback_refusals_and_the_failure_log(self):
+        self.cmd('advisor',['--model','claude-opus-5-5','--endpoint','http://127.0.0.1:8766/v1','--calls-per-goal','5'])
+        rescued=sse('Rescued advice: check the firewall rule order.')
+        rescued[0]['message']['model']='claude-opus-5-5'
+        rescued.insert(1,dict(type='content_block_start',index=9,content_block=dict(type='fallback',
+                         **{'from':dict(model='claude-opus-5-5'),'to':dict(model='claude-opus-4-8')})))
+        rt=Runtime(self.home)
+        try:
+            rt.advisor_opener=wire=Wire(rescued,
+                                        sse('',stop='refusal',stop_details=dict(type='refusal',category='cyber')),
+                                        sse("I'm sorry, but I can't help with that."),
+                                        (529,'{"type":"error","error":{"type":"overloaded_error"}}',{'request-id':'req_x'}))
+            gid=rt.store.enqueue('Harden my own SSH config.')
+            got=rt.advisor.ask(gid,'Which sshd settings first?')
+            url,headers,body=wire.requests[0]
+            h={k.lower():v for k,v in headers.items()}
+            self.assertEqual(body.get('fallbacks'),'default','Opus 5.5 asks for the server-side fallback')
+            self.assertEqual(h.get('anthropic-beta'),'server-side-fallback-2026-07-01')
+            self.assertEqual(got['model'],'claude-opus-4-8','the serving model is reported')
+            for q in ('Refused?','Soft?','Overloaded?'):
+                with self.assertRaises(ValueError):rt.advisor.ask(gid,q)
+            log=[json.loads(l) for l in (self.home/'failures.jsonl').read_text().splitlines()]
+            kinds=[(r['who'],r['error_type']) for r in log]
+            self.assertEqual(kinds,[('advisor','fallback'),('advisor','ModelRefused'),('advisor','soft refusal'),('advisor','ModelError')])
+            self.assertEqual(log[0]['call']['declined_by'],['claude-opus-5-5'])
+            self.assertEqual(log[1]['category'],'cyber');self.assertIn('Refused?',log[1]['brief'],'a refusal keeps its brief for a rerun')
+            self.assertEqual((log[3]['status'],log[3]['request_id']),(529,'req_x'))
+            self.assertEqual(oct((self.home/'failures.jsonl').stat().st_mode&0o777),'0o600')
+            self.assertEqual(rt.advisor.calls(gid),4,'refused and failed calls count against the cap')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_resident_model_failures_are_logged(self):
+        self.replies({'_status':401})
+        self.cmd('once',['--goal','Fail on auth.'],code=1)
+        log=[json.loads(l) for l in (self.home/'failures.jsonl').read_text().splitlines()]
+        self.assertEqual((log[-1]['who'],log[-1]['status'],log[-1]['goal_kind']),('resident',401,'work'))
+        self.assertIn('refused by the fixture',log[-1]['error'],'the provider reason is kept')
+
+    def test_free_time_leans_new_tracks_projects_and_rotates(self):
+        from caminus.env.resident.freetime import similarity, first_sentences
+        rt=self.free_runtime()
+        try:
+            first=rt.store.goal(rt.free.pulse())['prompt']
+            self.assertIn('PROJECTS.md',first);self.assertIn('not new',first);self.assertNotIn('earlier stretches',first)
+            for text in ('Built the haiku machine and tested syllable counts in the studio.',
+                         'Tuned the haiku machine syllable counts and tested them in the studio again.',
+                         'Haiku machine: tested syllable counts in the studio, tuned word banks.'):
+                gid=rt.store.next_goal()[0] if rt.store.next_goal() else rt.free.pulse()
+                rt._finish(gid,text)
+            (self.home/'studio'/'PROJECTS.md').write_text('# Projects\n- [active] haiku machine: 5-7-5 generator (last: 2026-11-15)\n'
+                                                       '- [active] tide notes: reading\n- [active] a game: tiny roguelike\n- [active] fourth: x\n- [done] old: y\n')
+            prompt=rt.store.goal(rt.free.pulse())['prompt']
+            self.assertIn('earlier stretches',prompt,'the invitation carries its own index')
+            self.assertIn('look alike',prompt);self.assertIn('last three stretches went to haiku machine',prompt)
+            self.assertIn('4 projects are active',prompt)
+            self.assertGreater(similarity('alpha beta gamma delta','alpha beta gamma epsilon'),0.5)
+            self.assertEqual(first_sentences('One thing. Two things happened here. '+'x'*400,60),'One thing. Two things happened here.')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_advisor_one_shot_call_writes_no_cache(self):
+        self.cmd('advisor',['--model','claude-sonnet-5-5','--endpoint','http://127.0.0.1:8766/v1'])
+        rt=Runtime(self.home)
+        try:
+            rt.advisor_opener=wire=Wire(sse('Advice.'))
+            gid=rt.store.enqueue('Anything.')
+            rt.advisor.ask(gid,'Question?')
+            self.assertNotIn('cache_control',json.dumps(wire.requests[0][2]),'a one-shot call would pay the write premium for nothing')
+        finally:rt.mail.close();rt.store.close()
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)
@@ -658,6 +770,26 @@ class Resident(unittest.TestCase):
         t=Terminal(self.home)
         out=t.call(uuid.uuid4().hex,dict(session=sid,stdin='answer\n',yield_ms=1000))
         self.assertEqual(out['exit_code'],0);self.assertIn('got:answer',out['output'])
+
+    def test_poll_returns_only_new_output_and_says_when_quiet(self):
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        # Two bursts separated by a pause; the command then waits for a line before exiting.
+        cmd='printf first-burst; sleep 1; printf second-burst; read x'
+        out=t.call(sid,dict(command=cmd,yield_ms=50))
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
+        self.assertIn('first-burst',out['output']);self.assertNotIn('second-burst',out['output'])
+        self.assertFalse(out['no_new_output'])
+        # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
+        self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])
+        # Second burst arrives; that poll returns only the second burst.
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
+        self.assertEqual(out['output'],'second-burst');self.assertFalse(out['no_new_output'])
+        # An explicit offset=0 still reads everything from the beginning.
+        out=t.call(uuid.uuid4().hex,dict(session=sid,stdin='go\n',yield_ms=1000,offset=0))
+        self.assertTrue(out['output'].startswith('first-burst'));self.assertIn('second-burst',out['output'])
+        self.assertEqual(out['exit_code'],0)
+        self.assertEqual(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=10))['no_new_output'],True)
 
     def test_zipapp_is_the_same_runtime(self):
         app=S/(self.key+'.pyz');app.write_bytes(bundle())
@@ -761,7 +893,17 @@ class Resident(unittest.TestCase):
             self.assertEqual(store.actions(first['id']),[])
         finally:store.close()
 
+    def hermetic_home(self):
+        """Runtime.context_message reads ~/ROBOTS.md of the account running the test; the host's file must not
+        change the measured token budget, so HOME points at an empty scratch directory for the test."""
+        empty=S/('home-'+uuid.uuid4().hex);empty.mkdir(parents=True)
+        return unittest.mock.patch.dict(os.environ,HOME=str(empty))
+
     def test_compaction_requests_fit_the_same_model_window(self):
+        with self.hermetic_home():
+            self._test_compaction_requests_fit_the_same_model_window()
+
+    def _test_compaction_requests_fit_the_same_model_window(self):
         class BoundedModel:
             def __init__(self):self.summaries=0
             def context_size(self):return 16384
@@ -782,6 +924,10 @@ class Resident(unittest.TestCase):
         finally:rt.mail.close();rt.store.close()
 
     def test_compaction_counts_the_trailing_context_message(self):
+        with self.hermetic_home():
+            self._test_compaction_counts_the_trailing_context_message()
+
+    def _test_compaction_counts_the_trailing_context_message(self):
         # The probe must measure the request as sent. A large MEMORY.md rides in the trailing context message;
         # with the history alone under the trigger, the old probe declined to compact and the real request
         # overflowed the window (the goal paused on a context error, and resuming repeated it).

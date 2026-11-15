@@ -33,6 +33,13 @@ def read_state(job):
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+def read_cursor(job):
+    try:
+        return max(0, int(json.loads((Path(job) / 'cursor').read_text())['offset']))
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
 def worker(job):
     job = Path(job)
     with (job / 'worker.lock').open('a') as lock:
@@ -187,11 +194,20 @@ class Terminal:
         if state.get('phase') in ('starting', 'running') and not alive(state.get('worker')):
             state.update(phase='interrupted', error='worker disappeared; inspect effects before repeating the command')
         log = job / 'output.log'
-        offset = max(0, int(args.get('offset', 0)))
+        # Without an explicit offset, a poll returns only what this session has not yet returned (the persisted
+        # read cursor). An explicit offset reads from there. Either way the cursor moves to the end of what was returned.
+        cursor = job / 'cursor'
+        if 'offset' in args:
+            offset = max(0, int(args['offset']))
+        else:
+            offset = read_cursor(job)
         data = b''
         if log.exists():
             with log.open('rb') as f:
                 f.seek(offset)
                 data = f.read(min(32768, max(1, int(args.get('max_output', 8192)))))
-        return dict(session=session, **state, output=data.decode(errors='replace'), next_offset=offset + len(data),
-                    running=state.get('phase') not in ('finished', 'interrupted'))
+        next_offset = offset + len(data)
+        if data or 'offset' in args:
+            atomic_json(cursor, dict(offset=next_offset))
+        return dict(session=session, **state, output=data.decode(errors='replace'), next_offset=next_offset,
+                    no_new_output=not data, running=state.get('phase') not in ('finished', 'interrupted'))
