@@ -221,19 +221,23 @@ class Store:
     def clear_failures(self, gid):
         self.db.execute('DELETE FROM failures WHERE goal=?', (gid,))
 
-    def set_ledger(self, gid, milestones, blockers):
-        """Replace the goal's ledger: the milestones it decomposed into, and what blocks it now."""
+    def set_todo(self, gid, items, blockers):
+        """Replace the goal's todo list (items with a state) and what blocks it now. Stored in the ledger column,
+        which the todo list replaced."""
         self.db.execute('UPDATE goals SET ledger=?, updated=? WHERE id=?',
-                        (json.dumps(dict(milestones=milestones, blockers=blockers), ensure_ascii=False),
-                         time.time(), gid))
+                        (json.dumps(dict(items=items, blockers=blockers), ensure_ascii=False), time.time(), gid))
 
-    def ledger(self, gid):
+    def todo(self, gid):
+        """The goal's todo list. A ledger from before the todo list reads as pending items."""
         raw = self.db.execute('SELECT ledger FROM goals WHERE id=?', (gid,)).fetchone()
         try:
             out = json.loads(raw['ledger']) if raw and raw['ledger'] else {}
         except ValueError:
             out = {}
-        return dict(milestones=out.get('milestones') or [], blockers=out.get('blockers') or [])
+        items = out.get('items')
+        if items is None:
+            items = [dict(text=str(m), state='pending') for m in out.get('milestones') or []]
+        return dict(items=items, blockers=out.get('blockers') or [])
 
     def add_checkpoint(self, cid, gid, label, paths, size):
         self.db.execute('INSERT INTO checkpoints(id,goal,label,paths,ts,bytes) VALUES(?,?,?,?,?,?)',

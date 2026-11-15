@@ -236,16 +236,45 @@ class Resident(unittest.TestCase):
         self.assertTrue(any('change approach' in (r.get('error') or '').lower() for r in results),
                         [r.get('error') for r in results])
 
-    def test_the_ledger_is_pinned_into_every_turn(self):
+    def test_the_todo_list_is_pinned_into_every_turn_and_gates_finish(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),
-                     call('ledger',dict(milestones=['write it','check it'],blockers=['no editor'])),
+                     call('todo',dict(items=[dict(text='write it',state='done'),dict(text='check it',state='in_progress')],blockers=['no editor'])),
                      call('verify',dict(evidence='the file is there')),
-                     call('finish',dict(summary='Done.')))
-        self.cmd('once',['--goal','Write the file.'])
-        body=json.dumps(Endpoint.seen[-1][1])
-        self.assertIn('write it | check it',body)
-        self.assertIn('blocked by: no editor',body)
+                     call('finish',dict(summary='Done.')),
+                     call('finish',dict(summary='Done.',open='check it: left for the human')))
+        out=self.cmd('once',['--goal','Write the file.'])
+        self.assertEqual(out['state'],'completed')
+        bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
+        self.assertIn('[x] write it | [>] check it',bodies[-1])
+        self.assertIn('blocked by: no editor',bodies[-1])
+        self.assertTrue(any('todo list still has unfinished items (check it)' in b for b in bodies),'finish refused while an item is open')
+
+    def test_todo_rejects_two_in_progress_and_bad_states(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Plan.')
+            with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='in_progress'),dict(text='b',state='in_progress')],[])
+            with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='later')],[])
+            self.assertEqual(rt._todo(gid,['bare string'],[])['left'],1)
+            # a ledger stored before the todo list reads as pending items
+            rt.store.db.execute('UPDATE goals SET ledger=? WHERE id=?',(json.dumps(dict(milestones=['old step'],blockers=[])),gid))
+            self.assertEqual(rt.store.todo(gid)['items'],[dict(text='old step',state='pending')])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_ledger_call_from_an_older_history_still_works(self):
+        self.replies(call('ledger',dict(milestones=['first','second'])),call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal','Use the old tool.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:self.assertEqual([it['text'] for it in store.todo(out['id'])['items']],['first','second'])
+        finally:store.close()
+
+    def test_boolean_arguments_reach_the_tool(self):
+        (self.home/'t.txt').write_text('a a\n')
+        self.replies(call('edit',dict(path='t.txt',old='a',new='b',replace_all=True)),call('finish',dict(summary='Done.')))
+        self.cmd('once',['--goal','Replace both.'])
+        self.assertEqual((self.home/'t.txt').read_text(),'b b\n')
 
     def test_memory_index_is_frozen_per_goal_and_state_loads_first(self):
         with self.hermetic_home():
@@ -263,6 +292,67 @@ class Resident(unittest.TestCase):
                 g2=rt.store.enqueue('Second goal.')
                 self.assertIn('written mid-goal',rt.context_message(g2)['content'],'the next goal sees the new index')
             finally:rt.mail.close();rt.store.close()
+
+    def test_file_tools_read_edit_write(self):
+        from caminus.env.resident import files
+        home=self.home
+        w=files.write(home,'src/a.py','def f(n):\n    if n > 3:\n        return 1\n    return 0\n')
+        self.assertTrue(w['created']);self.assertIn('4 lines',w['note'])
+        r=files.read(home,'src/a.py',offset=2,limit=2)
+        self.assertEqual(r['shown'],'2-3');self.assertIn('     2\t    if n > 3:',r['text']);self.assertIn('offset=4',r['next'])
+        e=files.edit(home,'src/a.py','if n > 3:','if n >= 3:')
+        self.assertEqual((e['added'],e['removed']),(1,1));self.assertIn('-    if n > 3:',e['diff']);self.assertIn('+    if n >= 3:',e['diff'])
+        with self.assertRaises(ValueError) as c:files.edit(home,'src/a.py','return','yield')
+        self.assertIn('occurs 2 times',str(c.exception))
+        self.assertEqual(files.edit(home,'src/a.py','return','yield',replace_all=True)['replaced'],2)
+        with self.assertRaises(ValueError) as c:files.edit(home,'src/a.py','  if n >= 3:  \n','x')
+        self.assertIn('not found',str(c.exception))
+        (home/'b.bin').write_bytes(b'\0\1\2')
+        with self.assertRaises(ValueError):files.read(home,'b.bin')
+        self.assertIn('src/',files.read(home,'.')['entries'])
+        # a CRLF file keeps its endings, and the mode survives an edit
+        p=home/'win.txt';p.write_bytes(b'one\r\ntwo\r\n');p.chmod(0o640)
+        files.edit(home,'win.txt','one\ntwo','uno\ndos')
+        self.assertEqual(p.read_bytes(),b'uno\r\ndos\r\n');self.assertEqual(p.stat().st_mode&0o777,0o640)
+
+    def test_file_tools_through_the_loop(self):
+        self.replies(call('write',dict(path='notes.txt',content='alpha\nbeta\n')),
+                     call('edit',dict(path='notes.txt',old='beta',new='gamma')),
+                     call('read',dict(path='notes.txt')),
+                     call('finish',dict(summary='Edited.')))
+        out=self.cmd('once',['--goal','Write and edit a file.'])
+        self.assertEqual(out['state'],'completed')
+        self.assertEqual((self.home/'notes.txt').read_text(),'alpha\ngamma\n')
+        store=Store(self.home)
+        try:
+            results=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result']
+            self.assertTrue(any(r.get('name')=='edit' and '+gamma' in r['result'].get('diff','') for r in results),results)
+        finally:store.close()
+
+    def test_big_outputs_go_to_a_file_with_a_preview(self):
+        from caminus.env.resident import outputs
+        big='\n'.join(f'line {i} of a long build log' for i in range(6000))
+        out=outputs.spill(self.home,'terminal','a'*32,dict(output=big,exit_code=0))
+        self.assertLess(len(json.dumps(out)),outputs.LIMIT_CHARS+500)
+        self.assertEqual(out['exit_code'],0,'small fields are kept as they are')
+        saved=out['saved'][0];self.assertEqual(saved['field'],'output');self.assertEqual(saved['lines'],6000)
+        self.assertEqual((self.home/saved['path']).read_text(),big,'the whole text is in the file')
+        self.assertIn('line 0 of',out['output']);self.assertIn('line 5999 of',out['output']);self.assertIn(saved['path'],out['output'])
+        small=dict(output='short');self.assertIs(outputs.spill(self.home,'terminal','b'*32,small),small)
+        # many medium fields: the whole result goes to one file
+        wide={f'f{i}':'y'*3000 for i in range(20)}
+        out=outputs.spill(self.home,'discover','c'*32,wide)
+        self.assertIn('preview',out);self.assertTrue((self.home/out['saved'][0]['path']).exists())
+
+    def test_a_big_tool_result_reaches_the_model_shortened(self):
+        big='\n'.join(f'row {i}' for i in range(20000))
+        (self.home/'big.txt').write_text(big)
+        self.replies(call('read',dict(path='big.txt',limit=2000)),call('finish',dict(summary='Read it.')))
+        self.cmd('once',['--goal','Read the big file.'])
+        last=[b for k,b in Endpoint.seen if k==self.key][-1]
+        tool_msgs=[m for m in last['messages'] if m.get('role')=='tool']
+        self.assertTrue(tool_msgs);content=tool_msgs[-1]['content']
+        self.assertLess(len(content),40000);self.assertIn('outputs/',content);self.assertIn('characters omitted',content)
 
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
@@ -1087,7 +1177,9 @@ class Resident(unittest.TestCase):
         try:
             gid=rt.store.enqueue('Continue the long task.')
             rt.store.event('startup_discovery',dict(topic='skipped in this test'),gid)   # keeps the kept tail small
-            messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*30000)]+[dict(role='assistant',content='observation '*20) for _ in range(10)]
+            # (28,000 filler characters: the tool definitions grow as tools are added, and the precondition below
+            # needs the history alone to stay under the window with the reply budget)
+            messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*28000)]+[dict(role='assistant',content='observation '*20) for _ in range(10)]
             rt.store.update(gid,messages=messages)
             history=rt.model.tokens([rt.system(gid),*messages],TOOLS)
             # The history alone leaves room for the reply budget too, so only the trailing context overflows.

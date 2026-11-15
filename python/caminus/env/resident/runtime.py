@@ -17,8 +17,15 @@ from .prompt import render as render_prompt
 from .freetime import FreeTime, KINDS as FREE_KINDS
 from .advisor import Advisor
 from .memory import Memory
+from . import files
+from . import outputs
 from .brain import Brains
 
+TODO_STATES = ('pending', 'in_progress', 'done')
+# Tools that were replaced but may still be called from an older history: accepted, never advertised.
+LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type':'array','items':{'type':'string'}},
+                                                               blockers={'type':'array','items':{'type':'string'}}),
+                               required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
 EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24}
@@ -52,12 +59,20 @@ TOOLS = [
          dict(check={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
+    tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
+         dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
+    tool('edit', 'Replace exact text in a file. old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
+         dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
+    tool('write', 'Create a file, or replace a whole file, with content. Returns the diff against what was there.',
+         dict(path={'type':'string'}, content={'type':'string'}), ('path','content')),
     tool('remember', 'Save one lasting fact as a note (notes/NAME.md) with a one-line entry in MEMORY.md, your notes index. The index is capped at 4 KB and loads into every goal; a note is read on demand. Refused when the index is full: merge or drop lines first. The new line shows from your next goal.',
          dict(name={'type':'string'}, text={'type':'string'}, summary={'type':'string'}), ('name','text','summary')),
     tool('history_search', 'Full-text search over your own past: earlier goals, your replies, tool results, finish summaries, your journal and notes. No model call; returns short snippets with where they came from.',
          dict(query={'type':'string'}, limit={'type':'integer'}), ('query',)),
-    tool('ledger', 'State the milestones this goal decomposes into and what blocks it now. Replaces the previous lists; it is pinned into every turn, so keep it short.',
-         dict(milestones={'type':'array','items':{'type':'string'}}, blockers={'type':'array','items':{'type':'string'}})),
+    tool('todo', 'Your plan for this goal as a checklist: each item pending, in_progress (one at a time) or done, plus what blocks you now. Send the whole list each time; it replaces the last one, is pinned into every turn (it survives compaction) and shows above your human\'s composer. finish refuses while items are unfinished unless open names what is left.',
+         dict(items={'type':'array','items':{'type':'object','properties':{'text':{'type':'string'},
+              'state':{'type':'string','enum':['pending','in_progress','done']}},'required':['text','state'],
+              'additionalProperties':False}}, blockers={'type':'array','items':{'type':'string'}}), ('items',)),
     tool('checkpoint', 'Snapshot named paths before a destructive action, so the work can be put back. Returns the id.',
          dict(paths={'type':'array','items':{'type':'string'}}, label={'type':'string'}), ('paths',)),
     tool('rollback', 'Restore a checkpoint\'s paths exactly as they were when it was taken.',
@@ -227,11 +242,12 @@ class Runtime:
         for r in rows:
             lines.append('LOOP: a call has failed %d times (%s): change approach, do not retry it.'
                          % (r['count'], (r['last_error'] or '')[:120]))
-        led = self.store.ledger(gid)
-        if led['milestones']:
-            lines.append('LOOP: milestones: ' + ' | '.join(led['milestones']))
-        if led['blockers']:
-            lines.append('LOOP: blocked by: ' + ' | '.join(led['blockers']))
+        todo = self.store.todo(gid)
+        if todo['items']:
+            mark = {'done': '[x]', 'in_progress': '[>]', 'pending': '[ ]'}
+            lines.append('TODO: ' + ' | '.join(mark.get(it['state'], '[ ]') + ' ' + it['text'] for it in todo['items']))
+        if todo['blockers']:
+            lines.append('LOOP: blocked by: ' + ' | '.join(todo['blockers']))
         if not self.store.verified_since_steer(gid):
             lines.append('LOOP: the done check has not been exercised since the last steer. Run it and call '
                          'verify before finish.')
@@ -353,12 +369,29 @@ class Runtime:
         self.store.event('done_check', dict(check=check), gid)
         return dict(done_check=check)
 
-    def _ledger(self, gid, milestones, blockers):
-        milestones = [str(m).strip() for m in (milestones or []) if str(m).strip()][:20]
-        blockers = [str(b).strip() for b in (blockers or []) if str(b).strip()][:20]
-        self.store.set_ledger(gid, milestones, blockers)
-        self.store.event('ledger', dict(milestones=milestones, blockers=blockers), gid)
-        return dict(milestones=milestones, blockers=blockers)
+    def _todo(self, gid, items, blockers):
+        """Replace the goal's checklist. One item in progress at a time keeps the list honest about now."""
+        clean = []
+        for it in items or []:
+            if isinstance(it, str):                       # a bare string is a pending item
+                it = dict(text=it, state='pending')
+            if not isinstance(it, dict):
+                raise ValueError('each todo item is {"text": ..., "state": "pending" | "in_progress" | "done"}')
+            text, state = str(it.get('text', '')).strip(), it.get('state', 'pending')
+            if not text:
+                continue
+            if state not in TODO_STATES:
+                raise ValueError(f'todo state must be one of {", ".join(TODO_STATES)}, not {state!r}')
+            clean.append(dict(text=text[:200], state=state))
+        if len(clean) > 30:
+            raise ValueError('a todo list holds at most 30 items: group the small steps')
+        if sum(1 for it in clean if it['state'] == 'in_progress') > 1:
+            raise ValueError('only one item can be in_progress: finish or pause the others first')
+        blockers = [str(b).strip()[:200] for b in (blockers or []) if str(b).strip()][:20]
+        self.store.set_todo(gid, clean, blockers)
+        self.store.event('todo', dict(items=clean, blockers=blockers), gid)
+        left = sum(1 for it in clean if it['state'] != 'done')
+        return dict(items=len(clean), left=left, blockers=blockers)
 
     def _checkpoint(self, gid, paths, label=''):
         """Tar the named paths under the agent home, with a manifest, and return the id."""
@@ -448,21 +481,24 @@ class Runtime:
             if not isinstance(args, dict):
                 raise ValueError('tool arguments must be an object')
             name = action['name']
-            schemas = {t['function']['name']:t['function']['parameters'] for t in TOOLS}
+            schemas = {t['function']['name']:t['function']['parameters'] for t in TOOLS} | LEGACY_TOOLS
             schema = schemas.get(name)
             if schema is None:
                 raise ValueError('unknown tool '+name)
             if set(schema['required'])-set(args) or set(args)-set(schema['properties']):
                 raise ValueError('missing required or unknown tool arguments')
-            types = dict(string=str,integer=int,array=list)
+            types = dict(string=str,integer=int,array=list,boolean=bool,object=dict)
             for key,value in args.items():
                 prop = schema['properties'][key]
-                if not isinstance(value,types[prop['type']]) or isinstance(value,bool):
+                # bool is a subclass of int: only a boolean property takes True / False
+                if not isinstance(value,types[prop['type']]) or (isinstance(value,bool) and prop['type']!='boolean'):
                     raise ValueError('invalid argument type for '+key)
                 if 'enum' in prop and value not in prop['enum']:
                     raise ValueError('invalid value for '+key)
-                if prop['type']=='array' and any(not isinstance(v,str) for v in value):
-                    raise ValueError('invalid array item for '+key)
+                if prop['type']=='array':
+                    item = prop.get('items',{}).get('type','string')
+                    if any(not isinstance(v,types[item]) for v in value):
+                        raise ValueError('invalid array item for '+key+' (each must be a '+item+')')
             gid_now = action['goal']
             refused = False
             signature = self._signature(name, args)
@@ -491,8 +527,18 @@ class Runtime:
                     result = self._define_done(action['goal'], args['check'])
                 elif name == 'verify':
                     result = self._verify(action['goal'], args['evidence'])
+                elif name == 'todo':
+                    result = self._todo(action['goal'], args.get('items'), args.get('blockers'))
                 elif name == 'ledger':
-                    result = self._ledger(action['goal'], args.get('milestones'), args.get('blockers'))
+                    # the todo list replaced the ledger; a history that still calls it gets its milestones as items
+                    result = self._todo(action['goal'], args.get('milestones'), args.get('blockers'))
+                    result['note'] = 'ledger is now todo: send items with a state next time'
+                elif name == 'read':
+                    result = files.read(self.home, args['path'], args.get('offset'), args.get('limit'))
+                elif name == 'edit':
+                    result = files.edit(self.home, args['path'], args['old'], args['new'], bool(args.get('replace_all')))
+                elif name == 'write':
+                    result = files.write(self.home, args['path'], args['content'])
                 elif name == 'remember':
                     result = self.memory.remember(args['name'], args['text'], args['summary'])
                 elif name == 'history_search':
@@ -524,6 +570,10 @@ class Runtime:
                     if graded and not self.store.verified_since_steer(action['goal']):
                         raise ValueError('the done check has not been exercised since the last steer: run it '
                                          'and call verify with what it showed before finishing')
+                    left = [it['text'] for it in self.store.todo(action['goal'])['items'] if it['state'] != 'done']
+                    if graded and left and not str(args.get('open', '')).strip():
+                        raise ValueError('your todo list still has unfinished items (%s): mark them done with todo, '
+                                         'or name what is left in open' % '; '.join(left[:5]))
                     result = dict(summary=args['summary'], open=args.get('open', ''))
             if name == 'terminal':
                 # Preparation already launched or queued input. Polling must not
@@ -547,6 +597,8 @@ class Runtime:
                                    dict(call=signature, error=failure[:200]))
             except Exception:
                 pass                          # the ledger is a backstop, never a reason to lose the error
+        # A result past about 8K tokens has its large text moved to ~/outputs: the model gets a preview and the path.
+        result = outputs.spill(self.home, action['name'], action['id'], result)
         self.store.action_result(action, result)
         if 'error' not in result:
             self.progress[action['goal']] = time.time()
