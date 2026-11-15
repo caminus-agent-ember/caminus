@@ -53,6 +53,16 @@ def main():
     from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, serve, sessions, settings
     from caminus.cmd import env as cmd_env
 
+    # Optional runtime sharing is operator-selected, portable and fail-visible.
+    plan=cmd_env.PROVISION
+    check(all(value not in plan for value in ('miniforge3','envs/drafter','src/caminus/public','2>/dev/null || true')),
+          'setup: no workstation-specific runtime sources or suppressed mount failures')
+    check(all(value in plan for value in ('runtime_source=','package_source=','models_source=',
+                                         '/opt/caminus-runtime/python/bin/python -I','remount,bind,ro')),
+          'setup: explicit runtime sources and read-only mount examples')
+    check(all(line.startswith('#') for line in plan.splitlines() if 'sudo mount' in line),
+          'setup: optional inference mounts require a separate operator choice')
+
     # settings: environment first
     check(settings.user() == 'test-agent', 'settings.user from the environment')
     check(settings.bridge_dir() == bridge_dir, 'settings.bridge_dir from the environment')

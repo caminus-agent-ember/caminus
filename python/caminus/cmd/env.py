@@ -288,12 +288,17 @@ sudo mkdir -p {bridge}/req {bridge}/res {bridge}/notes
 sudo chown root:{group} {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo chmod 770 {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo loginctl enable-linger {user}                   # its long-running servers survive logout
-# optional, for `caminus env serve` (the server runs as the agent user and must read python+torch+caminus):
-sudo mkdir -p /opt/caminus-runtime && sudo mount --bind "$HOME/miniforge3" /opt/caminus-runtime/conda 2>/dev/null || true
-sudo mount --bind "$HOME/src" /opt/caminus-runtime/src 2>/dev/null || true
-sudo mount --bind "$HOME/.local/share/caminus/models" /opt/caminus-runtime/models 2>/dev/null || true
-# then: export CAMINUS_ENV_PYTHON='/opt/caminus-runtime/conda/envs/drafter/bin/python -I'
-#       export CAMINUS_ENV_PKG=/opt/caminus-runtime/src/caminus/public/python
+# optional inference runtime: choose explicit sources for this installation before running these commented commands.
+# runtime_source=/absolute/path/to/python-prefix       # contains bin/python and its dependencies
+# package_source=/absolute/path/to/package-root       # contains the caminus package
+# models_source=/absolute/path/to/model-directory
+# test -x "$runtime_source/bin/python" && test -d "$package_source/caminus" && test -d "$models_source"
+# sudo mkdir -p /opt/caminus-runtime/python /opt/caminus-runtime/package /opt/caminus-runtime/models
+# sudo mount --bind "$runtime_source" /opt/caminus-runtime/python && sudo mount -o remount,bind,ro /opt/caminus-runtime/python
+# sudo mount --bind "$package_source" /opt/caminus-runtime/package && sudo mount -o remount,bind,ro /opt/caminus-runtime/package
+# sudo mount --bind "$models_source" /opt/caminus-runtime/models && sudo mount -o remount,bind,ro /opt/caminus-runtime/models
+# then: export CAMINUS_ENV_PYTHON='/opt/caminus-runtime/python/bin/python -I'
+#       export CAMINUS_ENV_PKG=/opt/caminus-runtime/package
 #       export CAMINUS_ENV_MODELS=/opt/caminus-runtime/models
 ssh-keygen -t ed25519 -f {key} -N '' -C caminus-env   # if {key} does not exist yet
 # then add this line to {user_home}/.ssh/authorized_keys (dir 700, file 600, owned by {user}):
