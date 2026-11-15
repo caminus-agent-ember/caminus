@@ -96,7 +96,7 @@ func (m envModel) questionBox() string {
 			}
 			row := wrap(fmt.Sprintf("%s%d. %s", mark, i+1, text))
 			if i == m.chat.questionChoice {
-				row = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")).Render(row)
+				row = bold(cAccent).Render(row)
 			}
 			parts = append(parts, row)
 			if i == m.chat.questionChoice {
@@ -111,7 +111,7 @@ func (m envModel) questionBox() string {
 		body = view.View()
 		hint = "↑/↓ select · Enter answer · e custom · Esc defer"
 	}
-	return envBorder.BorderForeground(lipgloss.Color("12")).Width(max(18, m.width-2)).Render(body + "\n" + envDim.Render(envClip(hint, w)))
+	return envBorder.BorderForeground(cAccent).Width(max(18, m.width-2)).Render(body + "\n" + envDim.Render(envClip(hint, w)))
 }
 
 func (m envModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

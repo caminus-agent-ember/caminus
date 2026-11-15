@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"slices"
 	"strings"
 
@@ -295,27 +296,27 @@ func fenced(text, language string) string {
 
 func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
-	heading := func(label, color string) string {
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color)).Render(label)
+	heading := func(label string, c color.Color) string {
+		return bold(c).Render(label)
 	}
 	switch e.Kind {
 	case "goal_queued":
-		return heading("YOU · goal "+shortGoal(e.Goal), "12") + "\n" + c.renderMarkdown(str("prompt"))
+		return heading("YOU · goal "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(str("prompt"))
 	case "user_message", "peer_message":
 		text := str("text")
 		if text == "" {
 			return ""
 		}
-		return heading("YOU · steer "+shortGoal(e.Goal), "12") + "\n" + c.renderMarkdown(text)
+		return heading("YOU · steer "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(text)
 	case "assistant":
 		var parts []string
 		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
 		// sent back to the model, so this block is display only.
 		if text := str("reasoning"); text != "" {
-			parts = append(parts, heading("THINKING", "8")+"\n"+c.renderMarkdown(text))
+			parts = append(parts, heading("THINKING", cMuted)+"\n"+c.renderMarkdown(text))
 		}
 		if text := str("content"); text != "" {
-			parts = append(parts, heading("AGENT", "10")+"\n"+c.renderMarkdown(text))
+			parts = append(parts, heading("AGENT", cGreen)+"\n"+c.renderMarkdown(text))
 		}
 		calls, _ := e.Data["tool_calls"].([]any)
 		for _, raw := range calls {
@@ -329,7 +330,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
-				parts = append(parts, heading("RUN · "+residentText(name), "14")+"\n"+c.renderMarkdown(fenced(command, "bash")))
+				parts = append(parts, heading("RUN · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(command, "bash")))
 			} else {
 				var pretty any
 				text := rawArgs
@@ -338,7 +339,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 						text = string(b)
 					}
 				}
-				parts = append(parts, heading("TOOL · "+residentText(name), "14")+"\n"+c.renderMarkdown(fenced(text, "json")))
+				parts = append(parts, heading("TOOL · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(text, "json")))
 			}
 		}
 		return strings.Join(parts, "\n\n")
@@ -349,19 +350,19 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if answer == "" {
 				answer, _ = result["decision"].(string)
 			}
-			return heading("YOU · answer", "12") + "\n" + c.renderMarkdown(answer)
+			return heading("YOU · answer", cBlue) + "\n" + c.renderMarkdown(answer)
 		}
 		if output, ok := result["output"].(string); ok && output != "" {
-			return heading("OUTPUT · "+residentText(str("name")), "8") + "\n" + c.renderMarkdown(fenced(strings.ReplaceAll(output, "\r\n", "\n"), "text"))
+			return heading("OUTPUT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(strings.ReplaceAll(output, "\r\n", "\n"), "text"))
 		}
 		if err, ok := result["error"].(string); ok {
-			return heading("TOOL ERROR", "9") + "\n" + c.renderMarkdown(fenced(err, "text"))
+			return heading("TOOL ERROR", cRed) + "\n" + c.renderMarkdown(fenced(err, "text"))
 		}
 		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
-			return heading("RESULT · "+residentText(str("name")), "8") + "\n" + c.renderMarkdown(fenced(string(b), "json"))
+			return heading("RESULT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(string(b), "json"))
 		}
 	case "finished":
-		return heading("FINISHED", "10") + "\n" + c.renderMarkdown(str("summary"))
+		return heading("FINISHED", cGreen) + "\n" + c.renderMarkdown(str("summary"))
 	case "question", "approval_requested":
 		text := str("text")
 		label := "QUESTION"
@@ -369,11 +370,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			text = str("reason") + "\n" + fenced(str("cmd"), "bash")
 			label = "ROOT REVIEW · /requests"
 		}
-		return heading(label, "11") + "\n" + c.renderMarkdown(text)
+		return heading(label, cYellow) + "\n" + c.renderMarkdown(text)
 	case "compacted":
-		return heading("CONTEXT COMPACTED · conversation remains in this transcript", "11")
+		return heading("CONTEXT COMPACTED · conversation remains in this transcript", cYellow)
 	case "cancelled":
-		return heading("GOAL CANCELLED · "+shortGoal(e.Goal), "11")
+		return heading("GOAL CANCELLED · "+shortGoal(e.Goal), cYellow)
 	case "model_unavailable", "model_truncated", "context_refused":
 		text := str("error")
 		if partial, ok := e.Data["partial"].(map[string]any); ok {
@@ -382,7 +383,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				text = c.renderMarkdown(content) + "\n" + envDim.Render(residentText(text))
 			}
 		}
-		return heading(residentText(e.Kind), "9") + "\n" + text
+		return heading(residentText(e.Kind), cRed) + "\n" + text
 	}
 	return ""
 }

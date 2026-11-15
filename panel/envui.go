@@ -1075,14 +1075,16 @@ func currentUser() string {
 // ---------------------------------------------------------------- view
 
 var (
-	envTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	envSel    = lipgloss.NewStyle().Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15"))
-	envHead   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
-	envDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	envWarn   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
-	envCtxHot = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	envTabOn  = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15"))
-	envBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
+	envTitle  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
+	envSel    = lipgloss.NewStyle().Background(cGray).Foreground(cText)
+	envHead   = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
+	envDim    = lipgloss.NewStyle().Foreground(cMuted)
+	envWarn   = lipgloss.NewStyle().Foreground(cYellow)
+	envCtxHot = lipgloss.NewStyle().Foreground(cRed)
+	envCtxOK  = lipgloss.NewStyle().Foreground(cGreen)
+	envBusy   = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
+	envTabOn  = lipgloss.NewStyle().Bold(true).Background(cGray).Foreground(cText)
+	envBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray)
 )
 
 func (m envModel) render() string {
