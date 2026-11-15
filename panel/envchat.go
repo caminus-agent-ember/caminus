@@ -45,6 +45,8 @@ type residentChat struct {
 	approvals                               bool // the Approvals overlay is over the conversation
 	approvalSel                             int  // the row it has selected
 	approvalDetail                          bool // Enter opened the selected request in full
+	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
+	goalsSel                                int
 	slashIdx                                int
 	slashToken, slashText                   string
 	pathIdx                                 int
@@ -760,13 +762,17 @@ func (m envModel) renderChat() string {
 	head := shellHeader(residentText(m.agentName), state, goalText, steps, w)
 	foot := m.chatFoot(w)
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals")
+		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
 	}
 	if m.chat.approvals {
 		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
 		// small so a short terminal (with /help's extra lines) still gets a box inside the frame.
 		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
 		return head + "\n" + m.approvalOverlay(w, h) + "\n" + foot
+	}
+	if m.chat.goals {
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.goalsOverlay(w, h) + "\n" + foot
 	}
 	body := []string{head, m.chat.transcript.View()}
 	if live := m.liveBlock(w); live != "" {
@@ -792,7 +798,7 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals {
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
 	}
@@ -803,6 +809,9 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	if m.chat.approvals {
 		return m.approvalKey(msg)
+	}
+	if m.chat.goals {
+		return m.goalsKey(msg)
 	}
 	if m.chat.picker {
 		return m.pickerKey(msg)
@@ -822,6 +831,10 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
+	case "ctrl+g":
+		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
+		m.chat.compose.Blur()
+		return m, nil
 	case "ctrl+a":
 		// The Approvals overlay over the conversation: the requests a person has to decide, in the one box every
 		// overlay uses. It owns the keys while it is open, so the composer lets go of them.
@@ -1051,12 +1064,8 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		return m, residentAction(m, []string{"memory", m.agentName, "--stdin", "--json"}, arg)
 	case "/goals":
 		clear()
-		m.chat.help = true
-		var goals []string
-		for _, g := range m.resident.Goals {
-			goals = append(goals, shortGoal(g.ID)+" "+g.State)
-		}
-		m.msg = strings.Join(goals, " · ")
+		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
+		m.chat.compose.Blur()
 	case "/goal":
 		var found []int
 		for i, g := range m.resident.Goals {
@@ -1194,7 +1203,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/goal", "select a goal by ID prefix"},
-	{"/goals", "list goals"},
+	{"/goals", "the goals overlay (Ctrl+G)"},
 	{"/help", "toggle the help footer"},
 	{"/new", "start a new goal"},
 	{"/newsession", "create a session NAME"},
