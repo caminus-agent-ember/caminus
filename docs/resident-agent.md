@@ -231,6 +231,18 @@ heartbeat NAME on|off|status|recap`; the recap is the "while you were away" line
 On a remote model free time spends its own allowance (`free_time.budget_usd`,
 0.50 USD a day by default).
 
+## When you are away
+
+Nothing waits on you. A question you have not answered within `question_timeout`
+(900 seconds by default; free time uses its own shorter window) is withdrawn by the
+resident itself, never answered in your name, and the agent carries on: with the
+advisor's pick when an advisor is configured, else with the option it recommended,
+recording the choice in `STATE.md` and its finish. Silence is never approval: a
+permission request (an irreversible change, an action in your name, spending money;
+`ask_user` with `approval`) that times out is a no, and an unanswered root request
+is not run. Each one is recorded (`question_unanswered`, `root_unanswered`), and you
+can steer the goal when you are back.
+
 ## The advisor and two brains
 
 `caminus env agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the
