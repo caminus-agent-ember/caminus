@@ -114,6 +114,17 @@ class Runtime:
         self.store.update(action['goal'], state='waiting_root' if kind == 'root' else 'waiting_user')
         return None
 
+    def _finish(self, gid, summary):
+        # Serialize completion with send --goal-id. Steering accepted while the
+        # model was in flight must be observed before the goal can finish.
+        with self.store.transaction():
+            if self.store.goal(gid)['state']=='cancelled':return
+            if self.store.db.execute('SELECT 1 FROM inbox WHERE goal=? AND consumed=0 LIMIT 1',(gid,)).fetchone():
+                self.store.event('completion_deferred',dict(reason='human steering is waiting'),gid)
+                return
+            self.store.update(gid,state='completed',summary=summary)
+            self.store.event('finished',dict(summary=summary),gid)
+
     def _action(self, action):
         try:
             args = json.loads(action['args'])
@@ -164,10 +175,7 @@ class Runtime:
             result = dict(error=str(e))
         self.store.action_result(action, result)
         if action['name'] == 'finish' and 'error' not in result:
-            with self.store.transaction():
-                if self.store.goal(action['goal'])['state'] != 'cancelled':
-                    self.store.update(action['goal'], state='completed', summary=result['summary'])
-                    self.store.event('finished', result, action['goal'])
+            self._finish(action['goal'],result['summary'])
         return True
 
     def _compact(self, gid, messages):
@@ -272,10 +280,7 @@ class Runtime:
             if not self.store.model_reply(gid,reply):
                 return True
             if not reply.get('tool_calls'):
-                with self.store.transaction():
-                    if self.store.goal(gid)['state']!='cancelled':
-                        self.store.update(gid,state='completed',summary=reply['content'])
-                        self.store.event('finished',dict(summary=reply['content']),gid)
+                self._finish(gid,reply['content'])
             return True
         except ModelError as e:
             with self.store.transaction():

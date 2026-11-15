@@ -120,6 +120,45 @@ class Resident(unittest.TestCase):
             self.assertEqual(rt.system(),before)
         finally:rt.mail.close();rt.store.close()
 
+    def test_steering_updates_same_goal_without_implicitly_resuming_it(self):
+        self.replies(call('terminal',dict(command='printf ready')))
+        first=self.cmd('once',['--goal','Work on this goal.','--max-steps','1'],code=22)
+        sent=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Use an existing utility before building.')
+        self.assertEqual(sent['id'],first['id']);self.assertTrue(sent['queued'])
+        status=self.cmd('status')
+        self.assertEqual(len(status['goals']),1);self.assertEqual(status['goals'][0]['state'],'paused')
+        self.replies(call('finish',dict(summary='Followed the steering.')))
+        self.cmd('once',['--goal-id',first['id']])
+        request=[v for k,v in Endpoint.seen if k==self.key][-1]
+        self.assertEqual(sum(m.get('content')=='Use an existing utility before building.' for m in request['messages']),1)
+        self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Too late.',code=2)
+
+    def test_inflight_steering_is_observed_before_either_completion_path(self):
+        for finish_tool in (False,True):
+            class Model:
+                calls=0
+                observed=False
+                def context_size(self):return 65536
+                def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+                def complete(self,messages,tools=None,max_tokens=None):
+                    self.calls+=1
+                    if self.calls==1:
+                        rt.store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(gid,'New human direction.'))
+                        summary='Earlier result.'
+                    else:
+                        self.observed=any(m.get('content')=='New human direction.' for m in messages)
+                        summary='Followed the new direction.'
+                    return call('finish',dict(summary=summary)) if finish_tool else dict(role='assistant',content=summary)
+            model=Model();rt=Runtime(self.home,model=model)
+            try:
+                gid=rt.store.enqueue('Continue until the human direction is satisfied.')
+                result=rt.run(target=gid)
+                self.assertEqual(result['state'],'completed')
+                self.assertEqual(result['summary'],'Followed the new direction.')
+                self.assertTrue(model.observed);self.assertEqual(model.calls,2)
+                self.assertTrue(any(e['kind']=='completion_deferred' and e['goal']==gid for e in rt.store.events()))
+            finally:rt.mail.close();rt.store.close()
+
     def test_approval_display_escapes_controls_but_executes_reviewed_bytes(self):
         import contextlib,io
         from unittest.mock import patch

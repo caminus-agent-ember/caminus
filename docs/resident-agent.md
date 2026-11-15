@@ -38,6 +38,15 @@ Use `n` to send a goal, `s` to start, `x` to stop the loop, `c` to cancel the se
 goal and `m` to choose a named resident. The existing requests tab handles human
 questions and root requests. `env run`, sessions, jobs and all previous CLI flows
 remain available.
+Press `t` on the agent tab to steer the selected unfinished goal. Enter sends the
+message to that goal's durable inbox; Escape cancels the draft. The target goal
+is captured when the editor opens, so a refresh cannot select a different target
+while typing. Steering is read between model steps and does not create a new goal.
+It does not approve root, answer a pending question, or resume a paused goal.
+Accepted steering is preserved even if it arrives during the model's final
+response: completion waits until the agent has observed that message. A send
+that loses the race to a completed/cancelled goal is rejected rather than silently
+creating another task. Steering text also appears in the agent activity feed.
 
 The daemon polls without inference while idle or waiting for human answers.
 There is no production step limit. Backend outages retain the goal and retry

@@ -172,10 +172,12 @@ def main(argv=None,stdin=None):
         if a.op in ('send','once'):
             text=(stdin or sys.stdin).read() if a.stdin else a.goal if a.goal is not None else a.text
             if a.op=='send' and a.goal_id:
-                store.goal(a.goal_id)
                 if not text:raise ValueError('steering text is required')
-                store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(a.goal_id,text))
-                store.event('user_message',dict(text=text),a.goal_id)
+                with store.transaction():
+                    if store.goal(a.goal_id)['state'] in ('completed','cancelled'):
+                        raise ValueError('goal finished; submit a new goal instead of steering it')
+                    store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(a.goal_id,text))
+                    store.event('user_message',dict(text=text),a.goal_id)
                 emit(dict(id=a.goal_id,queued=True),a.json);store.close();return 0
             if a.goal_id:
                 gid=a.goal_id

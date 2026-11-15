@@ -84,6 +84,7 @@ type envModel struct {
 	key            string
 	cli            []string
 	agentName      string
+	steerGoal      string
 	resident       residentStatus
 	residentEvents []residentEvent
 	goalSel        int
@@ -585,6 +586,7 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 			return m.submitInput()
 		case "esc":
 			m.mode, m.edit, m.newJob = "normal", "", ""
+			m.steerGoal = ""
 			m.editRequest = nil
 			return m, nil
 		case "backspace":
@@ -639,6 +641,13 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, residentAction(m, []string{"send", m.agentName, "--stdin", "--json"}, text)
+	case "agentsteer":
+		text, goal := m.edit, m.steerGoal
+		m.mode, m.edit, m.steerGoal = "normal", "", ""
+		if strings.TrimSpace(text) == "" || goal == "" {
+			return m, nil
+		}
+		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--stdin", "--json"}, text)
 	case "agentname":
 		m.agentName = strings.TrimSpace(m.edit)
 		m.mode, m.edit, m.goalSel = "normal", "", 0
@@ -921,6 +930,8 @@ func (m envModel) render() string {
 	switch m.mode {
 	case "agentgoal":
 		b.WriteString("\n\n" + envWarn.Render("goal for "+m.agentName+" (enter sends, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
+	case "agentsteer":
+		b.WriteString("\n\n" + envWarn.Render("steer goal "+terminalText(m.steerGoal, false)+" (enter sends, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "agentname":
 		b.WriteString("\n\n" + envWarn.Render("resident agent name:") + "\n" + terminalText(m.edit, false) + "█")
 	case "edit":
@@ -940,7 +951,7 @@ func (m envModel) render() string {
 	}
 	status := fmt.Sprintf("ssh: %s  requests: %d  jobs: %d  msg: %s", map[bool]string{true: "OK", false: "FAIL"}[m.sshOK], len(m.reqs), len(m.jobs), terminalText(m.msg, true))
 	b.WriteString("\n\n" + envDim.Render(status))
-	b.WriteString("\n" + envDim.Render("tab/1-7 panes · q quit · agent: n goal, s start, x stop, c cancel, m name · requests: a/e/d/s · r refresh"))
+	b.WriteString("\n" + envDim.Render("tab/1-7 panes · q quit · agent: n goal, t steer, s start, x stop, c cancel, m name · requests: a/e/d/s · r refresh"))
 	return b.String()
 }
 

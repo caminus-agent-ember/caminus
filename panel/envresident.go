@@ -97,6 +97,19 @@ func (m envModel) residentKeys(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "n", "enter":
 		m.mode, m.edit = "agentgoal", ""
+		m.steerGoal = ""
+	case "t":
+		if m.goalSel < 0 || m.goalSel >= len(m.resident.Goals) {
+			m.msg = "Select a goal to steer. Use n for a new goal."
+			return m, nil
+		}
+		goal := m.resident.Goals[m.goalSel]
+		if goal.ID == "" || goal.State == "completed" || goal.State == "cancelled" {
+			m.msg = "That goal is finished. Use n for a new goal."
+			return m, nil
+		}
+		m.mode, m.edit, m.steerGoal = "agentsteer", "", goal.ID
+		m.msg = "Steering is read between model steps; human/root waits and paused goals still need their normal answer or resume."
 	case "m":
 		m.mode, m.edit = "agentname", m.agentName
 	case "s":
@@ -128,7 +141,7 @@ func (m envModel) residentPane() string {
 	if m.resident.DaemonAlive {
 		state = "listening"
 	}
-	lines := []string{envHead.Render(fmt.Sprintf("RESIDENT %s · %s", m.agentName, state)), "n: give a goal · s: start · x: stop runtime · c: cancel goal · m: choose agent"}
+	lines := []string{envHead.Render(fmt.Sprintf("RESIDENT %s · %s", m.agentName, state)), "n: new goal · t: steer selected goal · s: start · x: stop runtime · c: cancel · m: agent"}
 	if len(m.resident.Goals) == 0 {
 		return strings.Join(append(lines, "\nWaiting for your first goal."), "\n")
 	}
@@ -165,6 +178,11 @@ func (m envModel) residentPane() string {
 			}
 			if s, ok := e.Data["question"].(string); ok {
 				text = s
+			}
+			if e.Kind == "user_message" {
+				if s, ok := e.Data["text"].(string); ok {
+					text = s
+				}
 			}
 			if text != "" {
 				activity = append(activity, e.Kind+": "+residentText(text))
