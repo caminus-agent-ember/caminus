@@ -286,6 +286,32 @@ def main():
     except ValueError:
         check(True, 'sessions: bad session names rejected')
 
+    # a ~/ path in the command must expand in the session's own shell: `caminus env serve` starts the session as
+    # `bash ~/homes/NAME/run.sh`, and quoting the tilde made the shell look for a literal `~` directory (exit 127)
+    from caminus.env import shell as _shell
+    check(_shell.quote_arg('~') == '"$HOME"', 'shell: a bare tilde is the agent user home')
+    check(_shell.quote_arg('~agent/x') == _shlex.quote('~agent/x'), 'shell: another user\'s tilde is quoted, never guessed')
+    check(_shell.quote_arg('~/.local/bin/caminus') == '"$HOME"/.local/bin/caminus',
+          'shell: a ~/ path expands at run time and stays quoted after the home')
+    s = sessions.new_script('demo', ['bash', '~/homes/demo/run.sh'])
+    check('"$HOME"/homes/demo/run.sh' in s and "'~/" not in s,
+          'sessions: new leaves a ~/ path to expand in the session shell')
+    s2 = sessions.new_script('demo', ['bash', '~/homes/a$(id)/run.sh'])
+    check(_shlex.split(_shlex.split(s2)[-1]) == ['bash', '$HOME/homes/a$(id)/run.sh'],
+          'sessions: only the home expands; the rest of a ~/ path stays one quoted word')
+    home = os.path.join(S, 'agent-home')
+    os.makedirs(os.path.join(home, 'homes', 'demo'), exist_ok=True)
+    launcher = os.path.join(home, 'homes', 'demo', 'run.sh')
+    with open(launcher, 'w') as f:
+        f.write('#!/bin/bash\necho launcher-ran\n')
+    os.chmod(launcher, 0o700)
+    r = subprocess.run(['bash', '-lc', _shlex.split(s)[-1]], env=dict(os.environ, HOME=home),
+                       capture_output=True, text=True)
+    check(r.returncode == 0 and 'launcher-ran' in (r.stdout or ''),
+          'sessions: the run.sh command new_script builds runs in the session shell')
+    s = jobs.spawn_script('demo', ['bash', '~/homes/demo/run.sh'])
+    check('bash "$HOME"/homes/demo/run.sh' in s, 'jobs: spawn leaves a ~/ path to expand in the detached shell')
+
     # serve: placement resolution, port allocation, per-name home, launcher
     from caminus.cmd import manage as _manage
     from caminus import models as _models

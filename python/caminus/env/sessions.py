@@ -8,7 +8,7 @@ agent interactively, watch it, and type into it.
 """
 import shlex
 
-from . import jobs
+from . import jobs, shell
 
 
 def check_name(name):
@@ -17,7 +17,7 @@ def check_name(name):
 
 def new_script(name, cmd_argv):
     check_name(name)
-    cmd = ' '.join(shlex.quote(str(a)) for a in cmd_argv)
+    cmd = shell.quote_argv(cmd_argv)
     return f'tmux new-session -d -s {shlex.quote(name)} bash -lc {shlex.quote(cmd)}'
 
 
