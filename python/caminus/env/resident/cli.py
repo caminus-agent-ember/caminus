@@ -3,6 +3,7 @@ import argparse
 import io
 import json
 import os
+import urllib.parse
 from pathlib import Path
 import shlex
 import signal
@@ -46,6 +47,13 @@ def parser():
             p.add_argument('--compact-target-ratio',type=float,default=.2)
             p.add_argument('--compaction-model',help='optional model alias for summaries on the same endpoint')
             p.add_argument('--api-key-env',default='CAMINUS_AGENT_API_KEY')
+            p.add_argument('--api',choices=('openai','anthropic'),default='openai',
+                           help="wire format: OpenAI chat completions (the local server) or Anthropic's Messages API")
+            p.add_argument('--effort',choices=('low','medium','high'),
+                           help='Messages API effort (thinking stays off; default medium)')
+            p.add_argument('--max-model-retries',type=int,
+                           help='failed model calls in a row before the goal stops (default: unbounded for a '
+                                'local endpoint, 8 for a remote one)')
             p.add_argument('--bus',help='shared agent-side SQLite mail bus; defaults under ~/.local/share/caminus/agents')
             p.add_argument('--idle-timeout',type=float,default=0,
                            help='seconds without progress before the watchdog pauses the goal (0: off)')
@@ -172,7 +180,13 @@ def main(argv=None,stdin=None):
                      compact_threshold=a.compact_threshold,compact_target_ratio=a.compact_target_ratio,
                      compaction_model=a.compaction_model,loop_gates=not a.no_loop_gates,
                      idle_timeout=a.idle_timeout,token_budget=a.token_budget)
-            if not cfg['endpoint'].endswith('/v1'):cfg['endpoint']+='/v1'
+            if a.api!='openai':cfg['api']=a.api
+            if a.effort:cfg['effort']=a.effort
+            if a.max_model_retries is not None:
+                if a.max_model_retries<0:raise ValueError('--max-model-retries must be 0 or more')
+                cfg['max_model_retries']=a.max_model_retries
+            # A bare host gets the /v1 root; a provider URL with its own path (…/v1/openai) is kept as given.
+            if not urllib.parse.urlsplit(cfg['endpoint']).path.strip('/'):cfg['endpoint']+='/v1'
             from .model import Model
             Model(cfg)                     # validate before persisting
             mail=Mail(cfg)

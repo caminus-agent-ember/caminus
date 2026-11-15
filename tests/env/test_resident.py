@@ -521,6 +521,23 @@ class Resident(unittest.TestCase):
         store=Store(self.home);gid=store.status()['goals'][0]['id'];store.close()
         self.cmd('once',['--goal-id',gid]);self.assertEqual((self.home/'counter').read_text(),'once')
 
+    def test_init_api_flags_and_endpoint_rule(self):
+        def init(name,*extra,code=0):
+            argv=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init',name,'--home',str(self.home/name),'--json',
+                  '--bus',str(self.home/'mail.sqlite3'),'--bridge',str(self.bridge),*extra]
+            p=subprocess.run(argv,capture_output=True,text=True,timeout=15)
+            self.assertEqual(p.returncode,code,p.stdout+p.stderr)
+            return json.loads((self.home/name/'config.json').read_text()) if code==0 else p
+        p=subprocess.run([sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init','nocontext','--home',str(self.home/'nocontext'),'--json',
+                          '--bus',str(self.home/'mail.sqlite3'),'--bridge',str(self.bridge),'--model','m','--endpoint','https://api.anthropic.com/v1','--api','anthropic'],
+                         capture_output=True,text=True,timeout=15)
+        self.assertNotEqual(p.returncode,0,'the anthropic api needs --context');self.assertFalse((self.home/'nocontext'/'config.json').exists())
+        cfg=init('haiku','--model','claude-haiku-5-5','--endpoint','https://api.anthropic.com/v1','--api','anthropic','--context','100000','--effort','low','--max-model-retries','4')
+        self.assertEqual((cfg['api'],cfg['effort'],cfg['max_model_retries'],cfg['endpoint']),('anthropic','low',4,'https://api.anthropic.com/v1'))
+        self.assertEqual(init('di','--model','m','--endpoint','https://api.deepinfra.com/v1/openai','--context','8192')['endpoint'],'https://api.deepinfra.com/v1/openai')
+        cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:8092')
+        self.assertEqual(cfg['endpoint'],'http://127.0.0.1:8092/v1');self.assertNotIn('api',cfg)
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)
@@ -1210,6 +1227,195 @@ class Resident(unittest.TestCase):
             self.assertEqual((note['tps'],note['tokens'],note['goal']),(88.0,88,gid))
             self.assertEqual(self.cmd('status')['tok_per_s'],88.0)
         finally:rt.mail.close();rt.store.close()
+
+
+
+class Wire:
+    """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
+    def __init__(self,*answers):self.answers=deque(answers);self.requests=[]
+    def __call__(self,req,timeout=None):
+        import io,urllib.error
+        body=json.loads(req.data) if req.data else None
+        self.requests.append((req.full_url,dict(req.header_items()),body))
+        a=self.answers.popleft()
+        if isinstance(a,tuple):        # (status, error body, headers)
+            raise urllib.error.HTTPError(req.full_url,a[0],'fixture',a[2] if len(a)>2 else {},io.BytesIO(a[1].encode()))
+        if isinstance(a,dict):         # a whole JSON reply (count_tokens)
+            return _Body([json.dumps(a).encode()])
+        return _Body([('data: '+json.dumps(e)+'\n').encode() if e is not None else b'\n' for e in a])
+
+
+class _Body:
+    def __init__(self,lines):self.lines=lines
+    def __enter__(self):return self
+    def __exit__(self,*a):return False
+    def __iter__(self):return iter(self.lines)
+    def read(self,n=-1):return b''.join(self.lines)
+
+
+def sse(*blocks,stop='end_turn',stop_details=None,complete=True):
+    """a Messages API event stream: text blocks are strings, tool calls are (id, name, json pieces)"""
+    ev=[dict(type='message_start',message=dict(usage=dict(input_tokens=100,cache_read_input_tokens=900,cache_creation_input_tokens=50)))]
+    for i,b in enumerate(blocks):
+        if isinstance(b,str):
+            ev.append(dict(type='content_block_start',index=i,content_block=dict(type='text',text='')))
+            ev.append(dict(type='content_block_delta',index=i,delta=dict(type='text_delta',text=b)))
+        else:
+            ev.append(dict(type='content_block_start',index=i,content_block=dict(type='tool_use',id=b[0],name=b[1],input={})))
+            for piece in b[2]:
+                ev.append(dict(type='content_block_delta',index=i,delta=dict(type='input_json_delta',partial_json=piece)))
+        ev.append(dict(type='content_block_stop',index=i))
+    if complete:
+        ev.append(dict(type='message_delta',delta=dict(stop_reason=stop,**(dict(stop_details=stop_details) if stop_details else {})),usage=dict(output_tokens=40)))
+        ev.append(dict(type='message_stop'))
+    return ev
+
+
+class AnthropicTransport(unittest.TestCase):
+    """The Messages API path, against recorded wire shapes. No network and no key: a fake opener answers."""
+    def model(self,*answers,endpoint='https://api.anthropic.com/v1',key='sk-fixture',**cfg):
+        from caminus.env.resident.model import Model
+        self.wire=Wire(*answers)
+        os.environ.pop('CAMINUS_TEST_KEY',None)
+        if key:os.environ['CAMINUS_TEST_KEY']=key
+        self.addCleanup(os.environ.pop,'CAMINUS_TEST_KEY',None)
+        m=Model(dict(model='claude-haiku-5-5',endpoint=endpoint,api='anthropic',context=100000,api_key_env='CAMINUS_TEST_KEY',**cfg),opener=self.wire)
+        m.counter=False                # the count_tokens round trip is tested on its own
+        return m
+    def history(self):
+        return [dict(role='system',content='You are the resident.'),dict(role='user',content='Do the thing.'),
+                dict(role='assistant',content='Looking.',tool_calls=[dict(id='t1',type='function',function=dict(name='terminal',arguments='{"command":"ls"}'))]),
+                dict(role='tool',tool_call_id='t1',content='{"output":"a b"}'),
+                dict(role='user',content='[steer] use b'),
+                dict(role='system',content='MEMORY.md:\nnotes')]
+
+    def test_request_shape(self):
+        m=self.model(sse('Done.'))
+        m.complete(self.history(),TOOLS[:1],max_tokens=500)
+        url,headers,body=self.wire.requests[0]
+        self.assertEqual(url,'https://api.anthropic.com/v1/messages')
+        h={k.lower():v for k,v in headers.items()}
+        self.assertEqual(h['x-api-key'],'sk-fixture');self.assertNotIn('authorization',h)
+        self.assertIn('anthropic-version',h)
+        for banned in ('temperature','top_p','top_k'):self.assertNotIn(banned,body)
+        self.assertEqual(body['thinking'],dict(type='disabled'));self.assertEqual(body['output_config'],dict(effort='medium'))
+        self.assertTrue(body['stream']);self.assertEqual(body['max_tokens'],500)
+        self.assertEqual(body['system'][0]['text'],'You are the resident.');self.assertIn('cache_control',body['system'][0])
+        roles=[x['role'] for x in body['messages']]
+        self.assertEqual(roles,['user','assistant','user','system'],'tool result and steer merge into one user turn; context last')
+        merged=body['messages'][2]['content']
+        self.assertEqual([b['type'] for b in merged],['tool_result','text'],'tool results first, the steer after them')
+        self.assertIn('cache_control',merged[-1],'breakpoint 2 on the newest stored message')
+        self.assertNotIn('cache_control',json.dumps(body['messages'][3]),'the rebuilt context message is never cached')
+        self.assertEqual(body['messages'][1]['content'][1],dict(type='tool_use',id='t1',name='terminal',input=dict(command='ls')))
+        self.assertEqual(body['tools'][0]['name'],TOOLS[0]['function']['name']);self.assertIn('input_schema',body['tools'][0])
+
+    def test_tool_call_and_usage(self):
+        m=self.model(sse('Running.',('call_9','terminal',['{"comm','and": "pwd"}']),stop='tool_use'))
+        seen=[]
+        reply=m.complete(self.history()[:2],TOOLS,on_delta=lambda k,v:seen.append((k,v)))
+        self.assertEqual(reply['content'],'Running.')
+        self.assertEqual(reply['tool_calls'],[dict(id='call_9',type='function',function=dict(name='terminal',arguments='{"command": "pwd"}'))])
+        self.assertIn(('tool','terminal'),seen);self.assertIn(('content','Running.'),seen)
+        self.assertEqual(m.last_usage['prompt_tokens'],1050);self.assertEqual(m.last_usage['cache_read_input_tokens'],900)
+
+    def test_refusal_stops(self):
+        from caminus.env.resident.model import ModelRefused
+        m=self.model(sse('',stop='refusal',stop_details=dict(type='refusal',category='cyber')))
+        with self.assertRaises(ModelRefused) as c:m.complete(self.history()[:2])
+        self.assertEqual(c.exception.status,400);self.assertIn('cyber',str(c.exception))
+
+    def test_budget_and_cut(self):
+        from caminus.env.resident.model import ModelTruncated
+        m=self.model(sse('half',stop='max_tokens'),sse('par',complete=False))
+        with self.assertRaises(ModelTruncated) as c:m.complete(self.history()[:2])
+        self.assertFalse(c.exception.retryable)
+        with self.assertRaises(ModelTruncated) as c:m.complete(self.history()[:2])
+        self.assertTrue(c.exception.retryable,'a stream without message_stop is a cut, retried')
+
+    def test_error_event_and_http_error(self):
+        from caminus.env.resident.model import ModelError
+        m=self.model([dict(type='error',error=dict(type='overloaded_error',message='busy'))],
+                     (429,'{"error":{"type":"rate_limit_error"}}',{'retry-after':'7'}))
+        with self.assertRaises(ModelError) as c:m.complete(self.history()[:2])
+        self.assertIn('overloaded',str(c.exception));self.assertEqual(getattr(c.exception,'status',0),0)
+        with self.assertRaises(ModelError) as c:m.complete(self.history()[:2])
+        self.assertEqual(c.exception.status,429);self.assertEqual(c.exception.retry_after,7.0)
+        self.assertIn('rate_limit_error',str(c.exception),'the provider reason is kept')
+
+    def test_missing_key_refused_before_sending(self):
+        from caminus.env.resident.model import ModelError
+        m=self.model(key=None)
+        with self.assertRaises(ModelError) as c:m.complete(self.history()[:2])
+        self.assertEqual(c.exception.status,401);self.assertEqual(self.wire.requests,[])
+        relay=self.model(sse('ok'),endpoint='http://127.0.0.1:9/v1',key=None)
+        relay.complete(self.history()[:2])
+        h={k.lower():v for k,v in self.wire.requests[0][1].items()}
+        self.assertNotIn('x-api-key',h,'a local relay adds the key itself')
+
+    def test_edge_histories(self):
+        m=self.model(sse('ok'),sse('ok'))
+        m.complete([dict(role='system',content='s'),dict(role='user',content='goal'),dict(role='assistant',content='Earlier working memory: x')])
+        body=self.wire.requests[0][2]
+        self.assertEqual(body['messages'][-1]['role'],'user','never end on an assistant turn (a prefill is a 400)')
+        m.complete([dict(role='system',content='s'),dict(role='user',content='goal'),dict(role='assistant',content='summary'),dict(role='system',content='ctx')])
+        body=self.wire.requests[1][2]
+        self.assertEqual(body['messages'][-1]['role'],'user','a context message after an assistant turn rides in a user turn')
+        self.assertIn('ctx',json.dumps(body['messages'][-1]))
+
+    def test_count_tokens(self):
+        m=self.model(dict(input_tokens=1234))
+        m.counter=True
+        self.assertEqual(m.tokens(self.history(),TOOLS),1234)
+        url,_,body=self.wire.requests[0]
+        self.assertTrue(url.endswith('/messages/count_tokens'));self.assertNotIn('max_tokens',body);self.assertNotIn('stream',body)
+
+    def test_config_validation(self):
+        from caminus.env.resident.model import Model
+        with self.assertRaises(ValueError):Model(dict(model='m',endpoint='https://api.anthropic.com/v1',api='anthropic'))
+        with self.assertRaises(ValueError):Model(dict(model='m',endpoint='https://x/v1',api='bogus',context=2048))
+        self.assertFalse(Model(dict(model='m',endpoint='http://127.0.0.1:8092/v1')).remote)
+        self.assertTrue(Model(dict(model='m',endpoint='https://api.example.com/v1')).remote)
+
+
+class RetryBudget(unittest.TestCase):
+    """remote providers bill every attempt: their retries are bounded and honour retry-after"""
+    def runtime(self,remote,**cfg):
+        import types
+        rt=Runtime.__new__(Runtime)
+        rt.config=dict(cfg);rt.retry={};rt.model=types.SimpleNamespace(remote=remote)
+        rt.updates=[];rt.events=[]
+        rt.store=types.SimpleNamespace(update=lambda gid,**kw:rt.updates.append(kw),event=lambda kind,data,gid:rt.events.append(kind))
+        return rt
+    def test_remote_stops_after_the_budget(self):
+        from caminus.env.resident.model import ModelError
+        rt=self.runtime(True,max_model_retries=3)
+        self.assertEqual([rt._schedule_retry('g',ModelError('x')) for _ in range(3)],[1,2,3])
+        self.assertIsNone(rt._schedule_retry('g',ModelError('x')))
+        self.assertEqual(rt.updates[-1]['state'],'error');self.assertEqual(rt.events,['model_gave_up'])
+    def test_remote_default_and_local_unbounded(self):
+        from caminus.env.resident.model import ModelError
+        rt=self.runtime(True)
+        self.assertEqual([rt._schedule_retry('g',ModelError('x')) for _ in range(9)][-2:],[8,None])
+        rt=self.runtime(False)
+        self.assertEqual(rt._schedule_retry('g',ModelError('x')) and [rt._schedule_retry('g',ModelError('x')) for _ in range(50)][-1],51)
+    def test_retry_after(self):
+        from caminus.env.resident.model import ModelError
+        rt=self.runtime(True);e=ModelError('429');e.retry_after=120
+        t=time.time();rt._schedule_retry('g',e)
+        self.assertGreaterEqual(rt.retry['g'][0]-t,119)
+        e.retry_after=10_000;rt._schedule_retry('g',e)
+        self.assertLessEqual(rt.retry['g'][0]-time.time(),301,'a provider cannot park the goal for hours')
+
+
+class WorkerEnv(unittest.TestCase):
+    def test_key_not_inherited(self):
+        from caminus.env.resident.terminal import worker_env
+        home=S/('env-'+uuid.uuid4().hex);home.mkdir()
+        (home/'config.json').write_text(json.dumps(dict(api_key_env='MY_PROVIDER_KEY')))
+        os.environ['MY_PROVIDER_KEY']='secret';self.addCleanup(os.environ.pop,'MY_PROVIDER_KEY',None)
+        env=worker_env(home)
+        self.assertNotIn('MY_PROVIDER_KEY',env);self.assertIn('PATH',env)
 
 
 result=unittest.main(argv=[sys.argv[0]],exit=False).result
