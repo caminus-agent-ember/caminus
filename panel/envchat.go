@@ -1174,7 +1174,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
 		m.chat.armed = ""
 		m.chat.compose.Blur()
-	case "/memory", "/context", "/audit", "/settings":
+	case "/memory", "/context", "/audit", "/settings", "/jobs", "/servers", "/agents":
 		clear()
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
@@ -1398,6 +1398,9 @@ var slashCommands = []struct{ name, hint string }{
 	{"/context", "what the agent's context holds"},
 	{"/audit", "the audit log"},
 	{"/settings", "this session's settings"},
+	{"/jobs", "the agent's jobs and processes"},
+	{"/servers", "the model servers and their windows"},
+	{"/agents", "every resident on this machine (advanced)"},
 	{"/recap", "while you were away: free time since your last goal"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
 }

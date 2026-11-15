@@ -9,6 +9,7 @@ package main
 // name a session) sits in the composer's slot. Nothing draws the old tab bar any more.
 
 import (
+	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -22,9 +23,12 @@ var pageOverlays = map[string]struct {
 	title string
 }{
 	"/memory":   {3, "MEMORY & NOTES"},
-	"/context":  {4, "CONTEXT"},
+	"/servers":  {4, "SERVERS"},
 	"/audit":    {5, "AUDIT"},
+	"/agents":   {7, "AGENTS"},
 	"/settings": {8, "SETTINGS"},
+	"/jobs":     {9, "JOBS & PROCESSES"},
+	"/context":  {10, "CONTEXT"},
 }
 
 // pageTitle is the overlay title for a page index.
@@ -45,7 +49,7 @@ func (m envModel) openPage(tab int) (envModel, tea.Cmd) {
 	m.tab = tab
 	m.refreshLocal()
 	cmds := sshRefresh(m)
-	if tab == 3 {
+	if tab == 3 || tab == 7 {
 		cmds = append(cmds, residentSessions(m))
 	}
 	m.tab = saved
@@ -109,4 +113,34 @@ func (m envModel) promptBox(w int) string {
 		text = envDim.Render(ansi.Truncate(residentText(m.editRequest.Text), max(8, w-6), "…")) + "\n" + text
 	}
 	return borderTitle(lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).Width(w).Render(text), title, envWarn)
+}
+
+// contextPane is what the agent's own context holds: its window, the measured use, where compaction starts and how far
+// it goes, and what the brain has cost (the servers' windows are /servers).
+func (m envModel) contextPane() string {
+	r := m.resident
+	pct := func(f float64) string { return fmt.Sprintf("%.1f %%", f*100) }
+	lines := []string{envHead.Render("CONTEXT · " + residentText(m.agentName))}
+	add := func(k, v string) { lines = append(lines, envDim.Render(fmt.Sprintf("  %-14s", k))+v) }
+	add("brain", residentText(r.Model))
+	add("window", fmt.Sprintf("%s tokens", short(r.Context)))
+	if r.ContextUsed > 0 && r.Context > 0 {
+		add("in use", fmt.Sprintf("%s (%s), measured at the last turn", short(r.ContextUsed), pct(float64(r.ContextUsed)/float64(r.Context))))
+	} else {
+		add("in use", "not measured yet")
+	}
+	if r.CompactThreshold > 0 {
+		add("compacts at", fmt.Sprintf("%s (%s)", pct(r.CompactThreshold), short(int(r.CompactThreshold*float64(r.Context)))))
+	}
+	if r.CompactTarget > 0 {
+		add("down to", fmt.Sprintf("%s (%s); old tool output is trimmed first, a summary only if needed", pct(r.CompactTarget),
+			short(int(r.CompactTarget*float64(r.Context)))))
+	}
+	if r.SpendToday > 0 {
+		add("spent today", fmt.Sprintf("$%.4f", r.SpendToday))
+	}
+	if r.TokPerS > 0 {
+		add("speed", fmt.Sprintf("%.0f tok/s (last reply)", r.TokPerS))
+	}
+	return strings.Join(lines, "\n")
 }

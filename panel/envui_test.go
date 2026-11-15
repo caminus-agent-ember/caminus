@@ -147,9 +147,18 @@ func TestViewShowsQueueAndAudit(t *testing.T) {
 	if v = next.(envModel).render(); !strings.Contains(v, `"event":"run"`) {
 		t.Fatalf("audit overlay missing the event:\n%s", ansi.Strip(v))
 	}
-	next, _ = m.chatSlash("/context")
+	next, _ = m.chatSlash("/servers")
 	if !strings.Contains(ansi.Strip(next.(envModel).render()), "SERVERS") {
-		t.Fatal("context overlay missing")
+		t.Fatal("servers overlay missing")
+	}
+	m.resident.Context, m.resident.ContextUsed, m.resident.CompactThreshold = 1000000, 250000, .38
+	next, _ = m.chatSlash("/context")
+	if v := ansi.Strip(next.(envModel).render()); !strings.Contains(v, "CONTEXT") || !strings.Contains(v, "25.0 %") || !strings.Contains(v, "38.0 %") {
+		t.Fatalf("context overlay shows the agent's own window:\n%s", v)
+	}
+	next, _ = m.chatSlash("/jobs")
+	if !strings.Contains(ansi.Strip(next.(envModel).render()), "JOBS & PROCESSES") {
+		t.Fatal("jobs overlay missing")
 	}
 }
 

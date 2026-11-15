@@ -266,6 +266,8 @@ func sshRefresh(m envModel) []tea.Cmd {
 		return []tea.Cmd{sshRun(m, "procs", procsScript(m.user))}
 	case 4:
 		return []tea.Cmd{sshRun(m, "servers", serversScript())}
+	case 9:
+		return []tea.Cmd{sshRun(m, "jobs", jobsScript()), sshRun(m, "procs", procsScript(m.user))}
 	}
 	return nil
 }
@@ -1073,6 +1075,10 @@ func (m envModel) pane() string {
 		return m.sessionsPane()
 	case 8:
 		return m.residentSettingsPane()
+	case 9:
+		return m.jobsPane() + "\n\n" + envHead.Render("PROCESSES") + "\n" + strings.Join(m.procs, "\n")
+	case 10:
+		return m.contextPane()
 	default:
 		return m.auditPane()
 	}
