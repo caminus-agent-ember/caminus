@@ -94,7 +94,7 @@ def _parser():
     p = sub.add_parser('reqs', help='the pending bridge requests (scriptable)')
     p.add_argument('--json', action='store_true')
 
-    p = sub.add_parser('answer', help='answer one request: approved | edited TEXT | denied | answered TEXT')
+    p = sub.add_parser('answer', help='answer one request: approved | edited TEXT | denied [WHAT TO DO INSTEAD] | answered TEXT')
     p.add_argument('--json', action='store_true')
     p.add_argument('--digest',help='the reviewed _digest from env reqs --json; required for approved/edited root decisions')
     p.add_argument('id')
@@ -549,9 +549,10 @@ def _answer_pending(a, tr):
         return 2
     ap = settings.audit_path()
     if a.decision == 'denied':
-        bridge.answer(settings.bridge_dir(), a.id, 'denied', me,request=req)
-        audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'denied', 'by': me})
-        res = {'id': a.id, 'decision': 'denied'}
+        # "no, do this instead": the instruction reaches the agent as a steer on its goal
+        bridge.answer(settings.bridge_dir(), a.id, 'denied', me, answer_text=a.text or '', request=req)
+        audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'denied', 'by': me, **({'instead': a.text} if a.text else {})})
+        res = {'id': a.id, 'decision': 'denied', **({'instead': a.text} if a.text else {})}
     elif a.decision == 'answered':
         if req.get('kind','root')!='question':
             print('caminus env answer: a root request needs a root decision',file=sys.stderr)

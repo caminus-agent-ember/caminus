@@ -1388,17 +1388,13 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "usage: /deny TEXT — denies the root request and tells the agent what to do instead"
 			return m, nil
 		}
+		// The instruction rides in the denial itself; the runtime files it as a steer on the request's goal (one
+		// write, so a denial can never arrive without its instruction).
 		r := m.reqs[i]
 		m.sel = i
-		next, _ := m.reqKeys("d")
-		m = next.(envModel)
+		m.mode, m.edit, m.editRequest = "denywhy", text, &r
 		clear()
-		goal := r.Goal
-		if goal == "" {
-			goal = m.chat.target
-		}
-		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--steer", "--stdin", "--json"},
-			"Your root request was denied. Instead: "+text)
+		return m.submitInput()
 	case "/glyphs":
 		// The symbol set (shell.go): nerd needs a Nerd Font; unicode needs none; ascii is for anything else.
 		name := strings.TrimSpace(arg)

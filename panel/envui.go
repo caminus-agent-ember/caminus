@@ -819,6 +819,26 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 
 func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 	switch m.mode {
+	case "denywhy":
+		instead := strings.TrimSpace(m.edit)
+		m.mode, m.edit = "normal", ""
+		if m.editRequest == nil || instead == "" {
+			m.editRequest = nil
+			return m, nil
+		}
+		r := *m.editRequest
+		m.editRequest = nil
+		if err := writeAnswer(m.bridge, currentUser(), r, "denied", r.Cmd, nil, "", "", instead); err != nil {
+			m.msg = err.Error()
+			m.refreshLocal()
+			return m, nil
+		}
+		_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID,
+			"decision": "denied", "by": currentUser(), "instead": instead})
+		m.seen[r.ID] = true
+		m.msg = "denied " + r.ID + " with an instruction (sent as a steer)"
+		m.refreshLocal()
+		return m, nil
 	case "sessionnew":
 		name := strings.TrimSpace(m.edit)
 		m.mode, m.edit = "normal", ""
@@ -939,6 +959,12 @@ func (m envModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		if m.sel < len(m.reqs)-1 {
 			m.sel++
+		}
+	case "D":
+		// deny with an instruction: "no, do this instead" goes to the agent as a steer
+		if m.sel < len(m.reqs) {
+			r := m.reqs[m.sel]
+			m.mode, m.edit, m.editRequest = "denywhy", "", &r
 		}
 	case "d":
 		if m.sel < len(m.reqs) {
@@ -1122,7 +1148,7 @@ func (m envModel) pane() string {
 }
 
 func (m envModel) reqPane() string {
-	lines := []string{envHead.Render("REQUESTS (root: a approve, e edit, d deny, s skip · ask: a answer)")}
+	lines := []string{envHead.Render("REQUESTS (root: a approve, e edit, d deny, D deny + what instead, s skip · ask: a answer)")}
 	if len(m.reqs) == 0 {
 		lines = append(lines, envDim.Render("  none waiting"))
 	}

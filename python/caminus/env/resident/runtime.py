@@ -446,6 +446,14 @@ class Runtime:
                 raise ValueError('root requests require a root decision')
             # The answer stays in the goal's transcript; the agent decides what to remember (nothing is written to
             # its memory automatically).
+            instead = (result.get('answer') or '').strip() if result['decision'] == 'denied' else ''
+            if instead:
+                # "No, do this instead": the instruction is a steer on the goal, so it wins over older instructions.
+                self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',
+                                      (action['goal'], instead, 'steer'))
+                self.store.event('user_message', dict(text=instead, kind='steer', via='denial'), action['goal'])
+                result = dict(result, instead=instead,
+                              note='denied; your human said what to do instead (also delivered as a steer)')
             return result
         # Nothing blocks on the human: past the timeout the resident withdraws its own request (it never writes a
         # decision on the human's behalf) and carries on. A root command is then not run; silence never grants root.

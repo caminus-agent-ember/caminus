@@ -1522,6 +1522,24 @@ for line in sys.stdin:
             self.assertEqual(len(list(rt.store.db.execute('SELECT 1 FROM inbox WHERE goal=?',(gid,)))),n,'off for this goal')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_denial_with_an_instruction_becomes_a_steer(self):
+        self.replies(call('ask_root',dict(command='apt-get install -y libfoo-dev',reason='need the headers')))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Build foo.')
+            for _ in range(4):
+                if rt.store.goal(gid)['state']=='waiting_root':break
+                rt.tick(gid)
+            rid=rt.store.db.execute('SELECT bridge_id FROM actions WHERE goal=? AND name=?',(gid,'ask_root')).fetchone()[0]
+            self.bridge.joinpath('res').mkdir(parents=True,exist_ok=True)
+            (self.bridge/'res'/(rid+'.json')).write_text(json.dumps(dict(id=rid,decision='denied',answer='use the vendored copy in third_party/')))
+            for _ in range(3):rt.tick(gid)
+            result=[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='ask_root'][-1]
+            self.assertEqual(result['instead'],'use the vendored copy in third_party/')
+            steers=[r['text'] for r in rt.store.db.execute("SELECT text FROM inbox WHERE goal=? AND kind='steer'",(gid,))]
+            self.assertEqual(steers,['use the vendored copy in third_party/'],'the instruction is a steer, once')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

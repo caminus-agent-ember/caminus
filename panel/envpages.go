@@ -99,6 +99,7 @@ func (m envModel) pageKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 var promptTitles = map[string]string{
 	"edit":       "edit the root command · Enter runs it under sudo · Esc cancels",
 	"answer":     "answer the question · Enter sends · a number picks a choice · Esc cancels",
+	"denywhy":    "deny · what should it do instead? · Enter sends it as a steer · Esc cancels",
 	"sessionnew": "new session name · Enter creates it · Esc cancels",
 }
 
