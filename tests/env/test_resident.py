@@ -560,6 +560,35 @@ class Resident(unittest.TestCase):
         self.assertEqual(first['pending'],[])
         self.cmd('once',['--goal-id',first['id']])
 
+    def test_repeated_tool_call_ids_do_not_stop_the_runtime(self):
+        # llama.cpp-style backends number calls from zero on every request
+        first=dict(role='assistant',content='',tool_calls=[dict(id='call_0',type='function',
+            function=dict(name='terminal',arguments=json.dumps(dict(command='printf one'))))])
+        second=dict(role='assistant',content='',tool_calls=[dict(id='call_0',type='function',
+            function=dict(name='finish',arguments=json.dumps(dict(summary='Second turn reused the id.'))))])
+        self.replies(first,second)
+        result=self.cmd('once',['--goal','Reuse a tool call id across turns.'])
+        self.assertEqual(result['state'],'completed')
+        calls=[e['data']['call_id'] for e in self.cmd('events') if e['kind']=='tool_result']
+        self.assertEqual(len(calls),2)
+        self.assertNotEqual(calls[0],calls[1],'the stored calls must keep distinct ids')
+
+    def test_unexpected_error_marks_the_goal_and_keeps_the_loop(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Crash the model once.')
+            class Broken:
+                def context_size(self):return 65536
+                def tokens(self,messages,tools):return 10
+                def complete(self,*a,**k):raise ZeroDivisionError('boom')
+            rt.model=Broken()
+            self.assertTrue(rt.tick(gid))
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'error');self.assertIn('ZeroDivisionError',g['error'])
+            self.assertTrue(any(e['kind']=='runtime_error' for e in rt.store.events()))
+            self.assertFalse(rt.tick(gid),'a finished goal is not retried')
+        finally:rt.mail.close();rt.store.close()
+
     def test_malformed_tools_are_results_not_daemon_crashes(self):
         self.replies(call('terminal',dict(session='0'*32,stdin=None)),call('send_message',dict(to='peer',text='hello',recipient_goal=[])),
                      call('finish',dict(summary='Recovered from malformed calls.')))

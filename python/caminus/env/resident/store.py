@@ -131,6 +131,7 @@ class Store:
             g = self.goal(gid)
             if g['state'] == 'cancelled':
                 return False
+            message = self._unique_calls(gid, message)
             self.update(gid, messages=[*g['messages'], message], steps=g['steps'] + 1, state='working', error='')
             for call in message.get('tool_calls') or []:
                 f = call['function']
@@ -138,6 +139,26 @@ class Store:
                     (uuid.uuid4().hex, gid, call['id'], f['name'], f['arguments'], 'pending'))
             self.event('assistant', dict(message, reasoning=reasoning) if reasoning else message, gid)
         return True
+
+    def _unique_calls(self, gid, message):
+        """A backend may reuse a tool-call id across turns (llama.cpp numbers calls from zero on every
+        request). The action rows keep one row per call, so a repeated id is replaced in both the stored
+        message and its action; the reply itself is unchanged in meaning."""
+        calls = message.get('tool_calls') or []
+        if not calls:
+            return message
+        taken = {r[0] for r in self.db.execute('SELECT call_id FROM actions WHERE goal=?', (gid,))}
+        out, changed = [], False
+        for call in calls:
+            if call['id'] in taken:
+                fresh = uuid.uuid4().hex
+                taken.add(fresh)
+                call = dict(call, id=fresh)
+                changed = True
+            else:
+                taken.add(call['id'])
+            out.append(call)
+        return dict(message, tool_calls=out) if changed else message
 
     def action_result(self, action, result):
         with self.transaction():

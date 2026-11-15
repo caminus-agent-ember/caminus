@@ -279,6 +279,20 @@ class Runtime:
         return compacted
 
     def tick(self, gid):
+        """One step. A failure the runtime did not anticipate marks this goal and returns, so the daemon
+        keeps serving the other goals instead of ending on a single bad reply."""
+        try:
+            return self._tick(gid)
+        except Exception as e:
+            error = type(e).__name__ + ': ' + str(e)
+            with self.store.transaction():
+                if self.store.goal(gid)['state'] == 'cancelled':
+                    return True
+                self.store.update(gid, state='error', error=error)
+                self.store.event('runtime_error', dict(error=error), gid)
+            return True
+
+    def _tick(self, gid):
         g = self.store.goal(gid)
         if g['state'] in ('completed','cancelled','paused','error'):
             return False
