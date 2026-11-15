@@ -769,20 +769,24 @@ func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
 	}
 }
 
-func TestLiveWindowTakesHalfTheBodyAndLeavesTheRestToTheTranscript(t *testing.T) {
+func TestEmbersBoxKeepsOneSizeGeneratingOrNot(t *testing.T) {
 	m := chatFixture(t)
 	m.height = 40
-	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
-		reasoning: strings.Repeat("thinking about it ", 60), reset: true})
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 800, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "an earlier thought"}})
+	m.syncChat()
+	idle := lipgloss.Height(m.liveBlock(m.width))
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1", reasoning: "short", reset: true})
 	m = next.(envModel)
-	body := m.bodyHeight()
-	live := lipgloss.Height(m.liveBlock(m.width))
-	if live < body/2-2 || live > body/2+2 {
-		t.Fatalf("live window is %d lines of a %d-line body; expected about half", live, body)
+	short := lipgloss.Height(m.liveBlock(m.width))
+	next, _ = m.Update(residentLiveMsg{agent: "resident", turn: "t1", reasoning: strings.Repeat("thinking about it ", 60)})
+	m = next.(envModel)
+	long := lipgloss.Height(m.liveBlock(m.width))
+	if idle != short || short != long || long != thoughtRows+3 {
+		t.Fatalf("one size: idle %d, a short thought %d, a long one %d (want %d)", idle, short, long, thoughtRows+3)
 	}
-	transcript := m.chat.transcript.Height()
-	if transcript < body-live-2 || transcript > body-live+2 {
-		t.Fatalf("transcript is %d lines, expected about %d", transcript, body-live)
+	body, transcript := m.bodyHeight(), m.chat.transcript.Height()
+	if transcript < body-long-2 || transcript > body-long+2 {
+		t.Fatalf("transcript is %d lines, expected about %d", transcript, body-long)
 	}
 }
 
@@ -1221,7 +1225,7 @@ func TestTodoIsPinnedAboveTheComposer(t *testing.T) {
 		t.Fatalf("the current task and what is happening now are pinned:\n%s", frame)
 	}
 	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Add(-14*time.Second).Unix())
-	if f := ansi.Strip(m.render()); !strings.Contains(f, "Now  running 1") || !strings.Contains(f, "s  make test") {
+	if f := ansi.Strip(m.render()); !strings.Contains(f, "Now   running 1") || !strings.Contains(f, "s  make test") {
 		t.Fatalf("a running command is named with how long it has run:\n%s", f)
 	}
 	m.chat.group.running = ""
@@ -1653,9 +1657,10 @@ func TestEmberStaysUpWithTheLatestThoughts(t *testing.T) {
 	defer func() { g = old }()
 	g = glyphTiers["unicode"]
 	m := chatFixture(t)
+	m.height = 44 // below about 22 body rows the idle box gives its rows to the transcript
 	m.residentEvents = append(m.residentEvents,
-		residentEvent{Seq: 600, Kind: "assistant", Data: map[string]any{"reasoning": "first I check the CVE list"}},
-		residentEvent{Seq: 601, Kind: "assistant", Data: map[string]any{"reasoning": "then the kernel source for the missing return"}})
+		residentEvent{Seq: 600, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "first I check the CVE list"}},
+		residentEvent{Seq: 601, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "then the kernel source for the missing return"}})
 	idle := ansi.Strip(m.liveBlock(110))
 	if !strings.Contains(idle, "▀") || !strings.Contains(idle, "thoughts") || !strings.Contains(idle, "missing return") {
 		t.Fatalf("idle, Ember stays with the latest thoughts:\n%s", idle)
