@@ -1644,6 +1644,21 @@ for line in sys.stdin:
         self.assertFalse(E._grant_recorded(str(ap),req,now=1000.0+13*3600),'a reused goal id cannot extend it')
         self.assertFalse(E._grant_recorded(str(ap),dict(req,goal='g2'),now=1001.0))
 
+    def test_the_resident_package_imports_nothing_outside_itself(self):
+        # The agent runs a zipapp of caminus/env/resident only: an import of anything else in the package (the
+        # leases refusal imported caminus.env.settings) works in a checkout and fails on a real install.
+        import ast
+        pkg=ROOT/'python'/'caminus'/'env'/'resident'
+        bad=[]
+        for f in pkg.glob('*.py'):
+            for node in ast.walk(ast.parse(f.read_text())):
+                if isinstance(node,ast.ImportFrom) and node.level>=2:
+                    bad.append(f'{f.name}: from {"."*node.level}{node.module or ""}')
+                if isinstance(node,ast.ImportFrom) and node.level==0 and (node.module or '').startswith('caminus') \
+                        and not node.module.startswith('caminus.env.resident'):
+                    bad.append(f'{f.name}: from {node.module}')
+        self.assertEqual(bad,[])
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

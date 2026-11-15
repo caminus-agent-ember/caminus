@@ -58,8 +58,14 @@ def take(rt, gid, cards=None, ram_gib=0, minutes=30, reason=''):
     d = folder(rt)
     if d is None or not d.is_dir():
         # The folder is provisioned by `caminus env setup`: name the exact fix instead of a silent fallback.
-        from .. import settings as env_settings
-        group = env_settings.BRIDGE_GROUP
+        # Not caminus.env.settings: the agent's runtime is a zipapp of this package alone, so that import fails
+        # there and the refusal would crash instead of naming the fix. The group is the bridge folder's own.
+        try:
+            import grp
+            group = grp.getgrgid(Path(rt.config['bridge']).expanduser().stat().st_gid).gr_name
+        except (ImportError, KeyError, OSError, TypeError):
+            group = rt.config.get('bridge_group') or 'caminus-env'
+
         raise ValueError(f'no shared leases folder {d}: ask your human to run '
                          f'`sudo mkdir -p {d} && sudo chown root:{group} {d} && sudo chmod 2770 {d}` '
                          '(from `caminus env setup`); leases are required before GPU work')
