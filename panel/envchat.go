@@ -403,44 +403,94 @@ func liveTextWidth(inner int) int {
 
 func (m envModel) liveBlock(w int) string {
 	l := m.chat.live
-	if !l.active {
+	inner := max(10, w-4)
+	text := min(liveTextWidth(inner), readingWidth)
+	body := m.thoughts(text)
+	if len(body) == 0 {
 		return ""
 	}
-	inner := max(10, w-4)
-	text := liveTextWidth(inner)
-	body := l.body(text)
+	// Ember's box stays on screen: while a reply is written it takes about half the page and Ember flickers; idle
+	// it keeps the latest thoughts in a smaller box with Ember still. The thoughts run downward, newest last.
 	height := m.liveHeight()
-	top := m.liveTop(len(body))
-	spin := g.spinner[m.tickN%len(g.spinner)]
-	who := g.agent + " agent"
-	if l.reasoning != "" && l.text == "" {
-		who = g.agent + " thinking"
+	frame := m.tickN % 2
+	if !l.active {
+		height, frame = min(height, idleThoughtRows+1), 0
 	}
-	hint := "  live · Ctrl+T hold · Alt+↑/↓ scroll"
-	if l.hold {
-		hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
+	window := max(1, height-1)
+	top := max(0, len(body)-window)
+	if l.active && l.hold {
+		top = m.liveTop(len(body))
 	}
-	rows := []string{bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)}
-	shown := body[top:min(top+height-1, len(body))]
-	if text < inner {
-		// Ember beside the reply while it is written: the flame flickers on the panel's half-second tick.
-		art := mascot(m.tickN % 2)
+	var head string
+	if l.active {
+		spin := g.spinner[m.tickN%len(g.spinner)]
+		who := g.agent + " agent"
+		if l.reasoning != "" && l.text == "" {
+			who = g.agent + " thinking"
+		}
+		hint := "  live · Ctrl+T hold · Alt+↑/↓ scroll"
+		if l.hold {
+			hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+window)))
+		}
+		head = bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)
+	} else {
+		head = bold(cGreen).Render(g.agent+" thoughts") + envDim.Render("  the latest, newest last")
+	}
+	shown := append([]string{}, body[top:min(top+window, len(body))]...)
+	if liveTextWidth(inner) < inner {
+		art := mascot(frame)
 		pad := strings.Repeat(" ", lipgloss.Width(art[0]))
-		for len(shown) < min(len(art), height-1) {
+		for len(shown) < min(len(art), window) {
 			shown = append(shown, "")
 		}
-		beside := make([]string, len(shown))
 		for i, line := range shown {
 			col := pad
 			if i < len(art) {
 				col = art[i]
 			}
-			beside[i] = col + "  " + line
+			shown[i] = col + "  " + line
 		}
-		shown = beside
 	}
-	rows = append(rows, shown...)
-	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
+	return envBorder.Width(max(18, w-2)).Render(strings.Join(append([]string{head}, shown...), "\n"))
+}
+
+// idleThoughtRows is how many lines of thoughts Ember's box keeps up while the agent is not generating.
+const idleThoughtRows = 6
+
+// thoughts is the stream Ember's box shows: the reasoning of the last few replies, oldest first, then the reply
+// being written (its thinking, tools and text). Each past reply is its tail, so a long one cannot fill the box.
+func (m envModel) thoughts(width int) []string {
+	var past []string
+	for i := len(m.residentEvents) - 1; i >= 0 && len(past) < 6; i-- {
+		e := m.residentEvents[i]
+		if e.Kind != "assistant" {
+			continue
+		}
+		r, _ := e.Data["reasoning"].(string)
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		if len(r) > 3000 {
+			r = "…" + r[len(r)-3000:]
+		}
+		past = append([]string{r}, past...)
+	}
+	var out []string
+	for _, r := range past {
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		for _, ln := range strings.Split(ansi.Wordwrap(residentText(strings.TrimSpace(r)), max(8, width), " "), "\n") {
+			out = append(out, envThink.Render(ln))
+		}
+	}
+	if m.chat.live.active {
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, m.chat.live.body(width)...)
+	}
+	return out
 }
 
 // envTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.

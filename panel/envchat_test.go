@@ -1642,3 +1642,25 @@ func TestCompactTranscriptFoldsToolWorkIntoOneLine(t *testing.T) {
 		t.Fatalf("the next reply fixes the line above it:\n%s", v)
 	}
 }
+
+func TestEmberStaysUpWithTheLatestThoughts(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 600, Kind: "assistant", Data: map[string]any{"reasoning": "first I check the CVE list"}},
+		residentEvent{Seq: 601, Kind: "assistant", Data: map[string]any{"reasoning": "then the kernel source for the missing return"}})
+	idle := ansi.Strip(m.liveBlock(110))
+	if !strings.Contains(idle, "▀") || !strings.Contains(idle, "thoughts") || !strings.Contains(idle, "missing return") {
+		t.Fatalf("idle, Ember stays with the latest thoughts:\n%s", idle)
+	}
+	if strings.Index(idle, "first I check") > strings.Index(idle, "missing return") {
+		t.Fatal("the thoughts run downward, newest last")
+	}
+	m.chat.live = residentLive{active: true, turn: "t", reasoning: "now drafting the report"}
+	live := ansi.Strip(m.liveBlock(110))
+	if !strings.Contains(live, "now drafting the report") || strings.Index(live, "missing return") > strings.Index(live, "now drafting") {
+		t.Fatalf("live thoughts append below the past ones:\n%s", live)
+	}
+}
