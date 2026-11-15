@@ -51,9 +51,11 @@ var glyphTiers = map[string]glyphs{
 		bar: "#", barEmpty: ".", spinner: []string{"|", "/", "-", "\\"}},
 }
 
-var g = glyphTiers["nerd"]
+// unicode is the shipped default: it needs no special font, so it works in any terminal and over SSH from a phone.
+// nerd is a per-user choice saved by /glyphs (most terminals have no Nerd Font and would show empty boxes).
+var g = glyphTiers["unicode"]
 
-// glyphsInit applies the saved tier (CAMINUS_GLYPHS wins); nerd is the owner's default.
+// init applies the user's saved tier (CAMINUS_GLYPHS wins).
 func init() {
 	name := strings.TrimSpace(os.Getenv("CAMINUS_GLYPHS"))
 	if name == "" {
@@ -97,7 +99,7 @@ func glyphsNext() string {
 			return order[(i+1)%len(order)]
 		}
 	}
-	return "nerd"
+	return "unicode"
 }
 
 // ---------------------------------------------------------------- pieces
