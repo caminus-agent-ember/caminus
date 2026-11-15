@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 import uuid
+from .memory import history_text
 
 
 def agent_home(name, home=None):
@@ -105,8 +106,12 @@ class Store:
             raise
 
     def event(self, kind, data, goal=None):
-        self.db.execute('INSERT INTO events(ts,goal,kind,data) VALUES(?,?,?,?)',
-                        (time.time(), goal, kind, json.dumps(data, ensure_ascii=False)))
+        cur = self.db.execute('INSERT INTO events(ts,goal,kind,data) VALUES(?,?,?,?)',
+                              (time.time(), goal, kind, json.dumps(data, ensure_ascii=False)))
+        if (text := history_text(kind, data)):
+            # The agent's own history, searchable without a model call (memory.Memory.search).
+            self.db.execute('INSERT INTO history_fts(rowid,text,goal,kind,seq) VALUES(?,?,?,?,?)',
+                            (cur.lastrowid, text, goal, kind, cur.lastrowid))
 
     def events(self, after=0, limit=200):
         return [dict(seq=r['seq'], ts=r['ts'], goal=r['goal'], kind=r['kind'], data=json.loads(r['data']))
@@ -156,6 +161,20 @@ class Store:
         have = {r['name'] for r in self.db.execute('PRAGMA table_info(failures)')}
         if have and 'last_error' not in have:
             self.db.execute('ALTER TABLE failures ADD COLUMN last_error TEXT')
+        # history_search: a full-text index over the events that are history. A database from before it is indexed
+        # once, here, from its events.
+        fresh = not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='history_fts'").fetchone()
+        self.db.execute('CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5('
+                        'text, goal UNINDEXED, kind UNINDEXED, seq UNINDEXED)')
+        if fresh:
+            for r in self.db.execute('SELECT seq,goal,kind,data FROM events').fetchall():
+                try:
+                    text = history_text(r['kind'], json.loads(r['data']))
+                except ValueError:
+                    continue
+                if text:
+                    self.db.execute('INSERT INTO history_fts(rowid,text,goal,kind,seq) VALUES(?,?,?,?,?)',
+                                    (r['seq'], text, r['goal'], r['kind'], r['seq']))
         self.db.commit()
 
     def update(self, gid, **fields):

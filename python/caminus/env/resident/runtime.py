@@ -16,6 +16,7 @@ from . import approval, discovery
 from .prompt import render as render_prompt
 from .freetime import FreeTime, KINDS as FREE_KINDS
 from .advisor import Advisor
+from .memory import Memory
 from .brain import Brains
 
 PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
@@ -51,6 +52,10 @@ TOOLS = [
          dict(check={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
+    tool('remember', 'Save one lasting fact as a note (notes/NAME.md) with a one-line entry in MEMORY.md, your notes index. The index is capped at 4 KB and loads into every goal; a note is read on demand. Refused when the index is full: merge or drop lines first. The new line shows from your next goal.',
+         dict(name={'type':'string'}, text={'type':'string'}, summary={'type':'string'}), ('name','text','summary')),
+    tool('history_search', 'Full-text search over your own past: earlier goals, your replies, tool results, finish summaries, your journal and notes. No model call; returns short snippets with where they came from.',
+         dict(query={'type':'string'}, limit={'type':'integer'}), ('query',)),
     tool('ledger', 'State the milestones this goal decomposes into and what blocks it now. Replaces the previous lists; it is pinned into every turn, so keep it short.',
          dict(milestones={'type':'array','items':{'type':'string'}}, blockers={'type':'array','items':{'type':'string'}})),
     tool('checkpoint', 'Snapshot named paths before a destructive action, so the work can be put back. Returns the id.',
@@ -151,6 +156,7 @@ class Runtime:
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
         self.brains = Brains(self, self.primary)
+        self.memory = Memory(self)
 
     def system(self,gid=None):
         """The stable prefix, and nothing else.
@@ -166,8 +172,9 @@ class Runtime:
 
         The files are re-read every turn: the agent writes MEMORY.md as it learns things, and it must see its
         own notes. Position is what keeps that affordable."""
-        parts = []
-        for p in (Path.home() / 'ROBOTS.md', self.home / 'IDENTITY.md', self.home / 'MEMORY.md'):
+        # STATE.md first: after a compaction or a restart it is the agent's own account of where it stands.
+        parts = [self.memory.state()]
+        for p in (Path.home() / 'ROBOTS.md', self.home / 'IDENTITY.md'):
             if not p.is_file():
                 continue
             text = p.read_text()
@@ -176,6 +183,7 @@ class Runtime:
                 # Say so in the prompt: a silent cut leaves the model believing it read its whole memory.
                 text = text[:limit] + f'\n[{p.name} truncated: {len(text) - limit} characters omitted from the end]'
             parts.append(p.name + ':\n' + text)
+        parts.append(self.memory.index(gid))
         if (note := self._context_budget(gid)):
             parts.append(note.strip())
         if (line := self.advisor.status_line(gid)):
@@ -253,8 +261,9 @@ class Runtime:
         return (f'\n\nContext budget: the last measured prompt was {tokens:,} of {size:,} window tokens '
                 f'({tokens/size:.0%}); {window_left:,} tokens remain, of which {until_compact:,} before '
                 f'auto-compaction summarizes the transcript (trigger {trigger_tokens:,} tokens, {trigger:.0%}). '
-                f'Record anything that must survive compaction in MEMORY.md, and finish a step before the remainder '
-                f'runs out.')
+                f'Keep STATE.md current (doing / verified / assumed / next): it loads first after a compaction. '
+                f'Lasting facts go in notes with remember.'
+                + (' Compaction is close: update STATE.md now.' if tokens >= 0.85 * limit else ''))
 
     def _bridge(self, action, args):
         root = Path(self.config['bridge']).expanduser()
@@ -292,9 +301,8 @@ class Runtime:
                 raise ValueError('invalid human response')
             if kind == 'root' and result['decision'] == 'answered':
                 raise ValueError('root requests require a root decision')
-            if kind == 'question':
-                with (self.home / 'MEMORY.md').open('a') as f:
-                    f.write('\nQ: ' + args['question'] + '\nA: ' + str(result.get('answer', result['decision'])) + '\n')
+            # The answer stays in the goal's transcript; the agent decides what to remember (nothing is written to
+            # its memory automatically).
             return result
         if kind == 'question' and self.free.is_free(action['goal']):
             # AFK: free time never blocks on its human. Past the window the resident withdraws its own question
@@ -480,6 +488,10 @@ class Runtime:
                     result = self._verify(action['goal'], args['evidence'])
                 elif name == 'ledger':
                     result = self._ledger(action['goal'], args.get('milestones'), args.get('blockers'))
+                elif name == 'remember':
+                    result = self.memory.remember(args['name'], args['text'], args['summary'])
+                elif name == 'history_search':
+                    result = self.memory.search(args['query'], args.get('limit', 8))
                 elif name == 'checkpoint':
                     result = self._checkpoint(action['goal'], args['paths'], args.get('label', ''))
                 elif name == 'rollback':
