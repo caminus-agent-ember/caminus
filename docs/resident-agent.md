@@ -33,20 +33,50 @@ systemd user service; linger, provisioned by `env setup`, keeps it alive after
 logout. Stopping the resident does not stop its inference server. Terminal workers
 survive a resident restart, so long commands can be inspected rather than repeated.
 
-The seventh panel tab, **agent**, shows goals, waiting states and recent activity.
-Use `n` to send a goal, `s` to start, `x` to stop the loop, `c` to cancel the selected
-goal and `m` to choose a named resident. The existing requests tab handles human
-questions and root requests. `env run`, sessions, jobs and all previous CLI flows
-remain available.
-Press `t` on the agent tab to steer the selected unfinished goal. Enter sends the
-message to that goal's durable inbox; Escape cancels the draft. The target goal
-is captured when the editor opens, so a refresh cannot select a different target
-while typing. Steering is read between model steps and does not create a new goal.
-It does not approve root, answer a pending question, or resume a paused goal.
-Accepted steering is preserved even if it arrives during the model's final
-response: completion waits until the agent has observed that message. A send
-that loses the race to a completed/cancelled goal is rejected rather than silently
-creating another task. Steering text also appears in the agent activity feed.
+The panel opens on **Sessions**. Select a named resident and press Enter for its
+conversation; `n` creates a fresh named session with the same model settings,
+separate memory/history, and its own persistent runtime. Existing sessions are
+never overwritten. The five main pages are Sessions, Audit, Settings, Notes &
+Memory, and Context. Tab/Shift-Tab or 1–5 navigates between them. Settings displays
+current model/context/compaction settings; it is read-only.
+
+Inside a conversation, a fixed multiline textbox stays below a scrollable
+transcript. Ordinary typing goes into that textbox. Enter sends; Alt+Enter or
+Shift+Enter inserts a newline; bracketed paste preserves Unicode and multiple
+lines. Text steers the selected unfinished goal, or creates a new goal when
+there is no unfinished target. `/new [goal]` explicitly starts another goal.
+A refresh never redirects a draft. Failed delivery retains its text.
+
+The transcript retains earlier goals, messages, commands and results. It loads
+paged durable history rather than dropping all but a few recent entries, and
+context compaction does not remove UI history. Markdown and fenced code render
+with syntax highlighting; terminal commands and outputs have separate labels.
+Page Up/Down and the mouse wheel scroll; incoming activity preserves the reading
+position. Ctrl+L follows the latest activity. Escape switches to browsing without
+deleting a draft; Enter returns to typing. The footer shows the configured model,
+context capacity, selected goal state/steps and pending request count. Context
+capacity is not presented as a measured current token count. Updates arrive at
+model/tool event boundaries, not as token-by-token private reasoning.
+
+Most controls use slash commands:
+
+| Command | Action |
+|---|---|
+| `/new [goal]` | Start or prepare a new goal |
+| `/goals`, `/goal ID` | List goals or select an unambiguous ID/prefix to steer |
+| `/newsession NAME`, `/session NAME`, `/sessions` | Create/open a named resident, or return home |
+| `/cancel`, `/resume` | Cancel or resume the selected goal |
+| `/start`, `/stop` | Control this session's resident loop; inference stays separate |
+| `/requests` | Open human questions and root approvals |
+| `/remember TEXT` | Append to the selected session's durable MEMORY.md |
+| `/help`, `/quit` | Toggle help, or close the UI while the agent keeps running |
+
+Requests retain their review controls: `a` answers/approves, `e` edits a root
+command, `d` denies. Root execution hands the actual terminal to the human for
+sudo. Steering does not approve root, answer a pending question or resume a
+paused goal. Accepted in-flight steering is observed before completion; a send
+that loses the race to a finished/cancelled goal is rejected. `env run`, jobs,
+sessions and all previous scriptable CLI flows remain available.
 
 The daemon polls without inference while idle or waiting for human answers.
 There is no production step limit. Backend outages retain the goal and retry

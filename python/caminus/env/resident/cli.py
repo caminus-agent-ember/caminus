@@ -23,11 +23,16 @@ from .prompt import render as render_prompt
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','run','once','send','status','events','resume','cancel','unit','start','stop','peers','message','mail','discover','prompt'):
+    for op in ('init','create','memory','run','once','send','status','events','resume','cancel','unit','start','stop','peers','message','mail','discover','prompt'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
         p.add_argument('--json',action='store_true')
+        if op=='create':
+            p.add_argument('--from',dest='template',required=True,help='copy model settings from a sibling resident; memory/history start fresh')
+        if op=='memory':
+            p.add_argument('--text',help='append a note to this resident\'s MEMORY.md')
+            p.add_argument('--stdin',action='store_true')
         if op=='discover':
             p.add_argument('--topic',choices=TOPICS,default='overview')
             p.add_argument('--query',default='')
@@ -104,6 +109,23 @@ def main(argv=None,stdin=None):
         if getattr(a,'max_steps',None) is not None and a.max_steps<1 or getattr(a,'max_seconds',None) is not None and a.max_seconds<=0:
             raise ValueError('test budgets must be positive')
         home=agent_home(a.name,a.home)
+        if a.op=='create':
+            agent_home(a.template)  # validate the sibling name before joining it
+            source=home.parent/a.template
+            cfg=json.loads((source/'config.json').read_text())
+            cfg['name']=a.name
+            from .model import Model
+            Model(cfg)
+            home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
+            atomic_json(home/'config.json',cfg)
+            (home/'MEMORY.md').write_text('# Persistent memory\n\nKeep durable facts and links to your work here.\n')
+            (home/'IDENTITY.md').write_text(f'# {a.name}\n\nYou are the resident agent whose home is this directory.\n')
+            store=Store(home);store.close()
+            mail=Mail(cfg)
+            try:mail.register(home)
+            finally:mail.close()
+            emit(dict(name=a.name,home=str(home),configured=True),True)
+            return 0
         if a.op=='discover':
             emit(discover(home,a.topic,a.query),True)
             return 0
@@ -137,6 +159,13 @@ def main(argv=None,stdin=None):
             return 0
         if not (home/'config.json').is_file():
             raise ValueError('agent not initialized; run agent init first')
+        if a.op=='memory':
+            p=home/'MEMORY.md'
+            text=(stdin or sys.stdin).read() if a.stdin else a.text
+            if text is not None:
+                with p.open('a') as f:f.write('\n'+text.rstrip()+'\n')
+            emit(dict(name=a.name,memory=p.read_text() if p.exists() else ''),True)
+            return 0
         if a.op in ('peers','message','mail'):
             mail=Mail(json.loads((home/'config.json').read_text()))
             try:
@@ -165,7 +194,10 @@ def main(argv=None,stdin=None):
         store=Store(home)
         if a.op=='status':
             heartbeat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
-            emit(dict(name=a.name,home=str(home),daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,**store.status()),True)
+            cfg=json.loads((home/'config.json').read_text())
+            emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
+                      compact_threshold=cfg.get('compact_threshold',.85),compact_target_ratio=cfg.get('compact_target_ratio',.2),
+                      daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,**store.status()),True)
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0

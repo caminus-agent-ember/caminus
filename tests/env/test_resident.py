@@ -134,6 +134,22 @@ class Resident(unittest.TestCase):
         rejected=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Too late.',code=1)
         self.assertIn('goal finished',rejected['error'])
 
+    def test_new_session_inherits_settings_with_separate_history_and_memory(self):
+        name='session-'+uuid.uuid4().hex
+        home=self.home.parent/name
+        self.cmd('memory',['--stdin'],stdin='Source-only memory.')
+        args=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','create',name,
+              '--from',self.home.name,'--home',str(home),'--json']
+        created=subprocess.run(args,capture_output=True,text=True,timeout=15)
+        self.assertEqual(created.returncode,0,created.stdout+created.stderr)
+        cfg=json.loads((home/'config.json').read_text())
+        source=json.loads((self.home/'config.json').read_text())
+        self.assertEqual(cfg,{**source,'name':name})
+        self.assertNotIn('Source-only memory.',(home/'MEMORY.md').read_text())
+        self.assertEqual(self.cmd('status',['--home',str(home)])['goals'],[])
+        self.assertEqual(subprocess.run(args,capture_output=True,text=True,timeout=15).returncode,1)
+        self.assertIn('Source-only memory.',self.cmd('memory')['memory'])
+
     def test_inflight_steering_is_observed_before_either_completion_path(self):
         for finish_tool in (False,True):
             class Model:

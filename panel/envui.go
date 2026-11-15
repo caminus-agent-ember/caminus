@@ -75,7 +75,9 @@ type server struct {
 	Nctx  string
 }
 
-var tabs = []string{"requests", "jobs", "procs", "notes", "ctx", "audit", "agent"}
+var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "audit", "agent", "sessions", "settings"}
+
+var envNavigation = []int{7, 5, 8, 3, 4}
 
 type envModel struct {
 	user           string
@@ -88,6 +90,10 @@ type envModel struct {
 	resident       residentStatus
 	residentEvents []residentEvent
 	goalSel        int
+	chat           residentChat
+	sessionNames   []string
+	sessionSel     int
+	sessionMemory  string
 
 	tab     int
 	reqs    []envReq
@@ -161,7 +167,8 @@ func envMain(args []string) {
 		}
 	}
 	m := envModel{user: *user, bridge: *bridge, auditPath: *audit, key: *key, cli: cliArgv,
-		agentName: *agent, tab: 6, seen: map[string]bool{}, mode: "normal", width: 110, height: 32}
+		agentName: *agent, tab: 7, seen: map[string]bool{}, mode: "normal", width: 110, height: 32}
+	m.initChat()
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "caminus-panel env:", err)
@@ -171,7 +178,7 @@ func envMain(args []string) {
 
 func (m envModel) Init() tea.Cmd {
 	cmds := append([]tea.Cmd{tickCmd(), probeCmd(m)}, sshRefresh(m)...)
-	cmds = append(cmds, residentRefresh(m))
+	cmds = append(cmds, residentRefresh(m), residentSessions(m))
 	return tea.Batch(cmds...)
 }
 
@@ -475,6 +482,7 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.syncChat()
 		return m, nil
 	case envTickMsg:
 		m.tickN++
@@ -485,13 +493,16 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.tickN%4 == 0 {
 			cmds = append(cmds, sshRefresh(m)...)
-			if m.tab == 6 {
+			if m.tab == 6 || m.tab == 7 || m.tab == 8 || m.tab == 3 {
 				cmds = append(cmds, residentRefresh(m))
 			}
 		}
 		return m, tea.Batch(cmds...)
 	case probeMsg:
-		m.sshOK, m.sshN, m.msg = msg.ok, msg.n, msg.err
+		m.sshOK, m.sshN = msg.ok, msg.n
+		if msg.err != "" {
+			m.msg = msg.err
+		}
 		return m, nil
 	case jobsMsg:
 		m.jobs = msg
@@ -509,15 +520,32 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.servers = msg
 		return m, nil
 	case residentMsg:
+		if msg.agent != "" && msg.agent != m.agentName {
+			return m, nil
+		}
 		if msg.err != "" {
 			m.msg = msg.err
 		} else {
-			m.resident, m.residentEvents = msg.status, msg.events
-			if m.goalSel >= len(m.resident.Goals) {
-				m.goalSel = max(0, len(m.resident.Goals)-1)
+			m.receiveResident(msg)
+		}
+		return m, nil
+	case residentComposeResult:
+		return m.finishCompose(msg)
+	case residentSessionsMsg:
+		if msg.agent == m.agentName {
+			m.sessionNames, m.sessionMemory = msg.names, msg.memory
+			if msg.err != "" {
+				m.msg = msg.err
 			}
 		}
 		return m, nil
+	case residentCreatedMsg:
+		if msg.err != "" {
+			m.msg = msg.err
+			return m, nil
+		}
+		m.openResident(msg.name)
+		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	case residentActionMsg:
 		m.msg = msg.text
 		return m, residentRefresh(m)
@@ -556,7 +584,13 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshLocal()
 		return m, tickCmd()
 	case tea.KeyPressMsg:
+		if m.tab == 6 && (m.mode == "" || m.mode == "normal") {
+			return m.chatKey(msg)
+		}
 		return m.onKey(msg.String())
+	}
+	if m.tab == 6 && m.chat.ready && (m.mode == "" || m.mode == "normal") {
+		return m.chatUpdate(msg)
 	}
 	return m, nil
 }
@@ -607,13 +641,22 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "tab":
-		m.tab = (m.tab + 1) % len(tabs)
+		m.tab = nextEnvTab(m.tab, 1)
+		if m.tab == 3 || m.tab == 7 {
+			return m, residentSessions(m)
+		}
 		return m, nil
 	case "shift+tab":
-		m.tab = (m.tab + len(tabs) - 1) % len(tabs)
+		m.tab = nextEnvTab(m.tab, -1)
+		if m.tab == 3 || m.tab == 7 {
+			return m, residentSessions(m)
+		}
 		return m, nil
-	case "1", "2", "3", "4", "5", "6", "7":
-		m.tab = int(k[0] - '1')
+	case "1", "2", "3", "4", "5":
+		m.tab = envNavigation[int(k[0]-'1')]
+		if m.tab == 3 || m.tab == 7 {
+			return m, residentSessions(m)
+		}
 		return m, nil
 	case "r":
 		m.refreshLocal()
@@ -628,6 +671,8 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 		return m.noteKeys(k)
 	case 6:
 		return m.residentKeys(k)
+	case 7:
+		return m.sessionKeys(k)
 	}
 	return m, nil
 }
@@ -651,7 +696,16 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 	case "agentname":
 		m.agentName = strings.TrimSpace(m.edit)
 		m.mode, m.edit, m.goalSel = "normal", "", 0
+		m.resident, m.residentEvents, m.chat = residentStatus{}, nil, residentChat{}
+		m.initChat()
 		return m, residentRefresh(m)
+	case "sessionnew":
+		name := strings.TrimSpace(m.edit)
+		m.mode, m.edit = "normal", ""
+		if name == "" {
+			return m, nil
+		}
+		return m, createResidentSession(m, name)
 	case "answer":
 		if m.editRequest == nil {
 			m.mode = "normal"
@@ -916,9 +970,14 @@ var (
 )
 
 func (m envModel) render() string {
+	if m.tab == 6 {
+		m.initChat()
+		return m.renderChat()
+	}
 	var b strings.Builder
 	b.WriteString(envTitle.Render("CAMINUS ENV") + "  " + envDim.Render("the agent's home: "+m.user+" on this machine") + "\n")
-	for i, t := range tabs {
+	for _, i := range envNavigation {
+		t := tabs[i]
 		if i == m.tab {
 			b.WriteString(" " + envTabOn.Render(t) + " ")
 		} else {
@@ -934,6 +993,8 @@ func (m envModel) render() string {
 		b.WriteString("\n\n" + envWarn.Render("steer goal "+terminalText(m.steerGoal, false)+" (enter sends, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "agentname":
 		b.WriteString("\n\n" + envWarn.Render("resident agent name:") + "\n" + terminalText(m.edit, false) + "█")
+	case "sessionnew":
+		b.WriteString("\n\n" + envWarn.Render("new session name (Enter creates; Esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "edit":
 		b.WriteString("\n\n" + envWarn.Render("edit root command (enter runs it under sudo, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "answer":
@@ -951,7 +1012,7 @@ func (m envModel) render() string {
 	}
 	status := fmt.Sprintf("ssh: %s  requests: %d  jobs: %d  msg: %s", map[bool]string{true: "OK", false: "FAIL"}[m.sshOK], len(m.reqs), len(m.jobs), terminalText(m.msg, true))
 	b.WriteString("\n\n" + envDim.Render(status))
-	b.WriteString("\n" + envDim.Render("tab/1-7 panes · q quit · agent: n goal, t steer, s start, x stop, c cancel, m name · requests: a/e/d/s · r refresh"))
+	b.WriteString("\n" + envDim.Render("Tab/1–5 pages · sessions: Enter open, n new · requests: a/e/d/s · q quit · r refresh"))
 	return b.String()
 }
 
@@ -964,11 +1025,15 @@ func (m envModel) pane() string {
 	case 2:
 		return strings.Join(m.procs, "\n")
 	case 3:
-		return m.notesPane()
+		return m.notesPane() + "\n\n" + envHead.Render("SESSION MEMORY · "+residentText(m.agentName)) + "\n" + residentText(m.sessionMemory)
 	case 4:
 		return m.ctxPane()
 	case 6:
 		return m.residentPane()
+	case 7:
+		return m.sessionsPane()
+	case 8:
+		return m.residentSettingsPane()
 	default:
 		return m.auditPane()
 	}
@@ -1060,6 +1125,9 @@ func (m envModel) auditPane() string {
 func (m envModel) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
+	if m.tab == 6 {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	v.WindowTitle = "caminus env"
 	return v
 }
