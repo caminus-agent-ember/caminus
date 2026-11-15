@@ -159,7 +159,7 @@ func (m envModel) approvalOverlay(w, h int) string {
 	}
 	hint := "Enter shows the full request  ·  a a approve  ·  e edit  ·  d deny  ·  /deny TEXT in the chat says what instead"
 	if m.chat.approvalDetail {
-		hint = "Enter folds the full request again  ·  a a approve  ·  e edit  ·  d deny"
+		hint = "Enter folds the full request again  ·  a a approve  ·  e edit  ·  d deny  ·  /deny TEXT says what instead"
 	}
 	body := strings.Join(rows, "\n")
 	if len(detail) > 0 {

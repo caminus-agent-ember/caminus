@@ -493,6 +493,19 @@ class Resident(unittest.TestCase):
         try:self.assertEqual([e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged'],['not_yet','met'])
         finally:store.close()
 
+    def test_a_wait_verdict_points_at_the_wait_tool_and_is_not_a_refusal(self):
+        self.gates_on()
+        self.verdicts(dict(verdict='wait',reason='the build started at step 2 has not finished'),
+                      dict(verdict='wait',reason='still building'),
+                      dict(verdict='wait',reason='still building'),
+                      dict(verdict='met',reason='the build log shows success'))
+        self.replies(call('define_done',dict(check='the build succeeds')),
+                     *[c for _ in range(4) for c in (call('verify',dict(evidence='build.log')),call('finish',dict(summary='Done.')))])
+        out=self.cmd('once',['--goal','Build it.'])
+        self.assertEqual(out['state'],'completed','three waits are not three refusals (JUDGE_LIMIT is 3)')
+        bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
+        self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
+
     def test_an_impossible_verdict_pauses_the_goal_for_the_human(self):
         self.gates_on()
         self.verdicts(dict(verdict='impossible',reason='writing /etc needs root and none was approved'))
@@ -1487,6 +1500,73 @@ for line in sys.stdin:
             self.assertTrue(any(f'answer to your root request {rid}' in t and 'denied' in t for t in inbox))
             self.assertEqual(rt.open_requests(gid),[])
             self.assertIn('request_answered',[e['kind'] for e in rt.store.events()])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_per_turn_gate_skips_read_only_commands_and_backs_off_a_slow_gate(self):
+        from caminus.env.resident import runtime as R
+        for c in ('ls -la','git status && git diff --stat','grep -rn foo src | head','cat a.txt; wc -l a.txt'):
+            self.assertTrue(R.read_only_command(c),c)
+        for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b'):
+            self.assertFalse(R.read_only_command(c),c)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Slow gate.')
+            rt.store.update(gid,gate='sleep 3; false')
+            old=R.GATE_TURN_TIMEOUT;R.GATE_TURN_TIMEOUT=1
+            try:
+                rt._gate_dirty.add(gid);rt._gate_check(gid,rt.store.goal(gid))
+            finally:R.GATE_TURN_TIMEOUT=old
+            inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertIn('no longer runs after each step',inbox[-1])
+            n=len(inbox);rt._gate_dirty.add(gid);rt._gate_check(gid,rt.store.goal(gid))
+            self.assertEqual(len(list(rt.store.db.execute('SELECT 1 FROM inbox WHERE goal=?',(gid,)))),n,'off for this goal')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_denial_with_an_instruction_becomes_a_steer(self):
+        self.replies(call('ask_root',dict(command='apt-get install -y libfoo-dev',reason='need the headers')))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Build foo.')
+            for _ in range(4):
+                if rt.store.goal(gid)['state']=='waiting_root':break
+                rt.tick(gid)
+            rid=rt.store.db.execute('SELECT bridge_id FROM actions WHERE goal=? AND name=?',(gid,'ask_root')).fetchone()[0]
+            self.bridge.joinpath('res').mkdir(parents=True,exist_ok=True)
+            (self.bridge/'res'/(rid+'.json')).write_text(json.dumps(dict(id=rid,decision='denied',answer='use the vendored copy in third_party/')))
+            for _ in range(3):rt.tick(gid)
+            result=[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='ask_root'][-1]
+            self.assertEqual(result['instead'],'use the vendored copy in third_party/')
+            steers=[r['text'] for r in rt.store.db.execute("SELECT text FROM inbox WHERE goal=? AND kind='steer'",(gid,))]
+            self.assertEqual(steers,['use the vendored copy in third_party/'],'the instruction is a steer, once')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_repeat_failure_watchdog_really_pauses_the_goal(self):
+        bad=call('read',dict(path='no/such/file.txt'))
+        self.replies(*[dict(bad,tool_calls=[dict(bad['tool_calls'][0],id=f'c{i}')]) for i in range(6)])
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Read a file that is not there.')
+            for _ in range(12):
+                if rt.store.goal(gid)['state']=='paused':break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'paused','two failures then two refused repeats pause the goal, and it stays paused')
+            self.assertIn('retried 2 times after failing twice',g['error'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_repeated_failing_finish_is_stopped_by_the_watchdog(self):
+        # finish is never refused up front, so its own failures must reach the watchdog (they did not: the result's
+        # recording set the goal back to working)
+        self.gates_on()
+        self.replies(*[call('finish',dict(summary='Done.')) for _ in range(5)])
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Finish without a done check.')
+            for _ in range(12):
+                if rt.store.goal(gid)['state']=='paused':break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'paused');self.assertIn('the same call failed 3 times',g['error'])
         finally:rt.mail.close();rt.store.close()
 
     def test_the_openai_transport_sends_reasoning_effort(self):

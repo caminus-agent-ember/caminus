@@ -54,6 +54,7 @@ type residentChat struct {
 	histQuery                               string      // Ctrl+R: the draft it searches for
 	histIdx                                 int         // Ctrl+R: how far back it is
 	full                                    bool        // Ctrl+O: cards show every line
+	rootSel                                 string      // the root request the decision keys act on (shared card)
 	view                                    textView    // /btw's answer, /diff
 	rewind                                  rewindState // the /rewind step picker
 	recapNow                                float64     // when the recap was taken: saved as seen on dismiss
@@ -918,6 +919,9 @@ func (m envModel) renderChat() string {
 	if card := m.planCard(w); card != "" {
 		body = append(body, card)
 	}
+	if card := m.rootsCard(w); card != "" {
+		body = append(body, card)
+	}
 	return strings.Join(append(body, m.chatBottom(), foot), "\n")
 }
 
@@ -1094,6 +1098,22 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if armed != "" {
 			m.msg = "approval cancelled"
+		}
+		if roots := m.pendingRoots(); len(roots) > 1 && (k == "[" || k == "]") {
+			pos := 0
+			for n, i := range roots {
+				if i == m.pendingRoot() {
+					pos = n
+				}
+			}
+			if k == "[" {
+				pos = max(0, pos-1)
+			} else {
+				pos = min(len(roots)-1, pos+1)
+			}
+			m.chat.rootSel = m.reqs[roots[pos]].ID
+			m.msg = fmt.Sprintf("request %d of %d: %s", pos+1, len(roots), terminalText(m.reqs[roots[pos]].Cmd, false))
+			return m, nil
 		}
 		switch k {
 		case "enter", "t":
@@ -1388,17 +1408,13 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "usage: /deny TEXT — denies the root request and tells the agent what to do instead"
 			return m, nil
 		}
+		// The instruction rides in the denial itself; the runtime files it as a steer on the request's goal (one
+		// write, so a denial can never arrive without its instruction).
 		r := m.reqs[i]
 		m.sel = i
-		next, _ := m.reqKeys("d")
-		m = next.(envModel)
+		m.mode, m.edit, m.editRequest = "denywhy", text, &r
 		clear()
-		goal := r.Goal
-		if goal == "" {
-			goal = m.chat.target
-		}
-		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--steer", "--stdin", "--json"},
-			"Your root request was denied. Instead: "+text)
+		return m.submitInput()
 	case "/glyphs":
 		// The symbol set (shell.go): nerd needs a Nerd Font; unicode needs none; ascii is for anything else.
 		name := strings.TrimSpace(arg)
@@ -1801,13 +1817,53 @@ func (m envModel) chatFoot(w int) string {
 	return foot
 }
 
-// pendingRoot is the index in m.reqs of the newest root request from this resident still waiting, or -1.
-func (m envModel) pendingRoot() int {
-	for i := len(m.reqs) - 1; i >= 0; i-- {
-		r := m.reqs[i]
+// pendingRoots are the indexes in m.reqs of this resident's waiting root requests, oldest first.
+func (m envModel) pendingRoots() []int {
+	var out []int
+	for i, r := range m.reqs {
 		if r.kind() == "root" && (r.Agent == "" || r.Agent == m.agentName) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// pendingRoot is the index in m.reqs of the root request the keys act on: the one highlighted on the shared card
+// ([ and ] move it), else the newest; -1 when none waits.
+func (m envModel) pendingRoot() int {
+	roots := m.pendingRoots()
+	if len(roots) == 0 {
+		return -1
+	}
+	for _, i := range roots {
+		if m.reqs[i].ID == m.chat.rootSel {
 			return i
 		}
 	}
-	return -1
+	return roots[len(roots)-1]
+}
+
+// rootsCard: when several root requests wait, one card above the composer lists them all; the decision keys act on
+// the highlighted one. One request needs no extra card (its card is in the transcript).
+func (m envModel) rootsCard(w int) string {
+	roots := m.pendingRoots()
+	if len(roots) < 2 {
+		return ""
+	}
+	cur := m.pendingRoot()
+	inner := max(10, min(w, 96)-4)
+	var rows []string
+	for n, i := range roots {
+		r := m.reqs[i]
+		line := fmt.Sprintf("%d  %s", n+1, residentText(r.Cmd))
+		if i == cur {
+			rows = append(rows, envSel.Render(ansi.Truncate(g.collapsed+" "+line, inner, "…")))
+		} else {
+			rows = append(rows, envDim.Render(ansi.Truncate("  "+line, inner, "…")))
+		}
+	}
+	rows = append(rows, envDim.Render("esc, then [ ] pick  ·  a a approve  ·  e edit  ·  d deny  ·  /deny TEXT what instead"))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).
+		Width(min(w, 96)).Render(strings.Join(rows, "\n"))
+	return borderTitle(box, fmt.Sprintf("%s %d ROOT REQUESTS WAITING", g.root, len(roots)), envWarn.Bold(true))
 }
