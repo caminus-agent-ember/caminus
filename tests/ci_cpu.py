@@ -45,6 +45,7 @@ SUITES = [
     ('context_note', ['tests/harness/test_context_note.py', '--scratch', '{scratch}'], set()),
     ('env', ['tests/env/test_env.py', '--scratch', '{scratch}'], set()),
     ('resident', ['tests/env/test_resident.py', '--scratch', '{scratch}'], set()),
+    ('resident_discovery', ['tests/env/test_discovery.py'], set()),
     ('resident_compare', ['tests/tools/test_resident_compare.py', '--scratch', '{scratch}'], set()),
     ('docs', ['tests/docs/test_docs.py'], set()),
     ('own_code', ['tests/test_own_code.py'], set()),

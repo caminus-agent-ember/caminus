@@ -86,6 +86,40 @@ class Resident(unittest.TestCase):
             time.sleep(.03)
         self.fail('condition did not become true')
 
+    def test_discovery_precedes_first_model_turn_and_survives_retry(self):
+        self.replies()
+        failed=self.cmd('once',['--goal','Inspect available tools before building anything.'],code=24)
+        self.replies(call('discover',dict(topic='commands',query='python')),
+                     call('finish',dict(summary='Reused installed tools.')))
+        result=self.cmd('once',['--goal-id',failed['id']])
+        self.assertEqual(result['state'],'completed')
+        events=self.cmd('events')
+        self.assertEqual(sum(e['kind']=='startup_discovery' for e in events),1)
+        discovered=[e for e in events if e['kind']=='tool_result' and e['data']['name']=='discover']
+        self.assertEqual(discovered[0]['data']['result']['topic'],'commands')
+        first=next(body for key,body in Endpoint.seen if key==self.key)
+        self.assertTrue(any('Read-only startup discovery' in m.get('content','') for m in first['messages']))
+
+    def test_discovery_cli_and_prompt_are_available_in_zipapp_before_init(self):
+        app=S/(self.key+'-discovery.pyz');app.write_bytes(bundle())
+        base=[sys.executable,'-I',str(app)]
+        for op,extra in [('discover',['--topic','web']),('prompt',[])]:
+            p=subprocess.run([*base,op,'new-agent','--home',str(self.home/'not-initialized'),'--json',*extra],
+                             capture_output=True,text=True,timeout=10)
+            self.assertEqual(p.returncode,0,p.stderr)
+            result=json.loads(p.stdout)
+            self.assertIn('programs' if op=='discover' else 'prompt',result)
+        self.assertFalse((self.home/'not-initialized').exists())
+
+    def test_discovery_does_not_change_system_prefix(self):
+        from caminus.env.resident import discovery
+        rt=Runtime(self.home)
+        try:
+            before=rt.system()
+            discovery.discover(self.home,'overview')
+            self.assertEqual(rt.system(),before)
+        finally:rt.mail.close();rt.store.close()
+
     def test_oneshot_actual_shell_and_json(self):
         # The model fixture must observe completion, not assume worker startup
         # takes less than one second on a busy CI runner.

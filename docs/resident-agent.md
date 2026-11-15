@@ -52,6 +52,46 @@ exact command and approves, edits or denies it through the existing bridge. The
 agent's open-ended shell does not grant root or access to another user's protected
 files. This is a Unix account, not a security sandbox.
 
+## Discover before building
+
+The resident prompt authorizes routine reversible work with the account's shell,
+web access, installed browsers, user-level software and scheduled jobs, subject
+to the human's goal. It explains the root and question bridges, persistent PTYs,
+memory and shared-resource rules. Read the authoritative prompt in
+`python/caminus/env/resident/prompt.py`, or print it with the current account and
+workspace values:
+
+```sh
+caminus env agent prompt resident
+caminus env agent discover resident --json
+caminus env agent discover resident --topic commands --query pdf --json
+caminus env agent discover resident --topic packages --query tshark --json
+caminus env agent discover resident --topic containers --json
+```
+
+These commands work before initialization and also accept `--local` for the
+current account. They never call the model. Each new goal automatically receives
+one discovery snapshot before its first model turn. That snapshot is saved in
+the conversation and journal, so retries do not reinsert it and changing RAM or
+disk readings do not continually alter the system-prompt prefix.
+
+The model's `discover` tool provides focused hardware, command, web, image,
+document, networking, development, Python, container and package information.
+Overview inspects metadata without launching discovered programs, importing
+third-party modules, reading user documents, contacting the internet or
+initializing GPUs. Python results describe the current interpreter only.
+Container queries explicitly use a local Docker socket or local podman; package
+queries read installed status and cached apt policy. These queries have a
+three-second timeout and a bounded returned output. No image is run or pulled,
+and no package is installed or index updated by discovery.
+
+The prompt requires checking these capabilities and a tool's documentation or a
+small relevant smoke check before building or installing an alternative. Presence
+is labeled as metadata, not proof of working functionality or an exhaustive scan
+of every environment. The model may use apt; system installs and index updates
+requiring root go through `ask_root` with exact commands and the effect and undo
+plan. A task's explicit offline or installation restrictions still apply.
+
 ## Scriptable oneshot testing
 
 Daemon and oneshot call the same runtime and tools. `once` submits a goal and

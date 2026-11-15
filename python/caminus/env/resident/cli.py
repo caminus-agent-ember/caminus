@@ -16,16 +16,21 @@ from .store import Store, agent_home, atomic_json
 from .terminal import alive
 from .mail import Mail
 from . import approval
+from .discovery import TOPICS, discover
+from .prompt import render as render_prompt
 
 
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','run','once','send','status','events','resume','cancel','unit','start','stop','peers','message','mail'):
+    for op in ('init','run','once','send','status','events','resume','cancel','unit','start','stop','peers','message','mail','discover','prompt'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
         p.add_argument('--json',action='store_true')
+        if op=='discover':
+            p.add_argument('--topic',choices=TOPICS,default='overview')
+            p.add_argument('--query',default='')
         if op=='init':
             p.add_argument('--model',required=True)
             p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1')
@@ -99,6 +104,13 @@ def main(argv=None,stdin=None):
         if getattr(a,'max_steps',None) is not None and a.max_steps<1 or getattr(a,'max_seconds',None) is not None and a.max_seconds<=0:
             raise ValueError('test budgets must be positive')
         home=agent_home(a.name,a.home)
+        if a.op=='discover':
+            emit(discover(home,a.topic,a.query),True)
+            return 0
+        if a.op=='prompt':
+            value=render_prompt(home)
+            emit(dict(prompt=value),True) if a.json else print(value)
+            return 0
         if a.op=='init':
             if not 0 < a.compact_target_ratio < a.compact_threshold < 1:
                 raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
