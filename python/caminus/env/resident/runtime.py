@@ -24,6 +24,12 @@ def tool(name, description, properties, required=()):
         parameters=dict(type='object', properties=properties, required=list(required), additionalProperties=False)))
 
 
+# Bounds for a user-requested compaction: the fragment one /compact takes, and the fragment each summary
+# call sends. Both are fixed so a large transcript cannot turn one request into a single enormous prefill
+# that freezes the agent for minutes.
+COMPACT_FRAGMENT_CHARS = 131072
+COMPACT_CHUNK_CHARS = 32768
+
 TOOLS = [
     tool('discover', 'Inspect available system capabilities before building or installing a helper. Overview reads metadata only; containers and packages query local catalogs. Presence is not a smoke test.',
          dict(topic={'type':'string','enum':list(discovery.TOPICS)},query={'type':'string'})),
@@ -113,7 +119,7 @@ class Runtime:
         self.retry = {}
         self.base_timeout = float(self.config.get('timeout', 900))
 
-    def system(self):
+    def system(self,gid=None):
         out = render_prompt(self.home)
         for p in (Path.home() / 'ROBOTS.md', self.home / 'IDENTITY.md', self.home / 'MEMORY.md'):
             if not p.is_file():
@@ -124,7 +130,38 @@ class Runtime:
                 # Say so in the prompt: a silent cut leaves the model believing it read its whole memory.
                 text = text[:limit] + f'\n[{p.name} truncated: {len(text) - limit} characters omitted from the end]'
             out += '\n\n' + p.name + ':\n' + text
+        budget = self._context_budget(gid)
+        if budget:
+            out += budget
         return dict(role='system', content=out)
+
+    def _context_budget(self,gid=None):
+        """A live budget line so the model can see its own token count and compaction distance — it cannot
+        read those any other way. Only measured counts (:meth:`context_note`, written by _compact's pre-turn
+        probe, which has already run when a completion is made), and counted for the goal being served: a
+        note left by an earlier goal says nothing about this one's transcript. No note, no line."""
+        try:
+            note = json.loads((self.home / 'context.json').read_text())
+            tokens,size = int(note['tokens']),int(note['size'])
+            same = gid is None or note.get('goal') == gid
+        except (OSError,ValueError,TypeError,KeyError):
+            return ''
+        if size <= 0 or not 0 <= tokens <= size:
+            return ''
+        trigger = self.config.get('compact_threshold',.85)
+        trigger_tokens = int(size * trigger)
+        reserve = min(int(self.config.get('max_tokens',4096)),size // 4)
+        limit = min(trigger_tokens,size - reserve)
+        if not same or tokens > limit:
+            return (f'\n\nContext budget: no measured count for this goal yet; the window is {size:,} tokens and '
+                    f'auto-compaction fires at {trigger_tokens:,} ({trigger:.0%}). The measured count appears '
+                    f'after the first turn of this goal.')
+        window_left,until_compact = size - tokens,max(0,limit - tokens)
+        return (f'\n\nContext budget: the last measured prompt was {tokens:,} of {size:,} window tokens '
+                f'({tokens/size:.0%}); {window_left:,} tokens remain, of which {until_compact:,} before '
+                f'auto-compaction summarizes the transcript (trigger {trigger_tokens:,} tokens, {trigger:.0%}). '
+                f'Record anything that must survive compaction in MEMORY.md, and finish a step before the remainder '
+                f'runs out.')
 
     def _bridge(self, action, args):
         root = Path(self.config['bridge']).expanduser()
@@ -240,7 +277,7 @@ class Runtime:
     def _compact(self, gid, messages, force=False):
         """Summarize the transcript into working memory. Automatic compaction waits for the trigger; a
         user's /compact sets force, because asking for it is the point."""
-        system = self.system()
+        system = self.system(gid)
         size = self.model.context_size()
         reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
         before_tokens = self.model.tokens([system, *messages], TOOLS)
@@ -251,11 +288,22 @@ class Runtime:
             return messages
         if len(messages) < 2:
             raise ModelContextError('goal/context exceeds the model window; send a smaller goal or shorten MEMORY.md')
-        start = max(1, len(messages) - 8)
-        while start > 1 and messages[start]['role'] == 'tool':
-            start -= 1
-        if start == 1:
-            start = len(messages)
+        if force:
+            # A user's /compact takes the oldest bounded fragment and leaves the rest as history, so one
+            # request costs a few short calls instead of one enormous prefill of the whole transcript.
+            # Repeating it compacts further back.
+            start, used = 1, 0
+            while start < len(messages) and used < COMPACT_FRAGMENT_CHARS:
+                used += len(json.dumps(messages[start], ensure_ascii=False))
+                start += 1
+            while start < len(messages) and messages[start]['role'] == 'tool':
+                start += 1
+        else:
+            start = max(1, len(messages) - 8)
+            while start > 1 and messages[start]['role'] == 'tool':
+                start -= 1
+            if start == 1:
+                start = len(messages)
         pinned_tokens = self.model.tokens([system, messages[0]], TOOLS)
         summary_limit = min(2048, reserve, target_tokens - pinned_tokens - 512)
         if summary_limit < 1:
@@ -263,7 +311,7 @@ class Runtime:
         # Retain complete assistant/tool groups only while they leave room for
         # the summary under the requested target. Large recent tool results
         # belong in the summary too, rather than overflowing the next request.
-        while self.model.tokens([system, messages[0], *messages[start:]], TOOLS) + summary_limit + 256 > target_tokens:
+        while not force and self.model.tokens([system, messages[0], *messages[start:]], TOOLS) + summary_limit + 256 > target_tokens:
             if start == len(messages):
                 raise ModelContextError('goal and persistent memory cannot fit the compaction target')
             start += 1
@@ -276,7 +324,7 @@ class Runtime:
         summary, pos = '', 0
         while pos < len(transcript):
             if self.store.goal(gid)['state']=='cancelled':return messages
-            take = min(len(transcript)-pos, max(128,size*2))
+            take = min(len(transcript)-pos, max(128,min(size*2,COMPACT_CHUNK_CHARS)))
             while True:
                 request = [instruction,dict(role='user',content='Prior memory:\n'+summary+'\nNext transcript fragment:\n'+transcript[pos:pos+take])]
                 if self.model.tokens(request,[]) + summary_limit + 256 < size:
@@ -289,8 +337,10 @@ class Runtime:
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
         after_tokens = self.model.tokens([system,*compacted],TOOLS)
-        if after_tokens > target_tokens or after_tokens + reserve >= size:
+        if after_tokens + reserve >= size or (not force and after_tokens > target_tokens):
             raise ModelContextError('compacted context exceeds its target; shorten the goal or memory')
+        if after_tokens >= before_tokens:
+            raise ModelContextError('compaction did not reduce the context; shorten the goal or memory')
         self.store.update(gid, messages=compacted)
         self.store.event('compacted',dict(before=len(messages),after=len(compacted),before_tokens=before_tokens,
                          after_tokens=after_tokens,trigger_tokens=trigger_tokens,target_tokens=target_tokens),gid)
@@ -353,7 +403,7 @@ class Runtime:
             # replaces it. clear() runs on every exit path, so a failed or cancelled turn leaves no tail.
             live = Live(self.home, gid, self.store)
             try:
-                reply = self.model.complete([self.system(),*messages],TOOLS,
+                reply = self.model.complete([self.system(gid),*messages],TOOLS,
                                             max_tokens=min(int(self.config.get('max_tokens',4096)),self.model.context_size()//4),
                                             on_delta=live.on_delta)
             finally:

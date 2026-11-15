@@ -506,6 +506,29 @@ class Resident(unittest.TestCase):
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
+    def test_forced_compaction_takes_a_bounded_fragment_and_keeps_the_newest(self):
+        class MeasuringModel:
+            def __init__(self):self.sizes=[]
+            def context_size(self):return 1048574
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                self.sizes.append(sum(len(str(m.get('content') or '')) for m in messages))
+                return dict(role='assistant',content='Earlier work summarized.')
+        model=MeasuringModel();rt=Runtime(self.home,model=model)
+        try:
+            gid=rt.store.enqueue('Big goal.')
+            msgs=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*20000) for _ in range(40)]
+            rt.store.update(gid,messages=msgs)
+            rt.store.request(gid,'compact')
+            self.assertTrue(rt.compact_request(gid))
+            self.assertTrue(model.sizes)
+            # A 1M window must not turn one /compact into a single prefill of the whole transcript.
+            self.assertLessEqual(max(model.sizes),65536)
+            after=rt.store.goal(gid)['messages']
+            self.assertLess(len(after),len(msgs))
+            self.assertEqual(after[-1]['content'],msgs[-1]['content'],'the newest messages must survive')
+        finally:rt.mail.close();rt.store.close()
+
     def test_compact_command_queues_for_a_live_runtime_and_runs_without_one(self):
         self.replies(call('finish',dict(summary='done')),dict(role='assistant',content='Summarized earlier turns.'))
         gid=self.cmd('once',extra=['--goal','finish the job','--max-steps','2'])['id']
@@ -708,6 +731,21 @@ class Resident(unittest.TestCase):
             content=rt.system()['content']
             self.assertIn('MEMORY.md truncated',content)
             self.assertIn('7232 characters omitted',content)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_system_prompt_states_the_measured_context_budget(self):
+        rt=Runtime(self.home)
+        try:
+            blank=rt.system()['content']
+            self.assertNotIn('Context budget',blank,'nothing was measured, so nothing may be claimed')
+            (self.home/'context.json').write_text(json.dumps(dict(goal='g',tokens=500000,size=1000000,ts=time.time())))
+            content=rt.system('g')['content']
+            self.assertIn('500,000 of 1,000,000 window tokens (50%)',content)
+            self.assertIn('500,000 tokens remain, of which 350,000 before auto-compaction',content)
+            self.assertIn('trigger 850,000 tokens, 85%',content)
+            stale=rt.system('another-goal')['content']
+            self.assertIn('no measured count for this goal yet',stale)
+            self.assertNotIn('(50%)',stale,'a note from another goal must not count for this one')
         finally:rt.mail.close();rt.store.close()
 
     def test_malformed_tools_are_results_not_daemon_crashes(self):
