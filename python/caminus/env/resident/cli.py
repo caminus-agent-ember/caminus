@@ -138,7 +138,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','export','diff'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','export','diff','rewind'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -278,6 +278,10 @@ def parser():
             p.add_argument('--out',help='write here (default: exports/<goal8>-<date>.md in the agent home)')
         if op=='diff':
             p.add_argument('goal_id',nargs='?',help='the goal (default: the most recent one)')
+        if op=='rewind':
+            p.add_argument('goal_id',nargs='?',help='the goal (default: the most recent one)')
+            p.add_argument('--to',type=int,help='cut back to this step: files changed later go back, the transcript ends there')
+            p.add_argument('--list',action='store_true',help='list the steps that can be rewound to, newest work last')
         if op in ('events','mail'):
             p.add_argument('--after',type=int,default=0)
         if op=='stream':
@@ -608,6 +612,23 @@ def main(argv=None,stdin=None):
                 store.event('plan_' + ('approved' if a.action=='approve' else 'rejected'),
                             dict(note=(a.note or '').strip()),gid)
             emit(dict(goal=gid,plan=verdict,state=store.goal(gid)['state']),a.json)
+            store.close();return 0
+        if a.op=='rewind':
+            gid=store.resolve(a.goal_id) if a.goal_id else store.latest_goal()
+            if a.list:
+                emit(dict(goal=gid,steps=store.rewind_steps(gid)),a.json)
+                store.close();return 0
+            if a.to is None:raise ValueError('rewind needs --to STEP or --list')
+            beat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
+            if alive(beat.get('pid')):
+                rid=store.request(gid,'rewind',dict(to=a.to))
+                emit(dict(goal=gid,to=a.to,queued=True,request=rid),a.json)
+            else:
+                with runtime_lock(home):
+                    runtime=Runtime(home)
+                    try:info=runtime._rewind(gid,a.to)
+                    finally:runtime.mail.close();runtime.store.close()
+                emit(dict(goal=gid,to=a.to,**info,note='terminal side effects are not undone'),a.json)
             store.close();return 0
         if a.op=='export':
             gid=store.resolve(a.goal_id)
