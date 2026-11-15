@@ -53,16 +53,17 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         if isinstance(value,dict) and '_status' in value:
             self.respond(dict(error='refused by the fixture'),value['_status']);return
         if body.get('stream') and isinstance(value,dict) and '_deltas' in value:
-            self.stream(value['_deltas']);return
+            self.stream(value['_deltas'],done=not value.get('_cut'));return
         msg=dict(value(body) if callable(value) else value);reason=msg.pop('_finish_reason','stop')
         self.respond(dict(choices=[dict(message=msg,finish_reason=reason)],usage=dict(prompt_tokens=30,completion_tokens=10)))
 
-    def stream(self,deltas):
-        """an SSE reply in the shape the engine emits: delta chunks, then [DONE]"""
+    def stream(self,deltas,done=True):
+        """an SSE reply in the shape the engine emits: delta chunks, then [DONE]; done=False cuts it short"""
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
         for d in deltas:
             self.wfile.write(('data: '+json.dumps(d)+'\n\n').encode())
-        self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
+        if done:self.wfile.write(b'data: [DONE]\n\n')
+        self.wfile.flush()
 
 
 class Resident(unittest.TestCase):
@@ -590,6 +591,23 @@ class Resident(unittest.TestCase):
             self.assertTrue(any(e['kind']=='runtime_error' for e in rt.store.events()))
             self.assertFalse(rt.tick(gid),'a finished goal is not retried')
         finally:rt.mail.close();rt.store.close()
+
+    def test_incomplete_stream_is_not_committed_or_executed(self):
+        # a proxy or backend closes the connection after a partial tool call: no finish_reason, no [DONE]
+        partial_call = dict(choices=[dict(delta=dict(tool_calls=[
+            dict(index=0, id='call_0', type='function',
+                 function=dict(name='terminal', arguments='{"command": "touch forbi'))]))])
+        self.replies(dict(_cut=True, _deltas=[
+            dict(choices=[dict(delta=dict(content='Working on it.'))]),
+            partial_call,
+        ]))
+        result=self.cmd('once',['--goal','Cut the stream.'],code=22)
+        self.assertEqual(result['state'],'paused')
+        self.assertFalse((self.home/'forbidden').exists(),'a partial tool call must not run')
+        self.assertFalse([e for e in self.cmd('events') if e['kind']=='tool_result'],'nothing may execute')
+        event=next(e for e in self.cmd('events') if e['kind']=='model_truncated')
+        self.assertIn('before it was complete',event['data']['error'])
+        self.assertEqual(event['data']['partial']['content'],'Working on it.')
 
     def test_permanent_model_refusal_stops_the_goal(self):
         self.replies({'_status':401})

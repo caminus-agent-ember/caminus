@@ -318,7 +318,14 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "cancelled":
 		return heading("GOAL CANCELLED · "+shortGoal(e.Goal), "11")
 	case "model_unavailable", "model_truncated", "context_refused":
-		return heading(residentText(e.Kind), "9") + "\n" + c.renderMarkdown(str("error"))
+		text := str("error")
+		if partial, ok := e.Data["partial"].(map[string]any); ok {
+			if content, _ := partial["content"].(string); content != "" {
+				// Show what the model produced before it stopped, then why it stopped.
+				text = c.renderMarkdown(content) + "\n" + envDim.Render(residentText(text))
+			}
+		}
+		return heading(residentText(e.Kind), "9") + "\n" + text
 	}
 	return ""
 }

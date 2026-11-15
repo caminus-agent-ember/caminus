@@ -125,8 +125,16 @@ def launcher(name, serve_args, devs, runtime=None, pkg=None, guard=None):
     if pkg:
         lines.append(f'export PYTHONPATH={shlex.quote(pkg)}${{PYTHONPATH:+:$PYTHONPATH}}')
     cmd = ' '.join(shlex.quote(a) for a in serve_args)
-    if guard:
-        lines.append(f'exec bash {shlex.quote(guard)} ~/homes/{shlex.quote(name)}/serve.log 0 {runtime} -m caminus serve {cmd}')
+    # -I ignores PYTHONPATH, so a shared package is put on sys.path explicitly rather than through the
+    # environment: otherwise `python3 -I -m caminus` cannot import the package the operator configured.
+    if pkg:
+        boot = ('import sys;sys.path.insert(0,' + repr(pkg) +
+                ');from caminus.__main__ import main;raise SystemExit(main())')
+        entry = f'{runtime} -c {shlex.quote(boot)} serve {cmd}'
     else:
-        lines.append(f'exec {runtime} -m caminus serve {cmd}')
+        entry = f'{runtime} -m caminus serve {cmd}'
+    if guard:
+        lines.append(f'exec bash {shlex.quote(guard)} ~/homes/{shlex.quote(name)}/serve.log 0 {entry}')
+    else:
+        lines.append(f'exec {entry}')
     return '\n'.join(lines) + '\n'

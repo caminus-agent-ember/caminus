@@ -15,8 +15,8 @@ class ModelContextError(ModelError):
 
 
 class ModelTruncated(ModelError):
-    def __init__(self, partial):
-        super().__init__('model output budget exhausted; increase --max-tokens and resume this goal')
+    def __init__(self, partial, reason='model output budget exhausted; increase --max-tokens and resume this goal'):
+        super().__init__(reason)
         self.partial = partial
 
 
@@ -115,6 +115,7 @@ class Model:
         headers['Authorization'] = 'Bearer ' + key
         req = urllib.request.Request(self.base + '/chat/completions', json.dumps(body).encode(), headers)
         content, reasoning, calls, finish, usage = [], [], {}, None, {}
+        done_seen = False
         try:
             with self.opener(req, timeout=float(self.config.get('timeout', 900))) as r:
                 for raw in r:
@@ -138,6 +139,7 @@ class Model:
                         return self._message(m)
                     data = line[5:].strip()
                     if data == '[DONE]':
+                        done_seen = True
                         break
                     chunk = json.loads(data)
                     if chunk.get('usage'):
@@ -179,6 +181,10 @@ class Model:
             out = dict(role='assistant', content=''.join(content))
             if reasoning:
                 out['reasoning_content'] = ''.join(reasoning)
+            if finish is None and not done_seen:
+                # The connection closed before the turn ended: a proxy or backend cut the stream. The text
+                # so far is shown with the error, and nothing of this reply is stored or executed.
+                raise ModelTruncated(out, 'the reply ended before it was complete; nothing was executed')
             if finish == 'length':
                 raise ModelTruncated(out)
             ordered = [calls[i] for i in sorted(calls)]

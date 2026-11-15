@@ -604,3 +604,18 @@ func TestSessionCommandRejectsAnUnknownNameWithoutClearingTheTranscript(t *testi
 		t.Fatalf("a known session did not open: %q", m.agentName)
 	}
 }
+
+func TestTruncatedReplyShowsWhatTheModelWroteBeforeItStopped(t *testing.T) {
+	m := chatFixture(t)
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original",
+		Kind: "model_truncated", Data: map[string]any{
+			"error":   "the reply ended before it was complete; nothing was executed",
+			"partial": map[string]any{"content": "Half an answer"}}}}})
+	block := ansi.Strip(m.chat.content)
+	if !strings.Contains(block, "Half an answer") {
+		t.Fatalf("the partial reply is not shown:\n%s", block)
+	}
+	if !strings.Contains(block, "before it was complete") {
+		t.Fatalf("the reason is not shown:\n%s", block)
+	}
+}

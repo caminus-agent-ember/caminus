@@ -358,6 +358,11 @@ def main():
     check('HIP_VISIBLE_DEVICES=1,2' in lc and 'PYTHONPATH=/opt/pkg' in lc and "CAMINUS_QWEN_HOME='~/homes/coder/qwen-home'" in lc
           and lc.rstrip().endswith('serve --model /m.gguf --port 8092') and 'bash /opt/guard.sh' in lc,
           'serve: launcher has placement, per-name env, guard and serve argv')
+    check('sys.path.insert(0,' in lc and '-m caminus' not in lc,
+          'serve: a shared package is bootstrapped explicitly, because -I ignores PYTHONPATH')
+    plain = serve.launcher('coder', ['--model', '/m.gguf'], [0], runtime='python3 -I', pkg='', guard='')
+    check('-m caminus serve --model /m.gguf' in plain and 'sys.path.insert' not in plain,
+          'serve: without a shared package the module entry point is unchanged')
     args = serve.remap_paths(['--model', '/models/m.gguf', '--drafter', '/models/d.gguf'],
                              '/models', '/opt/caminus-runtime/models')
     check(args[1] == '/opt/caminus-runtime/models/m.gguf' and args[3] == '/opt/caminus-runtime/models/d.gguf',
