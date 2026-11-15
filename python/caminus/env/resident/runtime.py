@@ -20,6 +20,7 @@ from .memory import Memory
 from . import files
 from . import outputs
 from . import housemate
+from . import leases
 from .brain import Brains
 
 TODO_STATES = ('pending', 'in_progress', 'done')
@@ -69,6 +70,9 @@ TOOLS = [
     tool('wait', 'Block without spending tokens until something happens: until=time (target: seconds, or a Unix time), file (a path appears or changes), port (host:port or a port number opens), process (a pid exits), session (one of your terminal sessions ends), or message. A message for this goal, cancellation or newly queued work always ends the wait early. timeout in seconds (default 300, at most 1800).',
          dict(until={'type':'string','enum':['time','file','port','process','session','message']}, target={'type':'string'}, timeout={'type':'integer'}), ('until',)),
     tool('machine', 'A snapshot of this shared machine, readable without root: GPUs (busy %, VRAM), memory, disk, load, the model servers on their ports, your running terminal sessions and the other agents. Read it before heavy work.', {}),
+    tool('lease', 'Claim GPU cards (HIP indices), memory (ram_gib) or both for some minutes (at most 120) before heavy work, with a reason your human sees; refused while another lease (yours, another agent\'s or your human\'s GPU window) holds a card you ask for. action=take, release (lease id, or all of this goal\'s) or list. A lease ends with the goal.',
+         dict(action={'type':'string','enum':['take','release','list']}, cards={'type':'array','items':{'type':'integer'}},
+              ram_gib={'type':'integer'}, minutes={'type':'integer'}, reason={'type':'string'}, lease={'type':'string'}), ('action',)),
     tool('remember', 'Save one lasting fact as a note (notes/NAME.md) with a one-line entry in MEMORY.md, your notes index. The index is capped at 4 KB and loads into every goal; a note is read on demand. Refused when the index is full: merge or drop lines first. The new line shows from your next goal.',
          dict(name={'type':'string'}, text={'type':'string'}, summary={'type':'string'}), ('name','text','summary')),
     tool('history_search', 'Full-text search over your own past: earlier goals, your replies, tool results, finish summaries, your journal and notes. No model call; returns short snippets with where they came from.',
@@ -543,6 +547,9 @@ class Runtime:
                     result = files.edit(self.home, args['path'], args['old'], args['new'], bool(args.get('replace_all')))
                 elif name == 'write':
                     result = files.write(self.home, args['path'], args['content'])
+                elif name == 'lease':
+                    result = leases.tool(self, action['goal'], args['action'], args.get('cards'), args.get('ram_gib', 0),
+                                         args.get('minutes', 30), args.get('reason', ''), args.get('lease', ''))
                 elif name == 'remember':
                     result = self.memory.remember(args['name'], args['text'], args['summary'])
                 elif name == 'history_search':
@@ -806,6 +813,7 @@ class Runtime:
 
     def _tick(self, gid):
         g = self.store.goal(gid)
+        leases.sweep(self)                    # a lease ends with its goal, wherever the goal stopped
         if g['state'] in ('completed','cancelled','paused','error'):
             return False
         if g['state']=='waiting_model' and self.retry.get(gid,(0,0))[0]>time.time():

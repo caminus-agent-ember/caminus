@@ -393,6 +393,35 @@ class Resident(unittest.TestCase):
             self.assertGreater(snap['memory']['total_mib'] or 0,0)
         finally:store.close()
 
+    def test_leases_claim_cards_and_memory_and_end_with_the_goal(self):
+        from caminus.env.resident import leases
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('GPU work.')
+            rt.config['leases']=str(self.home/'nope')
+            with self.assertRaises(ValueError) as c:leases.take(rt,gid,[1],0,30,'bench')
+            self.assertIn('leases folder',str(c.exception))
+            shared=self.home/'leases';shared.mkdir();rt.config['leases']=str(shared)
+            with self.assertRaises(ValueError):leases.take(rt,gid,[1],0,30,'')          # a reason is required
+            with self.assertRaises(ValueError):leases.take(rt,gid,[1],0,500,'bench')    # at most 120 minutes
+            got=leases.take(rt,gid,[1],0,30,'bench the drafter')
+            with self.assertRaises(ValueError) as c:leases.take(rt,gid,[1],0,10,'again')
+            self.assertIn('card 1 is held by agent',str(c.exception));self.assertIn('bench the drafter',str(c.exception))
+            (shared/str(os.getpid())).write_text(' 0 ')                                  # a live GPU window holds card 0
+            (shared/'999999999').write_text(' 2 ')                                       # a dead one does not
+            with self.assertRaises(ValueError) as c:leases.take(rt,gid,[0],0,10,'x')
+            self.assertIn('held by gpu window',str(c.exception))
+            self.assertTrue(leases.take(rt,gid,[2],0,10,'free card')['lease'])
+            with self.assertRaises(ValueError) as c:leases.take(rt,gid,[],10**6,10,'too much')
+            self.assertIn('more than is free',str(c.exception))
+            self.assertEqual(leases.tool(rt,gid,'release',lease=got['lease'])['released'],[got['lease']])
+            self.assertEqual(len([l for l in leases.held(rt) if l['who'].startswith('agent')]),1)
+            rt.store.update(gid,state='completed')                                       # the goal ends: its leases go
+            leases.sweep(rt)
+            self.assertFalse([l for l in leases.held(rt) if l['who'].startswith('agent')])
+            self.assertTrue(any(l['who'].startswith('gpu window') for l in leases.held(rt)),'the window\'s lease is not the agent\'s to remove')
+        finally:rt.mail.close();rt.store.close()
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)

@@ -192,7 +192,12 @@ def machine(rt):
     except Exception:
         peers = []
     load = os.getloadavg() if hasattr(os, 'getloadavg') else None
-    return dict(gpus=_gpus(), memory=_meminfo(), disk=disk, load=[round(x, 2) for x in load] if load else None,
+    from . import leases
+    try:
+        held = [{k: v for k, v in l.items() if k in ('who', 'cards', 'ram_mib', 'until', 'reason')} for l in leases.held(rt)]
+    except Exception:
+        held = []
+    return dict(gpus=_gpus(), memory=_meminfo(), disk=disk, leases=held, load=[round(x, 2) for x in load] if load else None,
                 cpus=os.cpu_count(), servers=_servers(), my_running_sessions=sessions, peers=peers,
                 note='GPUs are shared with your human and other jobs: use lease before GPU work, and never fill a '
                      'card a server is using')
