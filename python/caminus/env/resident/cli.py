@@ -212,7 +212,11 @@ def main(argv=None,stdin=None):
         if a.op=='status':
             heartbeat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
             cfg=json.loads((home/'config.json').read_text())
+            # Measured prompt footprint from the last turn's compaction probe; absent when the
+            # runtime has never measured this agent, so a UI shows capacity only, no estimate.
+            measured=json.loads((home/'context.json').read_text()) if (home/'context.json').exists() else {}
             emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
+                      context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       compact_threshold=cfg.get('compact_threshold',.85),compact_target_ratio=cfg.get('compact_target_ratio',.2),
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,**store.status()),True)
             store.close();return 0

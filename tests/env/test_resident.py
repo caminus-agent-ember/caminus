@@ -20,7 +20,7 @@ import uuid
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'python'))
 from caminus.env.resident.store import Store
-from caminus.env.resident.runtime import Runtime,runtime_lock
+from caminus.env.resident.runtime import Runtime,runtime_lock,TOOLS
 from caminus.env.resident.terminal import Terminal
 from caminus.env.agent_host import bundle
 from caminus.env.resident.mail import Mail
@@ -737,6 +737,26 @@ class Resident(unittest.TestCase):
             self.assertEqual(cmd_env.main(['answer','review','approved','--digest',fresh['_digest'],'--json'],transport=transport),0)
         self.assertEqual(calls,[['sudo','sh','-c','printf replacement']])
         self.assertEqual(approval.response(self.bridge,'review')['out'],'fixture result')
+
+    def test_context_note_records_measured_prompt_tokens_for_the_ui_bar(self):
+        class CountingModel:
+            def context_size(self):return 1048574
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None):return dict(role='assistant',content='understood')
+        rt=Runtime(self.home,model=CountingModel())
+        try:
+            gid=rt.store.enqueue('Check on the artifacts.')
+            messages=rt.store.goal(gid)['messages']
+            measured=rt.model.tokens([rt.system(),*messages],TOOLS)
+            out=rt._compact(gid,messages)
+            self.assertIs(out,messages)
+            note=json.loads((self.home/'context.json').read_text())
+            self.assertEqual(note['tokens'],measured)
+            self.assertEqual(note['size'],1048574)
+            self.assertEqual(note['goal'],gid)
+            status=self.cmd('status')
+            self.assertEqual(status['context_used'],measured)
+        finally:rt.mail.close();rt.store.close()
 
 
 result=unittest.main(argv=[sys.argv[0]],exit=False).result

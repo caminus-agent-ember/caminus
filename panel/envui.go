@@ -1067,6 +1067,7 @@ var (
 	envHead   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	envDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	envWarn   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	envCtxHot = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	envTabOn  = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15"))
 	envBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 )

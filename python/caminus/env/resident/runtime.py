@@ -222,6 +222,15 @@ class Runtime:
             self._finish(action['goal'],result['summary'])
         return True
 
+    def context_note(self, gid, tokens, size):
+        """Record the measured prompt footprint so a UI bar can show a real count.
+
+        Written where the count was actually measured (the pre-turn compaction
+        probe), never estimated after the fact; like heartbeat.json, one small
+        file rewritten in place by the runtime lock's owner.
+        """
+        atomic_json(self.home / 'context.json', dict(goal=gid, tokens=tokens, size=size, ts=time.time()))
+
     def _compact(self, gid, messages):
         system = self.system()
         size = self.model.context_size()
@@ -230,6 +239,7 @@ class Runtime:
         trigger_tokens = int(size * self.config.get('compact_threshold', .85))
         target_tokens = int(size * self.config.get('compact_target_ratio', .2))
         if before_tokens < trigger_tokens and before_tokens + reserve < size:
+            self.context_note(gid, before_tokens, size)
             return messages
         if len(messages) < 2:
             raise ModelContextError('goal/context exceeds the model window; send a smaller goal or shorten MEMORY.md')
@@ -276,6 +286,7 @@ class Runtime:
         self.store.update(gid, messages=compacted)
         self.store.event('compacted',dict(before=len(messages),after=len(compacted),before_tokens=before_tokens,
                          after_tokens=after_tokens,trigger_tokens=trigger_tokens,target_tokens=target_tokens),gid)
+        self.context_note(gid, after_tokens, size)
         return compacted
 
     def tick(self, gid):

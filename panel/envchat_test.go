@@ -506,3 +506,58 @@ func TestResidentCommandsWithoutTheCLIReportInsteadOfPanicking(t *testing.T) {
 		t.Fatalf("sessions without a CLI must report an error, got %#v", msg)
 	}
 }
+
+// The context bar shows what the daemon measured, graded against the
+// compaction trigger, and never invents a percentage of its own.
+func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
+	if got := contextBar(0, 1048574, .85); got != "ctx 1.0M window" || strings.Contains(got, "%") {
+		t.Fatalf("unmeasured context showed usage: %q", got)
+	}
+	if got := contextBar(0, 0, .85); got != "" || strings.Contains(got, "%") {
+		t.Fatalf("no capacity, no bar: %q", got)
+	}
+	bar := contextBar(314573, 1048574, .85) // 30%
+	if filled := strings.Count(bar, "█"); filled != 3 || !strings.Contains(bar, "░") {
+		t.Fatalf("30%% carved the bar wrong: %q", bar)
+	}
+	if !strings.Contains(bar, "30% of 1.0M · compact 85%") {
+		t.Fatalf("bar lost counts and trigger: %q", bar)
+	}
+	if got := contextBar(1048575, 1048574, .85); !strings.HasPrefix(got, "ctx ██████████ 100% of 1.0M") {
+		t.Fatalf("usage past the window did not clamp: %q", got)
+	}
+	if got := humanTokens(999); got != "999" || humanTokens(482000) != "482k" || humanTokens(1048574) != "1.0M" {
+		t.Fatalf("token formatting drifted: %s %s %s", humanTokens(999), humanTokens(482000), humanTokens(1048574))
+	}
+	tests := []struct {
+		used, capacity int
+		threshold      float64
+		level          int
+	}{
+		{0, 1048574, .85, 0},
+		{314573, 1048574, .85, 0},
+		{838861, 1048574, .85, 1}, // 80%: within fifteen points of the trigger
+		{891288, 1048574, .85, 2}, // at the trigger
+	}
+	for _, tc := range tests {
+		if got := contextBarLevel(tc.used, tc.capacity, tc.threshold); got != tc.level {
+			t.Fatalf("level(%d/%d, %.2f) = %d, want %d", tc.used, tc.capacity, tc.threshold, got, tc.level)
+		}
+	}
+}
+
+// The measured bar lands in the live footer, warning color included, without
+// pushing the frame past its width.
+func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.ContextUsed = 891288 // at the trigger: hot
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "ctx ") || !strings.Contains(frame, "85% of 1.0M · compact 85%") {
+		t.Fatalf("footer lost the measured bar:\n%s", frame)
+	}
+	for _, row := range strings.Split(frame, "\n") {
+		if ansi.StringWidth(row) > m.width {
+			t.Fatalf("footer line too wide: %q", row)
+		}
+	}
+}

@@ -26,6 +26,7 @@ type residentStatus struct {
 	Name             string         `json:"name"`
 	Model            string         `json:"model"`
 	Context          int            `json:"context"`
+	ContextUsed      int            `json:"context_used"` // measured at the last turn boundary; 0 means never measured
 	CompactThreshold float64        `json:"compact_threshold"`
 	CompactTarget    float64        `json:"compact_target_ratio"`
 	DaemonAlive      bool           `json:"daemon_alive"`

@@ -380,6 +380,68 @@ func (m envModel) chatBottom() string {
 	return m.chatComposer()
 }
 
+// contextBarSlots is the fixed width of the usage bar: readable at a glance,
+// small enough to keep the footer one line.
+const contextBarSlots = 10
+
+// humanTokens renders a token count at footer density: 482k, 1.0M.
+func humanTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1000:
+		return fmt.Sprintf("%dk", (n+500)/1000)
+	default:
+		return fmt.Sprint(n)
+	}
+}
+
+// compactTrigger normalizes the compaction threshold: a status without one
+// behaves like the daemon's default, never like "compact 0%".
+func compactTrigger(threshold float64) float64 {
+	if threshold <= 0 || threshold >= 1 {
+		return .85
+	}
+	return threshold
+}
+
+// contextBarLevel grades the measured footprint against the compaction
+// trigger: 0 comfortable, 1 approaching, 2 at or past the trigger.
+func contextBarLevel(used, capacity int, threshold float64) int {
+	if used <= 0 || capacity <= 0 {
+		return 0
+	}
+	switch share := float64(used) / float64(capacity); {
+	case share >= compactTrigger(threshold):
+		return 2
+	case share >= compactTrigger(threshold)-0.15:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// contextBar renders the measured context footprint for the footer. A used
+// count of 0 means the daemon has not measured anything yet; then only the
+// window size is shown — capacity is never presented as usage, and no
+// percentage is invented from events.
+func contextBar(used, capacity int, threshold float64) string {
+	if capacity <= 0 {
+		return ""
+	}
+	window := "ctx " + humanTokens(capacity) + " window"
+	if used <= 0 {
+		return window
+	}
+	share := float64(used) / float64(capacity)
+	if share > 1 {
+		share = 1
+	}
+	filled := int(share*contextBarSlots + 0.5)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", contextBarSlots-filled)
+	return fmt.Sprintf("ctx %s %d%% of %s · compact %.0f%%", bar, int(share*100+0.5), humanTokens(capacity), compactTrigger(threshold)*100)
+}
+
 func (m envModel) renderChat() string {
 	m.syncChat()
 	w := max(20, m.width)
@@ -400,17 +462,33 @@ func (m envModel) renderChat() string {
 	}
 	head := clip(envTitle.Render("CAMINUS") + " · " + residentText(m.agentName) +
 		"  " + envHead.Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
-	status := fmt.Sprintf("%s · ctx %d · SSH %s · %d requests", residentText(m.resident.Model), m.resident.Context, map[bool]string{true: "OK", false: "…"}[m.sshOK], len(m.reqs))
+	ctxText := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold)
+	ctxStyle := envDim
+	switch contextBarLevel(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold) {
+	case 1:
+		ctxStyle = envWarn
+	case 2:
+		ctxStyle = envCtxHot
+	}
+	status := []string{envDim.Render(residentText(m.resident.Model))}
+	if ctxText != "" {
+		status = append(status, ctxStyle.Render(ctxText))
+	}
+	status = append(status,
+		envDim.Render("SSH "+map[bool]string{true: "OK", false: "…"}[m.sshOK]),
+		envDim.Render(fmt.Sprintf("%d requests", len(m.reqs))),
+	)
 	if !m.chat.transcript.AtBottom() {
-		status += fmt.Sprintf(" · history %.0f%%", m.chat.transcript.ScrollPercent()*100)
+		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
 	}
 	if m.chat.seq < m.resident.LastEvent {
-		status += " · loading history"
+		status = append(status, envDim.Render("loading history"))
 	}
 	if m.msg != "" {
-		status += " · " + terminalText(m.msg, false)
+		status = append(status, envDim.Render(terminalText(m.msg, false)))
 	}
-	foot := clip(envDim.Render(status + " · Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
+	status = append(status, envDim.Render("Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
+	foot := clip(strings.Join(status, " · "))
 	if m.chat.help {
 		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
 	}
