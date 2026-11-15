@@ -784,6 +784,33 @@ class Resident(unittest.TestCase):
             self.assertNotIn('(50%)',stale,'a note from another goal must not count for this one')
         finally:rt.mail.close();rt.store.close()
 
+    def test_memory_edits_between_turns_do_not_change_the_request_prefix(self):
+        """End to end: the server matches the longest common prefix of consecutive requests, so across two
+        turns of one goal the system message is byte-identical and everything volatile (memory, the budget)
+        sits after the history, in the trailing context note only."""
+        seen=[]
+        class Recorder:
+            def context_size(self):return 65536
+            def tokens(self,messages,tools):return 10
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                seen.append([dict(m) for m in messages])
+                if len(seen)==1:
+                    (self.home/'MEMORY.md').write_text('A note the agent learned in step one.')
+                    return call('terminal',dict(command='printf fine'))
+                return dict(role='assistant',content='done')
+        model=Recorder();model.home=self.home
+        rt=Runtime(self.home,model=model)
+        try:
+            rt.run(target=rt.store.enqueue('Work across two turns.'))
+            self.assertEqual(len(seen),2)
+            self.assertEqual(seen[0][0],seen[1][0],'a memory write must not change the cached system prefix')
+            self.assertEqual(seen[1][:len(seen[0])-1],seen[0][:-1],
+                             'all but the trailing context note is prefix-stable across turns')
+            self.assertIn('A note the agent learned in step one.',seen[1][-1]['content'],
+                          'the new memory still reaches the model, in the tail note')
+            self.assertNotIn('A note the agent learned',seen[0][0]['content'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_malformed_tools_are_results_not_daemon_crashes(self):
         self.replies(call('terminal',dict(session='0'*32,stdin=None)),call('send_message',dict(to='peer',text='hello',recipient_goal=[])),
                      call('finish',dict(summary='Recovered from malformed calls.')))
