@@ -1758,6 +1758,7 @@ for line in sys.stdin:
         class R:returncode=0;stdout='active\n';stderr=''
         run=lambda argv,**k:(calls.append(argv),R())[1]
         old=os.environ.get('XDG_CONFIG_HOME');os.environ['XDG_CONFIG_HOME']=str(cfgdir)
+        old_data=os.environ.get('XDG_DATA_HOME');os.environ['XDG_DATA_HOME']=str(self.home/'xdg-data')
         try:
             with self.assertRaises(SystemExit):relay.service(['install','--provider','deepinfra'],run)   # no cap: refused
             with self.assertRaises(SystemExit):relay.service(['install','--provider','deepinfra','--cap-usd','3','--key-file',str(self.home/'missing')],run)
@@ -1770,6 +1771,13 @@ for line in sys.stdin:
             self.assertNotIn('\nk\n',unit,'the key itself never goes in the unit')
             self.assertIn(['systemctl','--user','enable','--now','caminus-relay-deepinfra.service'],calls)
             self.assertIn('enable-linger',out.getvalue())
+            # it runs a frozen copy, never the source tree: editing or moving a checkout cannot stop the relay
+            import re as _re;frozen=_re.search(r'/xdg-data/caminus/relay-code/[0-9a-f]{12}',unit)
+            self.assertTrue(frozen,unit);self.assertNotIn(str(ROOT/'python'),unit)
+            code=Path(str(self.home)+frozen.group(0))
+            r=subprocess.run([sys.executable,'-I','-c','import sys;sys.path.insert(0,sys.argv[1]);from caminus.env import relay;print(relay.__file__)',str(code)],capture_output=True,text=True)
+            self.assertTrue(r.stdout.startswith(str(code)),r.stderr)
+            relay.freeze();self.assertEqual(len(list((self.home/'xdg-data/caminus/relay-code').iterdir())),1,'the same code reuses its copy')
             out=_io.StringIO()
             with contextlib.redirect_stdout(out):relay.service(['status'],run)
             self.assertRegex(out.getvalue(),r'deepinfra\s+active\s+today \$');self.assertIn('not installed',out.getvalue())
@@ -1778,6 +1786,8 @@ for line in sys.stdin:
         finally:
             if old is None:os.environ.pop('XDG_CONFIG_HOME',None)
             else:os.environ['XDG_CONFIG_HOME']=old
+            if old_data is None:os.environ.pop('XDG_DATA_HOME',None)
+            else:os.environ['XDG_DATA_HOME']=old_data
 
     def test_the_anthropic_relay_serves_the_model_list_with_the_key(self):
         import urllib.request
