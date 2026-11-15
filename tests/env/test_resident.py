@@ -701,6 +701,26 @@ class Resident(unittest.TestCase):
         out=t.call(uuid.uuid4().hex,dict(session=sid,stdin='answer\n',yield_ms=1000))
         self.assertEqual(out['exit_code'],0);self.assertIn('got:answer',out['output'])
 
+    def test_poll_returns_only_new_output_and_says_when_quiet(self):
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        # Two bursts separated by a pause; the command then waits for a line before exiting.
+        cmd='printf first-burst; sleep 1; printf second-burst; read x'
+        out=t.call(sid,dict(command=cmd,yield_ms=50))
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
+        self.assertIn('first-burst',out['output']);self.assertNotIn('second-burst',out['output'])
+        self.assertFalse(out['no_new_output'])
+        # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
+        self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])
+        # Second burst arrives; that poll returns only the second burst.
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
+        self.assertEqual(out['output'],'second-burst');self.assertFalse(out['no_new_output'])
+        # An explicit offset=0 still reads everything from the beginning.
+        out=t.call(uuid.uuid4().hex,dict(session=sid,stdin='go\n',yield_ms=1000,offset=0))
+        self.assertTrue(out['output'].startswith('first-burst'));self.assertIn('second-burst',out['output'])
+        self.assertEqual(out['exit_code'],0)
+        self.assertEqual(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=10))['no_new_output'],True)
+
     def test_zipapp_is_the_same_runtime(self):
         app=S/(self.key+'.pyz');app.write_bytes(bundle())
         r=subprocess.run([sys.executable,'-I',str(app),'status','test','--home',str(self.home),'--json'],capture_output=True,text=True,timeout=10)

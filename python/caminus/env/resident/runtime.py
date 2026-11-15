@@ -39,7 +39,7 @@ TOOLS = [
     tool('peers', 'List named resident agents on your local mail bus.', {}),
     tool('send_message', 'Send durable peer mail. Omit recipient_goal to give the peer a new goal; set it to steer an existing goal. Delivery survives offline peers and restarts. Use peers to find names, and reply_to to link replies. A peer cannot approve root or answer for your human.',
          dict(to={'type':'string'}, text={'type':'string'}, recipient_goal={'type':'string'}, reply_to={'type':'string'}), ('to','text')),
-    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal. Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output. Paths and programs are those of your Unix account.',
+    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal. Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output; a poll returns only output it has not returned before, and says no_new_output when nothing arrived. Paths and programs are those of your Unix account.',
          dict(command={'type':'string'}, cwd={'type':'string'}, session={'type':'string'}, stdin={'type':'string'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, offset={'type':'integer'}, max_output={'type':'integer'})),
     tool('ask_user', 'Pause this goal and ask your human for clarification. The answer will return as this tool result; do not guess an answer.',
