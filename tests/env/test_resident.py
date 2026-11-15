@@ -1353,6 +1353,17 @@ for line in sys.stdin:
             self.assertEqual(ev[0]['data']['terminals_ended'],['a'*32])
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_stop_sweep_reaches_detached_processes_in_the_agent_account_only(self):
+        import signal as _signal
+        from caminus.env.resident import terminal as T
+        self.assertEqual(T.sweep_user(_signal.SIGTERM,account='someone-else'),[],'never outside the agent account')
+        # a detached process (its own session) is found by uid; the runtime and its ancestors are kept
+        p=subprocess.Popen(['sleep','300'],start_new_session=True);self.processes.append(p)
+        found=T.own_processes(keep=T._ancestors(os.getpid()))
+        self.assertIn(p.pid,found)
+        self.assertNotIn(os.getpid(),found);self.assertNotIn(os.getppid(),found)
+        os.kill(p.pid,_signal.SIGTERM);p.wait(timeout=5)
+
     def test_pause_is_applied_between_steps(self):
         rt=Runtime(self.home)
         try:

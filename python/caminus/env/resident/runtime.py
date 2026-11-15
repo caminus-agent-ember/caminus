@@ -1099,13 +1099,18 @@ class Runtime:
             # Commands already running in the agent's terminals are ended too: TERM now, KILL ten seconds later for any
             # that ignore it. (A process the agent detached into its own session is outside their process groups.)
             ended = self.terminal.signal_running(_signal.SIGTERM) if hasattr(self.terminal, 'signal_running') else []
-            self.store.event('emergency_stop', dict(reason=reason, paused=len(rows), terminals_ended=ended))
+            from .terminal import sweep_user
+            swept = sweep_user(_signal.SIGTERM)   # detached processes too (agent account only)
+            self.store.event('emergency_stop', dict(reason=reason, paused=len(rows), terminals_ended=ended,
+                                                    processes_ended=len(swept)))
             self._stopped, self._stop_at, self._stop_killed = True, time.time(), False
         elif not self._stop_killed and time.time() - self._stop_at >= 10:
             self._stop_killed = True
             left = self.terminal.signal_running(_signal.SIGKILL) if hasattr(self.terminal, 'signal_running') else []
-            if left:
-                self.store.event('emergency_stop', dict(reason=reason, terminals_killed=left))
+            from .terminal import sweep_user
+            killed = sweep_user(_signal.SIGKILL)
+            if left or killed:
+                self.store.event('emergency_stop', dict(reason=reason, terminals_killed=left, processes_killed=len(killed)))
         return True
 
     def _apply_pauses(self):
