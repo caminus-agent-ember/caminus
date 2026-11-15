@@ -1667,6 +1667,28 @@ for line in sys.stdin:
         self.assertAlmostEqual(usd,(3092*0.2+74*0.6+17939*0.006)/1e6,places=9)
         self.assertLess(usd,0.001,'the relay charged $0.00077 for this request')
 
+    def test_a_refused_compaction_model_falls_back_to_the_main_brain(self):
+        from caminus.env.resident.model import ModelError
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Compact me.')
+            rt.config['compaction_model']='k3-coder-nothink'
+            seen=[]
+            real=rt.model.complete
+            def complete(messages,tools=None,max_tokens=None,**kw):
+                seen.append(kw.get('model'))
+                if kw.get('model')=='k3-coder-nothink':
+                    e=ModelError('HTTP Error 403: relay: no published price');e.status=403;raise e
+                return dict(role='assistant',content='summary of the work')
+            rt.model.complete=complete
+            msgs=[dict(role='user',content='goal')]+[dict(role='assistant',content='x'*4000),dict(role='user',content='y'*4000)]*6
+            try:rt._compact(gid,msgs,force=True)
+            except Exception as e:
+                if 'compaction_model' in repr(e) or '403' in str(e):raise
+            self.assertIn('k3-coder-nothink',seen);self.assertIn(None,seen,'the main brain took the summary')
+            self.assertIn('compaction_model_refused',[e['kind'] for e in rt.store.events()])
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

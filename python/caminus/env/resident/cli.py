@@ -104,6 +104,9 @@ def model_ops(a,home):
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
         for k in ('relay','prices','context','thinking'):
             cfg.pop(k,None)
+        # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
+        if cfg.get('compaction_model') and catalog.find(cat,cfg['compaction_model'],entry['provider']) is None:
+            cfg.pop('compaction_model')
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
         if entry.get('context'):cfg['context']=int(entry['context'])

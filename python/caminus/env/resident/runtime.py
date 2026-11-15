@@ -1130,7 +1130,16 @@ class Runtime:
                 take = max(1,take//2)
             summary_options = dict(model=self.config['compaction_model']) if self.config.get('compaction_model') else {}
             try:
-                summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
+                try:
+                    summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
+                except ModelError as e:
+                    # A separate compaction model the endpoint does not serve (left from another brain: a relay
+                    # refuses an unpriced model with 403) failed the whole goal. The main brain summarizes instead.
+                    if not summary_options or getattr(e,'status',0) not in (400,403,404):
+                        raise
+                    self.store.event('compaction_model_refused',dict(model=summary_options['model'],error=str(e)[:200]),gid)
+                    summary_options = {}
+                    summary = self.model.complete(request,max_tokens=summary_limit)['content']
             except ModelTruncated as e:
                 # A summary cut at its limit is still the best working memory there is; refusing it failed the
                 # turn, and the next compaction was cut the same way until the goal paused.
