@@ -43,11 +43,33 @@ type residentChat struct {
 }
 
 // residentLive is the reply being generated: shown under the durable transcript and replaced by it when the
-// turn lands. Nothing here is durable; the transcript stays the record.
+// turn lands. Nothing here is durable; the transcript stays the record. hold keeps the window where the reader
+// put it while more text arrives, so a long reply can be read at its own pace.
 type residentLive struct {
 	turn, text, reasoning string
 	tools                 []string
-	active                bool
+	active, hold          bool
+	top                   int
+}
+
+// body is the live reply as wrapped lines: its reasoning, the tools it started, then the text.
+func (l residentLive) body(width int) []string {
+	var out []string
+	if l.reasoning != "" {
+		for _, ln := range strings.Split(ansi.Hardwrap(l.reasoning, width, true), "\n") {
+			out = append(out, envDim.Render(ln))
+		}
+	}
+	for _, name := range l.tools {
+		out = append(out, envWarn.Render("RUN · "+residentText(name)+" …"))
+	}
+	if l.text != "" {
+		out = append(out, strings.Split(ansi.Hardwrap(l.text, width, true), "\n")...)
+	}
+	if len(out) == 0 {
+		out = []string{envDim.Render("generating…")}
+	}
+	return out
 }
 
 type residentComposeResult struct {
@@ -175,29 +197,54 @@ func (m *envModel) syncChat() {
 	}
 }
 
-// liveBlock renders the reply being generated: its thinking, the tools it has started and the text so far.
-// Plain text, not glamour: this is redrawn on every snapshot, and the durable block is styled once when the
-// turn lands. The tail is bounded, so a long reply cannot push the composer off the screen.
+// liveHeight is the live window's line count: a quarter of the page, so the transcript keeps most of it.
+func (m envModel) liveHeight() int { return min(9, max(3, m.height/4)) }
+
+// liveTop is the first visible line: the tail while following, the held position otherwise.
+func (m envModel) liveTop(body int) int {
+	height := m.liveHeight()
+	if !m.chat.live.hold {
+		return max(0, body-height)
+	}
+	return max(0, min(m.chat.live.top, max(0, body-height)))
+}
+
+// scrollLive moves the live window and holds it, so text arriving mid-read cannot pull the view away.
+// Scrolling back to the bottom resumes following.
+func (m *envModel) scrollLive(delta int) {
+	l := &m.chat.live
+	if !l.active {
+		return
+	}
+	body := len(l.body(max(10, m.width-4)))
+	height := m.liveHeight()
+	top := max(0, min(m.liveTop(body)+delta, max(0, body-height)))
+	l.top = top
+	l.hold = top < max(0, body-height)
+}
+
+// liveBlock renders the reply being generated in a fixed-height window: its reasoning, the tools it has
+// started and the text so far. Plain text, not glamour: this is redrawn on every snapshot, and the durable
+// block is styled once when the turn lands.
 func (m envModel) liveBlock(w int) string {
 	l := m.chat.live
 	if !l.active {
 		return ""
 	}
 	inner := max(10, w-4)
-	var parts []string
-	if l.reasoning != "" {
-		parts = append(parts, envDim.Render("THINKING")+"\n"+envDim.Render(envTail(l.reasoning, inner, 6)))
+	body := l.body(inner)
+	height := m.liveHeight()
+	top := m.liveTop(len(body))
+	label := "THINKING · live · Ctrl+T hold · Alt+↑/↓ scroll"
+	if l.reasoning == "" {
+		label = "AGENT · live · Ctrl+T hold · Alt+↑/↓ scroll"
 	}
-	for _, name := range l.tools {
-		parts = append(parts, envWarn.Render("RUN · "+residentText(name)+" …"))
+	if l.hold {
+		label = fmt.Sprintf("LIVE · held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
 	}
-	if l.text != "" {
-		parts = append(parts, envHead.Render("AGENT")+"\n"+envTail(l.text, inner, 8))
-	}
-	if len(parts) == 0 {
-		parts = append(parts, envDim.Render("AGENT · generating…"))
-	}
-	return envBorder.Width(max(18, w-2)).Render(strings.Join(parts, "\n"))
+	rows := []string{envDim.Render(label)}
+	rows = append(rows, body[top:min(top+height, len(body))]...)
+	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
 }
 
 // envTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.
@@ -489,6 +536,13 @@ func (m envModel) renderChat() string {
 	if !m.chat.transcript.AtBottom() {
 		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
 	}
+	if m.chat.live.active {
+		hint := "live: Ctrl+T hold"
+		if m.chat.live.hold {
+			hint = "live: held · Ctrl+T follow"
+		}
+		status = append(status, envDim.Render(hint))
+	}
 	if m.chat.seq < m.resident.LastEvent {
 		status = append(status, envDim.Render("loading history"))
 	}
@@ -555,6 +609,20 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+l":
 		m.chat.transcript.GotoBottom()
+		m.chat.live.hold = false // follow the live tail again too
+		return m, nil
+	case "ctrl+t":
+		// Hold the live window where it is while the reply keeps arriving.
+		m.chat.live.hold = !m.chat.live.hold
+		if !m.chat.live.hold {
+			m.chat.live.top = 0 // following recomputes the tail from the body length
+		}
+		return m, nil
+	case "alt+up":
+		m.scrollLive(-3)
+		return m, nil
+	case "alt+down":
+		m.scrollLive(3)
 		return m, nil
 	case "esc":
 		m.chat.compose.Blur()

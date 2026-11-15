@@ -66,8 +66,11 @@ While a reply generates, a bounded tail below the transcript shows its thinking,
 each tool it starts and the text so far, redrawn a few times a second from the
 runtime's live snapshot. The durable blocks replace it when the turn lands, so a
 reply is never shown twice and the transcript is never rewritten mid-reply.
-Thinking is stored with the reply and shown above it as its own block; it is not
-sent back to the model or counted in its context budget.
+The live window has a fixed height: Alt+Up/Down scrolls it, and Ctrl+T holds it
+where it is while text keeps arriving; scrolling back to the bottom, or Ctrl+L,
+resumes following. Completed thinking is stored with the reply and shown above it
+as its own block, scrollable with the transcript; it is not sent back to the model
+or counted in its context budget.
 
 Most controls use slash commands (type `/` in the composer and Tab completes
 the highlighted name). A message that begins with `/` is read as a command; type

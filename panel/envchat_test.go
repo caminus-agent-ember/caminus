@@ -619,3 +619,48 @@ func TestTruncatedReplyShowsWhatTheModelWroteBeforeItStopped(t *testing.T) {
 		t.Fatalf("the reason is not shown:\n%s", block)
 	}
 }
+
+// liveWindow is the visible body of the live block, without its border or label line.
+func liveWindow(m envModel) string {
+	body := m.chat.live.body(m.width - 4)
+	top := m.liveTop(len(body))
+	return strings.Join(body[top:min(top+m.liveHeight(), len(body))], "\n")
+}
+
+func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 30
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
+		reasoning: strings.Repeat("thinking line ", 80), reset: true})
+	m = next.(envModel)
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "THINKING · live") {
+		t.Fatalf("the live window is not following:\n%s", ansi.Strip(m.liveBlock(m.width)))
+	}
+	m.scrollLive(-8)
+	held := ansi.Strip(m.liveBlock(m.width))
+	if !strings.Contains(held, "held") {
+		t.Fatalf("scrolling did not hold the window:\n%s", held)
+	}
+	// more of the reply arrives: the held window must keep showing the same lines
+	before := liveWindow(m)
+	next, _ = m.Update(residentLiveMsg{agent: "resident", turn: "t1", text: "and now an answer"})
+	m = next.(envModel)
+	if after := liveWindow(m); after != before {
+		t.Fatalf("the held window moved while text arrived:\n%s\n---\n%s", before, after)
+	}
+	// Ctrl+T resumes following, so the newest text is visible again
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	m = next.(envModel)
+	if m.chat.live.hold {
+		t.Fatal("Ctrl+T did not resume following")
+	}
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "and now an answer") {
+		t.Fatal("the resumed window does not show the newest text")
+	}
+	// scrolling back to the bottom resumes too
+	m.scrollLive(-4)
+	m.scrollLive(100)
+	if m.chat.live.hold {
+		t.Fatal("scrolling to the bottom must resume following")
+	}
+}
