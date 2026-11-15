@@ -34,6 +34,7 @@ import base64
 import getpass
 import json
 import os
+import grp
 import pwd
 from pathlib import Path
 import subprocess
@@ -51,7 +52,8 @@ def _parser():
     p = sub.add_parser('setup', help='print the provisioning commands, then check status')
     p.add_argument('--agent-side', action='store_true', help='also install ask-root into the agent user over SSH')
 
-    sub.add_parser('status', help='check user, key, ssh login, bridge, ask-root')
+    p = sub.add_parser('status', help='check user, key, ssh login, bridge, ask-root, leases')
+    p.add_argument('--json', action='store_true')
 
     p = sub.add_parser('run', help='run a command as the agent user')
     p.add_argument('--shell', '-s', action='store_true', help='CMD is one shell string, not an argv')
@@ -195,7 +197,7 @@ def main(rest, transport=None):
     if a.sub == 'setup':
         return _setup(a, tr)
     if a.sub == 'status':
-        return _status(tr)
+        return _status(tr,json_mode=a.json)
     if a.sub == 'run':
         return _run(a, tr)
     if a.sub == 'shell':
@@ -314,6 +316,9 @@ sudo usermod -aG {group} {you}
 sudo mkdir -p {bridge}/req {bridge}/res {bridge}/notes
 sudo chown root:{group} {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo chmod 770 {bridge} {bridge}/req {bridge}/res {bridge}/notes
+sudo mkdir -p {bridge}/leases
+sudo chown root:{group} {bridge}/leases
+sudo chmod 2770 {bridge}/leases                      # setgid: lease files stay group-only, never world-writable
 sudo loginctl enable-linger {user}                   # its long-running servers survive logout
 # optional inference runtime: choose explicit sources for this installation before running these commented commands.
 # runtime_source=/absolute/path/to/python-prefix       # contains bin/python and its dependencies
@@ -352,12 +357,41 @@ def _setup(a, tr):
     return _status(tr)
 
 
-def _status(tr):
-    checks = []
+def leases_report(path,group,gid):
+    """The leases folder as the contract reports it: {"path","ok","fix"}; fix carries the exact provisioning
+    commands when it is wrong. Shared with the agent through the bridge group: setgid 2770 keeps every lease
+    file group-only, never world-writable."""
+    import stat as stat_m
+    try:st=os.stat(path)
+    except OSError:
+        return dict(path=path,ok=False,
+                    fix=f'sudo mkdir -p {path} && sudo chown root:{group} {path} && sudo chmod 2770 {path}')
+    mode=stat_m.S_IMODE(st.st_mode)
+    if st.st_gid!=gid:
+        return dict(path=path,ok=False,fix=f'sudo chown root:{group} {path} && sudo chmod 2770 {path}')
+    if (mode & 0o7777)!=0o2770:
+        return dict(path=path,ok=False,fix=f'sudo chown root:{group} {path} && sudo chmod 2770 {path}')
+    return dict(path=path,ok=True,fix='')
 
-    def check(name, ok, detail=''):
-        checks.append((name, ok, detail))
-        print(f"{'PASS' if ok else 'FAIL'} {name}{(': ' + detail) if detail else ''}")
+
+def _leases_status():
+    group=settings.BRIDGE_GROUP
+    path=os.path.join(settings.bridge_dir(),'leases')
+    try:gid=grp.getgrnam(group).gr_gid
+    except KeyError:
+        return dict(path=path,ok=False,
+                    fix=f'sudo groupadd -f {group} && sudo mkdir -p {path} && sudo chown root:{group} {path} '
+                        f'&& sudo chmod 2770 {path}')
+    return leases_report(path,group,gid)
+
+
+def _status(tr,json_mode=False):
+    checks=[]
+
+    def check(name,ok,detail=''):
+        checks.append(dict(name=name,ok=bool(ok),detail=detail))
+        if not json_mode:
+            print(f"{'PASS' if ok else 'FAIL'} {name}{(': ' + detail) if detail else ''}")
 
     try:
         pwd.getpwnam(settings.user())
@@ -372,6 +406,10 @@ def _status(tr):
           '' if os.path.isdir(b) else 'missing (caminus env setup)')
     r = runner.run_shell(f'test -x {settings.agent_bin()}', transport=tr)   # shell: ~ must expand remotely
     check('ask-root installed', r.returncode == 0, 'run: caminus env setup --agent-side' if r.returncode else '')
+    leases = _leases_status()
+    check(f'leases {leases["path"]}', leases['ok'], leases['fix'])
+    if json_mode:
+        print(json.dumps(dict(ok=all(c['ok'] for c in checks),checks=checks,leases=leases)))
     return 0 if all(ok for _, ok, _ in checks) else 1
 
 

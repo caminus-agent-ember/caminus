@@ -3138,6 +3138,51 @@ for line in sys.stdin:
             self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
         self.assertEqual(len(calls),before,'nothing executes on the agent\'s word alone')
 
+    def test_setup_provisions_the_leases_folder_and_status_json_reports_it(self):
+        import contextlib,io
+        from unittest.mock import patch
+        from caminus.cmd import env as cmd_env
+        # the printed provisioning commands create the folder: shared group, setgid 2770, idempotent
+        text=cmd_env.PROVISION.format(user='agent',group='caminus-env',you='owner',bridge='/srv/b',
+                                      key='/k',pubkey='PUB',user_home='/home/agent')
+        self.assertIn('sudo mkdir -p /srv/b/leases',text)
+        self.assertIn('sudo chown root:caminus-env /srv/b/leases',text)
+        self.assertIn('sudo chmod 2770 /srv/b/leases',text)
+        # the report: missing, wrong mode, wrong group, and right
+        path=str(self.bridge/'leases')
+        miss=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertFalse(miss['ok']);self.assertIn('mkdir -p '+path,miss['fix'])
+        (self.bridge/'leases').mkdir(parents=True);os.chmod(path,0o770)
+        weak=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertFalse(weak['ok']);self.assertIn('chmod 2770',weak['fix'])
+        os.chmod(path,0o2777)                                        # setgid but world-writable
+        loose=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertFalse(loose['ok']);self.assertIn('chmod 2770',loose['fix'])
+        os.chmod(path,0o2770);os.chown(path,os.getuid(),os.getgid())
+        good=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertTrue(good['ok'],good);self.assertEqual(good['fix'],'')
+        # caminus env status --json carries the section
+        def transport(argv,**kw):return subprocess.CompletedProcess(argv,0,'','')
+        cap=io.StringIO()
+        with patch.dict(os.environ,dict(CAMINUS_ENV_BRIDGE=str(self.bridge),
+                                        CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))), \
+             patch('caminus.cmd.env.grp.getgrnam',return_value=type('G',(),{'gr_gid':os.getgid()})()), \
+             contextlib.redirect_stdout(cap):
+            cmd_env.main(['status','--json'],transport=transport)
+        data=json.loads(cap.getvalue()[cap.getvalue().index('{'):])
+        self.assertEqual(data['leases']['path'],path)
+        self.assertTrue(data['leases']['ok'])
+        self.assertIn('leases',[c['name'].split(' ')[0] for c in data['checks']])
+        # the lease tool refuses with the same exact fix when the folder is missing
+        from caminus.env.resident import leases
+        class R:pass
+        rt=R();rt.config={'bridge':str(self.home/'no-bridge-here')}
+        with self.assertRaises(ValueError) as erm:
+            leases.take(rt,'goalx',cards=[1],reason='bench')
+        msg=str(erm.exception)
+        self.assertIn('mkdir -p',msg) and self.assertIn('chmod 2770',msg)
+        self.assertIn('sudo',msg)
+
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
     def __init__(self,*answers):self.answers=deque(answers);self.requests=[]

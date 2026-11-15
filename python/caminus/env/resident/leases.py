@@ -57,8 +57,12 @@ def held(rt, now=None):
 def take(rt, gid, cards=None, ram_gib=0, minutes=30, reason=''):
     d = folder(rt)
     if d is None or not d.is_dir():
-        raise ValueError('no shared leases folder (the bridge\'s leases/ needs setting up by your human); '
-                         'ask them before GPU work')
+        # The folder is provisioned by `caminus env setup`: name the exact fix instead of a silent fallback.
+        from .. import settings as env_settings
+        group = env_settings.BRIDGE_GROUP
+        raise ValueError(f'no shared leases folder {d}: ask your human to run '
+                         f'`sudo mkdir -p {d} && sudo chown root:{group} {d} && sudo chmod 2770 {d}` '
+                         '(from `caminus env setup`); leases are required before GPU work')
     if not str(reason).strip():
         raise ValueError('say what the lease is for (reason): your human sees it')
     minutes = int(minutes or 30)
