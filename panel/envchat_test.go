@@ -1461,7 +1461,7 @@ func TestSteeringViews(t *testing.T) {
 	}
 	// /rewind takes two presses
 	m.chat.rewind = rewindState{open: true, goal: "goal1234abcd", steps: []rewindStep{{Step: 2, Label: "edit a.py"}, {Step: 5, Label: "write b.py"}}, sel: 1}
-	if v := ansi.Strip(m.renderChat()); !strings.Contains(v, "step   5  write b.py") || !strings.Contains(v, "side effects are not undone") {
+	if v := ansi.Strip(m.renderChat()); !strings.Contains(v, "undo from step 5 on  (write b.py)") || !strings.Contains(v, "side effects are not undone") {
 		t.Fatalf("rewind picker:\n%s", v)
 	}
 	next, cmd := m.rewindKey(tea.KeyPressMsg{Code: tea.KeyEnter})

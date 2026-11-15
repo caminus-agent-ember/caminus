@@ -187,12 +187,16 @@ func doRewind(m envModel, goal string, step int) tea.Cmd {
 	return func() tea.Msg {
 		var out struct {
 			To       int      `json:"to"`
+			Queued   bool     `json:"queued"`
 			Restored []string `json:"restored"`
 			Removed  []string `json:"removed"`
 			Note     string   `json:"note"`
 		}
 		if err := residentJSON(m, []string{"rewind", m.agentName, goal, "--to", strconv.Itoa(step), "--json"}, &out); err != nil {
 			return residentActionMsg{"rewind: " + err.Error()}
+		}
+		if out.Queued { // the agent is running: it rewinds between steps, and the rewound event shows what changed
+			return residentActionMsg{fmt.Sprintf("rewind to step %d queued: it happens between steps", out.To)}
 		}
 		return residentActionMsg{fmt.Sprintf("rewound to step %d: %d files restored, %d removed. %s", out.To,
 			len(out.Restored), len(out.Removed), out.Note)}
@@ -345,7 +349,7 @@ func (m envModel) rewindOverlay(w, h int) string {
 	}
 	for i := first; i < min(first+listH, len(st.steps)); i++ {
 		s := st.steps[i]
-		label := fmt.Sprintf("step %3d  %s", s.Step, residentText(s.Label))
+		label := fmt.Sprintf("undo from step %d on  (%s)", s.Step, residentText(s.Label))
 		if i == sel {
 			rows = append(rows, envSel.Render(ansi.Truncate(" "+g.collapsed+" "+label, max(8, inner-1), "…")))
 		} else {
@@ -378,11 +382,13 @@ func (m envModel) rewindKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		key := fmt.Sprintf("rewind:%s:%d", st.goal, s.Step)
 		if armed != key || time.Since(m.chat.armedAt) > 10*time.Second {
 			m.chat.armed, m.chat.armedAt = key, time.Now()
-			m.msg = fmt.Sprintf("rewind goal %s to step %d? it restores files: press Enter again", shortGoal(st.goal), s.Step)
+			m.msg = fmt.Sprintf("undo goal %s from step %d on (%s)? it restores files: press Enter again",
+				shortGoal(st.goal), s.Step, residentText(s.Label))
 			return m, nil
 		}
 		st.open = false
-		return m, tea.Batch(doRewind(m, st.goal, s.Step), m.chat.compose.Focus())
+		// "undo from step N on" keeps the work of the steps before it: the rewind goes to step N-1
+		return m, tea.Batch(doRewind(m, st.goal, s.Step-1), m.chat.compose.Focus())
 	}
 	return m, nil
 }

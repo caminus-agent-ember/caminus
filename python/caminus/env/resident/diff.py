@@ -6,6 +6,7 @@ resolved against the agent home, are walked up to the nearest .git root. Each re
 goal named, the most recent goal is used.
 """
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -27,22 +28,32 @@ def touched_repos(store, gid):
             args = json.loads(r['args'])
         except ValueError:
             continue
-        # edit/write touch a path; a terminal call offers only where it ran (cwd)
-        path = args.get('path') if r['name'] in ('edit', 'write') else args.get('cwd')
-        if not path:
-            continue
-        p = _resolve(store.home, path)
-        if not p.exists():
-            p = p.parent
-        while True:
-            if (p / '.git').exists():
-                if p not in roots:
-                    roots.append(p)
-                break
-            if p.parent == p:
-                break
-            p = p.parent
+        # edit/write touch a path; a terminal call offers where it ran (cwd) and the folders it cd's into
+        if r['name'] in ('edit', 'write'):
+            paths = [args.get('path')]
+        else:
+            paths = [args.get('cwd')] + CD.findall(args.get('command') or '')
+        for path in paths:
+            if path:
+                _add_root(store.home, path, roots)
     return roots
+
+
+CD = re.compile(r'(?:^|[;&|]|\bthen|\bdo)\s*cd\s+([^\s;&|]+)')
+
+
+def _add_root(home, path, roots):
+    p = _resolve(home, path.strip('"\''))
+    if not p.exists():
+        p = p.parent
+    while True:
+        if (p / '.git').exists():
+            if p not in roots:
+                roots.append(p)
+            break
+        if p.parent == p:
+            break
+        p = p.parent
 
 
 def _run(args, timeout):
@@ -56,11 +67,21 @@ def diff(store, gid):
     """{"repos":[{"path","stat","diff","truncated"}]} for every repo the goal touched."""
     repos = []
     for root in touched_repos(store, gid):
-        stat = _run(['git', '-C', str(root), 'diff', '--stat'], 30)
-        full = _run(['git', '-C', str(root), 'diff'], 60)
+        # Staged and unstaged changes against HEAD, plus new files (untracked: a file the agent wrote with write).
+        stat = _run(['git', '-C', str(root), 'status', '--short'], 30)
+        full = _run(['git', '-C', str(root), 'diff', 'HEAD'], 60)
         if stat is None or full is None:
             continue
-        text = full.stdout
+        text = full.stdout if full.returncode == 0 else ''
+        if full.returncode != 0:          # no commit yet: everything is new
+            text = (_run(['git', '-C', str(root), 'diff', '--cached'], 60) or full).stdout
+        new = _run(['git', '-C', str(root), 'ls-files', '--others', '--exclude-standard'], 30)
+        for name in (new.stdout.splitlines() if new else [])[:50]:
+            if len(text.encode()) > DIFF_CAP:
+                break
+            one = _run(['git', '-C', str(root), 'diff', '--no-index', '--', '/dev/null', name], 30)
+            if one is not None:
+                text += one.stdout
         truncated = len(text.encode()) > DIFF_CAP
         if truncated:
             text = text.encode()[:DIFF_CAP].decode('utf-8', 'ignore')

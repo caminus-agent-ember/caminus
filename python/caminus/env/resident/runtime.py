@@ -659,6 +659,12 @@ class Runtime:
         transcript to that step. Terminal side effects are not undone: only edit / write are snapshotted."""
         if to < 0:
             raise ValueError('step numbers start at 1')
+        g = self.store.goal(gid)
+        # A compaction folds early steps into a summary: the transcript then holds fewer replies than steps, and only
+        # the steps after the summary can be cut to.
+        folded = max(0, g['steps'] - sum(1 for m in g['messages'] if m.get('role') == 'assistant'))
+        if to < folded:
+            raise ValueError(f'steps up to {folded} were compacted into a summary; rewind to step {folded} or later')
         restored, removed, skipped = [], [], []
         for s in reversed(self.store.file_snapshots(gid)):
             if s['step'] <= to:
@@ -678,16 +684,25 @@ class Runtime:
                     path.unlink()
                 if str(path) not in removed:
                     removed.append(str(path))
+        # A path's final state decides which list it is in (created then edited after the step: removed only).
+        final = {}
+        for s_ in self.store.file_snapshots(gid):
+            if s_['step'] > to and not s_['skipped'] and s_['path'] not in final:
+                final[s_['path']] = bool(s_['existed'])
+        restored = [p_ for p_ in restored if final.get(p_)]
+        removed = [p_ for p_ in removed if final.get(p_) is False]
         with self.store.transaction():
             g = self.store.goal(gid)
             cut = len(g['messages'])
-            seen = 0
+            seen = folded
             for i, m in enumerate(g['messages']):
                 if m.get('role') == 'assistant':
                     seen += 1
                     if seen > to:
                         cut = i
                         break
+            # the cut replies' calls must not run after the rewind (a reply with several calls, a waiting request)
+            self.store.db.execute("DELETE FROM actions WHERE goal=? AND state!='done'", (gid,))
             self.store.update(gid, messages=g['messages'][:cut], steps=to, state='paused', summary='',
                               error='rewound to step %d (terminal side effects are not undone)' % to)
         self.store.event('rewound', dict(to=to, restored=restored, removed=removed, skipped=skipped), gid)

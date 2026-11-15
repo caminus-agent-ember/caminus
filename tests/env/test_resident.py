@@ -1606,6 +1606,34 @@ for line in sys.stdin:
             self.assertFalse([m for m in body['messages'] if m.get('role')=='tool' or m.get('tool_calls')])
         finally:rt.mail.close();rt.store.close()
 
+    def test_review_fixes_for_rewind_and_diff(self):
+        from caminus.env.resident import diff as D
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Edit files.')
+            def step(name,args):
+                rt.store.model_reply(gid,call(name,args));rt._action(rt.store.actions(gid)[0])
+            step('write',dict(path='a.txt',content='one'))                 # step 1
+            step('write',dict(path='b.txt',content='new'))                 # step 2: b created
+            step('edit',dict(path='b.txt',old='new',new='newer'))          # step 3: b edited
+            rt.store.model_reply(gid,call('terminal',dict(command='echo later')))   # step 4, not run yet
+            out=rt._rewind(gid,1)
+            self.assertFalse((self.home/'b.txt').exists());self.assertEqual((self.home/'a.txt').read_text(),'one')
+            self.assertEqual([Path(x).name for x in out['removed']],['b.txt']);self.assertEqual(out['restored'],[])
+            self.assertEqual(rt.store.actions(gid),[],'a cut reply\'s call does not run after the rewind')
+            # after a compaction the steps folded into the summary cannot be cut to
+            g=rt.store.goal(gid);rt.store.update(gid,steps=g['steps']+5)
+            with self.assertRaisesRegex(ValueError,'compacted into a summary'):rt._rewind(gid,1)
+            # /diff: a repo used through cd, with a new (untracked) file
+            repo=self.home/'work'/'proj';repo.mkdir(parents=True)
+            subprocess.run(['git','init','-q',str(repo)],check=True)
+            (repo/'new.py').write_text('print(1)\n')
+            rt.store.model_reply(gid,call('terminal',dict(command='cd work/proj && ls')))
+            got=D.diff(rt.store,gid)['repos']
+            self.assertEqual([Path(r['path']).name for r in got],['proj'])
+            self.assertIn('new.py',got[0]['stat']);self.assertIn('+print(1)',got[0]['diff'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
