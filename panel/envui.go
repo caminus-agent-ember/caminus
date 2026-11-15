@@ -154,6 +154,7 @@ func envMain(args []string) {
 	key := fs.String("key", "", "the harness ssh key")
 	cli := fs.String("cli", "", "JSON argv of the caminus CLI (for starting server jobs)")
 	agent := fs.String("agent", "resident", "resident agent name")
+	draft := fs.String("draft", "", "text the composer starts with (a new goal, sent on Enter)")
 	demo := fs.Bool("demo", false, "the demo (tools/env_demo.py): no SSH, and an approved root command is recorded, never run")
 	fs.Parse(args)
 	if *demo {
@@ -187,6 +188,10 @@ func envMain(args []string) {
 		m.pendingLast = *agent
 	} else {
 		openLastSession(&m)
+	}
+	if *draft != "" {
+		m.chat.compose.SetValue(*draft)
+		m.chat.newGoal = true
 	}
 	if m.pendingLast == "" {
 		m.chat.picker = true // no last conversation: start in the chat with the session picker open

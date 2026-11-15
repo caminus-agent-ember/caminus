@@ -13,7 +13,7 @@ approval card), asks you a question, verifies and finishes past the gate and the
 thinking, so the live tail shows.
 
 What to try (the panel's /help lists the rest):
-- type a goal and Enter; or Enter on the one queued for you
+- Enter sends the goal waiting in the composer (or type your own); the empty chat shows Ember, the mascot
 - while it works, type a message (it is delivered at its next step) or /steer TEXT (it says what it changed)
 - the approval card: Esc, then a a approves (in the demo nothing runs as root: there is no harness sudo here, so the
   approval is recorded and the command is not executed), d denies, /deny TEXT says what to do instead
@@ -318,10 +318,11 @@ def main(argv=None):
     log = (scratch / 'daemon.log').open('w')
     daemon = subprocess.Popen([sys.executable, '-I', '-c', BOOT, str(ROOT / 'python'), 'env', 'agent', '--local', 'run',
                                AGENT, '--home', str(home)], stdout=log, stderr=log, start_new_session=True)
-    agent(home, 'send', '--stdin', '--json', stdin='Write a short report about this machine and what is in my home.')
 
     cmd = [panel, 'env', '-demo', '-agent', AGENT, '-bridge', str(bridge), '-audit', str(scratch / 'audit.jsonl'),
-           '-cli', json.dumps([str(wrapper)])]
+           '-cli', json.dumps([str(wrapper)]),
+           # it opens on the empty chat (Ember and the welcome), with a first goal in the composer: Enter sends it
+           '-draft', 'Write a short report about this machine and what is in my home.']
     try:
         if a.no_tui:
             print(' '.join(q(c) for c in cmd), flush=True)
