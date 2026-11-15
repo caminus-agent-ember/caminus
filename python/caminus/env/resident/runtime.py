@@ -490,6 +490,11 @@ class Runtime:
                 self.compact_request(gid)
             progressed = False
             goals = [target] if target else self.store.next_goal()
+            if goals and time.time()-last_heartbeat>=5:
+                # Say we are alive before a turn, not after it: a turn waiting on the model server can hold
+                # this loop for minutes, and a stale heartbeat makes a working daemon look dead to every UI.
+                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working'))
+                last_heartbeat=time.time()
             for gid in goals:
                 progressed |= self.tick(gid)
                 if observe:
