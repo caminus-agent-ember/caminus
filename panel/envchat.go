@@ -1681,9 +1681,14 @@ func (m envModel) chatFoot(w int) string {
 	if len(m.reqs) > 0 {
 		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
 	}
+	// Spend shows once anything has been priced (a paid brain); a local brain's turns cost nothing and hide it.
+	usd := -1.0
+	if m.resident.SpendToday > 0 || len(m.resident.SpendGoals) > 0 {
+		usd = m.resident.SpendGoals[m.chat.target]
+	}
 	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
-		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: -1, tps: m.resident.TokPerS,
-		queue: queued, keys: keys}, w)
+		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
+		tps: m.resident.TokPerS, queue: queued, keys: keys}, w)
 	status := []string{}
 	if !m.sshOK {
 		status = append(status, envWarn.Render("SSH …"))

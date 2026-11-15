@@ -1354,3 +1354,16 @@ func TestRecapCardAndStudioOverlay(t *testing.T) {
 		t.Fatal("Enter reads the selected entry")
 	}
 }
+
+func TestStatusLineShowsSpendOnAPaidBrain(t *testing.T) {
+	m := chatFixture(t)
+	if strings.Contains(ansi.Strip(m.renderChat()), "today") {
+		t.Fatal("a local brain shows no spend")
+	}
+	m.resident.SpendToday = 1.25
+	m.resident.SpendGoals = map[string]float64{m.chat.target: 0.4}
+	view := ansi.Strip(m.renderChat())
+	if !strings.Contains(view, "0.40 · 1.25 today") {
+		t.Fatalf("the goal's spend and today's are in the status line:\n%s", view)
+	}
+}

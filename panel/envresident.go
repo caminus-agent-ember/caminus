@@ -24,16 +24,18 @@ type residentGoal struct {
 	Steps   int    `json:"steps"`
 }
 type residentStatus struct {
-	Name             string         `json:"name"`
-	Model            string         `json:"model"`
-	Context          int            `json:"context"`
-	ContextUsed      int            `json:"context_used"` // measured at the last turn boundary; 0 means never measured
-	TokPerS          float64        `json:"tok_per_s"`    // measured decode speed of the last streamed reply; 0 means none reported
-	CompactThreshold float64        `json:"compact_threshold"`
-	CompactTarget    float64        `json:"compact_target_ratio"`
-	DaemonAlive      bool           `json:"daemon_alive"`
-	Goals            []residentGoal `json:"goals"`
-	LastEvent        int            `json:"last_event"`
+	Name             string             `json:"name"`
+	Model            string             `json:"model"`
+	Context          int                `json:"context"`
+	ContextUsed      int                `json:"context_used"` // measured at the last turn boundary; 0 means never measured
+	TokPerS          float64            `json:"tok_per_s"`    // measured decode speed of the last streamed reply; 0 means none reported
+	CompactThreshold float64            `json:"compact_threshold"`
+	CompactTarget    float64            `json:"compact_target_ratio"`
+	SpendToday       float64            `json:"spend_today"` // every priced turn today, across goals
+	SpendGoals       map[string]float64 `json:"spend_goals"` // per goal
+	DaemonAlive      bool               `json:"daemon_alive"`
+	Goals            []residentGoal     `json:"goals"`
+	LastEvent        int                `json:"last_event"`
 }
 type residentEvent struct {
 	Seq  int            `json:"seq"`

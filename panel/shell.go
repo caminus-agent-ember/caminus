@@ -298,7 +298,8 @@ type status struct {
 	brain        string
 	used, window int
 	compact      float64 // the compaction threshold as a fraction of the window; the bar warms toward it
-	usd          float64
+	usd          float64 // this goal's spend; negative hides the segment (an unpriced brain)
+	usdDay       float64 // today's spend across goals; shown with usd when positive
 	tps          float64
 	queue        int
 	keys         []string
@@ -328,7 +329,11 @@ func statusLine(s status, w int) string {
 		envDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
 	}
 	if s.usd >= 0 {
-		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd)))
+		seg := strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd))
+		if s.usdDay > 0 {
+			seg += envDim.Render(fmt.Sprintf(" · %.2f today", s.usdDay))
+		}
+		segs = append(segs, seg)
 	}
 	if s.tps > 0 {
 		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %.0f tok/s", g.speed, s.tps)))
