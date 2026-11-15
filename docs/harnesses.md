@@ -105,3 +105,40 @@ Caminus keeps your conversation in a prompt cache, so each new turn only reads w
 on an 11K-token conversation with `coder`. Short side requests from your tool (titles, summaries) run beside the
 conversation without pushing it out. A conversation you leave for 8 hours, or one that was live when the server stopped,
 is saved to disk and comes back in about a second.
+
+## An agent with its own user (experimental)
+
+Instead of a fixed tool list, an agent can get an environment: a second user on this machine (`caminus-agent` by
+default) that it reaches over SSH and can do anything in. Your own files, keys and processes stay out of its reach by
+Unix permissions, and root is never in its hands: a root command waits in a queue until you approve it in
+`caminus env watch`, and only your side runs it under sudo.
+
+```bash
+caminus env setup --agent-side   # one-time provisioning (prints the sudo commands to run yourself)
+caminus env status               # user, key, ssh login, bridge, ask-root all OK?
+caminus env shell                # interactive session as the agent user: run any agent here
+caminus env run -- git status    # one command as the agent user
+caminus env ui                   # the TUI: queued root requests + the live audit log
+caminus env watch                # same, in plain text (approve / edit / deny queued root commands)
+caminus env spawn -n build -- make -j4   # long work, detached (log ~/env-logs/build.log)
+caminus env jobs                 # the detached jobs
+caminus env stop build           # kill one
+caminus env reqs --json          # pending root/question requests, machine-readable
+caminus env answer ID answered "yes"   # answer one from a script (approved/edited/denied/answered)
+caminus env memory               # the agent's ~/MEMORY.md (its persistent memory)
+caminus env remember "TP wins at these shapes"   # append to it
+caminus env serve coder coder --placement 2   # a model server as a job: own home/port/session, split on both cards
+caminus env serve swift swift-1.5 --placement 0  # one small model on the 24 GB card (S in `caminus env ui` does this)
+caminus env new coder -- qwen    # a named session running your agent CLI (tmux, in the agent user)
+caminus env sessions             # the sessions
+caminus env send coder "run the TP benchmarks"   # type an instruction into it, live
+caminus env attach coder         # sit in the same terminal
+caminus env ctx                  # running servers and the context window each reports
+caminus env audit --tail 20      # everything the environment did
+```
+
+Inside the agent user, `ask-root CMD...` asks you to run CMD as root and waits for the answer, and `~/ROBOTS.md` is
+its standing instruction — what it is, what it can do, and how root works (`caminus env prompt` prints it from your
+side). The full design is in
+[spec-agent-env.md](specs/spec-agent-env.md). This is an environment, not a sandbox: the agent user still has the
+network and the GPU, so give it only scoped credentials in its own environment.
