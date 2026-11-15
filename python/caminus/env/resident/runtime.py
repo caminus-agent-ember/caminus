@@ -130,10 +130,16 @@ class Runtime:
                 # Say so in the prompt: a silent cut leaves the model believing it read its whole memory.
                 text = text[:limit] + f'\n[{p.name} truncated: {len(text) - limit} characters omitted from the end]'
             out += '\n\n' + p.name + ':\n' + text
-        budget = self._context_budget(gid)
-        if budget:
-            out += budget
         return dict(role='system', content=out)
+
+    def context_message(self,gid=None):
+        """The measured budget as a trailing message rather than part of the system prompt.
+
+        The system prompt is the stable prefix an inference server caches: a line that changes every turn
+        invalidates the cache from the first token, so every turn pays a full prefill of the whole history.
+        Appended after the history, only the tail changes and the prefix stays reusable."""
+        note = self._context_budget(gid)
+        return dict(role='system', content=note.strip()) if note else None
 
     def _context_budget(self,gid=None):
         """A live budget line so the model can see its own token count and compaction distance — it cannot
@@ -416,7 +422,10 @@ class Runtime:
             # replaces it. clear() runs on every exit path, so a failed or cancelled turn leaves no tail.
             live = Live(self.home, gid, self.store)
             try:
-                reply = self.model.complete([self.system(gid),*messages],TOOLS,
+                request = [self.system(),*messages]
+                if (budget := self.context_message(gid)):
+                    request.append(budget)
+                reply = self.model.complete(request,TOOLS,
                                             max_tokens=min(int(self.config.get('max_tokens',4096)),self.model.context_size()//4),
                                             on_delta=live.on_delta)
             finally:

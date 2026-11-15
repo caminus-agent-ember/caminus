@@ -32,6 +32,13 @@ S=Path(A.scratch).resolve();S.mkdir(parents=True,exist_ok=True)
 BOOT="import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"
 
 
+def newest_history(body):
+    """The newest message that is history. The runtime appends its context-budget note as a trailing system
+    message on purpose - after the history, so the cached prefix stays identical from turn to turn and the
+    server does not re-read the whole prompt."""
+    return [m for m in body['messages'] if m['role']!='system'][-1]
+
+
 def call(name,args):
     return dict(role='assistant',content='',tool_calls=[dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name=name,arguments=json.dumps(args)))])
 
@@ -252,7 +259,7 @@ class Resident(unittest.TestCase):
         # The model fixture must observe completion, not assume worker startup
         # takes less than one second on a busy CI runner.
         def after_terminal(body):
-            result=json.loads(body['messages'][-1]['content'])
+            result=json.loads(newest_history(body)['content'])
             if result.get('running'):
                 (self.home/'release').write_text('go')
                 Endpoint.queues[self.key].appendleft(after_terminal)
@@ -288,7 +295,26 @@ class Resident(unittest.TestCase):
         self.respond(rid,'denied',rc=126,out='',err='denied by fixture operator')
         self.cmd('once',['--goal-id',first['id']]);self.assertFalse(marker.exists())
         last_request=[v for k,v in Endpoint.seen if k==self.key][-1]
-        self.assertIn('denied',last_request['messages'][-1]['content'])
+        self.assertIn('denied',newest_history(last_request)['content'])
+
+    def test_the_cached_prefix_survives_a_turn_so_the_server_does_not_reread(self):
+        self.replies(call('terminal',dict(command='printf one >> counter',yield_ms=1000)),call('finish',dict(summary='Done.')))
+        first=self.cmd('once',['--goal','Keep going.','--max-steps','1'],code=22)
+        (self.home/'context.json').write_text(json.dumps(dict(goal=first['id'],tokens=111111,size=1000000,ts=time.time())))
+        self.replies(call('finish',dict(summary='Second step.')))
+        self.cmd('once',['--goal-id',first['id']])
+        seen=[body for k,body in Endpoint.seen if k==self.key]
+        before,after=seen[-2],seen[-1]
+        history=before['messages'][:-1]  # everything but last turn's trailing budget note
+        # Everything the server read last turn is still the head of this turn's prompt, unchanged, so its
+        # cached prefix still applies and only the new tail has to be prefilled.
+        self.assertEqual(after['messages'][:len(history)],history)
+        # The budget line did change between the turns - which is exactly why it cannot live in the prefix.
+        note_before=before['messages'][-1]
+        note_after=after['messages'][-1]
+        self.assertEqual(note_before['role'],'system')
+        self.assertIn('Context budget',note_after['content'])
+        self.assertNotEqual(note_before['content'],note_after['content'])
 
     def test_step_budget_is_resumable(self):
         self.replies(call('terminal',dict(command='printf one >> counter',yield_ms=1000)),call('finish',dict(summary='Done.')))
@@ -733,17 +759,21 @@ class Resident(unittest.TestCase):
             self.assertIn('7232 characters omitted',content)
         finally:rt.mail.close();rt.store.close()
 
-    def test_system_prompt_states_the_measured_context_budget(self):
+    def test_the_context_budget_rides_after_the_history_so_the_prefix_stays_cached(self):
         rt=Runtime(self.home)
         try:
             blank=rt.system()['content']
             self.assertNotIn('Context budget',blank,'nothing was measured, so nothing may be claimed')
+            self.assertIsNone(rt.context_message())
             (self.home/'context.json').write_text(json.dumps(dict(goal='g',tokens=500000,size=1000000,ts=time.time())))
-            content=rt.system('g')['content']
-            self.assertIn('500,000 of 1,000,000 window tokens (50%)',content)
-            self.assertIn('500,000 tokens remain, of which 350,000 before auto-compaction',content)
-            self.assertIn('trigger 850,000 tokens, 85%',content)
-            stale=rt.system('another-goal')['content']
+            # The measured line must not enter the system prompt: a prefix that changes every turn makes the
+            # inference server re-read the whole history instead of reusing its cache.
+            self.assertEqual(rt.system()['content'],blank,'the system prompt must not change with the measurement')
+            note=rt.context_message('g')['content']
+            self.assertIn('500,000 of 1,000,000 window tokens (50%)',note)
+            self.assertIn('500,000 tokens remain, of which 350,000 before auto-compaction',note)
+            self.assertIn('trigger 850,000 tokens, 85%',note)
+            stale=rt.context_message('another-goal')['content']
             self.assertIn('no measured count for this goal yet',stale)
             self.assertNotIn('(50%)',stale,'a note from another goal must not count for this one')
         finally:rt.mail.close();rt.store.close()
