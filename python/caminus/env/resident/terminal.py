@@ -209,5 +209,8 @@ class Terminal:
         next_offset = offset + len(data)
         if data or 'offset' in args:
             atomic_json(cursor, dict(offset=next_offset))
-        return dict(session=session, **state, output=data.decode(errors='replace'), next_offset=next_offset,
+        # A PTY ends lines with \r\n. Handing that to the model put a stray \r at the end of every line, so a patch
+        # built from what it read did not match the file (the local Coder lost a patch to it). Offsets stay in raw bytes.
+        text = data.decode(errors='replace').replace('\r\n', '\n')
+        return dict(session=session, **state, output=text, next_offset=next_offset,
                     no_new_output=not data, running=state.get('phase') not in ('finished', 'interrupted'))

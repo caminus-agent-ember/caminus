@@ -247,6 +247,75 @@ class Resident(unittest.TestCase):
         self.assertIn('write it | check it',body)
         self.assertIn('blocked by: no editor',body)
 
+    def test_memory_index_is_frozen_per_goal_and_state_loads_first(self):
+        with self.hermetic_home():
+            (self.home/'MEMORY.md').write_text('- [build](notes/build.md) — use ./build.sh\n')
+            (self.home/'STATE.md').write_text('doing: parser fix\nnext: run the gate\n')
+            rt=Runtime(self.home)
+            try:
+                g1=rt.store.enqueue('First goal.')
+                first=rt.context_message(g1)['content']
+                self.assertTrue(first.startswith('STATE.md'),'STATE.md must load first')
+                self.assertIn('use ./build.sh',first)
+                (self.home/'MEMORY.md').write_text('- [later](notes/later.md) — written mid-goal\n')
+                again=rt.context_message(g1)['content']
+                self.assertIn('use ./build.sh',again);self.assertNotIn('written mid-goal',again,'the index is frozen for the goal')
+                g2=rt.store.enqueue('Second goal.')
+                self.assertIn('written mid-goal',rt.context_message(g2)['content'],'the next goal sees the new index')
+            finally:rt.mail.close();rt.store.close()
+
+    def test_context_names_the_model_answering_this_turn(self):
+        with self.hermetic_home():
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('Commit something.')
+                note=rt.context_message(gid)['content']
+                self.assertIn('MODEL: this turn is answered by fixture',note)
+                self.assertNotIn('MODEL:',rt.system()['content'],'the brain can change between turns: it stays out of the cached prefix')
+            finally:rt.mail.close();rt.store.close()
+
+    def test_remember_writes_a_note_and_refuses_a_full_index(self):
+        rt=Runtime(self.home)
+        try:
+            out=rt.memory.remember('Build command','The build is ./build.sh; BUILD_JOBS sets parallelism.','how to build')
+            self.assertEqual(out['note'],'notes/build-command.md')
+            self.assertIn('BUILD_JOBS',(self.home/'notes'/'build-command.md').read_text())
+            self.assertIn('](notes/build-command.md) — how to build',(self.home/'MEMORY.md').read_text())
+            rt.memory.remember('Build command','The build is ./build.sh.','how to build (updated)')
+            self.assertEqual((self.home/'MEMORY.md').read_text().count('notes/build-command.md'),1,'one line per note')
+            (self.home/'MEMORY.md').write_text('x'*4090+'\n')
+            with self.assertRaises(ValueError) as c:rt.memory.remember('Another','fact','summary')
+            self.assertIn('over its 4096-byte cap',str(c.exception))
+            self.assertFalse((self.home/'notes'/'another.md').exists(),'a refused remember writes nothing')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_history_search_finds_past_goals_journal_and_notes(self):
+        rt=Runtime(self.home)
+        try:
+            old=rt.store.enqueue('Fix the tokenizer crash.')
+            rt.store.event('assistant',dict(content='The crash came from an unescaped NUL byte in the tokenizer input.'),old)
+            rt.store.event('finished',dict(summary='Escaped NUL bytes before tokenizing.'),old)
+            rt.store.event('ledger',dict(milestones=['tokenizer']),old)  # not history: never indexed
+            (self.home/'journal').mkdir();(self.home/'journal'/'2026-11-15.md').write_text('# today\nread about tokenizer fuzzing\n')
+            hits=rt.memory.search('tokenizer NUL')['hits']
+            self.assertTrue(any('NUL' in h['text'] and 'assistant' in h['where'] for h in hits),hits)
+            self.assertTrue(any('finished' in h['where'] for h in hits),hits)
+            self.assertFalse(any('ledger' in h['where'] for h in hits))
+            self.assertTrue(any(h['where'].startswith('journal/') for h in rt.memory.search('tokenizer fuzzing')['hits']))
+            self.assertEqual(rt.memory.search('zebra')['note'],'no matches')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_history_index_is_built_for_an_older_database(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Old goal.')
+            rt.store.event('assistant',dict(content='remember the flux capacitor'),gid)
+            rt.store.db.execute('DROP TABLE history_fts')
+        finally:rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)   # reopening rebuilds the index from the events
+        try:self.assertTrue(rt.memory.search('flux capacitor')['hits'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
         rt=Runtime(self.home)
@@ -465,7 +534,12 @@ class Resident(unittest.TestCase):
         self.assertEqual(req['kind'],'question');self.assertEqual(req['choices'],['src','docs'])
         self.respond(rid,'answered',answer='docs')
         last=self.cmd('once',['--goal-id',first['id']]);self.assertEqual(last['id'],first['id'])
-        self.assertEqual(last['state'],'completed');self.assertIn('docs',(self.home/'MEMORY.md').read_text())
+        self.assertEqual(last['state'],'completed')
+        # The answer stays in the goal's history; nothing is written to the agent's memory automatically.
+        self.assertNotIn('docs',(self.home/'MEMORY.md').read_text())
+        store=Store(self.home)
+        try:self.assertTrue(any(e['kind']=='tool_result' and 'docs' in json.dumps(e['data']) for e in store.events(limit=500)))
+        finally:store.close()
 
     def test_root_request_never_executes_in_agent(self):
         marker=self.home/'root-must-not-execute'
@@ -482,8 +556,8 @@ class Resident(unittest.TestCase):
         self.replies(call('terminal',dict(command='printf one >> counter',yield_ms=1000)),call('finish',dict(summary='Done.')))
         first=self.cmd('once',['--goal','Keep going.','--max-steps','1'],code=22)
         (self.home/'context.json').write_text(json.dumps(dict(goal=first['id'],tokens=111111,size=1000000,ts=time.time())))
-        # The agent writes memory between steps; that must not invalidate the cached prefix either.
-        (self.home/'MEMORY.md').write_text('# Persistent memory\n\nlearned something new\n')
+        # The agent writes its working state between steps; that must not invalidate the cached prefix either.
+        (self.home/'STATE.md').write_text('doing: learned something new\n')
         self.replies(call('finish',dict(summary='Second step.')))
         self.cmd('once',['--goal-id',first['id']])
         seen=[body for k,body in Endpoint.seen if k==self.key]
@@ -497,7 +571,7 @@ class Resident(unittest.TestCase):
         note_after=after['messages'][-1]
         self.assertEqual(note_before['role'],'system')
         self.assertIn('Context budget',note_after['content'])
-        self.assertIn('learned something new',note_after['content'],'the new memory must reach the model')
+        self.assertIn('learned something new',note_after['content'],'the new working state must reach the model')
         self.assertNotEqual(note_before['content'],note_after['content'])
 
     def test_step_budget_is_resumable(self):
@@ -815,6 +889,14 @@ class Resident(unittest.TestCase):
             self.assertEqual(rt.store.goal(gid)['state'],'waiting_model')
         finally:rt.mail.close();rt.store.close()
         self.cmd('fallback',['--model','gpt-unpriced','--endpoint','https://api.example.com/v1'],code=1)
+
+    def test_terminal_output_has_no_carriage_returns_from_the_pty(self):
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        out=t.call(sid,dict(command="printf 'one\\ntwo\\n'",yield_ms=2000))
+        while out.get('running'):
+            out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=500,offset=0))
+        text=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0,offset=0))['output']
+        self.assertIn('one\ntwo',text);self.assertNotIn('\r\n',text,'a PTY line ending would corrupt a patch built from it')
 
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
@@ -1296,8 +1378,12 @@ class Resident(unittest.TestCase):
         rt=Runtime(self.home)
         try:
             content=rt.context_message()['content']
-            self.assertIn('MEMORY.md truncated',content)
-            self.assertIn('7232 characters omitted',content)
+            self.assertIn('MEMORY.md is',content);self.assertIn('over its 4096-byte cap',content)
+            self.assertIn('MEMORY.md is 40000 bytes',content)
+            # nothing is lost from sight: the whole file is kept in a note the agent is pointed at
+            self.assertIn('notes/memory-before-index.md',content)
+            self.assertTrue((self.home/'notes'/'memory-before-index.md').read_text().endswith('x'*40000))
+            self.assertEqual(len((self.home/'MEMORY.md').read_text()),40000,'the agent\'s own file is never rewritten')
             # Memory is written while the agent works, so it cannot live in the cached prefix.
             self.assertNotIn('truncated',rt.system()['content'])
         finally:rt.mail.close();rt.store.close()
@@ -1334,6 +1420,7 @@ class Resident(unittest.TestCase):
                 seen.append([dict(m) for m in messages])
                 if len(seen)==1:
                     (self.home/'MEMORY.md').write_text('A note the agent learned in step one.')
+                    (self.home/'STATE.md').write_text('doing: step two of the work')
                     return call('terminal',dict(command='printf fine'))
                 return dict(role='assistant',content='done')
         model=Recorder();model.home=self.home
@@ -1344,8 +1431,10 @@ class Resident(unittest.TestCase):
             self.assertEqual(seen[0][0],seen[1][0],'a memory write must not change the cached system prefix')
             self.assertEqual(seen[1][:len(seen[0])-1],seen[0][:-1],
                              'all but the trailing context note is prefix-stable across turns')
-            self.assertIn('A note the agent learned in step one.',seen[1][-1]['content'],
-                          'the new memory still reaches the model, in the tail note')
+            self.assertIn('doing: step two of the work',seen[1][-1]['content'],
+                          'the live working state reaches the model, in the tail note')
+            self.assertNotIn('A note the agent learned in step one.',seen[1][-1]['content'],
+                             'the notes index is frozen for the goal: a mid-goal edit shows from the next goal')
             self.assertNotIn('A note the agent learned',seen[0][0]['content'])
         finally:rt.mail.close();rt.store.close()
 
