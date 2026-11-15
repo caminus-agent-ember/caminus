@@ -1606,6 +1606,59 @@ for line in sys.stdin:
             self.assertFalse([m for m in body['messages'] if m.get('role')=='tool' or m.get('tool_calls')])
         finally:rt.mail.close();rt.store.close()
 
+    def test_review_fixes_for_rewind_and_diff(self):
+        from caminus.env.resident import diff as D
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Edit files.')
+            def step(name,args):
+                rt.store.model_reply(gid,call(name,args));rt._action(rt.store.actions(gid)[0])
+            step('write',dict(path='a.txt',content='one'))                 # step 1
+            step('write',dict(path='b.txt',content='new'))                 # step 2: b created
+            step('edit',dict(path='b.txt',old='new',new='newer'))          # step 3: b edited
+            rt.store.model_reply(gid,call('terminal',dict(command='echo later')))   # step 4, not run yet
+            out=rt._rewind(gid,1)
+            self.assertFalse((self.home/'b.txt').exists());self.assertEqual((self.home/'a.txt').read_text(),'one')
+            self.assertEqual([Path(x).name for x in out['removed']],['b.txt']);self.assertEqual(out['restored'],[])
+            self.assertEqual(rt.store.actions(gid),[],'a cut reply\'s call does not run after the rewind')
+            # after a compaction the steps folded into the summary cannot be cut to
+            g=rt.store.goal(gid);rt.store.update(gid,steps=g['steps']+5)
+            with self.assertRaisesRegex(ValueError,'compacted into a summary'):rt._rewind(gid,1)
+            # /diff: a repo used through cd, with a new (untracked) file
+            repo=self.home/'work'/'proj';repo.mkdir(parents=True)
+            subprocess.run(['git','init','-q',str(repo)],check=True)
+            (repo/'new.py').write_text('print(1)\n')
+            rt.store.model_reply(gid,call('terminal',dict(command='cd work/proj && ls')))
+            got=D.diff(rt.store,gid)['repos']
+            self.assertEqual([Path(r['path']).name for r in got],['proj'])
+            self.assertIn('new.py',got[0]['stat']);self.assertIn('+print(1)',got[0]['diff'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_grant_ends_after_twelve_hours_on_the_owner_side(self):
+        from caminus.cmd import env as E
+        ap=self.home/'audit.jsonl'
+        ap.write_text(json.dumps(dict(ts=1000.0,event='root_result',decision='approved',granted=True,
+                                      cmd='systemctl restart foo',goal='g1'))+'\n')
+        req=dict(cmd='systemctl restart foo',goal='g1',granted=True)
+        self.assertTrue(E._grant_recorded(str(ap),req,now=1000.0+3600))
+        self.assertFalse(E._grant_recorded(str(ap),req,now=1000.0+13*3600),'a reused goal id cannot extend it')
+        self.assertFalse(E._grant_recorded(str(ap),dict(req,goal='g2'),now=1001.0))
+
+    def test_the_resident_package_imports_nothing_outside_itself(self):
+        # The agent runs a zipapp of caminus/env/resident only: an import of anything else in the package (the
+        # leases refusal imported caminus.env.settings) works in a checkout and fails on a real install.
+        import ast
+        pkg=ROOT/'python'/'caminus'/'env'/'resident'
+        bad=[]
+        for f in pkg.glob('*.py'):
+            for node in ast.walk(ast.parse(f.read_text())):
+                if isinstance(node,ast.ImportFrom) and node.level>=2:
+                    bad.append(f'{f.name}: from {"."*node.level}{node.module or ""}')
+                if isinstance(node,ast.ImportFrom) and node.level==0 and (node.module or '').startswith('caminus') \
+                        and not node.module.startswith('caminus.env.resident'):
+                    bad.append(f'{f.name}: from {node.module}')
+        self.assertEqual(bad,[])
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
@@ -2923,6 +2976,227 @@ for line in sys.stdin:
         text=export_mod.render(gid,long_g)
         self.assertIn('100 characters omitted',text)
         self.assertNotIn('x'*4001,text)
+
+    def test_diff_reports_the_repos_a_goal_touched(self):
+        def git(repo,*a,commit=False):
+            args=['git','-C',str(repo)]
+            if commit:args+=['-c','user.name=t','-c','user.email=t@t']
+            return subprocess.run([*args,*a],capture_output=True,text=True,check=True)
+        repo=self.home/'proj';(repo/'src').mkdir(parents=True)
+        git(repo,'init','-q')
+        (repo/'src'/'x.py').write_text('original\n')
+        git(repo,'add','.',commit=True);git(repo,'commit','-qm','base',commit=True)
+        (repo/'src'/'x.py').write_text('original\nadded line\n')
+        # a second repo holding a diff past the 200 KB cap
+        big=self.home/'big';big.mkdir()
+        git(big,'init','-q')
+        (big/'blob.txt').write_text('a'*300000)
+        git(big,'add','.',commit=True);git(big,'commit','-qm','base',commit=True)
+        (big/'blob.txt').write_text('a'*300000+'b'*300000)
+        # a third repo the goal never touched never appears
+        clean=self.home/'clean';clean.mkdir();git(clean,'init','-q')
+        self.replies(call('finish',dict(summary='done')))
+        gid=self.cmd('once',['--goal','ZDIFF goal.'])['id']
+        store=Store(self.home)
+        try:
+            for aid,call_id,name,args in (('da1','dc1','edit',{'path':'proj/src/x.py'}),
+                                          ('da2','dc2','edit',{'path':'proj/src/x.py'}),
+                                          ('da3','dc3','terminal',{'cwd':'proj'}),
+                                          ('da4','dc4','write',{'path':str(big/'blob.txt')})):
+                store.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
+                                 (aid,gid,call_id,name,json.dumps(args),'done'))
+        finally:store.close()
+        out=self.cmd('diff',[gid])
+        self.assertEqual(out['goal'],gid)
+        self.assertEqual(sorted(r['path'] for r in out['repos']),sorted([str(repo),str(big)]))
+        small=[r for r in out['repos'] if r['path']==str(repo)][0]
+        self.assertIn('src/x.py',small['stat'])
+        self.assertIn('+added line',small['diff'])
+        self.assertFalse(small['truncated'])
+        bigr=[r for r in out['repos'] if r['path']==str(big)][0]
+        self.assertTrue(bigr['truncated'])
+        self.assertLessEqual(len(bigr['diff'].encode()),200*1024)
+        self.assertNotIn(str(clean),json.dumps(out['repos']))  # the untouched repo never appears
+
+        self.assertEqual(self.cmd('diff')['goal'],gid)
+        # a goal with no tool actions lists no repos
+        self.replies(call('finish',dict(summary='done')))
+        other=self.cmd('once',['--goal','ZDIFF untouched.'])['id']
+        self.assertEqual(self.cmd('diff',[other]),dict(goal=other,repos=[]))
+
+    def test_rewind_restores_files_and_cuts_the_transcript(self):
+        from caminus.env.resident.runtime import Runtime as RT
+        afile=self.home/'notes'/'a.txt';afile.parent.mkdir(parents=True,exist_ok=True)
+        afile.write_text('OLD ONE\n')                 # a file that was there before the goal touched it
+        self.replies(call('define_done',dict(check='files in place')),
+                     call('write',dict(path='notes/a.txt',content='NEW ONE\n')),
+                     call('write',dict(path='notes/b.txt',content='NEW TWO\n')),
+                     call('finish',dict(summary='ZREWIND done.')))
+        gid=self.cmd('once',['--goal','ZREWIND goal.'])['id']
+        self.assertEqual(self.cmd('rewind',[gid,'--list'])['steps'],
+                         [dict(step=2,label='write notes/a.txt'),dict(step=3,label='write notes/b.txt')])
+        # rewinding to step 2: what step 3 created disappears, what step 2 did stands
+        out=self.cmd('rewind',[gid,'--to','2'])
+        self.assertEqual(out['goal'],gid);self.assertEqual(out['to'],2)
+        self.assertEqual(out['restored'],[])
+        self.assertEqual(out['removed'],[str(self.home/'notes'/'b.txt')])
+        self.assertIn('terminal side effects are not undone',out['note'])
+        self.assertFalse((self.home/'notes'/'b.txt').exists())
+        self.assertEqual(afile.read_text(),'NEW ONE\n')
+        st={g['id']:g for g in self.cmd('status')['goals']}[gid]
+        self.assertEqual((st['state'],st['steps']),('paused',2))
+        self.assertIn('rewound to step 2',st['error'])
+        self.assertIn('rewound',[e['kind'] for e in self.cmd('events')])
+        store=Store(self.home)
+        try:
+            ms=store.goal(gid)['messages']
+            self.assertEqual([m['role'] for m in ms],
+                             ['user','user','assistant','tool','assistant','tool'])  # [1] is the startup discovery
+            self.assertIn('notes/a.txt',json.loads(ms[4]['tool_calls'][0]['function']['arguments'])['path'])
+            # a file over the cap is recorded but not restorable: the rewind names it as skipped
+            bigp=self.home/'big.bin';bigp.write_bytes(b'x'*(RT.SNAPSHOT_CAP+1))
+            rt=RT(self.home)
+            try:rt._snapshot_file(gid,'write','big.bin')
+            finally:rt.mail.close();rt.store.close()
+            # rewinding to 1: a.txt goes back to what was on disk before the goal
+            out2=self.cmd('rewind',[gid,'--to','1'])
+            self.assertEqual(out2['restored'],[str(afile)])
+            self.assertEqual(out2['skipped'],[str(bigp)])
+            self.assertEqual(afile.read_text(),'OLD ONE\n')
+            listed=self.cmd('rewind',[gid,'--list'])['steps']
+            self.assertIn('skipped',listed[-1]['label'])
+            self.assertTrue(bigp.exists())            # not restorable does not mean deleted
+        finally:store.close()
+        # and the goal carries on from the cut point
+        self.cmd('resume',[gid])
+        self.replies(call('finish',dict(summary='finished after rewind.')))
+        self.cmd('once',['--goal-id',gid])
+        st={g['id']:g for g in self.cmd('status')['goals']}[gid]
+        self.assertEqual(st['state'],'completed')
+
+    def test_answer_grant_auto_approves_the_byte_identical_root_request(self):
+        import contextlib,io
+        from unittest.mock import patch
+        from caminus.cmd import env as cmd_env
+        calls=[]
+        def transport(argv,**kw):
+            calls.append(argv);return subprocess.CompletedProcess(argv,0,'root ran','')
+        def owner(argv,code,json_out=None):
+            cap_out,cap_err=io.StringIO(),io.StringIO()
+            with patch.dict(os.environ,dict(CAMINUS_ENV_BRIDGE=str(self.bridge),
+                                            CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))), \
+                 contextlib.redirect_stdout(cap_out),contextlib.redirect_stderr(cap_err):
+                rc=cmd_env.main(argv,transport=transport)
+            self.assertEqual(rc,code,'OUT '+cap_out.getvalue()+' ERR '+cap_err.getvalue())
+            text=cap_out.getvalue()
+            if json_out:
+                self.assertIn('{',text,'no json: OUT '+text+' ERR '+cap_err.getvalue())
+                return json.loads(text[text.rindex('{'):])
+            return text
+        cmd='printf granted >> proof; id -un'
+        self.replies(call('ask_root',dict(command=cmd,reason='first')),
+                     call('ask_root',dict(command=cmd,reason='again')),
+                     call('ask_root',dict(command='printf granted >> proof2',reason='different command')),
+                     call('finish',dict(summary='Done.')))
+        first=self.cmd('once',['--goal','ZGRANT goal.'],code=21)
+        gid,rid=first['id'],first['pending'][0]['request_id']
+        reviewed=approval.snapshot(self.bridge,rid)
+        res=owner(['answer',rid,'approved','--digest',reviewed['_digest'],'--grant','--json'],0,json_out=True)
+        self.assertEqual(res['grant'],True)                 # the answer JSON gains "grant": true
+        self.cmd('once',['--goal-id',gid],code=21)          # the resident reads it, grants are per goal
+        second=[r for r in human_bridge.pending(str(self.bridge)) if r['goal']==gid]
+        self.assertEqual(second[0]['cmd'],cmd)
+        self.assertTrue(second[0]['granted'],'a byte-identical command in the goal carries the grant')
+        end=io.StringIO()
+        with patch.dict(os.environ,dict(CAMINUS_ENV_BRIDGE=str(self.bridge),
+                                        CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))), \
+             patch('builtins.input',return_value='d'),contextlib.redirect_stdout(end):
+            self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
+        self.assertEqual(approval.response(self.bridge,second[0]['id'])['approved_by'],'grant')
+        sudo=[c for c in calls if c[:3]==['sudo','sh','-c']]
+        self.assertEqual(len(sudo),2,"the granted answer runs it once, the watch's auto-approval runs it again")
+        self.assertEqual(sudo[1][3],cmd)
+        self.cmd('once',['--goal-id',gid],code=21)          # by: grant in the resident's result
+        events=self.cmd('events')
+        self.assertIn('grant_used',[e['kind'] for e in events])
+        # the resident's own result for the granted request carries by: grant
+        store=Store(self.home)
+        try:
+            rows=[json.loads(r) for (r,) in store.db.execute(
+                "SELECT result FROM actions WHERE goal=? AND name='ask_root' AND state='done'",(gid,))]
+        finally:store.close()
+        self.assertEqual([r for r in rows if r.get('by')=='grant'][0]['decision'],'approved')
+        # a command one byte different is not the grant: the watch goes back to asking the human
+        pending=[r for r in human_bridge.pending(str(self.bridge)) if r['goal']==gid]
+        self.assertEqual([r for r in pending if r.get('granted')],[])
+        with patch.dict(os.environ,dict(CAMINUS_ENV_BRIDGE=str(self.bridge),
+                                        CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))), \
+             patch('builtins.input',return_value='d'),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
+        self.cmd('once',['--goal-id',gid])
+        st={g['id']:g for g in self.cmd('status')['goals']}[gid]
+        self.assertEqual(st['state'],'completed')
+        # grants end with the goal
+        store=Store(self.home)
+        try:
+            self.assertFalse(store.has_grant(gid,cmd))
+            self.assertFalse(store.has_grant(gid,'printf granted >> proof2'))
+        finally:store.close()
+        # an agent-written granted flag without an owner approval in the audit is not trusted: watch asks
+        self.bridge.mkdir(exist_ok=True);(self.bridge/'req').mkdir(exist_ok=True);(self.bridge/'res').mkdir(exist_ok=True)
+        (self.bridge/'req'/'forged.json').write_text(json.dumps(
+            dict(id='forged',kind='root',cmd='rm -rf /',user='fixture',ts=0,granted=True,goal=gid)))
+        before=len(calls)
+        with patch.dict(os.environ,dict(CAMINUS_ENV_BRIDGE=str(self.bridge),
+                                        CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))), \
+             patch('builtins.input',return_value='d'),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
+        self.assertEqual(len(calls),before,'nothing executes on the agent\'s word alone')
+
+    def test_setup_provisions_the_leases_folder_and_status_json_reports_it(self):
+        import contextlib,io
+        from unittest.mock import patch
+        from caminus.cmd import env as cmd_env
+        # the printed provisioning commands create the folder: shared group, setgid 2770, idempotent
+        text=cmd_env.PROVISION.format(user='agent',group='caminus-env',you='owner',bridge='/srv/b',
+                                      key='/k',pubkey='PUB',user_home='/home/agent')
+        self.assertIn('sudo mkdir -p /srv/b/leases',text)
+        self.assertIn('sudo chown root:caminus-env /srv/b/leases',text)
+        self.assertIn('sudo chmod 2770 /srv/b/leases',text)
+        # the report: missing, wrong mode, wrong group, and right
+        path=str(self.bridge/'leases')
+        miss=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertFalse(miss['ok']);self.assertIn('mkdir -p '+path,miss['fix'])
+        (self.bridge/'leases').mkdir(parents=True);os.chmod(path,0o770)
+        weak=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertFalse(weak['ok']);self.assertIn('chmod 2770',weak['fix'])
+        os.chmod(path,0o2777)                                        # setgid but world-writable
+        loose=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertFalse(loose['ok']);self.assertIn('chmod 2770',loose['fix'])
+        os.chmod(path,0o2770);os.chown(path,os.getuid(),os.getgid())
+        good=cmd_env.leases_report(path,'caminus-env',os.getgid())
+        self.assertTrue(good['ok'],good);self.assertEqual(good['fix'],'')
+        # caminus env status --json carries the section
+        def transport(argv,**kw):return subprocess.CompletedProcess(argv,0,'','')
+        cap=io.StringIO()
+        with patch.dict(os.environ,dict(CAMINUS_ENV_BRIDGE=str(self.bridge),
+                                        CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))), \
+             patch('caminus.cmd.env.grp.getgrnam',return_value=type('G',(),{'gr_gid':os.getgid()})()), \
+             contextlib.redirect_stdout(cap):
+            cmd_env.main(['status','--json'],transport=transport)
+        data=json.loads(cap.getvalue()[cap.getvalue().index('{'):])
+        self.assertEqual(data['leases']['path'],path)
+        self.assertTrue(data['leases']['ok'])
+        self.assertIn('leases',[c['name'].split(' ')[0] for c in data['checks']])
+        # the lease tool refuses with the same exact fix when the folder is missing
+        from caminus.env.resident import leases
+        class R:pass
+        rt=R();rt.config={'bridge':str(self.home/'no-bridge-here')}
+        with self.assertRaises(ValueError) as erm:
+            leases.take(rt,'goalx',cards=[1],reason='bench')
+        msg=str(erm.exception)
+        self.assertIn('mkdir -p',msg) and self.assertIn('chmod 2770',msg)
+        self.assertIn('sudo',msg)
 
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""

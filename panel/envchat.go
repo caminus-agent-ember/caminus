@@ -1116,11 +1116,18 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// command, a second a within 10 s approves. Any other key disarms. Denying runs nothing and needs one.
 		armed := m.chat.armed
 		m.chat.armed = ""
-		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "d" || k == "e") {
+		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "g" || k == "d" || k == "e") {
 			r := m.reqs[i]
-			if k == "a" && (armed != r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
-				m.chat.armed, m.chat.armedAt = r.ID, time.Now()
-				m.msg = "approve as root: " + terminalText(r.Cmd, false) + " ? press a again (any other key cancels)"
+			// A command you granted for this goal (checked against your own audit, not the agent's word) runs with
+			// one a; anything else, and every grant, takes two presses.
+			granted := k == "a" && grantRecorded(m.auditPath, r, time.Now())
+			if (k == "a" || k == "g") && !granted && (armed != k+":"+r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
+				m.chat.armed, m.chat.armedAt = k+":"+r.ID, time.Now()
+				what := "approve as root: "
+				if k == "g" {
+					what = "approve and grant for this goal (the same command then needs one a): "
+				}
+				m.msg = what + terminalText(r.Cmd, false) + " ? press " + k + " again (any other key cancels)"
 				return m, nil
 			}
 			m.sel = i
@@ -1877,7 +1884,11 @@ func (m envModel) pendingRoot() int {
 // the highlighted one. One request needs no extra card (its card is in the transcript).
 func (m envModel) rootsCard(w int) string {
 	roots := m.pendingRoots()
-	if len(roots) < 2 {
+	anyGranted := false
+	for _, i := range roots {
+		anyGranted = anyGranted || grantRecorded(m.auditPath, m.reqs[i], time.Now())
+	}
+	if len(roots) < 2 && !anyGranted {
 		return ""
 	}
 	cur := m.pendingRoot()
@@ -1886,14 +1897,21 @@ func (m envModel) rootsCard(w int) string {
 	for n, i := range roots {
 		r := m.reqs[i]
 		line := fmt.Sprintf("%d  %s", n+1, residentText(r.Cmd))
+		if grantRecorded(m.auditPath, r, time.Now()) {
+			line += "   granted for this goal: one a runs it"
+		}
 		if i == cur {
 			rows = append(rows, envSel.Render(ansi.Truncate(g.collapsed+" "+line, inner, "…")))
 		} else {
 			rows = append(rows, envDim.Render(ansi.Truncate("  "+line, inner, "…")))
 		}
 	}
-	rows = append(rows, envDim.Render("esc, then [ ] pick  ·  a a approve  ·  e edit  ·  d deny  ·  /deny TEXT what instead"))
+	rows = append(rows, envDim.Render("esc, then [ ] pick  ·  a a approve  ·  g g grant for the goal  ·  e edit  ·  d deny  ·  /deny TEXT what instead"))
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).
 		Width(min(w, 96)).Render(strings.Join(rows, "\n"))
-	return borderTitle(box, fmt.Sprintf("%s %d ROOT REQUESTS WAITING", g.root, len(roots)), envWarn.Bold(true))
+	title := fmt.Sprintf("%s %d ROOT REQUESTS WAITING", g.root, len(roots))
+	if len(roots) == 1 {
+		title = g.root + " ROOT REQUEST WAITING"
+	}
+	return borderTitle(box, title, envWarn.Bold(true))
 }

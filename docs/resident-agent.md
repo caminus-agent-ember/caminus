@@ -30,7 +30,9 @@ caminus env ui
 `install` uploads a stdlib-only, versioned zipapp over the existing SSH transport.
 Goals and commands execute as the agent user. `start` enables an agent-owned
 systemd user service; linger, provisioned by `env setup`, keeps it alive after
-logout. Stopping the resident does not stop its inference server. Terminal workers
+logout. `env setup` also creates the shared leases folder (`<bridge>/leases`,
+setgid 2770) the `lease` tool and the human's GPU windows write. Stopping the
+resident does not stop its inference server. Terminal workers
 survive a resident restart, so long commands can be inspected rather than repeated.
 
 The panel reopens your last conversation directly; the Sessions page is one

@@ -55,6 +55,7 @@ type envReq struct {
 	Choices []string `json:"choices"`
 	Reason  string   `json:"reason"`
 	Ts      float64  `json:"ts"`
+	Granted bool     `json:"granted"` // the resident says this exact command was granted for its goal (checked, not trusted)
 }
 
 func (r envReq) kind() string {
@@ -133,6 +134,8 @@ type jobsMsg []job
 type procsMsg []string
 type serversMsg []server
 type execDoneMsg struct {
+	goal     string
+	granted  bool
 	claim    string
 	id       string
 	decision string
@@ -734,8 +737,12 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case execDoneMsg:
 		err := finishRoot(m.bridge, msg.id, msg.claim, msg.rc, msg.out)
-		_ = appendAudit(m.auditPath, map[string]any{"event": "root_result", "id": msg.id,
-			"decision": msg.decision, "cmd": msg.cmd, "rc": msg.rc})
+		ev := map[string]any{"event": "root_result", "id": msg.id, "decision": msg.decision, "cmd": msg.cmd,
+			"rc": msg.rc, "goal": msg.goal}
+		if msg.granted {
+			ev["granted"] = true // what a later grantRecorded looks for (the Python CLI writes the same)
+		}
+		_ = appendAudit(m.auditPath, ev)
 		m.seen[msg.id] = true
 		m.msg = fmt.Sprintf("%s: exit %d", msg.decision, msg.rc)
 		if err != nil {
@@ -1017,10 +1024,14 @@ func (m envModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 			m.seen[m.reqs[m.sel].ID] = true
 			m.refreshLocal()
 		}
-	case "a":
+	case "a", "g":
+		// g approves and grants this exact command for the rest of its goal (repeat uses then need one a)
 		if m.sel < len(m.reqs) {
 			r := m.reqs[m.sel]
 			if r.kind() == "question" {
+				if k == "g" {
+					return m, nil
+				}
 				m.mode, m.edit = "answer", ""
 				m.editRequest = &r
 				return m, nil
@@ -1030,7 +1041,8 @@ func (m envModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 				m.msg = err.Error()
 				return m, nil
 			}
-			token, err := claimRoot(m.bridge, currentUser(), r, "approved", r.Cmd)
+			grant := k == "g"
+			token, err := claimRootGrant(m.bridge, currentUser(), r, "approved", r.Cmd, grant)
 			if err != nil {
 				os.Remove(tmp)
 				m.msg = err.Error()
@@ -1038,7 +1050,16 @@ func (m envModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.msg = "running under sudo (approve with your password)..."
-			return m, tea.ExecProcess(c, execCallback(r.ID, "approved", r.Cmd, tmp, token))
+			if grant {
+				m.msg = "granted for this goal; running under sudo (approve with your password)..."
+			}
+			done := execCallback(r.ID, "approved", r.Cmd, tmp, token)
+			goal := r.Goal
+			return m, tea.ExecProcess(c, func(err error) tea.Msg {
+				msg := done(err).(execDoneMsg)
+				msg.goal, msg.granted = goal, grant
+				return msg
+			})
 		}
 	case "e":
 		if m.sel < len(m.reqs) && m.reqs[m.sel].kind() == "root" {
@@ -1180,7 +1201,7 @@ func (m envModel) pane() string {
 }
 
 func (m envModel) reqPane() string {
-	lines := []string{envHead.Render("REQUESTS (root: a approve, e edit, d deny, D deny + what instead, s skip · ask: a answer)")}
+	lines := []string{envHead.Render("REQUESTS (root: a approve, g approve + grant for the goal, e edit, d deny, D deny + what instead, s skip · ask: a answer)")}
 	if len(m.reqs) == 0 {
 		lines = append(lines, envDim.Render("  none waiting"))
 	}

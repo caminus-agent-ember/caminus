@@ -34,6 +34,7 @@ import base64
 import getpass
 import json
 import os
+import grp
 import pwd
 from pathlib import Path
 import subprocess
@@ -51,7 +52,8 @@ def _parser():
     p = sub.add_parser('setup', help='print the provisioning commands, then check status')
     p.add_argument('--agent-side', action='store_true', help='also install ask-root into the agent user over SSH')
 
-    sub.add_parser('status', help='check user, key, ssh login, bridge, ask-root')
+    p = sub.add_parser('status', help='check user, key, ssh login, bridge, ask-root, leases')
+    p.add_argument('--json', action='store_true')
 
     p = sub.add_parser('run', help='run a command as the agent user')
     p.add_argument('--shell', '-s', action='store_true', help='CMD is one shell string, not an argv')
@@ -97,6 +99,9 @@ def _parser():
     p = sub.add_parser('answer', help='answer one request: approved | edited TEXT | denied [WHAT TO DO INSTEAD] | answered TEXT')
     p.add_argument('--json', action='store_true')
     p.add_argument('--digest',help='the reviewed _digest from env reqs --json; required for approved/edited root decisions')
+    p.add_argument('--grant', action='store_true',
+                   help='with approved: also grant this exact command for the goal; the same byte-identical '
+                        'command is then approved without asking again (every use audited; grants end with the goal)')
     p.add_argument('id')
     p.add_argument('decision', choices=['approved', 'edited', 'denied', 'answered'])
     p.add_argument('text', nargs='?')
@@ -192,7 +197,7 @@ def main(rest, transport=None):
     if a.sub == 'setup':
         return _setup(a, tr)
     if a.sub == 'status':
-        return _status(tr)
+        return _status(tr,json_mode=a.json)
     if a.sub == 'run':
         return _run(a, tr)
     if a.sub == 'shell':
@@ -311,6 +316,9 @@ sudo usermod -aG {group} {you}
 sudo mkdir -p {bridge}/req {bridge}/res {bridge}/notes
 sudo chown root:{group} {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo chmod 770 {bridge} {bridge}/req {bridge}/res {bridge}/notes
+sudo mkdir -p {bridge}/leases
+sudo chown root:{group} {bridge}/leases
+sudo chmod 2770 {bridge}/leases                      # setgid: lease files stay group-only, never world-writable
 sudo loginctl enable-linger {user}                   # its long-running servers survive logout
 # optional inference runtime: choose explicit sources for this installation before running these commented commands.
 # runtime_source=/absolute/path/to/python-prefix       # contains bin/python and its dependencies
@@ -349,12 +357,41 @@ def _setup(a, tr):
     return _status(tr)
 
 
-def _status(tr):
-    checks = []
+def leases_report(path,group,gid):
+    """The leases folder as the contract reports it: {"path","ok","fix"}; fix carries the exact provisioning
+    commands when it is wrong. Shared with the agent through the bridge group: setgid 2770 keeps every lease
+    file group-only, never world-writable."""
+    import stat as stat_m
+    try:st=os.stat(path)
+    except OSError:
+        return dict(path=path,ok=False,
+                    fix=f'sudo mkdir -p {path} && sudo chown root:{group} {path} && sudo chmod 2770 {path}')
+    mode=stat_m.S_IMODE(st.st_mode)
+    if st.st_gid!=gid:
+        return dict(path=path,ok=False,fix=f'sudo chown root:{group} {path} && sudo chmod 2770 {path}')
+    if (mode & 0o7777)!=0o2770:
+        return dict(path=path,ok=False,fix=f'sudo chown root:{group} {path} && sudo chmod 2770 {path}')
+    return dict(path=path,ok=True,fix='')
 
-    def check(name, ok, detail=''):
-        checks.append((name, ok, detail))
-        print(f"{'PASS' if ok else 'FAIL'} {name}{(': ' + detail) if detail else ''}")
+
+def _leases_status():
+    group=settings.BRIDGE_GROUP
+    path=os.path.join(settings.bridge_dir(),'leases')
+    try:gid=grp.getgrnam(group).gr_gid
+    except KeyError:
+        return dict(path=path,ok=False,
+                    fix=f'sudo groupadd -f {group} && sudo mkdir -p {path} && sudo chown root:{group} {path} '
+                        f'&& sudo chmod 2770 {path}')
+    return leases_report(path,group,gid)
+
+
+def _status(tr,json_mode=False):
+    checks=[]
+
+    def check(name,ok,detail=''):
+        checks.append(dict(name=name,ok=bool(ok),detail=detail))
+        if not json_mode:
+            print(f"{'PASS' if ok else 'FAIL'} {name}{(': ' + detail) if detail else ''}")
 
     try:
         pwd.getpwnam(settings.user())
@@ -369,6 +406,10 @@ def _status(tr):
           '' if os.path.isdir(b) else 'missing (caminus env setup)')
     r = runner.run_shell(f'test -x {settings.agent_bin()}', transport=tr)   # shell: ~ must expand remotely
     check('ask-root installed', r.returncode == 0, 'run: caminus env setup --agent-side' if r.returncode else '')
+    leases = _leases_status()
+    check(f'leases {leases["path"]}', leases['ok'], leases['fix'])
+    if json_mode:
+        print(json.dumps(dict(ok=all(c['ok'] for c in checks),checks=checks,leases=leases)))
     return 0 if all(ok for _, ok, _ in checks) else 1
 
 
@@ -458,9 +499,33 @@ def _ask(a):
     return 0
 
 
-def _root_result(req,decision,cmd,actor,tr):
-    token=bridge.claim(settings.bridge_dir(),req,decision,actor,cmd)
-    audit.log(settings.audit_path(),dict(event='root_claim',id=req['id'],decision=decision,by=actor,cmd=cmd))
+GRANT_SECONDS = 12 * 3600   # a grant's limit on the owner's side, whatever the agent's goal does
+
+
+def _grant_recorded(ap,req,now=None):
+    """The owner's audit shows an approved, granted execution of exactly this command in exactly this goal, less than
+    GRANT_SECONDS ago. The agent's `granted` flag on the request is not trusted on its own; nor is its goal id, which
+    the agent writes: the grants table that ends with the goal lives on the agent's side, so without this limit a
+    finished goal's grant could be reused by filing the same command under its id."""
+    now=time.time() if now is None else now
+    try:
+        with open(ap) as f:
+            for line in f:
+                try:e=json.loads(line)
+                except ValueError:continue
+                if (e.get('event')=='root_result' and e.get('decision')=='approved' and e.get('granted')
+                        and e.get('cmd')==req.get('cmd') and e.get('goal')==req.get('goal')
+                        and now-float(e.get('ts') or 0)<=GRANT_SECONDS):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _root_result(req,decision,cmd,actor,tr,grant=False):
+    token=bridge.claim(settings.bridge_dir(),req,decision,actor,cmd,grant=grant)
+    audit.log(settings.audit_path(),dict(event='root_claim',id=req['id'],decision=decision,by=actor,cmd=cmd,
+                                         **({'granted': True} if grant else {})))
     try:r=bridge.execute_root(cmd,runner=tr)
     except (OSError,ValueError) as e:r=subprocess.CompletedProcess(['sudo','sh','-c',cmd],127,'',str(e))
     bridge.finish(settings.bridge_dir(),req['id'],token,r.returncode,r.stdout or '',r.stderr or '')
@@ -498,6 +563,23 @@ def _watch(a, tr):
                 print('  '+terminal_text(req['cmd']))
                 if req.get('reason'):
                     print('  reason: '+terminal_text(req['reason']))
+                if req.get('granted') and _grant_recorded(ap,req):
+                    # The resident marks a request as carrying the goal's grant (`answer ID approved --grant`
+                    # was used for this exact command in this goal) and the owner's own audit confirms it; the
+                    # agent's flag alone is never trusted. Approve and execute without asking again. The
+                    # resident never runs root; claim, sudo and the audit stay exactly as usual.
+                    print('  granted for this goal; executing without asking again (use audited)')
+                    try:r = _root_result(req,'approved',req['cmd'],'grant',tr)
+                    except (OSError,ValueError) as e:
+                        print('request not executed: '+str(e),file=sys.stderr)
+                        continue
+                    audit.log(ap, {'event': 'grant_used', 'id': req['id'], 'decision': 'approved',
+                                   'by': me, 'cmd': req['cmd'], 'rc': r.returncode, 'goal': req.get('goal')})
+                    sys.stdout.write(r.stdout or '')
+                    sys.stderr.write(r.stderr or '')
+                    continue
+                if req.get('granted'):
+                    print('  the agent marked this granted, but no matching owner approval is in the audit log; asking')
                 choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
                 if choice not in ('a','e','d'):
                     continue
@@ -541,6 +623,9 @@ def _answer_pending(a, tr):
         print(f'caminus env answer: no pending request {a.id} (caminus env reqs)', file=sys.stderr)
         return 2
     req = reqs[a.id]
+    if a.grant and a.decision != 'approved':
+        print('caminus env answer: --grant goes with approved (the exact command as reviewed)', file=sys.stderr)
+        return 2
     if a.decision in ('approved','edited') and not a.digest:
         print('caminus env answer: root approval requires --digest from the request you reviewed (env reqs --json)',file=sys.stderr)
         return 2
@@ -569,12 +654,14 @@ def _answer_pending(a, tr):
         if not cmd:
             print('caminus env answer: no command to run', file=sys.stderr)
             return 2
-        r = _root_result(req,a.decision,cmd,me,tr)
+        r = _root_result(req,a.decision,cmd,me,tr,grant=a.grant)
         audit.log(ap, {'event': 'root_result', 'id': a.id, 'decision': a.decision, 'by': me,
-                       'cmd': cmd, 'rc': r.returncode})
+                       'cmd': cmd, 'rc': r.returncode, 'goal': req.get('goal'),
+                       **({'granted': True} if a.grant else {})})
         sys.stdout.write(r.stdout or '')
         sys.stderr.write(r.stderr or '')
-        res = {'id': a.id, 'decision': a.decision, 'cmd': cmd, 'rc': r.returncode}
+        res = {'id': a.id, 'decision': a.decision, 'cmd': cmd, 'rc': r.returncode,
+               **({'grant': True} if a.grant else {})}
     if a.json:
         print(json.dumps(res))
     return 0

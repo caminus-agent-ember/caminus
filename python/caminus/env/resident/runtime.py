@@ -446,6 +446,11 @@ class Runtime:
                          ts=time.time(), agent=self.config['name'], goal=action['goal'])
             if kind == 'root':
                 value.update(cmd=args['command'], reason=args['reason'])
+                # A grant approves this exact command text for this goal (answer --grant recorded it): the req
+                # carries it, so the owner's watch answers without asking again. It never lets the agent run root;
+                # an owner process claiming and executing is still required, as for any root request.
+                if self.store.has_grant(action['goal'], args['command']):
+                    value['granted'] = True
             else:
                 value.update(text=args['question'], choices=args.get('choices', []))
             parent = req.parent
@@ -460,11 +465,21 @@ class Runtime:
                 return None
             if result.get('id')==rid and result.get('decision')=='withdrawn':
                 self.store.update(action['goal'],state='cancelled')
+                self.store.end_grants(action['goal'])
                 return result
             if result.get('id') != rid or result.get('decision') not in ('approved','edited','denied','answered'):
                 raise ValueError('invalid human response')
             if kind == 'root' and result['decision'] == 'answered':
                 raise ValueError('root requests require a root decision')
+            # A grant rides in the answer the owner wrote (`answer ID approved --grant`): record this exact
+            # command as granted for the goal. A later byte-identical ask_root then needs no re-approval.
+            if kind == 'root' and result['decision'] == 'approved' and result.get('grant'):
+                self.store.add_grant(action['goal'], args['command'])
+            # A granted command still went through the owner's side (watch); mark the result for the agent
+            # and audit the use.
+            if kind == 'root' and result.get('approved_by') == 'grant':
+                result = dict(result, by='grant')
+                self.store.event('grant_used', dict(id=rid, command=args['command']), action['goal'])
             # The answer stays in the goal's transcript; the agent decides what to remember (nothing is written to
             # its memory automatically).
             instead = (result.get('answer') or '').strip() if result['decision'] == 'denied' else ''
@@ -640,6 +655,87 @@ class Runtime:
         self.store.event('rollback', dict(id=cid, label=cp['label'], paths=cp['paths']), gid)
         return dict(id=cid, restored=cp['paths'])
 
+    SNAPSHOT_CAP = 2 * 1024 * 1024     # bytes of a file kept for /rewind; over this the step is recorded, not restorable
+
+    def _snapshot_file(self, gid, name, path):
+        """Before an edit or write runs, keep the bytes the tool is about to replace (file_snapshots)."""
+        abs_path = self._abs_path(path)
+        existed = abs_path.exists() and abs_path.is_file()
+        try:
+            content = abs_path.read_bytes() if existed else b''
+            skipped = len(content) > self.SNAPSHOT_CAP
+        except OSError:
+            content, skipped = b'', True
+        self.store.add_snapshot(gid, self.store.goal(gid)['steps'], str(abs_path),
+                                f'{name} {path}', existed, b'' if skipped else content, skipped)
+
+    def _rewind(self, gid, to):
+        """Put every file changed after step `to` back, delete the ones that did not exist, and cut the
+        transcript to that step. Terminal side effects are not undone: only edit / write are snapshotted."""
+        if to < 0:
+            raise ValueError('step numbers start at 1')
+        g = self.store.goal(gid)
+        # A compaction folds early steps into a summary: the transcript then holds fewer replies than steps, and only
+        # the steps after the summary can be cut to.
+        folded = max(0, g['steps'] - sum(1 for m in g['messages'] if m.get('role') == 'assistant'))
+        if to < folded:
+            raise ValueError(f'steps up to {folded} were compacted into a summary; rewind to step {folded} or later')
+        restored, removed, skipped = [], [], []
+        for s in reversed(self.store.file_snapshots(gid)):
+            if s['step'] <= to:
+                continue
+            path = Path(s['path'])
+            if s['skipped']:
+                if str(path) not in skipped:
+                    skipped.append(str(path))
+                continue
+            if s['existed']:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(self.store.file_snapshot_content(s['id']))
+                if str(path) not in restored:
+                    restored.append(str(path))
+            else:
+                if path.exists():
+                    path.unlink()
+                if str(path) not in removed:
+                    removed.append(str(path))
+        # A path's final state decides which list it is in (created then edited after the step: removed only).
+        final = {}
+        for s_ in self.store.file_snapshots(gid):
+            if s_['step'] > to and not s_['skipped'] and s_['path'] not in final:
+                final[s_['path']] = bool(s_['existed'])
+        restored = [p_ for p_ in restored if final.get(p_)]
+        removed = [p_ for p_ in removed if final.get(p_) is False]
+        with self.store.transaction():
+            g = self.store.goal(gid)
+            cut = len(g['messages'])
+            seen = folded
+            for i, m in enumerate(g['messages']):
+                if m.get('role') == 'assistant':
+                    seen += 1
+                    if seen > to:
+                        cut = i
+                        break
+            # the cut replies' calls must not run after the rewind (a reply with several calls, a waiting request)
+            self.store.db.execute("DELETE FROM actions WHERE goal=? AND state!='done'", (gid,))
+            self.store.update(gid, messages=g['messages'][:cut], steps=to, state='paused', summary='',
+                              error='rewound to step %d (terminal side effects are not undone)' % to)
+        self.store.event('rewound', dict(to=to, restored=restored, removed=removed, skipped=skipped), gid)
+        return dict(restored=restored, removed=removed, skipped=skipped)
+
+    def _apply_rewinds(self):
+        """/rewind: queued like /pause and applied here, between steps, so a tool is never cut off mid-call."""
+        for gid in self.store.pending_requests('rewind'):
+            req = self.store.pending_request(gid, 'rewind')
+            if req is None:
+                continue
+            try:
+                self._rewind(gid, int(json.loads(req['data'])['to']))
+                self.store.settle_request(req['id'], 'done')
+            except Exception as e:
+                self.store.settle_request(req['id'], 'failed', str(e))
+                self.store.event('rewind_failed', dict(error=str(e)), gid)
+
     def _verify(self, gid, evidence):
         evidence = (evidence or '').strip()
         if not evidence:
@@ -657,6 +753,7 @@ class Runtime:
                 self.store.event('completion_deferred',dict(reason='human steering is waiting'),gid)
                 return
             self.store.update(gid,state='completed',summary=summary)
+            self.store.end_grants(gid)      # grants end with the goal
             if goal.get('kind','work') in FREE_KINDS:
                 self.free.ended(gid, summary)
             # The finish report says what was done, what was verified and what is still open: the check it
@@ -751,8 +848,10 @@ class Runtime:
                 elif name == 'read':
                     result = files.read(self.home, args['path'], args.get('offset'), args.get('limit'))
                 elif name == 'edit':
+                    self._snapshot_file(action['goal'], name, args['path'])
                     result = files.edit(self.home, args['path'], args['old'], args['new'], bool(args.get('replace_all')))
                 elif name == 'write':
+                    self._snapshot_file(action['goal'], name, args['path'])
                     result = files.write(self.home, args['path'], args['content'])
                 elif name == 'lease':
                     result = leases.tool(self, action['goal'], args['action'], args.get('cards'), args.get('ram_gib', 0),
@@ -1565,6 +1664,7 @@ class Runtime:
             if not target and self._maybe_update():
                 return None                   # systemd restarts the daemon on the new runtime
             self._apply_pauses()
+            self._apply_rewinds()
             if self._emergency_stop():
                 if time.time()-last_heartbeat>=5:
                     atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='stopped',runtime=RUNTIME))
