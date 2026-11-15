@@ -16,24 +16,28 @@ import (
 )
 
 type residentGoal struct {
-	ID      string `json:"id"`
-	Prompt  string `json:"prompt"`
-	State   string `json:"state"`
-	Summary string `json:"summary"`
-	Error   string `json:"error"`
-	Steps   int    `json:"steps"`
+	ID       string `json:"id"`
+	Prompt   string `json:"prompt"`
+	State    string `json:"state"`
+	Summary  string `json:"summary"`
+	Error    string `json:"error"`
+	Steps    int    `json:"steps"`
+	Plan     int    `json:"plan"`      // 0 a plain goal, 1 in plan mode, 2 its plan approved
+	PlanText string `json:"plan_text"` // the plan it proposed (state waiting_plan)
 }
 type residentStatus struct {
-	Name             string         `json:"name"`
-	Model            string         `json:"model"`
-	Context          int            `json:"context"`
-	ContextUsed      int            `json:"context_used"` // measured at the last turn boundary; 0 means never measured
-	TokPerS          float64        `json:"tok_per_s"`    // measured decode speed of the last streamed reply; 0 means none reported
-	CompactThreshold float64        `json:"compact_threshold"`
-	CompactTarget    float64        `json:"compact_target_ratio"`
-	DaemonAlive      bool           `json:"daemon_alive"`
-	Goals            []residentGoal `json:"goals"`
-	LastEvent        int            `json:"last_event"`
+	Name             string             `json:"name"`
+	Model            string             `json:"model"`
+	Context          int                `json:"context"`
+	ContextUsed      int                `json:"context_used"` // measured at the last turn boundary; 0 means never measured
+	TokPerS          float64            `json:"tok_per_s"`    // measured decode speed of the last streamed reply; 0 means none reported
+	CompactThreshold float64            `json:"compact_threshold"`
+	CompactTarget    float64            `json:"compact_target_ratio"`
+	SpendToday       float64            `json:"spend_today"` // every priced turn today, across goals
+	SpendGoals       map[string]float64 `json:"spend_goals"` // per goal
+	DaemonAlive      bool               `json:"daemon_alive"`
+	Goals            []residentGoal     `json:"goals"`
+	LastEvent        int                `json:"last_event"`
 }
 type residentEvent struct {
 	Seq  int            `json:"seq"`

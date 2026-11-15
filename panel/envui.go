@@ -79,6 +79,7 @@ var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "a
 var envNavigation = []int{7, 5, 8, 3, 4}
 
 type envModel struct {
+	notes          notifier // desktop notifications already shown (notify.go)
 	user           string
 	bridge         string
 	auditPath      string
@@ -266,6 +267,8 @@ func sshRefresh(m envModel) []tea.Cmd {
 		return []tea.Cmd{sshRun(m, "procs", procsScript(m.user))}
 	case 4:
 		return []tea.Cmd{sshRun(m, "servers", serversScript())}
+	case 9:
+		return []tea.Cmd{sshRun(m, "jobs", jobsScript()), sshRun(m, "procs", procsScript(m.user))}
 	}
 	return nil
 }
@@ -585,6 +588,41 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	case modelsLoadedMsg:
 		return m.modelsLoaded(msg), nil
+	case editorDoneMsg:
+		if msg.err != "" {
+			m.msg = msg.err
+		} else {
+			m.chat.compose.SetValue(msg.text)
+			m.msg = "draft back from the editor"
+		}
+		return m, m.chat.compose.Focus()
+	case bangDoneMsg:
+		return m.bangDone(msg), m.chat.compose.Focus()
+	case textViewMsg:
+		if msg.err != "" {
+			m.msg = msg.err
+			return m, nil
+		}
+		m.chat.view = textView{open: true, title: msg.title, lines: msg.lines, colourDiff: msg.diff}
+		m.msg = ""
+		return m, nil
+	case rewindListMsg:
+		if msg.goal == m.chat.rewind.goal {
+			m.chat.rewind.steps, m.chat.rewind.err = msg.steps, msg.err
+			m.chat.rewind.sel = max(0, len(msg.steps)-1)
+		}
+		return m, nil
+	case unsendMsg:
+		switch {
+		case msg.err != "":
+			m.msg = "pull back: " + msg.err
+		case msg.text == nil:
+			m.msg = "nothing to pull back: the agent has read your messages"
+		default:
+			m.chat.compose.SetValue(*msg.text)
+			m.msg = "pulled back: edit it and Enter to send again"
+		}
+		return m, nil
 	case recapMsg:
 		return m.receiveRecap(msg), nil
 	case studioMsg:
@@ -706,6 +744,7 @@ func (m *envModel) refreshLocal() {
 			}
 		}
 		m.reqs = vis
+		m.notifyRequests()
 	}
 	if m.sel >= len(m.reqs) {
 		m.sel = max(0, len(m.reqs)-1)
@@ -1073,6 +1112,10 @@ func (m envModel) pane() string {
 		return m.sessionsPane()
 	case 8:
 		return m.residentSettingsPane()
+	case 9:
+		return m.jobsPane() + "\n\n" + envHead.Render("PROCESSES") + "\n" + strings.Join(m.procs, "\n")
+	case 10:
+		return m.contextPane()
 	default:
 		return m.auditPane()
 	}

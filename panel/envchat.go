@@ -50,6 +50,12 @@ type residentChat struct {
 	models                                  modelsState // the Models overlay (/model)
 	studio                                  studioState // the Studio overlay (/studio)
 	recap                                   string      // the "while you were away" card, until Esc
+	chordAt                                 time.Time   // Ctrl+X pressed: Ctrl+E within 2 s opens $EDITOR
+	histQuery                               string      // Ctrl+R: the draft it searches for
+	histIdx                                 int         // Ctrl+R: how far back it is
+	full                                    bool        // Ctrl+O: cards show every line
+	view                                    textView    // /btw's answer, /diff
+	rewind                                  rewindState // the /rewind step picker
 	recapNow                                float64     // when the recap was taken: saved as seen on dismiss
 	recapAsked                              int         // recapNotAsked, recapAtOpen or recapOnDemand
 	page, pageTop                           int         // an old page shown as an overlay (-1: none), and its scroll
@@ -214,6 +220,7 @@ func (m *envModel) receiveResident(msg residentMsg) {
 	if msg.status.LastEvent >= m.resident.LastEvent {
 		m.resident = msg.status
 	}
+	defer m.notifyResident(msg.events)
 	for _, e := range msg.events {
 		if e.Seq > m.chat.seq {
 			if len(m.residentEvents) >= maxResidentEvents {
@@ -448,8 +455,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	}
 	lines := func(s string, limit int) []string {
 		all := strings.Split(strings.TrimRight(strings.ReplaceAll(residentText(s), "\r\n", "\n"), "\n"), "\n")
+		if c.full {
+			limit = max(limit, 5000) // Ctrl+O: the whole output, bounded so one card cannot stall the screen
+		}
 		if len(all) > limit {
-			all = append([]string{fmt.Sprintf("… %d earlier lines", len(all)-limit)}, all[len(all)-limit:]...)
+			all = append([]string{fmt.Sprintf("… %d earlier lines (Ctrl+O shows all)", len(all)-limit)}, all[len(all)-limit:]...)
 		}
 		return all
 	}
@@ -881,6 +891,14 @@ func (m envModel) renderChat() string {
 		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
 		return head + "\n" + m.studioOverlay(w, h) + "\n" + foot
 	}
+	if m.chat.view.open {
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.textOverlay(w, h) + "\n" + foot
+	}
+	if m.chat.rewind.open {
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.rewindOverlay(w, h) + "\n" + foot
+	}
 	if m.chat.page >= 0 {
 		// a typed prompt opened from the page (a new note) sits under the overlay
 		prompt := m.promptBox(max(18, w-2))
@@ -895,6 +913,9 @@ func (m envModel) renderChat() string {
 		body = append(body, live)
 	}
 	if card := m.recapCard(w); card != "" {
+		body = append(body, card)
+	}
+	if card := m.planCard(w); card != "" {
 		body = append(body, card)
 	}
 	return strings.Join(append(body, m.chatBottom(), foot), "\n")
@@ -917,7 +938,8 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.studio.open {
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.studio.open &&
+		!m.chat.view.open && !m.chat.rewind.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
 	}
@@ -938,6 +960,12 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.chat.studio.open {
 		return m.studioKey(msg)
 	}
+	if m.chat.view.open {
+		return m.textKey(msg)
+	}
+	if m.chat.rewind.open {
+		return m.rewindKey(msg)
+	}
 	if msg.String() == "esc" && m.chat.recap != "" && strings.TrimSpace(m.chat.compose.Value()) == "" {
 		return m.dismissRecap(), nil
 	}
@@ -954,6 +982,9 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if next, cmd, ok := m.composerKey(msg); ok {
+		return next, cmd
+	}
 	k := msg.String()
 	switch k {
 	case "ctrl+c":
@@ -1020,8 +1051,20 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.scrollLive(3)
 		return m, nil
 	case "esc":
+		if m.chat.live.active {
+			// Esc while a reply is being written interrupts that turn only; the next message steers.
+			if goal := m.targetGoal(); goal != "" {
+				m.msg = "interrupting the turn…"
+				return m, interruptTurn(m, goal)
+			}
+		}
 		m.chat.compose.Blur()
 		return m, nil
+	case "up":
+		if strings.TrimSpace(m.chat.compose.Value()) == "" && !m.chat.newGoal && m.chat.target != "" {
+			// ↑ on an empty composer pulls back your newest message the agent has not read yet
+			return m, unsendLast(m, m.chat.target)
+		}
 	case "ctrl+n":
 		if !m.chat.sending {
 			m.chat.newGoal = true
@@ -1103,6 +1146,10 @@ func (m envModel) submitCompose() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "/") {
 		return m.chatSlash(trimmed)
 	}
+	if strings.HasPrefix(trimmed, "!") && len(trimmed) > 1 {
+		m.msg = "running in the agent's account…"
+		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
+	}
 	return m.sendCompose(text)
 }
 
@@ -1114,6 +1161,9 @@ func (m envModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true
 	return m, func() tea.Msg {
+		if strings.Contains(text, "@") {
+			text = expandAttachments(m, text) // @path: the file, read as the agent, goes with the message
+		}
 		out, err := residentCommand(m, args, text).CombinedOutput()
 		if err != nil {
 			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
@@ -1174,7 +1224,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
 		m.chat.armed = ""
 		m.chat.compose.Blur()
-	case "/memory", "/context", "/audit", "/settings":
+	case "/memory", "/context", "/audit", "/settings", "/jobs", "/servers", "/agents":
 		clear()
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
@@ -1201,6 +1251,15 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
 		m.chat.compose.Blur()
 	case "/goal":
+		if plan, ok := strings.CutPrefix(arg, "--plan"); ok {
+			if strings.TrimSpace(plan) == "" {
+				m.msg = "usage: /goal --plan TEXT — it explores and proposes a plan before it changes anything"
+				return m, nil
+			}
+			clear()
+			m.chat.newGoal, m.chat.target = true, ""
+			return m.sendPlanGoal(strings.TrimSpace(plan))
+		}
 		var found []int
 		for i, g := range m.resident.Goals {
 			if arg != "" && strings.HasPrefix(g.ID, arg) {
@@ -1271,6 +1330,10 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		m.msg = "emergency stop…"
 		return m, emergencyStop(m, strings.TrimSpace(arg))
+	case "/btw", "/diff", "/export", "/rewind", "/plan":
+		clear()
+		next, cmd, _ := m.steerSlash(command, arg)
+		return next, cmd
 	case "/update":
 		clear()
 		m.msg = "uploading the runtime…"
@@ -1359,6 +1422,15 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		return m, residentAction(m, []string{"resume", m.agentName, g.ID, "--json"}, "")
 	default:
+		if path, ok := customCommands()[command]; ok {
+			body, err := expandCustom(path, arg)
+			if err != nil {
+				m.msg = "custom command: " + err.Error()
+				return m, nil
+			}
+			clear()
+			return m.sendCompose(body)
+		}
 		m.msg = "Unknown command. /help lists commands; //text sends a message; your draft is retained."
 	}
 	m.syncChat()
@@ -1398,6 +1470,14 @@ var slashCommands = []struct{ name, hint string }{
 	{"/context", "what the agent's context holds"},
 	{"/audit", "the audit log"},
 	{"/settings", "this session's settings"},
+	{"/jobs", "the agent's jobs and processes"},
+	{"/btw", "a side question with no tools; the goal keeps nothing"},
+	{"/diff", "what this goal changed in its git repositories"},
+	{"/export", "this goal as markdown in the agent's ~/exports"},
+	{"/rewind", "back to an earlier step, files included"},
+	{"/plan", "approve or revise a waiting plan (/goal --plan TEXT starts one)"},
+	{"/servers", "the model servers and their windows"},
+	{"/agents", "every resident on this machine (advanced)"},
 	{"/recap", "while you were away: free time since your last goal"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
 }
@@ -1416,6 +1496,11 @@ func slashMatches(draft string) []string {
 	for _, c := range slashCommands {
 		if strings.HasPrefix(c.name, draft) {
 			out = append(out, c.name)
+		}
+	}
+	for _, n := range customNames() {
+		if strings.HasPrefix(n, draft) {
+			out = append(out, n)
 		}
 	}
 	return out
@@ -1681,9 +1766,14 @@ func (m envModel) chatFoot(w int) string {
 	if len(m.reqs) > 0 {
 		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
 	}
+	// Spend shows once anything has been priced (a paid brain); a local brain's turns cost nothing and hide it.
+	usd := -1.0
+	if m.resident.SpendToday > 0 || len(m.resident.SpendGoals) > 0 {
+		usd = m.resident.SpendGoals[m.chat.target]
+	}
 	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
-		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: -1, tps: m.resident.TokPerS,
-		queue: queued, keys: keys}, w)
+		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
+		tps: m.resident.TokPerS, queue: queued, keys: keys}, w)
 	status := []string{}
 	if !m.sshOK {
 		status = append(status, envWarn.Render("SSH …"))

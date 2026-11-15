@@ -327,13 +327,13 @@ func sortedCopy(in []string) []string {
 }
 
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
-	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/session /sessions /settings]" {
+	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/servers /session /sessions /settings]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/session /sessions /settings /start /steer /stop /studio]" {
+	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/servers /session /sessions /settings /start /steer /stop /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -342,7 +342,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /recap /studio /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -1352,5 +1352,151 @@ func TestRecapCardAndStudioOverlay(t *testing.T) {
 	m = next.(envModel)
 	if cmd == nil || m.chat.studio.reading != "/h/studio/for-you/sketch.svg" {
 		t.Fatal("Enter reads the selected entry")
+	}
+}
+
+func TestStatusLineShowsSpendOnAPaidBrain(t *testing.T) {
+	m := chatFixture(t)
+	if strings.Contains(ansi.Strip(m.renderChat()), "today") {
+		t.Fatal("a local brain shows no spend")
+	}
+	m.resident.SpendToday = 1.25
+	m.resident.SpendGoals = map[string]float64{m.chat.target: 0.4}
+	view := ansi.Strip(m.renderChat())
+	if !strings.Contains(view, "0.40 · 1.25 today") {
+		t.Fatalf("the goal's spend and today's are in the status line:\n%s", view)
+	}
+}
+
+func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
+	var got []string
+	old := notifyRun
+	notifyRun = func(u, title, body string) { got = append(got, u+"|"+title+"|"+body) }
+	defer func() { notifyRun = old }()
+	m := chatFixture(t)
+	m.reqs = []envReq{{ID: "old", Kind: "question", Text: "already pending"}}
+	m.notifyRequests()
+	if len(got) != 0 {
+		t.Fatalf("what is pending at start is not announced: %v", got)
+	}
+	m.reqs = append(m.reqs, envReq{ID: "new", Cmd: "apt-get install jq"})
+	m.notifyRequests()
+	m.notifyRequests()
+	if len(got) != 1 || !strings.Contains(got[0], "critical|Caminus: root approval needed|apt-get install jq") {
+		t.Fatalf("one notification for the new root request: %v", got)
+	}
+	m.notifyResident(nil) // first pass: silent
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "g2", State: "completed", Summary: "Report written."})
+	m.notifyResident([]residentEvent{{Seq: 99, Kind: "report", Data: map[string]any{"level": "need_you", "text": "the disk is full"}}})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "needs you|the disk is full") || !strings.Contains(joined, "goal done|Report written.") {
+		t.Fatalf("need_you and a finished goal are announced: %v", got)
+	}
+}
+
+func TestComposerExtras(t *testing.T) {
+	m := chatFixture(t)
+	// Ctrl+R: earlier prompts containing the draft, newest first
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 900, Kind: "goal_queued", Data: map[string]any{"prompt": "fix the parser tests"}},
+		residentEvent{Seq: 901, Kind: "user_message", Data: map[string]any{"text": "also run the parser benchmark"}})
+	m.chat.compose.SetValue("parser")
+	next, _, ok := m.composerKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if !ok || next.chat.compose.Value() != "also run the parser benchmark" {
+		t.Fatalf("Ctrl+R gives the newest matching prompt: %q", next.chat.compose.Value())
+	}
+	next, _, _ = next.composerKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if next.chat.compose.Value() != "fix the parser tests" {
+		t.Fatalf("a second Ctrl+R goes further back: %q", next.chat.compose.Value())
+	}
+	// Ctrl+X Ctrl+E opens the editor (here: true, which returns at once)
+	t.Setenv("VISUAL", "true")
+	n2, _, _ := m.composerKey(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	if _, cmd, ok := n2.composerKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}); !ok || cmd == nil {
+		t.Fatal("Ctrl+X then Ctrl+E opens the editor")
+	}
+	if _, _, ok := m.composerKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}); ok {
+		t.Fatal("Ctrl+E alone still folds the cards (not the editor)")
+	}
+	// !cmd: the output lands in the draft, fenced
+	m = m.bangDone(bangDoneMsg{cmd: "df -h ~", output: "/dev/x 100G 40G"})
+	if v := m.chat.compose.Value(); !strings.Contains(v, "```\n$ df -h ~\n/dev/x 100G 40G\n```") {
+		t.Fatalf("the command and its output are in the draft: %q", v)
+	}
+	// Ctrl+O: every line of the open cards
+	next, _, _ = m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if !next.chat.full {
+		t.Fatal("Ctrl+O shows every line")
+	}
+	// custom commands: a markdown file, $ARGUMENTS replaced, offered by autocomplete
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	_ = os.MkdirAll(filepath.Join(dir, "caminus", "commands"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "caminus", "commands", "review.md"), []byte("---\ndescription: review\n---\nReview $ARGUMENTS for bugs."), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "caminus", "commands", "goals.md"), []byte("shadowing a built-in is ignored"), 0o644)
+	if got := customNames(); fmt.Sprint(got) != "[/review]" {
+		t.Fatalf("custom commands: %v", got)
+	}
+	if got := slashMatches("/rev"); fmt.Sprint(got) != "[/review]" {
+		t.Fatalf("autocomplete offers the custom command: %v", got)
+	}
+	if body, _ := expandCustom(customCommands()["/review"], "panel/shell.go"); body != "Review panel/shell.go for bugs." {
+		t.Fatalf("expanded: %q", body)
+	}
+}
+
+func TestSteeringViews(t *testing.T) {
+	m := chatFixture(t)
+	// /diff opens a coloured view
+	m.chat.view = textView{open: true, title: "DIFF", colourDiff: true, lines: []string{"### /work/repo", "+added line", "-removed line", "@@ -1 +1 @@"}}
+	view := ansi.Strip(m.renderChat())
+	for _, want := range []string{"DIFF", "+added line", "-removed line"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("diff view misses %q:\n%s", want, view)
+		}
+	}
+	next, _ := m.textKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(envModel)
+	if m.chat.view.open {
+		t.Fatal("Esc closes the view")
+	}
+	// /rewind takes two presses
+	m.chat.rewind = rewindState{open: true, goal: "goal1234abcd", steps: []rewindStep{{Step: 2, Label: "edit a.py"}, {Step: 5, Label: "write b.py"}}, sel: 1}
+	if v := ansi.Strip(m.renderChat()); !strings.Contains(v, "step   5  write b.py") || !strings.Contains(v, "side effects are not undone") {
+		t.Fatalf("rewind picker:\n%s", v)
+	}
+	next, cmd := m.rewindKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(envModel)
+	if cmd != nil || !strings.Contains(m.msg, "press Enter again") {
+		t.Fatalf("the first Enter only arms it: %q", m.msg)
+	}
+	next, cmd = m.rewindKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil || next.(envModel).chat.rewind.open {
+		t.Fatal("the second Enter rewinds and closes")
+	}
+	// a waiting plan is a card above the composer
+	m = chatFixture(t)
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "plan5678abcd", State: "waiting_plan", PlanText: "1. read the parser\n2. add the tests"})
+	if v := ansi.Strip(m.renderChat()); !strings.Contains(v, "PLAN · goal") || !strings.Contains(v, "2. add the tests") || !strings.Contains(v, "/plan approve") {
+		t.Fatalf("plan card:\n%s", v)
+	}
+	if _, cmd, ok := m.steerSlash("/plan", "approve"); !ok || cmd == nil {
+		t.Fatal("/plan approve decides the waiting plan")
+	}
+	// ↑ on an empty composer pulls back; Esc while a reply streams interrupts
+	m.chat.compose.SetValue("")
+	m.chat.newGoal = false
+	m.chat.target = "plan5678abcd"
+	if _, cmd := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyUp}); cmd == nil {
+		t.Fatal("↑ on an empty composer asks to pull back the last message")
+	}
+	text := "edited again"
+	next, _ = m.Update(unsendMsg{text: &text})
+	if next.(envModel).chat.compose.Value() != "edited again" {
+		t.Fatal("the pulled-back message is in the composer")
+	}
+	m.chat.live.active = true
+	if _, cmd := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyEscape}); cmd == nil {
+		t.Fatal("Esc while a reply is written interrupts the turn")
 	}
 }
