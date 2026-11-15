@@ -1894,6 +1894,37 @@ for line in sys.stdin:
             self.assertTrue(any(e['kind']=='summary_cut' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
+    def test_compaction_trims_old_tool_outputs_first_without_a_model_call(self):
+        calls=[]
+        class BoundedModel:
+            remote=False
+            def context_size(self):return 200000
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                calls.append(1);return dict(role='assistant',content='summary of the work')
+        rt=Runtime(self.home,model=BoundedModel())
+        try:
+            gid=rt.store.enqueue('Read many logs.')
+            history=list(rt.store.goal(gid)['messages'])
+            for i in range(12):
+                msg=call('terminal',dict(command=f'cat log{i}'))
+                history+=[msg,dict(role='tool',tool_call_id=msg['tool_calls'][0]['id'],content=f'log {i} '+'x'*60000)]
+            history+=[dict(role='assistant',content=f'note {i}') for i in range(8)]   # the newest messages stay whole
+            out,done=rt._compact(gid,history)
+            self.assertTrue(done);self.assertEqual(calls,[],'old tool outputs alone made room: no summary, no model call')
+            stubs=[m for m in out if m.get('role')=='tool' and m['content'].startswith('[trimmed at compaction')]
+            self.assertEqual(len(stubs),12,'every tool output outside the newest 8 messages is a stub')
+            path=stubs[0]['content'].split(' saved to ')[1].split(';')[0]
+            self.assertTrue(Path(path).read_text().startswith('log 0 '),'the full output is kept in a file the stub names')
+            self.assertEqual(len(out),len(history),'nothing is dropped or reordered: tool calls keep their results')
+            ev=next(e for e in rt.store.events() if e['kind']=='compacted')['data']
+            self.assertEqual((ev['tier'],ev['trimmed']),('trim',12))
+            # history that is mostly the agent's own text still needs the summary
+            talk=list(rt.store.goal(gid)['messages'])+[dict(role='assistant',content='thinking '*9000) for _ in range(12)]
+            out,done=rt._compact(gid,talk)
+            self.assertTrue(done);self.assertTrue(calls,'no tool outputs to trim: the summary runs')
+        finally:rt.mail.close();rt.store.close()
+
     def test_compaction_counts_the_trailing_context_message(self):
         with self.hermetic_home():
             self._test_compaction_counts_the_trailing_context_message()

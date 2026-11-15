@@ -36,6 +36,7 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
+COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
 RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
 # target_ratio 0.20 of the threshold: on a 1M window it compacts at ~400K and keeps the newest ~80K).
@@ -815,6 +816,21 @@ class Runtime:
         if not force and before_tokens < trigger_tokens and before_tokens + reserve < size:
             self.context_note(gid, before_tokens, size)
             return messages, False
+        if not force and len(messages) > 2:
+            # Tier one, no model call: old tool outputs become one-line stubs pointing at files. When that alone brings
+            # the request to the target, no summary is made: nothing is paraphrased and nothing is paid for. Otherwise
+            # the summary below works from the trimmed history (large recent outputs still go into it).
+            trimmed, count, removed = outputs.trim(self.home, messages, COMPACT_KEEP, gid[:8])
+            if count:
+                after = self.model.tokens([system, *trimmed, *tail], self.tools)
+                if after <= target_tokens and after + reserve < size:
+                    self.store.update(gid, messages=trimmed)
+                    self.store.event('compacted', dict(tier='trim', trimmed=count, chars=removed, before=len(messages),
+                                     after=len(trimmed), before_tokens=before_tokens, after_tokens=after,
+                                     trigger_tokens=trigger_tokens, target_tokens=target_tokens), gid)
+                    self.context_note(gid, after, size)
+                    return trimmed, True
+                messages = trimmed
         if len(messages) < 2:
             raise ModelContextError('goal/context exceeds the model window; send a smaller goal or shorten MEMORY.md')
         if force:
@@ -828,7 +844,7 @@ class Runtime:
             while start < len(messages) and messages[start]['role'] == 'tool':
                 start += 1
         else:
-            start = max(1, len(messages) - 8)
+            start = max(1, len(messages) - COMPACT_KEEP)
             while start > 1 and messages[start]['role'] == 'tool':
                 start -= 1
             if start == 1:
