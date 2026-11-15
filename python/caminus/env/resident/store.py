@@ -111,22 +111,23 @@ class Store:
         return [dict(seq=r['seq'], ts=r['ts'], goal=r['goal'], kind=r['kind'], data=json.loads(r['data']))
                 for r in self.db.execute('SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT ?', (after, limit))]
 
-    def enqueue(self, prompt, max_steps=None, max_seconds=None):
+    def enqueue(self, prompt, max_steps=None, max_seconds=None, kind='work'):
         if not prompt.strip():
             raise ValueError('goal must not be empty')
         if max_steps is not None and max_steps < 1 or max_seconds is not None and max_seconds <= 0:
             raise ValueError('test budgets must be positive')
         with self.transaction():
-            gid = self._enqueue(prompt, max_steps, max_seconds)
+            gid = self._enqueue(prompt, max_steps, max_seconds, kind)
         return gid
 
-    def _enqueue(self, prompt, max_steps=None, max_seconds=None):
+    def _enqueue(self, prompt, max_steps=None, max_seconds=None, kind='work'):
         """Caller owns the transaction, including any delivery checkpoint."""
         gid, now = uuid.uuid4().hex, time.time()
-        self.db.execute('INSERT INTO goals(id,prompt,state,messages,step_limit,deadline,created,updated) VALUES(?,?,?,?,?,?,?,?)',
+        # kind: 'work' is a goal from the human; 'free' and 'dream' are the resident's own time (freetime.py).
+        self.db.execute('INSERT INTO goals(id,prompt,state,messages,step_limit,deadline,created,updated,kind) VALUES(?,?,?,?,?,?,?,?,?)',
             (gid, prompt, 'queued', json.dumps([dict(role='user', content=prompt)]), max_steps,
-             now + max_seconds if max_seconds else None, now, now))
-        self.event('goal_queued', dict(prompt=prompt), gid)
+             now + max_seconds if max_seconds else None, now, now, kind))
+        self.event('goal_queued', dict(prompt=prompt, kind=kind) if kind != 'work' else dict(prompt=prompt), gid)
         return gid
 
     def goal(self, gid):
@@ -142,7 +143,8 @@ class Store:
         table untouched, so the loop's own state has to be added explicitly."""
         have = {r['name'] for r in self.db.execute('PRAGMA table_info(goals)')}
         for name, decl in (('done_check','TEXT'), ('steer_seq','INTEGER NOT NULL DEFAULT 0'),
-                           ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT')):
+                           ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT'),
+                           ('kind',"TEXT NOT NULL DEFAULT 'work'")):
             if name not in have:
                 self.db.execute('ALTER TABLE goals ADD COLUMN ' + name + ' ' + decl)
         for table, name, decl in (('inbox','kind',"TEXT NOT NULL DEFAULT 'nudge'"),

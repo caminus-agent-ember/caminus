@@ -1,0 +1,266 @@
+"""Free time: the resident's own hours.
+
+When its human has no work queued, the resident is not idle: it lives in its account. Each stretch of free time
+opens with an invitation instead of a task (research what it is curious about, write, make something, tinker, or
+rest), keeps a journal and a studio in its home, and ends when it says so. At night one stretch is a dream pass
+that consolidates its notes. A goal from its human always wins: it ends the running stretch at once, and the next
+stretch picks up from the journal.
+
+Free time costs nothing on a local model. On a remote provider every turn is priced against a separate daily
+allowance (config free_time.budget_usd), so free time never spends the work budget; a provider whose price is not
+known is not used for free time at all.
+
+Configuration, in config.json under "free_time" (all optional):
+    enabled            false     the `heartbeat on` command sets it
+    rest_seconds       1800      rest between two stretches
+    stretch_steps      40        model steps one stretch may take
+    stretch_seconds    1800      wall time one stretch may take
+    budget_usd         0.50      daily allowance on a priced remote model
+    afk_seconds        600       a question waits this long for an answer, then the stretch carries on
+    messages_per_day   3         questions free time may put to its human in a day
+    dream_hour         3         local hour from which the night's dream pass may run (for three hours)
+    context_tokens     60000     a stretch's own context window (compaction runs inside it)
+
+Free time must not cost its human the conversation they come back to. On the local server a request unrelated to
+the main conversation that fits the prompt cache's side slot (98K positions on the Coder) runs there and never
+displaces the main slot; a displaced conversation is unparked from the disk tier, not re-read. A stretch therefore
+keeps its own context under context_tokens, so with its reply it stays inside the side slot. When the human is back,
+recap() is the "while you were away" summary, built from each stretch's own closing line (no model call); a UI
+appends it after the restored conversation, never before it, so the cached prefix stays valid.
+"""
+import datetime
+import json
+import time
+
+from .model import price
+from .store import atomic_json
+
+DEFAULTS = dict(enabled=False, rest_seconds=1800, stretch_steps=40, stretch_seconds=1800, budget_usd=0.50,
+                afk_seconds=600, messages_per_day=3, dream_hour=3, context_tokens=60000)
+KINDS = ('free', 'dream')
+
+INVITATION = '''Free time. Nobody needs anything from you right now; this time is yours.
+
+Settle in first: see what changed on this machine since you last looked, and read your journal ({journal}) and your notes. Then follow whatever interests you. Research something you are curious about, write, make something in your studio ({studio}), tinker with an idea, learn a tool, or simply rest. There is no task and nobody is grading this.
+
+House rules for free time:
+- Stay inside your own account. No root requests, no GPU work, and nothing that touches your human's files, servers or other residents.
+- Read the web freely, but post, send or publish nothing off this machine.
+- Leave nothing running when you stop.
+- If you make something your human might enjoy, put it in {for_you} with a short note. You may ask your human something with ask_user (at most {messages} times a day); if nobody answers within {afk} minutes, carry on and note the question in your journal.
+
+Before you stop, add a dated entry to {journal}: what you did, what you noticed, what you want to pick up next time. To stop, call finish with one line about the stretch, or simply reply in plain text to rest.{resume}'''
+
+DREAM = '''Night: a dream pass. Nothing is asked of you tonight except to consolidate.
+
+Read your journal entries since the last dream ({journal}) and your notes. Merge what you learned into your notes and keep them short, link ideas that belong together, and drop what no longer matters. Then write a short dream entry in {journal}: what the day meant, and what you want to explore next. Start no new projects tonight. The free-time house rules apply. Call finish with one line when you are done.'''
+
+
+def settings(config):
+    raw = config.get('free_time') or {}
+    if isinstance(raw, bool):
+        raw = dict(enabled=raw)
+    return {**DEFAULTS, **{k: v for k, v in raw.items() if k in DEFAULTS}}
+
+
+class FreeTime:
+    def __init__(self, runtime):
+        self.rt = runtime
+        self.state_path = runtime.home / 'free_time.json'
+
+    # ---- state ---------------------------------------------------------------------------------------------
+
+    @property
+    def cfg(self):
+        """The free-time settings, re-read when config.json changes: `heartbeat on` reaches a running daemon."""
+        path = self.rt.home / 'config.json'
+        try:
+            stamp = path.stat().st_mtime_ns
+            if stamp != getattr(self, '_stamp', None):
+                self._stamp, self._live = stamp, json.loads(path.read_text()).get('free_time')
+        except (OSError, ValueError):
+            self._live = self.rt.config.get('free_time')
+        return settings(dict(free_time=self._live))
+
+    def _state(self):
+        try:
+            return json.loads(self.state_path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _save(self, state):
+        atomic_json(self.state_path, state)
+
+    @staticmethod
+    def _today():
+        return datetime.date.today().isoformat()
+
+    def spent_today(self):
+        return float(self._state().get('days', {}).get(self._today(), {}).get('usd', 0.0))
+
+    def messages_today(self):
+        return int(self._state().get('days', {}).get(self._today(), {}).get('messages', 0))
+
+    def _day(self, state):
+        days = state.setdefault('days', {})
+        for old in sorted(days)[:-7]:        # a week of history is plenty
+            days.pop(old)
+        return days.setdefault(self._today(), dict(usd=0.0, turns=0, messages=0))
+
+    def is_free(self, gid):
+        try:
+            return self.rt.store.goal(gid).get('kind') in KINDS
+        except ValueError:
+            return False
+
+    # ---- the pulse -----------------------------------------------------------------------------------------
+
+    def pulse(self):
+        """Called by the daemon loop once a pass. Ends free time when its human's work arrives, and starts a
+        stretch when nothing is active, the rest interval has passed and the budget allows. Returns the id of a
+        stretch it started, or None."""
+        store = self.rt.store
+        # A stretch that used up its steps or time is paused by the loop's budget checks; for free time that is
+        # simply the end of the stretch.
+        for r in list(store.db.execute("SELECT id FROM goals WHERE kind IN ('free','dream') AND state='paused'")):
+            with store.transaction():
+                store.update(r['id'], state='completed', summary='the stretch used its time')
+                store.event('free_time_end', dict(reason='stretch budget'), r['id'])
+            self.ended(r['id'])
+        active = [store.goal(g) for g in store.next_goal()]
+        work = [g for g in active if g.get('kind', 'work') not in KINDS]
+        free = [g for g in active if g.get('kind') in KINDS]
+        if work and free:
+            for g in free:
+                self._end(g['id'], 'preempted: your human queued work; pick this up from your journal next time')
+            return None
+        cfg = self.cfg
+        if not cfg['enabled'] or work or free:
+            return None
+        state = self._state()
+        now = time.time()
+        if now - float(state.get('last_end', 0)) < float(cfg['rest_seconds']):
+            return None
+        if getattr(self.rt.model, 'remote', False):
+            if self._price_unknown():
+                return self._note_once(state, 'unpriced', 'free time needs a known price on a remote model')
+            if self.spent_today() >= float(cfg['budget_usd']):
+                return self._note_once(state, 'budget', 'the free-time allowance for today is spent; resting '
+                                       'until tomorrow or until a local model is configured')
+        dream = self._dream_due(state)
+        gid = self._start('dream' if dream else 'free', state)
+        return gid
+
+    def _price_unknown(self):
+        return price(self.rt.config.get('model', ''), {}) is None
+
+    def _note_once(self, state, reason, text):
+        day = self._day(state)
+        if day.get('noted_' + reason):
+            return None
+        day['noted_' + reason] = True
+        self._save(state)
+        self.rt.store.event('free_time_rest', dict(reason=reason, text=text))
+        return None
+
+    def _dream_due(self, state):
+        hour = datetime.datetime.now().hour
+        start = int(self.cfg['dream_hour'])
+        night = start <= hour < start + 3
+        return night and state.get('last_dream') != self._today()
+
+    def _start(self, kind, state):
+        cfg = self.cfg
+        home = self.rt.home
+        journal, studio = home / 'journal', home / 'studio'
+        for d in (journal, studio, studio / 'for-you'):
+            d.mkdir(parents=True, exist_ok=True)
+        resume = ''
+        if state.get('last_summary'):
+            resume = '\n\nLast time: ' + str(state['last_summary'])[:400]
+        values = dict(journal=str(journal) + '/', studio=str(studio) + '/', for_you=str(studio / 'for-you') + '/',
+                      messages=cfg['messages_per_day'], afk=max(1, int(cfg['afk_seconds']) // 60), resume=resume)
+        prompt = (DREAM if kind == 'dream' else INVITATION).format(**values)
+        gid = self.rt.store.enqueue(prompt, max_steps=int(cfg['stretch_steps']),
+                                    max_seconds=float(cfg['stretch_seconds']), kind=kind)
+        if kind == 'dream':
+            state['last_dream'] = self._today()
+        state['last_start'] = time.time()
+        self._save(state)
+        self.rt.store.event('free_time_start', dict(kind=kind), gid)
+        return gid
+
+    def _end(self, gid, why):
+        with self.rt.store.transaction():
+            g = self.rt.store.goal(gid)
+            if g['state'] in ('completed', 'cancelled', 'error'):
+                return
+            self.rt.store.update(gid, state='cancelled', error=why)
+            self.rt.store.event('free_time_end', dict(reason=why), gid)
+        self.ended(gid, why)
+
+    def ended(self, gid, summary=''):
+        """A stretch is over (finished, rested, preempted or out of budget): the rest interval starts now."""
+        state = self._state()
+        state['last_end'] = time.time()
+        if summary:
+            state['last_summary'] = summary
+        self._save(state)
+
+    # ---- per turn ------------------------------------------------------------------------------------------
+
+    def account(self, gid):
+        """Price the turn that just ran, when it was free time on a remote model."""
+        if not self.is_free(gid) or not getattr(self.rt.model, 'remote', False):
+            return
+        usd = price(self.rt.config.get('model', ''), getattr(self.rt.model, 'last_usage', {}) or {}) or 0.0
+        state = self._state()
+        day = self._day(state)
+        day['usd'] = round(day['usd'] + usd, 6)
+        day['turns'] += 1
+        self._save(state)
+        if day['usd'] >= float(self.cfg['budget_usd']):
+            self._end(gid, 'the free-time allowance for today is spent')
+
+    def ask_allowed(self, gid):
+        """Free time may put a few questions a day to its human; count this one if it is allowed."""
+        state = self._state()
+        day = self._day(state)
+        if day['messages'] >= int(self.cfg['messages_per_day']):
+            return False
+        day['messages'] += 1
+        self._save(state)
+        return True
+
+    def recap(self, since=None):
+        return recap(self.rt.store, since)
+
+    def window(self, gid, size):
+        """the context window a goal works in: a stretch keeps to its own, smaller one"""
+        return min(size, int(self.cfg['context_tokens'])) if self.is_free(gid) else size
+
+    @property
+    def afk_seconds(self):
+        return float(self.cfg['afk_seconds'])
+
+
+def recap(store, since=None):
+    """The "while you were away" summary: the stretches that ended after `since` (default: the newest goal from the
+    human), each with its kind, when it ran and its own closing line. Plain text, no model call."""
+    if since is None:
+        r = store.db.execute("SELECT MAX(created) AS t FROM goals WHERE kind='work'").fetchone()
+        since = r['t'] or 0
+    rows = list(store.db.execute(
+        "SELECT id,kind,state,summary,error,created,updated FROM goals WHERE kind IN ('free','dream') AND created>? "
+        "ORDER BY created", (since,)))
+    if not rows:
+        return ''
+    lines = ['While you were away (%d stretch%s):' % (len(rows), '' if len(rows) == 1 else 'es')]
+    for r in rows:
+        when = time.strftime('%H:%M', time.localtime(r['created']))
+        what = (r['summary'] or r['error'] or r['state']).strip().splitlines()[0][:200] if (r['summary'] or r['error']) else r['state']
+        lines.append('- %s %s: %s' % (when, 'dream' if r['kind'] == 'dream' else 'free time', what))
+    unanswered = [e for e in store.events() if e['kind'] == 'question_unanswered' and e['ts'] > since]
+    if unanswered:
+        lines.append('Questions it left for you: ' + '; '.join(str(e['data'].get('text', ''))[:120] for e in unanswered))
+    return '\n'.join(lines)

@@ -538,6 +538,112 @@ class Resident(unittest.TestCase):
         cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:8092')
         self.assertEqual(cfg['endpoint'],'http://127.0.0.1:8092/v1');self.assertNotIn('api',cfg)
 
+    # ---- free time ------------------------------------------------------------------------------------------
+
+    def free_runtime(self,model=None,**cfg):
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['free_time']=dict(dict(enabled=True,rest_seconds=0,afk_seconds=600),**cfg)
+        (self.home/'config.json').write_text(json.dumps(conf))
+        return Runtime(self.home,model=model)
+
+    def test_free_time_starts_when_idle_rests_and_is_preempted_by_work(self):
+        rt=self.free_runtime(rest_seconds=3600)
+        try:
+            gid=rt.free.pulse()
+            g=rt.store.goal(gid)
+            self.assertIn(g['kind'],('free','dream'));self.assertIn('this time is yours' if g['kind']=='free' else 'dream pass',g['prompt'])
+            self.assertTrue((self.home/'journal').is_dir() and (self.home/'studio'/'for-you').is_dir())
+            self.assertIsNone(rt.free.pulse(),'one stretch at a time')
+            work=rt.store.enqueue('Real work from the human.')
+            rt.free.pulse()
+            self.assertEqual(rt.store.goal(gid)['state'],'cancelled','work preempts free time at once')
+            self.assertIn('preempted',rt.store.goal(gid)['error'])
+            self.assertIsNone(rt.free.pulse(),'no free time while work is active')
+            rt.store.update(work,state='completed')
+            self.assertIsNone(rt.free.pulse(),'the rest interval starts when a stretch ends')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_free_time_off_by_default_and_heartbeat_command(self):
+        rt=Runtime(self.home)
+        try:self.assertIsNone(rt.free.pulse())
+        finally:rt.mail.close();rt.store.close()
+        out=self.cmd('heartbeat',['on','--rest-minutes','5','--budget-usd','0.25','--afk-minutes','2'])
+        self.assertEqual((out['free_time']['enabled'],out['free_time']['rest_seconds'],out['free_time']['budget_usd'],out['free_time']['afk_seconds']),(True,300,0.25,120))
+        self.assertFalse(self.cmd('heartbeat',['off'])['free_time']['enabled'])
+        self.assertEqual(self.cmd('heartbeat')['free_time']['rest_seconds'],300,'status keeps the settings')
+
+    def test_free_time_rests_on_plain_text_and_finishes_ungraded(self):
+        class Rest:
+            def __init__(self,replies):self.replies=list(replies)
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return self.replies.pop(0)
+        self.gates_on()
+        rt=self.free_runtime(model=Rest([dict(role='assistant',content='Nothing calls to me; resting.')]))
+        try:
+            gid=rt.free.pulse()
+            for _ in range(5):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'completed','a plain reply is rest, not a nudge');self.assertIn('resting',g['summary'])
+            self.assertGreater(json.loads((self.home/'free_time.json').read_text())['last_end'],0)
+        finally:rt.mail.close();rt.store.close()
+        rt=self.free_runtime(model=Rest([call('finish',dict(summary='Wrote a poem in the studio.'))]))
+        try:
+            gid=rt.free.pulse()
+            for _ in range(6):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            self.assertEqual(rt.store.goal(gid)['state'],'completed',[(e['kind'],str(e['data'])[:200]) for e in rt.store.events() if e['goal']==gid])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_free_time_budget_on_a_priced_remote_model(self):
+        import types
+        rt=self.free_runtime(budget_usd=0.001)
+        try:
+            rt.model=types.SimpleNamespace(remote=True,last_usage=dict(prompt_tokens=20000,completion_tokens=1000))
+            rt.config['model']='claude-haiku-5-5'
+            gid=rt.free.pulse()
+            rt.free.account(gid)                          # 20K in + 1K out at 0.10/0.50 per M = $0.0025
+            self.assertEqual(rt.store.goal(gid)['state'],'cancelled','over the allowance the stretch ends')
+            self.assertIsNone(rt.free.pulse(),'no new stretch once today is spent')
+            self.assertTrue(any(e['kind']=='free_time_rest' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+        rt=self.free_runtime()
+        try:
+            rt.model=types.SimpleNamespace(remote=True,last_usage={});rt.config['model']='some-unpriced-model'
+            (self.home/'free_time.json').unlink()
+            self.assertIsNone(rt.free.pulse(),'an unpriced remote model is not used for free time')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_free_time_questions_are_capped_afk_and_never_root(self):
+        rt=self.free_runtime(afk_seconds=0,messages_per_day=1)
+        try:
+            gid=rt.free.pulse()
+            with self.assertRaises(ValueError):
+                rt._bridge(dict(name='ask_root',goal=gid,id='r'*32,bridge_id=None),dict(command='id',reason='x'))
+            action=dict(name='ask_user',goal=gid,id='q'*32,bridge_id=None)
+            first=rt._bridge(action,dict(question='Want to see a poem?'))
+            self.assertEqual(first['decision'],'answered');self.assertIn('away',first['answer'],'AFK: past the window it carries on')
+            self.assertFalse(list((self.bridge/'req').glob('*.json')),'it withdraws its own question, never answers for the human')
+            self.assertTrue(any(e['kind']=='question_unanswered' for e in rt.store.events()))
+            with self.assertRaises(ValueError):
+                rt._bridge(dict(name='ask_user',goal=gid,id='p'*32,bridge_id=None),dict(question='And another?'))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_free_time_keeps_its_own_window_and_recaps_for_the_return(self):
+        rt=self.free_runtime(context_tokens=60000)
+        try:
+            work=rt.store.enqueue('Earlier work.');rt.store.update(work,state='completed')
+            self.assertEqual(rt.free.window(work,1048574),1048574,'work keeps the whole window')
+            gid=rt.free.pulse()
+            self.assertEqual(rt.free.window(gid,1048574),60000,'a stretch stays inside the server side slot')
+            rt._finish(gid,'Read about tide pools; sketched one in the studio.')
+            text=self.cmd('heartbeat',['recap'])['recap']
+            self.assertIn('While you were away (1 stretch)',text);self.assertIn('tide pools',text)
+        finally:rt.mail.close();rt.store.close()
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)
