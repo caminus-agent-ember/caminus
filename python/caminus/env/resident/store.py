@@ -98,6 +98,12 @@ class Store:
           CREATE INDEX IF NOT EXISTS checkpoints_goal ON checkpoints(goal,ts);
           CREATE INDEX IF NOT EXISTS failures_goal ON failures(goal,signature);
           CREATE INDEX IF NOT EXISTS file_snapshots_goal ON file_snapshots(goal,step);
+          -- A grant is one exact root command the owner approved "for this goal" (`answer ID approved --grant`):
+          -- the same byte-identical command is then approved without asking again, every use still audited,
+          -- and the command keeps being executed by the owner's side. Grants end with their goal.
+          CREATE TABLE IF NOT EXISTS grants(
+            goal TEXT NOT NULL, command TEXT NOT NULL, ts REAL NOT NULL,
+            UNIQUE(goal,command));
         ''')
         self._migrate()
 
@@ -296,6 +302,19 @@ class Store:
             else:
                 out.append(dict(step=r['step'], label=label))
         return out
+
+    def add_grant(self, gid, command):
+        self.db.execute('INSERT OR IGNORE INTO grants(goal,command,ts) VALUES(?,?,?)', (gid, command, time.time()))
+
+    def has_grant(self, gid, command):
+        """The exact command was granted for this goal, and the goal can still run (grants end with it)."""
+        r = self.db.execute('SELECT 1 FROM grants g JOIN goals ON goals.id=g.goal '
+                            "WHERE g.goal=? AND g.command=? AND goals.state NOT IN ('completed','cancelled')",
+                            (gid, command)).fetchone()
+        return r is not None
+
+    def end_grants(self, gid):
+        self.db.execute('DELETE FROM grants WHERE goal=?', (gid,))
 
     def next_goal(self):
         # The queue's explicit order (position); COALESCE keeps an older row that predates it in place.

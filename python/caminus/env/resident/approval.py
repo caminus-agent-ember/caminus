@@ -96,7 +96,7 @@ def answer(bridge,request,decision,actor,**fields):
         return value
 
 
-def claim(bridge,request,decision,actor,command):
+def claim(bridge,request,decision,actor,command,grant=False):
     if decision not in ('approved','edited') or not isinstance(command,str) or not command.strip():
         raise ValueError('invalid root decision or command')
     with locked(bridge,request['id']):
@@ -106,6 +106,10 @@ def claim(bridge,request,decision,actor,command):
         token=uuid.uuid4().hex
         value=dict(id=request['id'],decision='executing',claim=token,final_decision=decision,
                    approved_by=actor,cmd=command,ts=time.time())
+        # A grant must survive into the final result: the resident reads it there.
+        if grant or current.get('grant'):value['grant']=True
+        write(bridge,request['id'],value)
+        return token
         write(bridge,request['id'],value)
         return token
 
