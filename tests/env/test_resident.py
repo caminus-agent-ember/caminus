@@ -504,9 +504,47 @@ class Resident(unittest.TestCase):
         self.assertIsNone(judge.verdict('looks fine to me'))
         self.assertEqual(judge.verdict('sure: {"verdict": "met", "reason": "tests pass"}')['verdict'],'met')
         self.gates_on()
-        self.verdicts('not json at all')
+        self.verdicts('not json at all','still not json')
         self.replies(call('define_done',dict(check='x')),call('verify',dict(evidence='y')),call('finish',dict(summary='Done.')))
         self.assertEqual(self.cmd('once',['--goal','Anything.'])['state'],'completed')
+        judged=[b for k,b in Endpoint.judge_seen if k==self.key]
+        self.assertEqual(len(judged),2,'an unreadable reply is asked once more, strictly')
+        self.assertIn('only the JSON object',json.dumps(judged[1]))
+        store=Store(self.home)
+        try:
+            ev=[e['data'] for e in store.events(limit=500) if e['kind']=='judged']
+            self.assertEqual([e['verdict'] for e in ev],['unread']);self.assertEqual(ev[0]['model'],'fixture')
+        finally:store.close()
+
+    def test_the_judge_prefers_the_advisor_and_falls_back_to_its_own_model(self):
+        from caminus.env.resident import judge
+        class Own:
+            config=dict(model='own-model');calls=0
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                Own.calls+=1;return dict(role='assistant',content='{"verdict":"met","reason":"own model"}')
+        rt=Runtime(self.home,model=Own())
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x')
+            seen=[]
+            rt.advisor.raw=lambda g,msgs,n,who='judge':(seen.append(msgs) or ('{"verdict":"not_yet","reason":"advisor says no"}','claude-opus-5-5'))
+            out=judge.review(rt,gid,dict(summary='Done.'))
+            self.assertIn('advisor says no',out['error']);self.assertEqual(Own.calls,0,'the advisor judged, not the agent\'s model')
+            self.assertTrue(seen[0][0]['content'].startswith('JUDGE'))
+            def down(*a,**k):raise ValueError('no advisor budget')
+            rt.advisor.raw=down
+            self.assertIn('met: own model',judge.review(rt,gid,dict(summary='Done.'))['judge'])
+            models=[e['data']['model'] for e in rt.store.events() if e['kind']=='judged']
+            self.assertEqual(models,['claude-opus-5-5','own-model'],'every verdict records who gave it')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_loose_first_reply_is_rescued_by_the_strict_retry(self):
+        self.gates_on()
+        self.verdicts('I think it is fine',dict(verdict='met',reason='ok.flag exists'))
+        self.replies(call('define_done',dict(check='x')),call('verify',dict(evidence='y')),call('finish',dict(summary='Done.')))
+        self.assertEqual(self.cmd('once',['--goal','Anything.'])['state'],'completed')
+        store=Store(self.home)
+        try:self.assertEqual([e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged'],['met'])
+        finally:store.close()
 
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():

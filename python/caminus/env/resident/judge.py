@@ -9,7 +9,11 @@ When a graded goal calls finish (after define_done and verify), two things run b
    answers met, not_yet or impossible. not_yet refuses the finish with the reason; impossible pauses the goal and tells
    the human. After JUDGE_LIMIT refusals the goal pauses instead of looping (agent and judge disagree: a person decides).
 
-A judge reply that cannot be read lets the finish through with a note: a broken judge must not trap a goal.
+The judge runs on the advisor's model when one is configured (an independent reviewer, on the advisor's own budget);
+otherwise, or when that call fails, on the agent's own model, in a fresh context. A reply that is not the JSON asked
+for is asked once more, strictly; a second unreadable reply lets the finish through, marked unchecked, so a broken
+judge cannot trap a goal. Every verdict records the model that gave it, and unread ones are counted (judged events
+with verdict "unread"), so a model that answers loosely shows up in the evals instead of quietly turning the judge off.
 """
 import json
 import re
@@ -90,19 +94,33 @@ def review(rt, gid, result):
         "SELECT count(*) FROM events WHERE goal=? AND kind='judged' AND data LIKE '%\"not_yet\"%'", (gid,)).fetchone()[0]
     messages = [dict(role='system', content=SYSTEM),
                 dict(role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', '')))]
-    try:
-        reply = rt.model.complete(messages, tools=None, max_tokens=600)
+    def ask(msgs):
         try:
-            rt.brains.account(gid)
+            return rt.advisor.raw(gid, msgs, 600)       # an independent reviewer when there is one
         except Exception:
-            pass
-        v = verdict(reply.get('content') if isinstance(reply, dict) else '')
+            reply = rt.model.complete(msgs, tools=None, max_tokens=600)
+            try:
+                rt.brains.account(gid)
+            except Exception:
+                pass
+            name = (getattr(rt.model, 'config', None) or {}).get('model') or rt.config.get('model', '')
+            return (reply.get('content') if isinstance(reply, dict) else '') or '', name
+    try:
+        text, who = ask(messages)
+        v = verdict(text)
+        if v is None:                                    # once more, strictly
+            text, who = ask(messages + [dict(role='assistant', content=text[:2000]),
+                                        dict(role='user', content='Answer with only the JSON object: '
+                                             '{"verdict": "met" | "not_yet" | "impossible", "reason": "..."}')])
+            v = verdict(text)
     except Exception as e:                               # the brain is down or refused: do not trap the goal
         rt.store.event('judged', dict(verdict='unread', reason=f'the judge call failed: {type(e).__name__}'), gid)
         return dict(result, judge='the judge could not run; finish accepted unchecked')
     if v is None:
-        rt.store.event('judged', dict(verdict='unread', reason='the judge reply could not be read'), gid)
+        rt.store.event('judged', dict(verdict='unread', reason='the judge reply could not be read, twice',
+                                      model=who, reply=text[:500]), gid)
         return dict(result, judge='the judge reply could not be read; finish accepted unchecked')
+    v['model'] = who
     rt.store.event('judged', v, gid)
     if v['verdict'] == 'met':
         return dict(result, judge='met: ' + v['reason'])

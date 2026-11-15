@@ -135,6 +135,31 @@ class Advisor:
         return dict(advice=reply['content'], model=call.get('served') or cfg['model'], usd=round(usd, 5),
                     calls_left=max(0, int(cfg['calls_per_goal']) - self.calls(gid)))
 
+    def raw(self, gid, messages, max_tokens, who='judge'):
+        """One call on the advisor's model for the harness itself (the loop judge): the advisor's key, daily budget,
+        pricing and failure log, but not the agent's per-goal question count. Returns (text, model) or raises
+        ValueError when there is no advisor, the budget is spent, or the call fails."""
+        cfg = self.cfg
+        if cfg is None or self.spent_today() >= float(cfg['budget_usd']) or price(cfg['model'], {}) is None:
+            raise ValueError('no advisor budget')
+        model = Model(dict(model=cfg['model'], endpoint=cfg['endpoint'], api='anthropic',
+                           context=int(cfg.get('context', 200000)), max_tokens=max_tokens,
+                           api_key_env=cfg.get('api_key_env', 'CAMINUS_ADVISOR_API_KEY'), effort='low',
+                           thinking='adaptive', timeout=float(cfg.get('timeout', 300)),
+                           fallbacks=cfg.get('fallbacks') or None, cache=False),
+                      opener=getattr(self.rt, 'advisor_opener', None) or urllib.request.urlopen)
+        model.counter = False
+        try:
+            reply = model.complete(messages, max_tokens=max_tokens)
+        except ModelError as e:
+            self._spend(cfg, model)
+            log_failure(self.rt.home, dict(goal=gid, who=who, model=cfg['model'], error_type=type(e).__name__,
+                                           error=str(e)[:2048], status=getattr(e, 'status', None),
+                                           category=getattr(e, 'category', None), call=model.last_call))
+            raise ValueError('the advisor model did not answer: %s' % e)
+        self._spend(cfg, model)
+        return reply.get('content') or '', (model.last_call or {}).get('served') or cfg['model']
+
     def _spend(self, cfg, model):
         usd = price(cfg['model'], model.last_usage, (model.last_call or {}).get('served')) or 0.0
         state = self._state()
