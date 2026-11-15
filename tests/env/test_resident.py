@@ -1023,17 +1023,23 @@ class Resident(unittest.TestCase):
                 rt._bridge(dict(name='ask_user',goal=gid,id='p'*32,bridge_id=None),dict(question='And another?'))
         finally:rt.mail.close();rt.store.close()
 
-    def test_free_time_keeps_its_own_window_and_recaps_for_the_return(self):
-        rt=self.free_runtime(context_tokens=60000)
+    def test_free_time_uses_the_full_window_and_recaps_for_the_return(self):
+        rt=self.free_runtime()
         try:
             work=rt.store.enqueue('Earlier work.');rt.store.update(work,state='completed')
             self.assertEqual(rt.free.window(work,1048574),1048574,'work keeps the whole window')
             gid=rt.free.pulse()
-            self.assertEqual(rt.free.window(gid,1048574),60000,'a stretch stays inside the server side slot')
+            self.assertEqual(rt.free.window(gid,1048574),1048574,'free time has the full window (the server snapshots the conversation)')
+
             rt._finish(gid,'Read about tide pools; sketched one in the studio.')
             text=self.cmd('heartbeat',['recap'])['recap']
             self.assertIn('While you were away (1 stretch)',text);self.assertIn('tide pools',text)
         finally:rt.mail.close();rt.store.close()
+        capped=self.free_runtime(context_tokens=60000)
+        try:
+            g=capped.store.enqueue('A capped stretch.',kind='free')
+            self.assertEqual(capped.free.window(g,1048574),60000,'context_tokens can still cap free time')
+        finally:capped.mail.close();capped.store.close()
 
     # ---- advisor ----------------------------------------------------------------------------------------------
 

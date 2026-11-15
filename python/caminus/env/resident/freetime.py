@@ -19,14 +19,16 @@ Configuration, in config.json under "free_time" (all optional):
     afk_seconds        600       a question waits this long for an answer, then the stretch carries on
     messages_per_day   3         questions free time may put to its human in a day
     dream_hour         3         local hour from which the night's dream pass may run (for three hours)
-    context_tokens     60000     a stretch's own context window (compaction runs inside it)
+    context_tokens     0         a stretch's own context window; 0 = the resident's full window (owner 11-15)
 
-Free time must not cost its human the conversation they come back to. On the local server a request unrelated to
-the main conversation that fits the prompt cache's side slot (98K positions on the Coder) runs there and never
-displaces the main slot; a displaced conversation is unparked from the disk tier, not re-read. A stretch therefore
-keeps its own context under context_tokens, so with its reply it stays inside the side slot. When the human is back,
-recap() is the "while you were away" summary, built from each stretch's own closing line (no model call); a UI
-appends it after the restored conversation, never before it, so the cached prefix stays valid.
+Free time works in the resident's full context window, and must still not cost its human the conversation they come
+back to. The local server keeps that conversation by snapshot: a short stretch that fits the prompt cache's side slot
+(98K positions on the Coder) runs there and never touches the main slot; a stretch that outgrows it takes the main slot,
+and before a request overwrites 4,096 or more of the live conversation's tokens the cache parks that conversation to
+its disk tier (prompt.AUTO_PARK_MIN). The human's next request finds it there and unparks it whole: restored, not
+re-read. When the human is back, recap() is the "while you were away" summary, built from each stretch's own closing
+line (no model call); a UI appends it after the restored conversation, never before it, so the restored prefix stays
+valid. context_tokens can still cap a stretch (e.g. to keep it in the side slot on a server without a disk tier).
 """
 import datetime
 import json
@@ -37,7 +39,7 @@ from .model import price
 from .store import atomic_json
 
 DEFAULTS = dict(enabled=False, rest_seconds=1800, stretch_steps=40, stretch_seconds=1800, budget_usd=0.50,
-                afk_seconds=600, messages_per_day=3, dream_hour=3, context_tokens=60000)
+                afk_seconds=600, messages_per_day=3, dream_hour=3, context_tokens=0)
 KINDS = ('free', 'dream')
 
 INVITATION = '''Free time. Nobody needs anything from you right now; this time is yours.
@@ -286,8 +288,9 @@ class FreeTime:
         return recap(self.rt.store, since)
 
     def window(self, gid, size):
-        """the context window a goal works in: a stretch keeps to its own, smaller one"""
-        return min(size, int(self.cfg['context_tokens'])) if self.is_free(gid) else size
+        """the context window a goal works in: the full one, unless context_tokens caps free time"""
+        cap = int(self.cfg.get('context_tokens') or 0)
+        return min(size, cap) if cap and self.is_free(gid) else size
 
     @property
     def afk_seconds(self):
