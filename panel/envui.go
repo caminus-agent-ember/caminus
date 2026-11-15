@@ -175,12 +175,15 @@ func envMain(args []string) {
 		}
 	}
 	m := envModel{user: *user, bridge: *bridge, auditPath: *audit, key: *key, cli: cliArgv,
-		agentName: *agent, defaultAgent: *agent, tab: 7, seen: map[string]bool{}, mode: "normal",
+		agentName: *agent, defaultAgent: *agent, tab: 6, seen: map[string]bool{}, mode: "normal",
 		width: 110, height: 32}
 	m.initChat()
 	// Open directly into the last conversation; the first session list decides
 	// whether that session still exists (residentSessionsMsg below).
 	openLastSession(&m)
+	if m.pendingLast == "" {
+		m.chat.picker = true // no last conversation: start in the chat with the session picker open
+	}
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "caminus-panel env:", err)
@@ -605,8 +608,9 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.residentEpoch++
 					m.resident, m.residentEvents, m.chat = residentStatus{}, nil, residentChat{}
 					m.goalSel, m.sessionMemory = 0, ""
-					m.tab = 7
+					m.tab = 6
 					m.initChat()
+					m.chat.picker = true // pick another session in the chat's own picker
 					m.syncChat()
 					m.msg = "session " + terminalText(last, true) + " no longer exists; pick another"
 					return m, tea.Batch(residentRefresh(m), residentSessions(m))
@@ -784,36 +788,6 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	case "tab":
-		m.tab = nextEnvTab(m.tab, 1)
-		m.pageScroll = 0
-		// A page fetches its data when it opens; nothing polls the pages that are not on screen.
-		m.refreshLocal()
-		cmds := sshRefresh(m)
-		if m.tab == 3 || m.tab == 7 {
-			cmds = append(cmds, residentSessions(m))
-		}
-		return m, tea.Batch(cmds...)
-	case "shift+tab":
-		m.tab = nextEnvTab(m.tab, -1)
-		m.pageScroll = 0
-		// A page fetches its data when it opens; nothing polls the pages that are not on screen.
-		m.refreshLocal()
-		cmds := sshRefresh(m)
-		if m.tab == 3 || m.tab == 7 {
-			cmds = append(cmds, residentSessions(m))
-		}
-		return m, tea.Batch(cmds...)
-	case "1", "2", "3", "4", "5":
-		m.tab = envNavigation[int(k[0]-'1')]
-		m.pageScroll = 0
-		// A page fetches its data when it opens; nothing polls the pages that are not on screen.
-		m.refreshLocal()
-		cmds := sshRefresh(m)
-		if m.tab == 3 || m.tab == 7 {
-			cmds = append(cmds, residentSessions(m))
-		}
-		return m, tea.Batch(cmds...)
 	case "r":
 		m.refreshLocal()
 		return m, tea.Batch(append(sshRefresh(m), residentRefresh(m))...)
@@ -1096,10 +1070,13 @@ func currentUser() string {
 // theme's roles; a theme switch rebuilds them there.
 
 func (m envModel) render() string {
-	if m.tab == 6 {
-		m.initChat()
-		return m.renderChat()
-	}
+	// The chat is the only screen; the old pages' content opens as overlays (envpages.go). renderPages is kept only
+	// for the page tests and is never reached from a key.
+	m.initChat()
+	return m.renderChat()
+}
+
+func (m envModel) renderPages() string {
 	var b strings.Builder
 	b.WriteString(envTitle.Render("CAMINUS ENV") + "  " + envDim.Render("the agent's home: "+m.user+" on this machine") + "\n")
 	for _, i := range envNavigation {

@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/charmbracelet/x/ansi"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,24 +131,25 @@ func TestViewShowsQueueAndAudit(t *testing.T) {
 	if err := appendAudit(audit, map[string]any{"event": "run", "cmd": "id"}); err != nil {
 		t.Fatal(err)
 	}
-	m := envModel{user: "agent", bridge: bridge, auditPath: audit, key: "k",
-		seen: map[string]bool{}, mode: "normal", width: 120, height: 40, msg: "hello"}
+	// The chat is the only screen: the queue opens as the approvals overlay, the audit and context pages as overlays.
+	m := chatFixture(t)
+	m.user, m.bridge, m.auditPath, m.key, m.seen, m.width, m.height = "agent", bridge, audit, "k", map[string]bool{}, 120, 40
 	m.refreshLocal()
-	v := m.render()
-	for _, want := range []string{"CAMINUS ENV", "systemctl restart foo", "a approve", "ssh:", "requests", "jobs", "audit"} {
-		if !strings.Contains(v, want) {
-			t.Fatalf("view missing %q:\n%s", want, v)
-		}
+	v := ansi.Strip(m.render())
+	if strings.Contains(v, "CAMINUS ENV") || !strings.Contains(v, "1 pending ^A") {
+		t.Fatalf("the chat must be the screen and name the waiting request:\n%s", v)
 	}
-	m.tab = 5
-	m.refreshLocal() // a page reads its data when it opens (switching tabs calls this)
-	v = m.render()
-	if !strings.Contains(v, `"event":"run"`) {
-		t.Fatalf("audit tab missing the event:\n%s", v)
+	next, _ := m.chatSlash("/approvals")
+	if v = ansi.Strip(next.(envModel).render()); !strings.Contains(v, "systemctl restart foo") || !strings.Contains(v, "a a approve") {
+		t.Fatalf("approvals overlay missing the request:\n%s", v)
 	}
-	m.tab = 4
-	if !strings.Contains(m.render(), "SERVERS") {
-		t.Fatal("ctx tab missing")
+	next, _ = m.chatSlash("/audit")
+	if v = next.(envModel).render(); !strings.Contains(v, `"event":"run"`) {
+		t.Fatalf("audit overlay missing the event:\n%s", ansi.Strip(v))
+	}
+	next, _ = m.chatSlash("/context")
+	if !strings.Contains(ansi.Strip(next.(envModel).render()), "SERVERS") {
+		t.Fatal("context overlay missing")
 	}
 }
 
@@ -228,10 +230,15 @@ func TestQuestionFlow(t *testing.T) {
 	if len(m.reqs) != 1 || m.reqs[0].kind() != "question" {
 		t.Fatalf("question not loaded: %+v", m.reqs)
 	}
-	v := m.render()
-	if !strings.Contains(v, "ASK") || !strings.Contains(v, "which model?") || !strings.Contains(v, "coder | swift") {
-		t.Fatalf("view missing question:\n%s", v)
+	m.width = 120
+	m.initChat()
+	m.chat.approvals, m.chat.approvalDetail = true, true
+	m.tab = 6
+	v := ansi.Strip(m.render())
+	if !strings.Contains(v, "? ask") || !strings.Contains(v, "which model?") || !strings.Contains(v, "1 coder") {
+		t.Fatalf("approvals overlay missing the question:\n%s", v)
 	}
+	m.tab, m.chat.approvals = 0, false
 	mm, _ := m.onKey("a")
 	m = mm.(envModel)
 	if m.mode != "answer" {
@@ -294,20 +301,17 @@ func mustRead(t *testing.T, p string) string {
 }
 
 func TestTabsAndJobKeys(t *testing.T) {
-	m := envModel{seen: map[string]bool{}, width: 120, height: 40}
-	mm, _ := m.onKey("tab")
-	if mm.(envModel).tab != 7 {
-		t.Fatal("tab from a detail pane should return to sessions")
+	// The old page switch is gone: Tab and the number keys open nothing.
+	m := envModel{seen: map[string]bool{}, width: 120, height: 40, tab: 6}
+	for _, k := range []string{"tab", "shift+tab", "1", "3", "5"} {
+		if mm, _ := m.onKey(k); mm.(envModel).tab != 6 {
+			t.Fatalf("%s still switches to an old page", k)
+		}
 	}
-	mm, _ = mm.(envModel).onKey("3")
-	if mm.(envModel).tab != 8 {
-		t.Fatal("key 3 should select settings")
-	}
-	// jobs tab: K on a selected job builds a kill script (via returned cmd; just check no panic and selection moves)
-	m = mm.(envModel)
+	// jobs: K on a selected job builds a kill script (via returned cmd; just check no panic and selection moves)
 	m.tab = 1
 	m.jobs = []job{{Name: "build", Pid: "123", State: "alive", Log: "~/env-logs/build.log"}}
-	mm, _ = m.onKey("down")
+	mm, _ := m.onKey("down")
 	if mm.(envModel).jobSel != 0 {
 		t.Fatal("jobSel should stay 0 with one job")
 	}

@@ -47,6 +47,7 @@ type residentChat struct {
 	approvalDetail                          bool // Enter opened the selected request in full
 	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
 	goalsSel                                int
+	page, pageTop                           int // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
 	slashToken, slashText                   string
 	pathIdx                                 int
@@ -150,7 +151,7 @@ func (m *envModel) initChat() {
 	if m.chat.ready {
 		return
 	}
-	c := residentChat{ready: true, newGoal: true}
+	c := residentChat{ready: true, newGoal: true, page: -1}
 	c.compose = textarea.New()
 	// One prompt mark on the first line, an equal indent under it: the editor asks per display line, so a wrapped
 	// draft keeps the column its text starts in.
@@ -649,6 +650,9 @@ func (m envModel) composerHint() string {
 // the inline question or the Ctrl+P session switcher. syncChat sizes the
 // transcript against its measured height.
 func (m envModel) chatBottom() string {
+	if box := m.promptBox(max(18, m.width-2)); box != "" {
+		return box
+	}
 	if m.chat.picker {
 		return m.pickerBox()
 	}
@@ -762,7 +766,7 @@ func (m envModel) renderChat() string {
 	head := shellHeader(residentText(m.agentName), state, goalText, steps, w)
 	foot := m.chatFoot(w)
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
+		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /approvals · /remember TEXT · /memory · /context · /audit · /settings") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
 	}
 	if m.chat.approvals {
 		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
@@ -773,6 +777,15 @@ func (m envModel) renderChat() string {
 	if m.chat.goals {
 		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
 		return head + "\n" + m.goalsOverlay(w, h) + "\n" + foot
+	}
+	if m.chat.page >= 0 {
+		// a typed prompt opened from the page (a new note) sits under the overlay
+		prompt := m.promptBox(max(18, w-2))
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)-lipgloss.Height(prompt)+1)
+		if prompt != "" {
+			return head + "\n" + m.pageOverlay(w, h) + "\n" + prompt + "\n" + foot
+		}
+		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
 	body := []string{head, m.chat.transcript.View()}
 	if live := m.liveBlock(w); live != "" {
@@ -813,6 +826,9 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.chat.goals {
 		return m.goalsKey(msg)
 	}
+	if m.chat.page >= 0 {
+		return m.pageKey(msg)
+	}
 	if m.chat.picker {
 		return m.pickerKey(msg)
 	}
@@ -849,7 +865,7 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if next, done := m.cyclePath(); done {
 			return next, nil
 		}
-		return m.onKey(k)
+		return m, nil // the chat is the only screen: Tab completes and does nothing else
 	case "pgup":
 		if m.chat.live.active {
 			m.scrollLive(-m.liveHeight())
@@ -916,10 +932,7 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.sel = i
-			if k == "e" {
-				m.tab = 0
-			}
-			return m.reqKeys(k)
+			return m.reqKeys(k) // e opens the edit prompt in the composer's slot
 		}
 		if armed != "" {
 			m.msg = "approval cancelled"
@@ -1037,16 +1050,22 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 	case "/requests":
 		clear()
-		m.tab = 0
+		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
+		m.chat.armed = ""
+		m.chat.compose.Blur()
 	case "/approvals":
 		// The overlay over the conversation; /requests still opens the page that edits and answers.
 		clear()
 		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
 		m.chat.armed = ""
 		m.chat.compose.Blur()
+	case "/memory", "/context", "/audit", "/settings":
+		clear()
+		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
 		clear()
-		m.tab = 7
+		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
+		m.chat.compose.Blur()
 		return m, residentSessions(m)
 	case "/newsession":
 		if arg == "" {
@@ -1219,6 +1238,10 @@ var slashCommands = []struct{ name, hint string }{
 	{"/theme", "switch panel colors NAME; /theme lists"},
 	{"/glyphs", "symbols: nerd, unicode or ascii; alone, the next one"},
 	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
+	{"/memory", "memory and notes"},
+	{"/context", "what the agent's context holds"},
+	{"/audit", "the audit log"},
+	{"/settings", "this session's settings"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.
@@ -1413,8 +1436,6 @@ func (m envModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
-	case "tab", "shift+tab":
-		return m.onKey(k)
 	case "esc":
 		m.chat.picker = false
 		return m, m.chat.compose.Focus()

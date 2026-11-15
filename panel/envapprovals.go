@@ -207,9 +207,8 @@ func (m envModel) approvalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.sel = order[sel]
 		if k == "e" || (k == "a" && r.kind() == "question") {
-			// the editor and the answer box live on the Requests page
+			// the editor and the answer box are typed prompts in the composer's slot
 			m.chat.approvals, m.chat.approvalDetail = false, false
-			m.tab = 0
 		}
 		return m.reqKeys(k)
 	}

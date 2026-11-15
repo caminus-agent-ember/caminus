@@ -97,10 +97,10 @@ func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
 	m.chat.compose.SetValue("/requests")
 	next, _ = m.submitCompose()
 	m = next.(envModel)
-	if m.tab != 0 {
-		t.Fatal("/requests did not open approvals")
+	if m.tab != 6 || !m.chat.approvals {
+		t.Fatal("/requests did not open the approvals overlay in the chat")
 	}
-	m.tab = 6
+	m.chat.approvals = false
 	m.chat.compose.SetValue("/unknown keep this")
 	next, cmd = m.submitCompose()
 	m = next.(envModel)
@@ -252,28 +252,37 @@ func TestChatRejectsResponsesFromAnEarlierVisitToTheSameSession(t *testing.T) {
 }
 
 func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
-	m := envModel{tab: 5, width: 80, height: 24, mode: "normal"}
+	// The old audit page is an overlay over the chat now: it fits the terminal and Page Down scrolls it.
+	m := chatFixture(t)
+	m.width, m.height = 80, 24
+	next, _ := m.chatSlash("/audit") // (opening reads the audit file; the fixture fills the lines after)
+	m = next.(envModel)
 	for i := 0; i < 90; i++ {
 		m.events = append(m.events, fmt.Sprintf("audit entry %d with a long but readable message", i))
 	}
 	frame := m.render()
+	if m.tab != 6 || m.chat.page != 5 || !strings.Contains(ansi.Strip(frame), "AUDIT") {
+		t.Fatalf("/audit did not open the overlay:\n%s", ansi.Strip(frame))
+	}
 	if len(strings.Split(frame, "\n")) > m.height {
-		t.Fatal("audit page exceeded terminal height")
+		t.Fatal("audit overlay exceeded terminal height")
 	}
 	for _, line := range strings.Split(frame, "\n") {
 		if ansi.StringWidth(line) > m.width {
-			t.Fatal("audit page exceeded terminal width")
+			t.Fatal("audit overlay exceeded terminal width")
 		}
 	}
-	next, _ := m.onKey("pgdown")
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = next.(envModel)
-	if m.pageScroll == 0 || ansi.Strip(m.render()) == ansi.Strip(frame) {
-		t.Fatal("Page Down did not scroll audit")
+	if m.chat.pageTop == 0 || ansi.Strip(m.render()) == ansi.Strip(frame) {
+		t.Fatal("Page Down did not scroll the audit overlay")
 	}
-	next, _ = m.onKey("1")
-	m = next.(envModel)
-	if m.tab != 7 || m.pageScroll != 0 {
-		t.Fatal("opening sessions retained another page's scroll offset")
+	if _, cmd := m.chatKey(tea.KeyPressMsg{Code: 'q', Text: "q"}); cmd != nil {
+		t.Fatal("q must not quit inside an overlay")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if next.(envModel).chat.page != -1 {
+		t.Fatal("Esc must close the overlay")
 	}
 }
 
@@ -318,13 +327,13 @@ func sortedCopy(in []string) []string {
 }
 
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
-	if got := slashMatches("/se"); fmt.Sprint(got) != "[/session /sessions]" {
+	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/session /sessions /settings]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); len(got) != 5 || got[0] != "/session" || got[4] != "/stop" {
+	if got := slashMatches("/s"); len(got) != 6 || got[0] != "/session" || got[5] != "/settings" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -333,7 +342,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -439,8 +448,8 @@ func TestLaunchReopensLastSessionAndFallsBackWhenGone(t *testing.T) {
 	openLastSession(&m2)
 	next, _ = m2.Update(residentSessionsMsg{agent: "ghost", names: []string{"resident"}})
 	m2 = next.(envModel)
-	if m2.tab != 7 || m2.agentName != "resident" || !m2.chat.ready {
-		t.Fatal("a vanished session did not fall back to the homepage")
+	if m2.tab != 6 || !m2.chat.picker || m2.agentName != "resident" || !m2.chat.ready {
+		t.Fatal("a vanished session did not fall back to the chat with the session picker open")
 	}
 	m3 := envModel{agentName: "resident", defaultAgent: "resident", tab: 7, width: 90, height: 28}
 	m3.initChat()
@@ -450,8 +459,8 @@ func TestLaunchReopensLastSessionAndFallsBackWhenGone(t *testing.T) {
 	}
 	next, _ = m3.Update(residentSessionsMsg{agent: "ghost", err: "no such resident"})
 	m3 = next.(envModel)
-	if m3.tab != 7 || m3.agentName != "resident" || m3.pendingLast != "" {
-		t.Fatal("an unresolvable last session did not fall back to the homepage")
+	if m3.tab != 6 || !m3.chat.picker || m3.agentName != "resident" || m3.pendingLast != "" {
+		t.Fatal("an unresolvable last session did not fall back to the chat's session picker")
 	}
 }
 
