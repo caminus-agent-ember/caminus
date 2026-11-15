@@ -233,12 +233,23 @@ func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).
 		Width(min(w, 72)).Render(inner)
 	// the title rides on the top border
-	lines := strings.Split(box, "\n")
-	label := envWarn.Bold(true).Render(" " + title + " ")
-	if len(lines) > 0 && lipgloss.Width(lines[0]) > lipgloss.Width(label)+4 {
-		top := lines[0]
-		lines[0] = ansi.Truncate(top, 2, "") + label + ansi.TruncateLeft(top, 2+lipgloss.Width(label), "")
+	return borderTitle(box, title, envWarn.Bold(true))
+}
+
+// borderTitle writes a title into a rendered box's top border, replacing the rule there: "⚿ ROOT" on the approval
+// card, the composer's target. A box too narrow for the title keeps its plain border, so a narrow terminal loses the
+// label and never the frame.
+func borderTitle(box, title string, st lipgloss.Style) string {
+	if title == "" {
+		return box
 	}
+	label := st.Render(" " + title + " ")
+	lines := strings.Split(box, "\n")
+	if len(lines) == 0 || lipgloss.Width(lines[0]) <= lipgloss.Width(label)+4 {
+		return box
+	}
+	top := lines[0]
+	lines[0] = ansi.Truncate(top, 2, "") + label + ansi.TruncateLeft(top, 2+lipgloss.Width(label), "")
 	return strings.Join(lines, "\n")
 }
 
@@ -263,14 +274,20 @@ func todoLine(items []todoItem, w int) string {
 	return ansi.Truncate(strings.Join(parts, "  "), w, "…")
 }
 
-// composer: where the human types; the hint says what Enter does now.
-func composer(draft, hint string, w int) string {
+// composer: where the human types. The target rides on the top border, the mark sits on the first line only, and the
+// hint says what Enter does now.
+func composer(draft, hint, title string, w int) string {
 	text := envDim.Render(hint)
 	if draft != "" {
 		text = lipgloss.NewStyle().Foreground(cText).Render(draft) + "█"
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray).Padding(0, 1).
-		Width(w).Render(envBusy.Render(g.user) + " " + text)
+	return composerBox(envBusy.Render(g.user)+" "+text, title, w)
+}
+
+// composerBox frames the editor's rendered lines as the composer: a rounded box in the chrome colour, with the target
+// on its top border. The caller draws the prompt mark (the editor's own, so a wrapped line keeps its indent).
+func composerBox(input, title string, w int) string {
+	return borderTitle(envBorder.Padding(0, 1).Width(w).Render(input), title, envDim)
 }
 
 // statusLine: brain, context, money and speed, then the keys that matter now. In the nerd tier the segments are

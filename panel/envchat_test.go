@@ -129,8 +129,54 @@ func TestChatPasteAndFrameStayWithinTerminal(t *testing.T) {
 				t.Fatalf("%v: line too wide: %q", size, ansi.Strip(line))
 			}
 		}
-		if !strings.Contains(ansi.Strip(frame), "Steer goal original") {
-			t.Fatal("bottom composer missing")
+		if !strings.Contains(ansi.Strip(frame), "to goal original") {
+			t.Fatal("bottom composer missing its target")
+		}
+	}
+}
+
+// The composer is the shell's: the target rides on its top border (the old label line, moved), one prompt mark sits on
+// the first line only, the hint says what Enter does now, and the frame still fits the terminal at both extremes.
+func TestComposerCarriesItsTargetOnTheBorder(t *testing.T) {
+	for _, size := range [][2]int{{40, 16}, {100, 30}} {
+		m := chatFixture(t) // the selected goal "original" is working
+		m.width, m.height = size[0], size[1]
+		m.syncChat()
+		frame := ansi.Strip(m.render())
+		if !strings.Contains(frame, "─ to goal original ─") {
+			t.Fatalf("%v: the composer's border does not name its goal:\n%s", size, frame)
+		}
+		box := ansi.Strip(m.chatComposer())
+		if n := strings.Count(box, g.user); n != 1 {
+			t.Fatalf("%v: the composer drew %d prompt marks, want one:\n%s", size, n, box)
+		}
+		if !strings.Contains(box, "message the agent") || !strings.Contains(box, "Enter nudges") || !strings.Contains(box, "/steer") {
+			t.Fatalf("%v: the hint does not say what Enter does:\n%s", size, box)
+		}
+		m.chat.compose.SetValue("first line\nsecond line")
+		box = ansi.Strip(m.chatComposer())
+		if n := strings.Count(box, g.user); n != 1 {
+			t.Fatalf("%v: a multi-line draft drew %d prompt marks:\n%s", size, n, box)
+		}
+		if !strings.Contains(box, "  second line") {
+			t.Fatalf("%v: the continuation line lost its indent:\n%s", size, box)
+		}
+		m.chat.newGoal, m.chat.target = true, ""
+		m.chat.compose.Reset()
+		m.syncChat()
+		box = ansi.Strip(m.chatComposer())
+		if !strings.Contains(box, "─ new goal ─") || !strings.Contains(box, "type a goal") || !strings.Contains(box, "Enter starts it") {
+			t.Fatalf("%v: a new goal does not say what Enter does:\n%s", size, box)
+		}
+		frame = ansi.Strip(m.render())
+		rows := strings.Split(frame, "\n")
+		if len(rows) > size[1] {
+			t.Fatalf("%v: %d rows overflow the terminal", size, len(rows))
+		}
+		for _, line := range rows {
+			if ansi.StringWidth(line) > size[0] {
+				t.Fatalf("%v: line too wide: %q", size, line)
+			}
 		}
 	}
 }

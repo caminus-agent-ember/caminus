@@ -147,8 +147,9 @@ func (m *envModel) initChat() {
 	}
 	c := residentChat{ready: true, newGoal: true}
 	c.compose = textarea.New()
-	c.compose.Prompt = "› "
-	c.compose.Placeholder = "Give the agent a goal, or type /help"
+	// One prompt mark on the first line, an equal indent under it: the editor asks per display line, so a wrapped
+	// draft keeps the column its text starts in.
+	c.compose.SetPromptFunc(2, promptMark)
 	c.compose.ShowLineNumbers = false
 	c.compose.CharLimit = 0
 	c.compose.MaxHeight = 0 // long pasted goals scroll inside the visible editor
@@ -160,6 +161,25 @@ func (m *envModel) initChat() {
 	// turning every editor keystroke and cursor blink into a full transcript scan.
 	c.transcript.SoftWrap = false
 	m.chat = c
+	m.chatStyles()
+}
+
+// promptMark is the composer's prompt: the glyph on the first line, nothing on the lines under it (the editor pads
+// them to the same width, so the text stays in one column).
+func promptMark(info textarea.PromptInfo) string {
+	if info.LineNumber == 0 {
+		return g.user + " "
+	}
+	return ""
+}
+
+// chatStyles gives the composer the palette's prompt and placeholder styles. A style keeps the colour it was built
+// with, so a theme switch calls this again.
+func (m *envModel) chatStyles() {
+	s := m.chat.compose.Styles()
+	s.Focused.Prompt, s.Blurred.Prompt = envBusy, envBusy
+	s.Focused.Placeholder, s.Blurred.Placeholder = envDim, envDim
+	m.chat.compose.SetStyles(s)
 }
 
 func (m envModel) selectedResidentGoal() *residentGoal {
@@ -228,7 +248,10 @@ func (m *envModel) targetSelectedGoal() {
 func (m *envModel) syncChat() {
 	m.initChat()
 	w, h := max(20, m.width), max(12, m.height)
-	m.chat.compose.SetWidth(w - 4)
+	// The composer's box is w-2 wide: four of those cells are its border and padding, so the editor gets w-6 and a
+	// full line never eats the frame.
+	m.chat.compose.SetWidth(w - 6)
+	m.chat.compose.Placeholder = m.composerHint()
 	m.chat.compose.SetHeight(min(3, max(1, h-10)))
 	if m.chat.question != nil {
 		m.chat.questionInput.SetWidth(w - 4)
@@ -539,25 +562,12 @@ func shortGoal(id string) string {
 	return id
 }
 
+// chatComposer is where the human types: the shell's composer box (shell.go), its top border saying which goal the
+// draft goes to, the editor's one prompt mark on the first line, and a dim hint that says what Enter does now. The
+// Tab completion hint rides above the draft, inside the same box.
 func (m envModel) chatComposer() string {
 	if m.chat.question != nil && m.chat.questionArmed {
 		return m.questionBox()
-	}
-	label := "New goal"
-	if m.chat.question != nil && !m.chat.questionArmed {
-		label = "Question waiting · F2 to answer · your draft is preserved"
-	}
-	if !m.chat.newGoal && m.chat.question == nil {
-		label = "Steer goal " + shortGoal(m.chat.target)
-		if g := m.selectedResidentGoal(); g != nil && g.ID == m.chat.target && g.State == "completed" {
-			label = "Continue conversation · " + shortGoal(m.chat.target)
-		}
-	}
-	if m.chat.sending {
-		label = "Sending…"
-	}
-	if !m.chat.compose.Focused() {
-		label += " · browsing history; Enter to type"
 	}
 	input := m.chat.compose.View()
 	if (m.mode == "" || m.mode == "normal") && !m.chat.sending {
@@ -595,7 +605,39 @@ func (m envModel) chatComposer() string {
 			input = envClip(input, max(18, m.width-6)) + "\n" + input
 		}
 	}
-	return envBorder.Width(max(18, m.width-2)).Render(envDim.Render(label) + "\n" + input)
+	return composerBox(input, m.composerTitle(), max(18, m.width-2))
+}
+
+// composerTitle is what the composer's top border says: which goal a message goes to, or that it starts a new one.
+// The old label's other facts (sending, a waiting question, browsing) keep their place there, shortened to a title.
+func (m envModel) composerTitle() string {
+	title := "new goal"
+	switch {
+	case m.chat.sending:
+		title = "sending…"
+	case m.chat.question != nil:
+		title = "question waiting · F2 answers"
+	case !m.chat.newGoal:
+		title = "to goal " + shortGoal(m.chat.target)
+		if g := m.selectedResidentGoal(); g != nil && g.ID == m.chat.target && g.State == "completed" {
+			title = "continue goal " + shortGoal(m.chat.target)
+		}
+	}
+	if !m.chat.compose.Focused() && !m.chat.sending {
+		title += " · browsing"
+	}
+	return title
+}
+
+// composerHint is the composer's placeholder: what Enter does with the draft now.
+func (m envModel) composerHint() string {
+	if !m.chat.compose.Focused() {
+		return "browsing history · Enter returns to typing"
+	}
+	if m.chat.newGoal {
+		return "type a goal · Enter starts it · /help"
+	}
+	return "message the agent · Enter nudges at the next step · /steer redirects"
 }
 
 // chatBottom renders whatever occupies the composer slot: the steering draft,
@@ -1062,6 +1104,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.chat.markdown = nil
+		m.chatStyles() // the composer's prompt and hint keep the palette's colours
 		m.msg = "theme: " + name
 		m.syncChat()
 		return m, nil
