@@ -348,7 +348,32 @@ class Runtime:
                 f'Lasting facts go in notes with remember.'
                 + (' Compaction is close: update STATE.md now.' if tokens >= 0.85 * limit else ''))
 
-    def _bridge(self, action, args):
+    def poll_requests(self, gid):
+        """Deliver answers to this goal's pending (non-blocking) requests as messages, and time them out the way a
+        parked request would (an unanswered root request is not run; a permission request is a no)."""
+        rows = list(self.store.db.execute(
+            "SELECT id,data FROM requests WHERE goal=? AND kind='bridge' AND state='new' ORDER BY id", (gid,)))
+        for r in rows:
+            d = json.loads(r['data'])
+            act = dict(name=d['name'], goal=gid, id=d['action'], bridge_id=d['rid'])
+            try:
+                result = self._bridge(act, d['args'], park=False)
+            except ValueError as e:
+                result = dict(error=str(e))
+            if result is None:
+                continue
+            what = 'root request' if d['name'] == 'ask_root' else 'question'
+            text = f"[answer to your {what} {d['rid']}] " + json.dumps(result, ensure_ascii=False)[:6000]
+            with self.store.transaction():
+                self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, text, 'nudge'))
+                self.store.settle_request(r['id'], 'done')
+                self.store.event('request_answered', dict(request=d['rid'], decision=result.get('decision')), gid)
+
+    def open_requests(self, gid):
+        return [json.loads(r['data'])['rid'] for r in self.store.db.execute(
+            "SELECT data FROM requests WHERE goal=? AND kind='bridge' AND state='new'", (gid,))]
+
+    def _bridge(self, action, args, park=True):
         root = Path(self.config['bridge']).expanduser()
         kind = 'root' if action['name'] == 'ask_root' else 'question'
         if self.free.is_free(action['goal']):
@@ -375,7 +400,8 @@ class Runtime:
         if res.exists():
             result = json.loads(res.read_text())
             if result.get('id')==rid and result.get('decision')=='executing':
-                self.store.update(action['goal'],state='waiting_root')
+                if park:
+                    self.store.update(action['goal'],state='waiting_root')
                 return None
             if result.get('id')==rid and result.get('decision')=='withdrawn':
                 self.store.update(action['goal'],state='cancelled')
@@ -398,7 +424,8 @@ class Runtime:
             except OSError:
                 pass
             return self._unanswered(action, args, kind, rid, timeout, free)
-        self.store.update(action['goal'], state='waiting_root' if kind == 'root' else 'waiting_user')
+        if park:
+            self.store.update(action['goal'], state='waiting_root' if kind == 'root' else 'waiting_user')
         return None
 
     def _unanswered(self, action, args, kind, rid, timeout, free):
@@ -676,11 +703,27 @@ class Runtime:
                 elif name == 'send_message':
                     result = self.mail.send(sender_goal=action['goal'], message_id=action['id'], **args)
                 elif name in ('ask_user', 'ask_root'):
-                    result = self._bridge(action, args)
-                    if result is None:return False
+                    blocking = not self.config.get('nonblocking_approvals', True) or self.free.is_free(action['goal'])
+                    result = self._bridge(action, args, park=blocking)
+                    if result is None:
+                        if blocking:return False
+                        # Non-blocking: only this step waits. The agent gets a pending result now and works on;
+                        # the answer (or the root command's output) arrives later as a message.
+                        rid = self.store.db.execute('SELECT bridge_id FROM actions WHERE id=?',
+                                                    (action['id'],)).fetchone()['bridge_id'] or action['id'][:16]
+                        self.store.request(action['goal'], 'bridge', dict(rid=rid, name=name, args=args, action=action['id']))
+                        self.store.update(action['goal'], state='working')
+                        self.store.event('request_pending', dict(request=rid, name=name), action['goal'])
+                        result = dict(pending=True, request=rid,
+                                      note='your human has not answered yet. Work on what does not need the answer; it '
+                                           'arrives as a message (wait with until message to sleep until then). Do not '
+                                           'act as if it were answered.')
                 elif name == 'finish':
                     if len(self.store.actions(action['goal']))>1:
                         raise ValueError('finish must follow all other pending actions')
+                    if (waiting := self.open_requests(action['goal'])):
+                        raise ValueError('a request is still waiting for your human (%s): wait for the answer (wait with '
+                                         'until message) before finishing' % ', '.join(waiting))
                     # Step 9: finish only when done passes and the inbox is empty. The runtime cannot judge
                     # the check itself, so it requires the model to have run it since the last steer.
                     graded = self.loop_gates and self.store.goal(action['goal']).get('kind','work') not in FREE_KINDS
@@ -1186,6 +1229,7 @@ class Runtime:
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot model-step budget reached')
             return True
+        self.poll_requests(gid)
         self._gate_check(gid, g)
         try:
             with self.store.transaction():

@@ -96,6 +96,8 @@ def wait(rt, gid, until, target='', timeout=300):
     seen_inbox = _inbox_count(rt, gid)
     queued = _queued(rt, gid)
     while True:
+        if hasattr(rt, 'poll_requests'):
+            rt.poll_requests(gid)             # an answer to a pending request is a message: it wakes this wait
         if check and (why := check()):
             return dict(happened=why, waited_s=round(time.monotonic() - start, 1))
         if _inbox_count(rt, gid) > seen_inbox:

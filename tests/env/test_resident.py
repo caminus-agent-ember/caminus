@@ -94,6 +94,10 @@ class Resident(unittest.TestCase):
     def setUp(self):
         self.key=uuid.uuid4().hex;self.home=S/self.key;self.bridge=self.home/'bridge';self.processes=[]
         self.cmd('init',extra=['--model','fixture','--endpoint',f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1','--bridge',str(self.bridge),'--bus',str(self.home/'mail.sqlite3'),'--no-loop-gates'])
+        # The bridge-protocol tests below park the goal on a request; the non-blocking mode (the default for real
+        # residents) has its own tests, which turn it back on.
+        conf=json.loads((self.home/'config.json').read_text());conf['nonblocking_approvals']=False
+        (self.home/'config.json').write_text(json.dumps(conf))
     def tearDown(self):
         for p in self.processes:
             if p.poll() is None:p.terminate()
@@ -1438,6 +1442,40 @@ for line in sys.stdin:
             rt.config['gate_each_turn']=False
             rt._gate_dirty.add(gid);rt._gate_check(gid,g())
             self.assertEqual(len(inbox()),2,'gate_each_turn false turns it off')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_pending_request_parks_only_its_step(self):
+        conf=json.loads((self.home/'config.json').read_text());conf['nonblocking_approvals']=True
+        (self.home/'config.json').write_text(json.dumps(conf))
+        self.replies(call('ask_root',dict(command='apt-get install jq',reason='need jq')),
+                     call('write',dict(path='notes.txt',content='other work')),
+                     call('finish',dict(summary='too early')),
+                     call('wait',dict(until='message',timeout=5)),
+                     call('finish',dict(summary='done with jq')))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Install jq and write notes.')
+            results=lambda name:[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']==name]
+            for _ in range(12):
+                if results('finish'):break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'working','the goal keeps working while the request waits')
+            self.assertEqual((self.home/'notes.txt').read_text(),'other work')
+            first=next(e for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='ask_root')['data']['result']
+            self.assertTrue(first['pending']);rid=first['request']
+            refused=[e for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='finish']
+            self.assertIn('still waiting for your human',json.dumps(refused[-1]['data']['result']),'no finish with an open request')
+            # the human answers while the agent waits for a message: the wait wakes and the answer is in the inbox
+            self.bridge.joinpath('res').mkdir(parents=True,exist_ok=True)
+            (self.bridge/'res'/(rid+'.json')).write_text(json.dumps(dict(id=rid,decision='denied',reason='use the user-level jq')))
+            from caminus.env.resident import housemate
+            woke=housemate.wait(rt,gid,'message',timeout=3)
+            self.assertIn('message arrived',woke['happened'],'an agent waiting for a message wakes on the answer')
+            inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertTrue(any(f'answer to your root request {rid}' in t and 'denied' in t for t in inbox))
+            self.assertEqual(rt.open_requests(gid),[])
+            self.assertIn('request_answered',[e['kind'] for e in rt.store.events()])
         finally:rt.mail.close();rt.store.close()
 
     def test_the_openai_transport_sends_reasoning_effort(self):
