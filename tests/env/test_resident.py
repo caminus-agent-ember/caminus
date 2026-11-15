@@ -1659,6 +1659,14 @@ for line in sys.stdin:
                     bad.append(f'{f.name}: from {node.module}')
         self.assertEqual(bad,[])
 
+    def test_openai_style_cached_tokens_are_priced_at_the_cache_rate(self):
+        from caminus.env.resident.model import remember_prices, price
+        remember_prices('deepseek-ai/DeepSeek-V4.1-Flash-1017',dict(input=0.2,output=0.6,cache_read=0.006))
+        usage=dict(prompt_tokens=21031,completion_tokens=74,prompt_tokens_details=dict(cached_tokens=17939))
+        usd=price('deepseek-ai/DeepSeek-V4.1-Flash-1017',usage)
+        self.assertAlmostEqual(usd,(3092*0.2+74*0.6+17939*0.006)/1e6,places=9)
+        self.assertLess(usd,0.001,'the relay charged $0.00077 for this request')
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
