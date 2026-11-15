@@ -819,7 +819,9 @@ class Runtime:
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
         after_tokens = self.model.tokens([system,*compacted,*tail],self.tools)
-        if after_tokens + reserve >= size or (not force and after_tokens > target_tokens):
+        # The target is an aim, not a limit: a large tool head plus a full summary can pass it. What must hold is
+        # that the result fits the window and lands below the trigger, so the next turn does not compact again.
+        if after_tokens + reserve >= size or (not force and after_tokens >= trigger_tokens):
             raise ModelContextError('compacted context exceeds its target; shorten the goal or memory')
         if after_tokens > before_tokens:
             raise ModelContextError('compaction did not reduce the context; shorten the goal or memory')
