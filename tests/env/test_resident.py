@@ -1634,6 +1634,16 @@ for line in sys.stdin:
             self.assertIn('new.py',got[0]['stat']);self.assertIn('+print(1)',got[0]['diff'])
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_grant_ends_after_twelve_hours_on_the_owner_side(self):
+        from caminus.cmd import env as E
+        ap=self.home/'audit.jsonl'
+        ap.write_text(json.dumps(dict(ts=1000.0,event='root_result',decision='approved',granted=True,
+                                      cmd='systemctl restart foo',goal='g1'))+'\n')
+        req=dict(cmd='systemctl restart foo',goal='g1',granted=True)
+        self.assertTrue(E._grant_recorded(str(ap),req,now=1000.0+3600))
+        self.assertFalse(E._grant_recorded(str(ap),req,now=1000.0+13*3600),'a reused goal id cannot extend it')
+        self.assertFalse(E._grant_recorded(str(ap),dict(req,goal='g2'),now=1001.0))
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

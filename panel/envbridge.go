@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -96,6 +97,12 @@ func checkPendingRequest(bridge string, r envReq) (envReq, error) {
 }
 
 func claimRoot(bridge, actor string, r envReq, decision, cmd string) (string, error) {
+	return claimRootGrant(bridge, actor, r, decision, cmd, false)
+}
+
+// claimRootGrant is claimRoot that also grants the approved command for its goal: the answer carries grant, the
+// resident records it, and the same exact command in that goal is approved without the two-press confirmation.
+func claimRootGrant(bridge, actor string, r envReq, decision, cmd string, grant bool) (string, error) {
 	token := ""
 	err := withBridgeLock(bridge, r.ID, func() error {
 		current, err := checkPendingRequest(bridge, r)
@@ -115,6 +122,9 @@ func claimRoot(bridge, actor string, r envReq, decision, cmd string) (string, er
 		token = fmt.Sprintf("%x", nonce)
 		value := map[string]any{"id": r.ID, "decision": "executing", "claim": token, "final_decision": decision,
 			"approved_by": actor, "cmd": cmd, "ts": float64(time.Now().UnixMilli()) / 1000}
+		if grant && decision == "approved" {
+			value["grant"] = true // finishRoot keeps it: the resident reads it from the final answer
+		}
 		data, _ := json.Marshal(value)
 		return writeBridgeJSON(filepath.Join(bridge, "res", r.ID+".json"), data)
 	})
@@ -141,4 +151,35 @@ func finishRoot(bridge, id, token string, rc int, out string) error {
 		data, _ = json.Marshal(value)
 		return writeBridgeJSON(path, data)
 	})
+}
+
+// grantSeconds is a grant's limit on the owner's side (the Python CLI's GRANT_SECONDS): whatever the agent's goal does,
+// a grant is not honoured after this.
+const grantSeconds = 12 * 3600
+
+// grantRecorded: the owner's own audit holds a granted, approved run of exactly this command in exactly this goal,
+// less than grantSeconds ago. The agent's granted flag and goal id are not trusted on their own.
+func grantRecorded(auditPath string, r envReq, now time.Time) bool {
+	if !r.Granted || r.Goal == "" || r.Cmd == "" {
+		return false
+	}
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		var e struct {
+			Event, Decision, Cmd, Goal string
+			Granted                    bool
+			Ts                         float64
+		}
+		if json.Unmarshal([]byte(line), &e) != nil {
+			continue
+		}
+		if e.Event == "root_result" && e.Decision == "approved" && e.Granted && e.Cmd == r.Cmd && e.Goal == r.Goal &&
+			float64(now.Unix())-e.Ts <= grantSeconds {
+			return true
+		}
+	}
+	return false
 }

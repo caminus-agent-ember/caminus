@@ -1152,7 +1152,7 @@ func TestChatApprovalNeedsASecondPress(t *testing.T) {
 		m = next.(envModel)
 	}
 	press('a')
-	if m.chat.armed != "r1" || !strings.Contains(m.msg, "rm -rf /var/cache/foo") || !strings.Contains(m.msg, "press a again") {
+	if m.chat.armed != "a:r1" || !strings.Contains(m.msg, "rm -rf /var/cache/foo") || !strings.Contains(m.msg, "press a again") {
 		t.Fatalf("the first a must only arm and name the command: %q", m.msg)
 	}
 	press('j') // scrolling in between
@@ -1160,12 +1160,12 @@ func TestChatApprovalNeedsASecondPress(t *testing.T) {
 		t.Fatal("another key must disarm the approval")
 	}
 	press('a')
-	if m.chat.armed != "r1" {
+	if m.chat.armed != "a:r1" {
 		t.Fatal("a fresh a arms again")
 	}
 	m.chat.armedAt = m.chat.armedAt.Add(-11 * time.Second)
 	press('a')
-	if m.chat.armed != "r1" {
+	if m.chat.armed != "a:r1" {
 		t.Fatal("a stale arm (over 10 s) only re-arms")
 	}
 	if _, err := os.Stat(filepath.Join(bridge, "res", "r1.json")); err == nil {
@@ -1549,5 +1549,41 @@ func TestEmberFlickersBesideTheLiveReply(t *testing.T) {
 	}
 	if n := m.liveBlock(40); strings.Contains(ansi.Strip(n), "▀") {
 		t.Fatalf("a narrow box leaves Ember out:\n%s", ansi.Strip(n))
+	}
+}
+
+func TestGrantTakesTwoPressesAndAGrantedRepeatOne(t *testing.T) {
+	m := chatFixture(t)
+	bridge := t.TempDir()
+	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
+	writeReq(t, bridge, "r1", "systemctl restart foo", 1)
+	m.refreshLocal()
+	m.chat.compose.Blur()
+	press := func(r rune) tea.Cmd {
+		next, cmd := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(envModel)
+		return cmd
+	}
+	if press('g'); m.chat.armed != "g:r1" || !strings.Contains(m.msg, "grant for this goal") {
+		t.Fatalf("the first g only arms the grant: %q", m.msg)
+	}
+	if press('a'); m.chat.armed != "a:r1" {
+		t.Fatal("a after g does not run the grant: it arms a plain approval")
+	}
+	// a request the agent marks granted: honoured only when your own audit holds the grant, within 12 hours
+	r := envReq{ID: "r2", Goal: "goal1", Cmd: "systemctl restart foo", Granted: true}
+	if grantRecorded(m.auditPath, r, time.Now()) {
+		t.Fatal("the agent's flag alone is not a grant")
+	}
+	_ = appendAudit(m.auditPath, map[string]any{"event": "root_result", "decision": "approved", "cmd": r.Cmd,
+		"goal": "goal1", "granted": true})
+	if !grantRecorded(m.auditPath, r, time.Now()) {
+		t.Fatal("your audited grant for this goal and command is honoured")
+	}
+	if grantRecorded(m.auditPath, envReq{ID: "r3", Goal: "goal2", Cmd: r.Cmd, Granted: true}, time.Now()) {
+		t.Fatal("another goal's grant is not honoured")
+	}
+	if grantRecorded(m.auditPath, r, time.Now().Add(13*time.Hour)) {
+		t.Fatal("a grant ends after 12 hours on the owner's side")
 	}
 }

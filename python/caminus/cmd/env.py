@@ -461,16 +461,23 @@ def _ask(a):
     return 0
 
 
-def _grant_recorded(ap,req):
-    """The owner's audit shows an approved, granted execution of exactly this command in exactly this goal.
-    The agent's `granted` flag on the request is not trusted on its own."""
+GRANT_SECONDS = 12 * 3600   # a grant's limit on the owner's side, whatever the agent's goal does
+
+
+def _grant_recorded(ap,req,now=None):
+    """The owner's audit shows an approved, granted execution of exactly this command in exactly this goal, less than
+    GRANT_SECONDS ago. The agent's `granted` flag on the request is not trusted on its own; nor is its goal id, which
+    the agent writes: the grants table that ends with the goal lives on the agent's side, so without this limit a
+    finished goal's grant could be reused by filing the same command under its id."""
+    now=time.time() if now is None else now
     try:
         with open(ap) as f:
             for line in f:
                 try:e=json.loads(line)
                 except ValueError:continue
                 if (e.get('event')=='root_result' and e.get('decision')=='approved' and e.get('granted')
-                        and e.get('cmd')==req.get('cmd') and e.get('goal')==req.get('goal')):
+                        and e.get('cmd')==req.get('cmd') and e.get('goal')==req.get('goal')
+                        and now-float(e.get('ts') or 0)<=GRANT_SECONDS):
                     return True
     except OSError:
         pass
