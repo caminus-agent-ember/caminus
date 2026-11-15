@@ -342,7 +342,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -1279,5 +1279,44 @@ func TestGateAndJudgeVerdicts(t *testing.T) {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
+	}
+}
+
+func TestModelsOverlayListsTheCatalogAndPicks(t *testing.T) {
+	m := chatFixture(t)
+	next, _ := m.chatSlash("/model")
+	m = next.(envModel)
+	if !m.chat.models.open || !m.chat.models.loading {
+		t.Fatalf("/model alone opens the overlay and asks for the catalog: %+v", m.chat.models)
+	}
+	ctx, big, out := 202752, 1000000, 16384
+	in, outp := 0.6, 2.2
+	m = m.modelsLoaded(modelsLoadedMsg{
+		models: []catalogModel{
+			{ID: "claude-opus-5-5", Provider: "anthropic", Context: &big, Efforts: []string{"low", "medium", "high", "xhigh", "max"}, Thinking: "adaptive", Vision: true},
+			{ID: "zai-org/GLM-5.2", Provider: "deepinfra", Context: &ctx, MaxOutput: &out, Efforts: []string{"none", "low", "medium", "high"}, Prices: &catalogPrices{Input: &in, Output: &outp}},
+		},
+		current: modelCurrent{Model: "zai-org/GLM-5.2", Provider: "deepinfra"},
+	})
+	if m.chat.models.sel != 1 {
+		t.Fatalf("the selection starts on the current model, got %d", m.chat.models.sel)
+	}
+	view := ansi.Strip(m.renderChat())
+	for _, want := range []string{"MODELS  2", "now zai-org/GLM-5.2", "claude-opus-5-5", "anthropic · 1M · effort low/medium/high/xhigh/max · vision",
+		"deepinfra · 203K · effort none/low/medium/high · $0.6/$2.2"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overlay misses %q:\n%s", want, view)
+		}
+	}
+	next, _ = m.modelsKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	m = next.(envModel)
+	next, cmd := m.modelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(envModel)
+	if m.chat.models.open || cmd == nil || !strings.Contains(m.msg, "switching to claude-opus-5-5") {
+		t.Fatalf("Enter picks the selected model and closes: open=%v msg=%q", m.chat.models.open, m.msg)
+	}
+	next, cmd = m.chatSlash("/effort high")
+	if cmd == nil {
+		t.Fatal("/effort LEVEL runs the effort command")
 	}
 }
