@@ -120,7 +120,20 @@ class Runtime:
         self.base_timeout = float(self.config.get('timeout', 900))
 
     def system(self,gid=None):
-        out = render_prompt(self.home)
+        """The stable prefix, and nothing else.
+
+        An inference server caches the longest common prefix of the prompt. Everything that changes while the
+        agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, ROBOTS.md, and the measured
+        budget - therefore rides after the history instead (see :meth:`context_message`). A memory write used
+        to invalidate the cache at the first token and force a full re-read of the whole transcript."""
+        return dict(role='system', content=render_prompt(self.home))
+
+    def context_message(self,gid=None):
+        """What the model knows about itself, delivered after the history so the cached prefix survives.
+
+        The files are re-read every turn: the agent writes MEMORY.md as it learns things, and it must see its
+        own notes. Position is what keeps that affordable."""
+        parts = []
         for p in (Path.home() / 'ROBOTS.md', self.home / 'IDENTITY.md', self.home / 'MEMORY.md'):
             if not p.is_file():
                 continue
@@ -129,17 +142,10 @@ class Runtime:
             if len(text) > limit:
                 # Say so in the prompt: a silent cut leaves the model believing it read its whole memory.
                 text = text[:limit] + f'\n[{p.name} truncated: {len(text) - limit} characters omitted from the end]'
-            out += '\n\n' + p.name + ':\n' + text
-        return dict(role='system', content=out)
-
-    def context_message(self,gid=None):
-        """The measured budget as a trailing message rather than part of the system prompt.
-
-        The system prompt is the stable prefix an inference server caches: a line that changes every turn
-        invalidates the cache from the first token, so every turn pays a full prefill of the whole history.
-        Appended after the history, only the tail changes and the prefix stays reusable."""
-        note = self._context_budget(gid)
-        return dict(role='system', content=note.strip()) if note else None
+            parts.append(p.name + ':\n' + text)
+        if (note := self._context_budget(gid)):
+            parts.append(note.strip())
+        return dict(role='system', content='\n\n'.join(parts)) if parts else None
 
     def _context_budget(self,gid=None):
         """A live budget line so the model can see its own token count and compaction distance — it cannot

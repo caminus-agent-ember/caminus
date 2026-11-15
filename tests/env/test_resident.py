@@ -301,6 +301,8 @@ class Resident(unittest.TestCase):
         self.replies(call('terminal',dict(command='printf one >> counter',yield_ms=1000)),call('finish',dict(summary='Done.')))
         first=self.cmd('once',['--goal','Keep going.','--max-steps','1'],code=22)
         (self.home/'context.json').write_text(json.dumps(dict(goal=first['id'],tokens=111111,size=1000000,ts=time.time())))
+        # The agent writes memory between steps; that must not invalidate the cached prefix either.
+        (self.home/'MEMORY.md').write_text('# Persistent memory\n\nlearned something new\n')
         self.replies(call('finish',dict(summary='Second step.')))
         self.cmd('once',['--goal-id',first['id']])
         seen=[body for k,body in Endpoint.seen if k==self.key]
@@ -314,6 +316,7 @@ class Resident(unittest.TestCase):
         note_after=after['messages'][-1]
         self.assertEqual(note_before['role'],'system')
         self.assertIn('Context budget',note_after['content'])
+        self.assertIn('learned something new',note_after['content'],'the new memory must reach the model')
         self.assertNotEqual(note_before['content'],note_after['content'])
 
     def test_step_budget_is_resumable(self):
@@ -754,9 +757,11 @@ class Resident(unittest.TestCase):
         (self.home/'MEMORY.md').write_text('x'*40000)
         rt=Runtime(self.home)
         try:
-            content=rt.system()['content']
+            content=rt.context_message()['content']
             self.assertIn('MEMORY.md truncated',content)
             self.assertIn('7232 characters omitted',content)
+            # Memory is written while the agent works, so it cannot live in the cached prefix.
+            self.assertNotIn('truncated',rt.system()['content'])
         finally:rt.mail.close();rt.store.close()
 
     def test_the_context_budget_rides_after_the_history_so_the_prefix_stays_cached(self):
@@ -764,7 +769,8 @@ class Resident(unittest.TestCase):
         try:
             blank=rt.system()['content']
             self.assertNotIn('Context budget',blank,'nothing was measured, so nothing may be claimed')
-            self.assertIsNone(rt.context_message())
+            self.assertNotIn('Context budget',(rt.context_message() or {}).get('content',''),
+                             'nothing was measured, so nothing may be claimed')
             (self.home/'context.json').write_text(json.dumps(dict(goal='g',tokens=500000,size=1000000,ts=time.time())))
             # The measured line must not enter the system prompt: a prefix that changes every turn makes the
             # inference server re-read the whole history instead of reusing its cache.
