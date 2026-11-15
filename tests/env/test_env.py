@@ -254,6 +254,22 @@ def main():
             pass
     check(True, 'jobs: bad names rejected')
 
+    # the live reader must inherit stdout: a buffered call would hold every line until the stream ends
+    from caminus.env import agent_host as _agent_host
+    live_calls, plain_calls = [], []
+    old_stream, old_run = runner.run_shell_stream, runner.run_shell
+    runner.run_shell_stream = lambda script: live_calls.append(script) or subprocess.CompletedProcess([], 0)
+    runner.run_shell = lambda script, transport=None, **kw: plain_calls.append(script) or subprocess.CompletedProcess([], 0)
+    try:
+        _agent_host.main(['stream', 'resident', '--once'], transport=lambda *a, **k: None)
+        check(live_calls and 'stream' in live_calls[0] and not plain_calls,
+              'agent_host: stream keeps its lines flowing over SSH')
+        live_calls.clear(); plain_calls.clear()
+        _agent_host.main(['status', 'resident', '--json'], transport=lambda *a, **k: None)
+        check(plain_calls and not live_calls, 'agent_host: a one-shot operation stays buffered')
+    finally:
+        runner.run_shell_stream, runner.run_shell = old_stream, old_run
+
     # sessions: tmux script builders
     import shlex as _shlex
     s = sessions.new_script('coder', ['qwen', '-p', 'hi there'])

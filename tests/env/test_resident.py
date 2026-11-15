@@ -49,8 +49,18 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         key=self.path.split('/')[1];self.seen.append((key,body))
         q=self.queues[key]
         if not q:self.respond(dict(error='fixture exhausted'),500);return
-        value=q.popleft();msg=dict(value(body) if callable(value) else value);reason=msg.pop('_finish_reason','stop')
+        value=q.popleft()
+        if body.get('stream') and isinstance(value,dict) and '_deltas' in value:
+            self.stream(value['_deltas']);return
+        msg=dict(value(body) if callable(value) else value);reason=msg.pop('_finish_reason','stop')
         self.respond(dict(choices=[dict(message=msg,finish_reason=reason)],usage=dict(prompt_tokens=30,completion_tokens=10)))
+
+    def stream(self,deltas):
+        """an SSE reply in the shape the engine emits: delta chunks, then [DONE]"""
+        self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+        for d in deltas:
+            self.wfile.write(('data: '+json.dumps(d)+'\n\n').encode())
+        self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
 
 
 class Resident(unittest.TestCase):
@@ -195,7 +205,7 @@ class Resident(unittest.TestCase):
                 observed=False
                 def context_size(self):return 65536
                 def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
-                def complete(self,messages,tools=None,max_tokens=None):
+                def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                     self.calls+=1
                     if self.calls==1:
                         rt.store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(gid,'New human direction.'))
@@ -421,7 +431,7 @@ class Resident(unittest.TestCase):
             def __init__(self):self.summaries=0
             def context_size(self):return 16384
             def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
-            def complete(self,messages,tools=None,max_tokens=None):
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                 assert self.tokens(messages,tools)+max_tokens<self.context_size(),'compaction overflow'
                 if tools:return call('finish',dict(summary='Compacted and continued.'))
                 self.summaries+=1
@@ -480,6 +490,66 @@ class Resident(unittest.TestCase):
         sent.clear();model.tokens=lambda messages,tools:17000
         with self.assertRaises(ModelContextError):model.complete([dict(role='user',content='too large')])
         self.assertEqual(sent,[])
+
+    def test_streamed_reply_reaches_the_same_durable_message(self):
+        self.replies(dict(_deltas=[
+            dict(choices=[dict(delta=dict(reasoning_content='Plan: '))]),
+            dict(choices=[dict(delta=dict(content='Hel'))]),
+            dict(choices=[dict(delta=dict(content='lo.'))]),
+            dict(choices=[dict(delta=dict(content=''),finish_reason='stop')]),
+        ]))
+        result=self.cmd('once',['--goal','Stream a short answer.'])
+        self.assertEqual(result['state'],'completed');self.assertEqual(result['summary'],'Hello.')
+        assistant=next(e for e in self.cmd('events') if e['kind']=='assistant')
+        self.assertEqual(assistant['data']['content'],'Hello.')
+        self.assertEqual(assistant['data']['reasoning'],'Plan: ')
+        # reasoning is displayed with the reply, never replayed to the model or counted in its budget
+        goal=json.loads(subprocess.run(self.argv('status'),capture_output=True,text=True).stdout)['goals'][0]
+        self.assertNotIn('reasoning',json.dumps(goal))
+        self.assertEqual(list((self.home/'live').glob('*.json')) if (self.home/'live').is_dir() else [],[],
+                         'the live snapshot must be gone once the reply is durable')
+
+    def test_streamed_truncation_keeps_the_partial_text_visible(self):
+        self.replies(dict(_deltas=[
+            dict(choices=[dict(delta=dict(content='Half an ans'))]),
+            dict(choices=[dict(delta=dict(content='wer'),finish_reason='length')]),
+        ]))
+        result=self.cmd('once',['--goal','Stream until the budget runs out.'],code=22)
+        self.assertEqual(result['state'],'paused')
+        event=next(e for e in self.cmd('events') if e['kind']=='model_truncated')
+        self.assertEqual(event['data']['partial']['content'],'Half an answer')
+        self.assertFalse(any((self.home/'live').glob('*.json')) if (self.home/'live').is_dir() else False)
+
+    def test_live_snapshot_coalesces_and_disappears_when_the_turn_ends(self):
+        from caminus.env.resident.runtime import Live
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Stream a reply.')
+            live=Live(self.home,gid,rt.store)
+            live.on_delta('content','a');live.on_delta('content','b')
+            self.assertEqual(json.loads(live.path.read_text())['content'],'a','one write per 0.1s, not per piece')
+            live.flush();self.assertEqual(json.loads(live.path.read_text())['content'],'ab')
+            live.on_delta('tool','terminal');live.flush()
+            self.assertEqual(json.loads(live.path.read_text())['tools'],['terminal'])
+            rt.store.update(gid,state='cancelled')
+            self.assertFalse(live.flush(),'a cancelled goal stops the stream')
+            live.clear();self.assertFalse(live.path.exists())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_stream_cli_reports_live_text_then_done(self):
+        from caminus.env.resident.runtime import Live
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Stream a reply.')
+            live=Live(self.home,gid,rt.store)
+            p=subprocess.Popen(self.argv('stream',['--seconds','1.2']),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            time.sleep(.2);live.on_delta('content','Hello');live.flush()
+            time.sleep(.25);live.clear()
+            out=p.communicate(timeout=10)[0]
+        finally:rt.mail.close();rt.store.close()
+        lines=[json.loads(l) for l in out.splitlines() if l.strip().startswith('{')]
+        self.assertTrue(any(l.get('reset') and l.get('content')=='Hello' for l in lines),out)
+        self.assertTrue(any(l.get('done') for l in lines),out)
 
     def test_truncation_never_completes_or_executes_partial_tools(self):
         partial=call('terminal',dict(command='touch forbidden'))

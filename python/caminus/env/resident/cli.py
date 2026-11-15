@@ -23,7 +23,7 @@ from .prompt import render as render_prompt
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','resume','cancel','unit','start','stop','peers','message','mail','discover','prompt'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','unit','start','stop','peers','message','mail','discover','prompt'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -67,6 +67,10 @@ def parser():
             p.add_argument('--jsonl',action='store_true',help='stream events followed by a result record')
         if op in ('events','mail'):
             p.add_argument('--after',type=int,default=0)
+        if op=='stream':
+            p.add_argument('--interval',type=float,default=.05)
+            p.add_argument('--seconds',type=float,help='stop after this long (default: until the reader goes away)')
+            p.add_argument('--once',action='store_true',help='print the live snapshots once and exit')
         if op in ('resume','cancel'):
             p.add_argument('goal_id')
     return ap
@@ -214,6 +218,37 @@ def main(argv=None,stdin=None):
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0
+        if a.op=='stream':
+            # NDJSON, one line per change of a live snapshot: a UI holds one process instead of polling the
+            # agent's home over SSH. The first line of a turn carries the whole text (reset), later lines
+            # carry only the suffix; a vanished snapshot is reported once as done.
+            live=home/'live'
+            seen={}
+            deadline=time.time()+a.seconds if a.seconds else None
+            store.close()
+            while True:
+                for p in sorted(live.glob('*.json')) if live.is_dir() else []:
+                    try:data=json.loads(p.read_text())
+                    except (OSError,ValueError):continue
+                    if not isinstance(data,dict):continue
+                    gid=str(data.get('goal') or p.stem)
+                    prev=seen.get(gid) or {}
+                    content=str(data.get('content') or '');reasoning=str(data.get('reasoning') or '')
+                    line=dict(goal=gid,turn=str(data.get('turn') or ''),tools=data.get('tools') or [])
+                    if line['turn']!=prev.get('turn'):
+                        line.update(reset=True,content=content,reasoning=reasoning)
+                    else:
+                        line.update(content=content[len(str(prev.get('content') or '')):],
+                                    reasoning=reasoning[len(str(prev.get('reasoning') or '')):])
+                    if line.get('reset') or line['content'] or line['reasoning'] or line['tools']!=prev.get('tools'):
+                        emit(line,True)
+                    seen[gid]=data
+                for gid in list(seen):
+                    if not (live/(gid+'.json')).exists():
+                        emit(dict(goal=gid,turn=str(seen[gid].get('turn') or ''),done=True),True)
+                        seen.pop(gid)
+                if a.once or (deadline and time.time()>=deadline):return 0
+                time.sleep(max(.02,a.interval))
         if a.op in ('send','once'):
             text=(stdin or sys.stdin).read() if a.stdin else a.goal if a.goal is not None else a.text
             if a.op=='send' and a.goal_id:

@@ -4,6 +4,8 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -45,12 +47,86 @@ type residentMsg struct {
 }
 type residentActionMsg struct{ text string }
 
+// residentLiveMsg is one NDJSON line from `agent stream`: the reply the runtime is generating right now.
+// reset carries the whole text of a new turn; later lines carry only the suffix.
+type residentLiveMsg struct {
+	agent, turn, text, reasoning string
+	tools                        []string
+	reset, done                  bool
+	err                          string
+	epoch                        uint64
+}
+
+// residentStreamStartMsg hands the started reader process to the model.
+type residentStreamStartMsg struct {
+	agent string
+	epoch uint64
+	state *streamState
+	err   string
+}
+
+// streamState is the one live reader for this conversation page: one long-lived process instead of a poll
+// per keystroke, killed when the page, the session or the UI goes away.
+type streamState struct {
+	cancel context.CancelFunc
+	sc     *bufio.Scanner
+}
+
 func residentCommand(m envModel, args []string, input string) *exec.Cmd {
 	argv := append(append([]string{}, m.cli[1:]...), "env", "agent")
 	argv = append(argv, args...)
 	c := exec.Command(m.cli[0], argv...)
 	c.Stdin = strings.NewReader(input)
 	return c
+}
+
+// startStream opens `agent stream NAME`: the runtime rewrites a snapshot of the reply it is generating
+// (at most ten times a second), and each line arrives here as one message.
+func startStream(m envModel) tea.Cmd {
+	if len(m.cli) == 0 || m.agentName == "" {
+		return nil
+	}
+	name, epoch := m.agentName, m.residentEpoch
+	cli := append([]string{}, m.cli...)
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		argv := append(append([]string{}, cli[1:]...), "env", "agent", "stream", name, "--interval", "0.05")
+		cmd := exec.CommandContext(ctx, cli[0], argv...)
+		out, err := cmd.StdoutPipe()
+		if err == nil {
+			err = cmd.Start()
+		}
+		if err != nil {
+			cancel()
+			return residentStreamStartMsg{agent: name, epoch: epoch, err: err.Error()}
+		}
+		go func() { _ = cmd.Wait() }() // reap when the page closes and the context kills it
+		sc := bufio.NewScanner(out)
+		sc.Buffer(make([]byte, 0, 64<<10), 1<<20) // a turn's whole text can arrive in one reset line
+		return residentStreamStartMsg{agent: name, epoch: epoch, state: &streamState{cancel: cancel, sc: sc}}
+	}
+}
+
+// streamLine reads one NDJSON line; the update loop asks for the next one after handling each.
+func streamLine(agent string, epoch uint64, sc *bufio.Scanner) tea.Cmd {
+	return func() tea.Msg {
+		if sc == nil || !sc.Scan() {
+			return residentLiveMsg{agent: agent, epoch: epoch, done: true}
+		}
+		var line struct {
+			Turn      string   `json:"turn"`
+			Content   string   `json:"content"`
+			Reasoning string   `json:"reasoning"`
+			Tools     []string `json:"tools"`
+			Reset     bool     `json:"reset"`
+			Done      bool     `json:"done"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+			return residentLiveMsg{agent: agent, epoch: epoch, err: err.Error(), done: true}
+		}
+		return residentLiveMsg{agent: agent, epoch: epoch, turn: line.Turn, text: line.Content,
+			reasoning: line.Reasoning, tools: line.Tools, reset: line.Reset, done: line.Done}
+	}
 }
 
 func residentRefresh(m envModel) tea.Cmd {

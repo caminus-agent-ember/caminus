@@ -6,8 +6,9 @@ import json
 import os
 from pathlib import Path
 import time
+import uuid
 
-from .model import Model, ModelError, ModelTruncated, ModelContextError
+from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled
 from .store import Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
@@ -52,6 +53,49 @@ def runtime_lock(home):
             yield
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+class Live:
+    """The snapshot a UI reads while the model generates.
+
+    One small JSON file per goal, rewritten at most ten times a second: a streamed reply costs no durable
+    write per token and leaves nothing in the event log. The turn's id lets a reader tell a new reply from
+    a continuation; the file is removed when the turn ends, so its absence is the "not generating" signal.
+    """
+
+    def __init__(self, home, gid, store):
+        self.path = Path(home) / 'live' / (gid + '.json')
+        self.store, self.gid = store, gid
+        self.turn = uuid.uuid4().hex[:12]
+        self.content, self.reasoning, self.tools = [], [], []
+        self.last = 0.0
+
+    def on_delta(self, kind, value):
+        """the model's per-piece callback; False cancels the stream (the goal was cancelled meanwhile)"""
+        if kind == 'content':
+            self.content.append(value)
+        elif kind == 'reasoning':
+            self.reasoning.append(value)
+        elif kind == 'tool':
+            self.tools.append(value)
+        else:
+            return True
+        now = time.time()
+        if now - self.last < .1:
+            return True
+        self.last = now
+        return self.flush()
+
+    def flush(self):
+        if self.store.goal(self.gid)['state'] == 'cancelled':
+            return False
+        atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
+                                    content=''.join(self.content), reasoning=''.join(self.reasoning),
+                                    tools=self.tools))
+        return True
+
+    def clear(self):
+        self.path.unlink(missing_ok=True)
 
 
 class Runtime:
@@ -272,15 +316,26 @@ class Runtime:
                 self.store.update(gid,state='working')
             if hasattr(self.model,'config'):
                 self.model.config['timeout'] = max(.1,min(self.base_timeout,g['deadline']-time.time())) if g['deadline'] else self.base_timeout
-            reply = self.model.complete([self.system(),*messages],TOOLS,
-                                        max_tokens=min(int(self.config.get('max_tokens',4096)),self.model.context_size()//4))
+            # The live snapshot is what a UI shows while this call generates; the durable event below
+            # replaces it. clear() runs on every exit path, so a failed or cancelled turn leaves no tail.
+            live = Live(self.home, gid, self.store)
+            try:
+                reply = self.model.complete([self.system(),*messages],TOOLS,
+                                            max_tokens=min(int(self.config.get('max_tokens',4096)),self.model.context_size()//4),
+                                            on_delta=live.on_delta)
+            finally:
+                live.clear()
             if self.store.goal(gid)['state']=='cancelled':
                 return True
             self.retry.pop(gid,None)
-            if not self.store.model_reply(gid,reply):
+            reasoning = reply.pop('reasoning_content','')
+            if not self.store.model_reply(gid,reply,reasoning=reasoning):
                 return True
             if not reply.get('tool_calls'):
                 self._finish(gid,reply['content'])
+            return True
+        except Cancelled:
+            # Cancelled between two streamed pieces: the model was closed, nothing was stored.
             return True
         except ModelError as e:
             with self.store.transaction():

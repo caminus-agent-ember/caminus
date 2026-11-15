@@ -62,7 +62,10 @@ CAMINUS_INSTALL
         import uuid
         delimiter='CAMINUS_REQUEST_'+uuid.uuid4().hex
         script='exec python3 -I "$HOME/bin/caminus-agent" request <<\''+delimiter+"'\n"+payload+'\n'+delimiter+'\n'
-        result=runner.run_shell_stream(script) if '--jsonl' in args else runner.run_shell(script,transport=transport)
+        # A live reader must inherit stdout: `stream` and `--jsonl` keep their lines flowing over SSH
+        # instead of arriving as one buffered result when the process ends.
+        live='--jsonl' in args or args[:1]==['stream']
+        result=runner.run_shell_stream(script) if live else runner.run_shell(script,transport=transport)
     sys.stdout.write(result.stdout or '')
     sys.stderr.write(result.stderr or '')
     return result.returncode

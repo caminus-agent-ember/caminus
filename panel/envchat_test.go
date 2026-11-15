@@ -415,3 +415,51 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 		}
 	}
 }
+
+func TestLiveTailShowsThinkingToolsAndTextThenYieldsToTheDurableBlock(t *testing.T) {
+	m := chatFixture()
+	// a turn's first line carries the whole text, later lines carry the suffix
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1", text: "Half", reasoning: "Weighing options.",
+		tools: []string{"terminal"}, reset: true})
+	m = next.(envModel)
+	if !m.chat.live.active {
+		t.Fatal("the live tail did not start")
+	}
+	live := ansi.Strip(m.liveBlock(m.width))
+	for _, want := range []string{"THINKING", "Weighing options.", "RUN · terminal", "Half"} {
+		if !strings.Contains(live, want) {
+			t.Fatalf("live tail missing %q:\n%s", want, live)
+		}
+	}
+	next, _ = m.Update(residentLiveMsg{agent: "resident", turn: "t1", text: " an answer."})
+	m = next.(envModel)
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "Half an answer.") {
+		t.Fatal("streamed deltas did not accumulate")
+	}
+	// the durable reply replaces the tail and shows its reasoning as its own block
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original",
+		Kind: "assistant", Data: map[string]any{"content": "Half an answer.", "reasoning": "Weighing options."}}}})
+	if m.chat.live.active {
+		t.Fatal("the durable reply must end the live tail")
+	}
+	durable := ansi.Strip(m.chat.content)
+	if !strings.Contains(durable, "THINKING") || !strings.Contains(durable, "AGENT") || !strings.Contains(durable, "Half an answer.") {
+		t.Fatalf("durable blocks missing:\n%s", durable)
+	}
+	if strings.Contains(ansi.Strip(m.liveBlock(m.width)), "Half an answer.") {
+		t.Fatal("the live tail outlived the durable block")
+	}
+}
+
+func TestLiveTailStaysBoundedAndRejectsAnotherVisit(t *testing.T) {
+	long := strings.Repeat("word ", 400)
+	if got := strings.Count(envTail(long, 40, 8), "\n"); got > 8 {
+		t.Fatalf("live tail kept %d lines", got)
+	}
+	m := chatFixture()
+	m.residentEpoch = 3
+	next, _ := m.Update(residentLiveMsg{agent: "resident", epoch: 2, turn: "t", text: "ghost", reset: true})
+	if next.(envModel).chat.live.active {
+		t.Fatal("a stream from an earlier visit painted the tail")
+	}
+}

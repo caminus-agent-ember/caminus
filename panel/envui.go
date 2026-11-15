@@ -508,6 +508,11 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, residentRefresh(m))
 			}
 		}
+		// The conversation page keeps one live reader open; it is started here so a page that was
+		// entered without a key press (a reopened session) streams too.
+		if m.tab == 6 && m.chat.stream == nil {
+			cmds = append(cmds, startStream(m))
+		}
 		return m, tea.Batch(cmds...)
 	case probeMsg:
 		m.sshOK, m.sshN = msg.ok, msg.n
@@ -575,6 +580,42 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case residentActionMsg:
 		m.msg = msg.text
 		return m, residentRefresh(m)
+	case residentStreamStartMsg:
+		if msg.err != "" || msg.epoch != m.residentEpoch || msg.agent != m.agentName {
+			return m, nil
+		}
+		m.chat.stopStream()
+		m.chat.stream = msg.state
+		return m, streamLine(msg.agent, msg.epoch, msg.state.sc)
+	case residentLiveMsg:
+		if msg.epoch != m.residentEpoch || (msg.agent != "" && msg.agent != m.agentName) {
+			m.chat.stopStream()
+			return m, nil
+		}
+		if msg.err != "" || msg.done {
+			m.chat.stopStream()
+			m.syncChat()
+			return m, nil
+		}
+		if msg.reset || msg.turn != m.chat.live.turn {
+			m.chat.live = residentLive{turn: msg.turn, text: msg.text, reasoning: msg.reasoning,
+				tools: msg.tools, active: true}
+		} else {
+			m.chat.live.text += msg.text
+			m.chat.live.reasoning += msg.reasoning
+			if len(msg.tools) > 0 {
+				m.chat.live.tools = msg.tools
+			}
+		}
+		wasBottom := m.chat.transcript.AtBottom()
+		m.syncChat()
+		if wasBottom {
+			m.chat.transcript.GotoBottom()
+		}
+		if m.chat.stream != nil {
+			return m, streamLine(msg.agent, msg.epoch, m.chat.stream.sc)
+		}
+		return m, nil
 	case sshOutMsg:
 		switch msg.what {
 		case "jobs":
@@ -610,6 +651,10 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshLocal()
 		return m, tickCmd()
 	case tea.KeyPressMsg:
+		if m.tab != 6 {
+			// Leaving the conversation page ends its live reader; the next visit starts a fresh one.
+			m.chat.stopStream()
+		}
 		if m.tab == 6 && (m.mode == "" || m.mode == "normal") {
 			return m.chatKey(msg)
 		}

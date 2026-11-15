@@ -124,7 +124,9 @@ class Store:
     def actions(self, gid):
         return [dict(r) for r in self.db.execute("SELECT * FROM actions WHERE goal=? AND state!='done' ORDER BY rowid", (gid,))]
 
-    def model_reply(self, gid, message):
+    def model_reply(self, gid, message, reasoning=''):
+        """Store one reply. reasoning is displayed with the reply but never sent back to the model:
+        it is not part of messages, so replay and the token budget are unchanged."""
         with self.transaction():
             g = self.goal(gid)
             if g['state'] == 'cancelled':
@@ -134,7 +136,7 @@ class Store:
                 f = call['function']
                 self.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
                     (uuid.uuid4().hex, gid, call['id'], f['name'], f['arguments'], 'pending'))
-            self.event('assistant', message, gid)
+            self.event('assistant', dict(message, reasoning=reasoning) if reasoning else message, gid)
         return True
 
     def action_result(self, action, result):

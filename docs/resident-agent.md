@@ -60,8 +60,14 @@ filters by name without leaving the conversation. When the draft is a `/` token,
 matching commands appear next to the composer and Tab cycles through them. The
 footer shows the configured model,
 context capacity, selected goal state/steps and pending request count. Context
-capacity is not presented as a measured current token count. Updates arrive at
-model/tool event boundaries, not as token-by-token private reasoning.
+capacity is not presented as a measured current token count.
+
+While a reply generates, a bounded tail below the transcript shows its thinking,
+each tool it starts and the text so far, redrawn a few times a second from the
+runtime's live snapshot. The durable blocks replace it when the turn lands, so a
+reply is never shown twice and the transcript is never rewritten mid-reply.
+Thinking is stored with the reply and shown above it as its own block; it is not
+sent back to the model or counted in its context budget.
 
 Most controls use slash commands (type `/` in the composer and Tab completes
 the highlighted name):
@@ -169,6 +175,12 @@ caminus env agent events resident --after 0 --json
 caminus env agent once resident --goal-id GOAL_ID --json
 caminus env agent cancel resident GOAL_ID --json
 ```
+
+`caminus env agent stream resident` prints NDJSON for the reply being generated:
+one line per change, the first line of a turn carrying the whole text (`reset`)
+and later lines only the suffix, then a `done` line when the turn lands. It is
+what the panel's live tail reads; `--once` prints the current snapshots and
+exits, and `--seconds N` bounds a wait. Nothing it prints is durable.
 
 Test budgets are optional, persist with the goal, and pause further actions;
 they are not a hard process timeout for already running terminal jobs. `cancel`

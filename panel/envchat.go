@@ -37,6 +37,16 @@ type residentChat struct {
 	pickerSel                               int
 	slashIdx                                int
 	slashToken, slashText                   string
+	live                                    residentLive
+	stream                                  *streamState
+}
+
+// residentLive is the reply being generated: shown under the durable transcript and replaced by it when the
+// turn lands. Nothing here is durable; the transcript stays the record.
+type residentLive struct {
+	turn, text, reasoning string
+	tools                 []string
+	active                bool
 }
 
 type residentComposeResult struct {
@@ -87,6 +97,10 @@ func (m *envModel) receiveResident(msg residentMsg) {
 		if e.Seq > m.chat.seq {
 			m.residentEvents = append(m.residentEvents, e)
 			m.chat.seq = e.Seq
+			if e.Kind == "assistant" {
+				// The durable block replaces the live tail; keeping both would show the reply twice.
+				m.chat.live = residentLive{}
+			}
 		}
 	}
 	if m.chat.selectID != "" {
@@ -127,8 +141,13 @@ func (m *envModel) syncChat() {
 	}
 	oldBottom := m.chat.transcript.AtBottom()
 	m.chat.transcript.SetWidth(w)
-	// One header line and one footer line surround the transcript.
-	m.chat.transcript.SetHeight(max(1, h-1-lipgloss.Height(m.chatBottom())-1))
+	// One header line and one footer line surround the transcript; the live tail sits between it and the
+	// composer, so a generating reply never rewrites the durable content.
+	tail := 0
+	if live := m.liveBlock(w); live != "" {
+		tail = lipgloss.Height(live)
+	}
+	m.chat.transcript.SetHeight(max(1, h-1-lipgloss.Height(m.chatBottom())-1-tail))
 	if m.chat.help {
 		m.chat.transcript.SetHeight(max(1, m.chat.transcript.Height()-3))
 	}
@@ -153,6 +172,49 @@ func (m *envModel) syncChat() {
 	if oldBottom {
 		m.chat.transcript.GotoBottom()
 	}
+}
+
+// liveBlock renders the reply being generated: its thinking, the tools it has started and the text so far.
+// Plain text, not glamour: this is redrawn on every snapshot, and the durable block is styled once when the
+// turn lands. The tail is bounded, so a long reply cannot push the composer off the screen.
+func (m envModel) liveBlock(w int) string {
+	l := m.chat.live
+	if !l.active {
+		return ""
+	}
+	inner := max(10, w-4)
+	var parts []string
+	if l.reasoning != "" {
+		parts = append(parts, envDim.Render("THINKING")+"\n"+envDim.Render(envTail(l.reasoning, inner, 6)))
+	}
+	for _, name := range l.tools {
+		parts = append(parts, envWarn.Render("RUN · "+residentText(name)+" …"))
+	}
+	if l.text != "" {
+		parts = append(parts, envHead.Render("AGENT")+"\n"+envTail(l.text, inner, 8))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, envDim.Render("AGENT · generating…"))
+	}
+	return envBorder.Width(max(18, w-2)).Render(strings.Join(parts, "\n"))
+}
+
+// envTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.
+func envTail(s string, width, maxLines int) string {
+	lines := strings.Split(ansi.Hardwrap(s, max(8, width), true), "\n")
+	if len(lines) > maxLines {
+		lines = append([]string{envDim.Render("…")}, lines[len(lines)-maxLines:]...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// stopStream ends the reader process and drops the live tail; the transcript already holds what is durable.
+func (c *residentChat) stopStream() {
+	if c.stream != nil {
+		c.stream.cancel()
+		c.stream = nil
+	}
+	c.live = residentLive{}
 }
 
 func (c *residentChat) renderMarkdown(text string) string {
@@ -189,6 +251,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return heading("YOU · steer "+shortGoal(e.Goal), "12") + "\n" + c.renderMarkdown(text)
 	case "assistant":
 		var parts []string
+		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
+		// sent back to the model, so this block is display only.
+		if text := str("reasoning"); text != "" {
+			parts = append(parts, heading("THINKING", "8")+"\n"+c.renderMarkdown(text))
+		}
 		if text := str("content"); text != "" {
 			parts = append(parts, heading("AGENT", "10")+"\n"+c.renderMarkdown(text))
 		}
@@ -347,7 +414,11 @@ func (m envModel) renderChat() string {
 	if m.chat.help {
 		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
 	}
-	return strings.Join([]string{head, m.chat.transcript.View(), m.chatBottom(), foot}, "\n")
+	body := []string{head, m.chat.transcript.View()}
+	if live := m.liveBlock(w); live != "" {
+		body = append(body, live)
+	}
+	return strings.Join(append(body, m.chatBottom(), foot), "\n")
 }
 
 func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
