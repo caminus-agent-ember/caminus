@@ -69,7 +69,10 @@ def price(model, usage, served=None):
         row = PRICES.get(served) or max(PRICES.values(), key=lambda r: r[0][1])
     low, high, line = row
     usage = usage or {}
-    read = usage.get('cache_read_input_tokens') or 0
+    # Anthropic reports cache reads as cache_read_input_tokens; OpenAI-style providers (DeepInfra) inside
+    # prompt_tokens_details.cached_tokens, already counted in prompt_tokens. Missing the second priced every cached
+    # token at the full input rate (4-5x on a cached DeepSeek prompt).
+    read = usage.get('cache_read_input_tokens') or (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0
     wrote = usage.get('cache_creation_input_tokens') or 0
     out = usage.get('completion_tokens', usage.get('output_tokens')) or 0
     # last_usage reports prompt_tokens as everything sent; the uncached part is what remains after the cache.

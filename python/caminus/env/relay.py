@@ -331,9 +331,35 @@ def unit_dir():
     return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd' / 'user'
 
 
-def unit_text(provider, args):
-    """The service: this interpreter, this package, the relay's own flags; no --ttl (it runs until stopped)."""
-    pkg_root = Path(__file__).resolve().parents[2]      # the directory holding the caminus package
+def freeze():
+    """A copy of the code the relay runs (caminus/env/relay.py and the resident package it prices from), in
+    $XDG_DATA_HOME/caminus/relay-code/<content digest>/, so the service never runs from a checkout: editing, moving or
+    archiving the source tree cannot stop or change a running relay. Named by content, so the same code reuses its
+    copy and an older copy stays for any service still on it. Returns the directory that holds the caminus package."""
+    import hashlib
+    import shutil
+    src = Path(__file__).resolve().parents[2]
+    files = [Path('caminus/__init__.py'), Path('caminus/env/__init__.py'), Path('caminus/env/relay.py'),
+             *sorted(p.relative_to(src) for p in (src / 'caminus/env/resident').glob('*.py'))]
+    digest = hashlib.sha256()
+    for f in files:
+        digest.update(str(f).encode() + b'\0' + (src / f).read_bytes())
+    root = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'caminus' / 'relay-code'
+    dest = root / digest.hexdigest()[:12]
+    if not (dest / 'caminus/env/relay.py').exists():
+        tmp = root / (dest.name + '.tmp')
+        shutil.rmtree(tmp, ignore_errors=True)
+        for f in files:
+            (tmp / f).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src / f, tmp / f)
+        tmp.replace(dest)
+    return dest
+
+
+def unit_text(provider, args, pkg_root=None):
+    """The service: this interpreter, the frozen relay code (freeze), the relay's own flags; no --ttl (it runs until
+    stopped)."""
+    pkg_root = pkg_root or Path(__file__).resolve().parents[2]
     cmd = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); from caminus.env import relay; '
            'relay.main(sys.argv[2:])', str(pkg_root), '--provider', provider, '--ttl', '0', *args]
     quote = lambda a: '"' + a.replace('\\', '\\\\').replace('"', '\\"') + '"' if any(c in a for c in ' ";') else a
@@ -369,7 +395,7 @@ def service(argv, run=subprocess.run):
             args += ['--model', m]
         d = unit_dir()
         d.mkdir(parents=True, exist_ok=True)
-        (d / unit_name(a.provider)).write_text(unit_text(a.provider, args))
+        (d / unit_name(a.provider)).write_text(unit_text(a.provider, args, freeze()))
         ctl('daemon-reload')
         r = ctl('enable', '--now', unit_name(a.provider))
         if r.returncode:
