@@ -1234,6 +1234,10 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	case "/effort":
 		clear()
 		return m, setEffort(m, strings.TrimSpace(arg))
+	case "/update":
+		clear()
+		m.msg = "uploading the runtime…"
+		return m, updateResident(m, strings.TrimSpace(arg) == "now")
 	case "/compact":
 		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
 		// pass rather than writing history from here.
@@ -1333,6 +1337,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
 	{"/model", "pick the brain: the models overlay; or /model ID"},
+	{"/update", "install this caminus's runtime between goals (now: at the next turn)"},
 	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "the goals overlay (Ctrl+G)"},
 	{"/help", "toggle the help footer"},

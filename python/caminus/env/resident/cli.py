@@ -101,7 +101,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -148,6 +148,10 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='update':
+            p.add_argument('--program',help='the runtime to install (default: the newest one install uploaded, ~/bin/caminus-agent)')
+            p.add_argument('--now',action='store_true',help='at the next turn boundary instead of between goals')
+            p.add_argument('--wait',type=float,default=0,help='seconds to wait for the daemon to come back on it')
         if op=='provider':
             p.add_argument('action',nargs='?',default='list',choices=('list','add','remove'))
             p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, ...')
@@ -354,7 +358,7 @@ def main(argv=None,stdin=None):
                 print(unit_text(a.name,home),end='');return 0
             env=dict(os.environ,XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()))
             if a.op=='start':
-                d=Path.home()/'.config/systemd/user';d.mkdir(parents=True,exist_ok=True)
+                d=Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd/user';d.mkdir(parents=True,exist_ok=True)
                 (d/unit).write_text(unit_text(a.name,home))
                 subprocess.run(['systemctl','--user','daemon-reload'],env=env,check=True)
                 subprocess.run(['systemctl','--user','enable','--now',unit],env=env,check=True)
@@ -388,6 +392,23 @@ def main(argv=None,stdin=None):
             return 0
         if a.op in ('provider','models','model','effort'):
             return model_ops(a,home)
+        if a.op=='update':
+            import time as _t
+            program=Path(a.program).expanduser().resolve() if a.program else (Path.home()/'bin/caminus-agent').resolve()
+            if not program.is_file():raise ValueError(f'no runtime at {program}: run `caminus env agent install` first')
+            atomic_json(home/'update.json',dict(program=str(program),now=bool(a.now),ts=_t.time()))
+            out=dict(name=a.name,queued=True,runtime=program.name,
+                     note='the daemon installs it between goals' if not a.now else 'the daemon installs it at its next turn boundary')
+            end=_t.time()+max(0,a.wait)
+            while a.wait and _t.time()<end:
+                try:hb=json.loads((home/'heartbeat.json').read_text())
+                except (OSError,ValueError):hb={}
+                if hb.get('runtime')==program.name and not (home/'update.json').exists():
+                    out.update(applied=True,pid=hb.get('pid'));break
+                _t.sleep(1)
+            else:
+                if a.wait:out['applied']=False
+            emit(out,a.json);return 0
         if a.op=='mcp':
             import re as _re
             cfg=json.loads((home/'config.json').read_text())

@@ -1277,6 +1277,42 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
+        cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)
+        name=json.loads((self.home/'config.json').read_text())['name']
+        (units/f'caminus-agent-{name}.service').write_text('[Service]\nExecStart=old\n')
+        new=self.home/'abc123.pyz';new.write_text('zip')
+        old=os.environ.get('XDG_CONFIG_HOME');os.environ['XDG_CONFIG_HOME']=str(cfgdir)
+        calls=[]
+        class R:returncode=0
+        try:
+            out=self.cmd('update',['--program',str(new)])
+            self.assertTrue(out['queued']);self.assertEqual(out['runtime'],'abc123.pyz')
+            rt=Runtime(self.home);rt.systemctl=lambda argv,**k:(calls.append(argv),R())[1]
+            try:
+                gid=rt.store.enqueue('Busy.');rt.store.update(gid,state='working')
+                self.assertFalse(rt._maybe_update(),'a goal is mid-run: the update waits for it')
+                self.assertTrue((self.home/'update.json').exists());self.assertEqual(calls,[])
+                rt.store.update(gid,state='completed')
+                self.assertTrue(rt._maybe_update(),'between goals it installs and restarts')
+                unit=(units/f'caminus-agent-{name}.service').read_text()
+                self.assertIn(str(new),unit);self.assertIn(f'run {name} --home',unit)
+                self.assertIn(['systemctl','--user','restart','--no-block',f'caminus-agent-{name}.service'],calls)
+                self.assertFalse((self.home/'update.json').exists())
+                self.assertIn('updating',[e['kind'] for e in rt.store.events()])
+                # --now does not wait for the running goal
+                self.cmd('update',['--program',str(new),'--now'])
+                g2=rt.store.enqueue('Busy again.');rt.store.update(g2,state='working')
+                self.assertTrue(rt._maybe_update())
+            finally:rt.mail.close();rt.store.close()
+            # the new daemon's heartbeat names its runtime: --wait confirms it
+            (self.home/'heartbeat.json').write_text(json.dumps(dict(pid=1,ts=time.time(),state='listening',runtime='abc123.pyz')))
+            done=self.cmd('update',['--program',str(new),'--wait','1'])
+            self.assertFalse(done['applied'],'the marker is still waiting for a daemon')
+        finally:
+            if old is None:os.environ.pop('XDG_CONFIG_HOME',None)
+            else:os.environ['XDG_CONFIG_HOME']=old
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

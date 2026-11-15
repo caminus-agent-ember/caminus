@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import time
+import subprocess
+import sys
 import uuid
 
 from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices
@@ -34,6 +36,7 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
+RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
 # target_ratio 0.20 of the threshold: on a 1M window it compacts at ~400K and keeps the newest ~80K).
 PAID_COMPACT = (.38, .38 * .20)
@@ -954,6 +957,44 @@ class Runtime:
                     float(self.config.get('paid_compact_target_ratio', PAID_COMPACT[1])))
         return float(self.config.get('compact_threshold', .85)), float(self.config.get('compact_target_ratio', .2))
 
+    def _maybe_update(self):
+        """/update: a new runtime is installed between goals (or at the next turn boundary with now). The daemon
+        rewrites its own unit to the new program and asks systemd to restart it; the new daemon's heartbeat names
+        its runtime, which is how the update is confirmed."""
+        marker = self.home / 'update.json'
+        if not marker.exists():
+            return False
+        try:
+            req = json.loads(marker.read_text())
+        except (OSError, ValueError):
+            return False
+        busy = [r['id'] for r in self.store.db.execute(
+            "SELECT id,kind FROM goals WHERE state IN ('working','waiting_model')") if r['kind'] not in FREE_KINDS]
+        if busy and not req.get('now'):
+            return False                      # between goals only: the running goal finishes first
+        program = Path(str(req.get('program') or ''))
+        marker.unlink(missing_ok=True)
+        if not program.is_file():
+            self.store.event('update_failed', dict(reason=f'no runtime at {program}'))
+            return False
+        from .cli import unit_text
+        name = self.config.get('name')
+        unit = f'caminus-agent-{name}.service'
+        path = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd/user' / unit
+        if not path.exists():
+            self.store.event('update_failed', dict(reason='this resident is not a systemd service (start it with start)'))
+            return False
+        path.write_text(unit_text(name, self.home, str(program)))
+        self.store.event('updating', dict(from_runtime=RUNTIME, to_runtime=program.name, busy=busy))
+        env = dict(os.environ, XDG_RUNTIME_DIR='/run/user/' + str(os.getuid()))
+        run = getattr(self, 'systemctl', None) or subprocess.run
+        run(['systemctl', '--user', 'daemon-reload'], env=env, capture_output=True)
+        r = run(['systemctl', '--user', 'restart', '--no-block', unit], env=env, capture_output=True)
+        if getattr(r, 'returncode', 1):
+            self.store.event('update_failed', dict(reason='systemctl restart failed'))
+            return False
+        return True
+
     MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
                   'provider', 'provider_kind', 'api_key_env', 'temperature')
 
@@ -1216,6 +1257,8 @@ class Runtime:
         """Same loop for daemon and oneshot; callers own the process lock."""
         last_heartbeat=0
         while stop is None or not stop():
+            if not target and self._maybe_update():
+                return None                   # systemd restarts the daemon on the new runtime
             self.mail.receive(self.store)
             for gid in self.store.pending_requests('compact'):
                 self.compact_request(gid)
@@ -1226,7 +1269,7 @@ class Runtime:
             if goals and time.time()-last_heartbeat>=5:
                 # Say we are alive before a turn, not after it: a turn waiting on the model server can hold
                 # this loop for minutes, and a stale heartbeat makes a working daemon look dead to every UI.
-                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working'))
+                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working',runtime=RUNTIME))
                 last_heartbeat=time.time()
             for gid in goals:
                 progressed |= self.tick(gid)
@@ -1237,7 +1280,7 @@ class Runtime:
                     if state in PAUSED or state == 'waiting_model':
                         return self.store.goal(gid)
             if time.time()-last_heartbeat>=5:
-                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working' if progressed else 'listening'))
+                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working' if progressed else 'listening',runtime=RUNTIME))
                 last_heartbeat=time.time()
             if not progressed:
                 time.sleep(max(.05,poll))
