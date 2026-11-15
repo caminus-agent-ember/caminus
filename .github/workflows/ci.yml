@@ -40,6 +40,9 @@ jobs:
       - name: Build the tested panel
         working-directory: panel
         run: go build -o "$RUNNER_TEMP/caminus-panel" .
+      - name: Resident typing cost with growing history
+        working-directory: panel
+        run: go test -run '^$' -bench '^BenchmarkResidentTyping$' -benchtime=200ms -benchmem
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: caminus-panel-linux
