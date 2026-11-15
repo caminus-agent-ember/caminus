@@ -20,6 +20,7 @@ from . import approval
 from .discovery import TOPICS, discover
 from .prompt import render as render_prompt
 from . import planning
+from . import btw
 
 
 def _current(cfg):
@@ -136,7 +137,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -267,6 +268,10 @@ def parser():
             p.add_argument('goal_id',help='the goal whose newest undelivered message is pulled back')
         if op=='interrupt':
             p.add_argument('goal_id',help='the goal whose reply being generated is dropped')
+        if op=='btw':
+            p.add_argument('goal_id',help='the goal the side question is about')
+            p.add_argument('text',nargs='?',help='the question (or --stdin)')
+            p.add_argument('--stdin',action='store_true',help='read the question from stdin')
         if op in ('events','mail'):
             p.add_argument('--after',type=int,default=0)
         if op=='stream':
@@ -598,6 +603,15 @@ def main(argv=None,stdin=None):
                             dict(note=(a.note or '').strip()),gid)
             emit(dict(goal=gid,plan=verdict,state=store.goal(gid)['state']),a.json)
             store.close();return 0
+        if a.op=='btw':
+            gid=store.resolve(a.goal_id)
+            store.close()
+            question=(stdin or sys.stdin).read() if a.stdin else a.text
+            if not (question or '').strip():raise ValueError('btw needs a question (TEXT or --stdin)')
+            rt=Runtime(home)
+            try:answer=btw.ask(rt,gid,question.strip())
+            finally:rt.mail.close();rt.store.close()
+            emit(dict(goal=gid,answer=answer),a.json);return 0
         if a.op=='interrupt':
             gid=store.resolve(a.goal_id)
             store.request(gid,'interrupt')

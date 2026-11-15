@@ -2753,6 +2753,32 @@ for line in sys.stdin:
         self.assertEqual(self.cmd('interrupt',[gid]),dict(goal=gid,queued=True))
         self.assertEqual([r['state'] for r in self.cmd('status')['goals']],['completed'])
 
+    def test_btw_answers_a_side_question_outside_the_goal(self):
+        self.replies(call('define_done',dict(check='the roster is sorted')),
+                     call('todo',dict(items=[dict(text='write it',state='done'),dict(text='check it',state='in_progress')])),
+                     call('finish',dict(summary='Roster sorted.')))
+        g=self.cmd('once',['--goal','Sort the roster.'])
+        gid=g['id']
+        before=len([e for e in self.cmd('events') if e['kind']=='assistant'])
+        self.replies(dict(role='assistant',content='Side answer: two files changed, one test pending.'))
+        out=self.cmd('btw',[gid,'--stdin'],stdin='what changed so far?')
+        self.assertEqual(out,dict(goal=gid,answer='Side answer: two files changed, one test pending.'))
+        body=Endpoint.seen[-1][1]
+        text=json.dumps(body)
+        self.assertIn('Sort the roster.',text)              # the goal's prompt
+        self.assertIn('DONE CHECK: the roster is sorted',text)
+        self.assertIn('[in_progress] check it',text)        # the todo rides along
+        self.assertIn('what changed so far?',text)          # the question itself
+        self.assertFalse(body.get('tools'),'a side question gets no tools')
+        # nothing entered the goal: the same steps, no new assistant event in the transcript
+        events=self.cmd('events')
+        self.assertEqual(len([e for e in events if e['kind']=='assistant']),before)
+        btw=[e for e in events if e['kind']=='btw'][0]['data']
+        self.assertEqual(btw['question'],'what changed so far?')
+        self.assertEqual(btw['answer'],'Side answer: two files changed, one test pending.')
+        self.assertEqual(self.cmd('status')['goals'][0]['steps'],3)
+        self.cmd('btw',[gid],code=1)                        # an empty question is refused
+
     def test_unsend_pulls_back_undelivered_messages_only(self):
         gid=self.cmd('send',['goal'])['id']
         self.cmd('send',['ZZONE one','--goal-id',gid])
