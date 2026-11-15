@@ -134,6 +134,9 @@ func (m envModel) selectedResidentGoal() *residentGoal {
 	return &g
 }
 
+// maxResidentEvents bounds the events the panel keeps in memory for one conversation.
+const maxResidentEvents = 2000
+
 func (m *envModel) receiveResident(msg residentMsg) {
 	m.initChat()
 	selected := ""
@@ -146,6 +149,11 @@ func (m *envModel) receiveResident(msg residentMsg) {
 	}
 	for _, e := range msg.events {
 		if e.Seq > m.chat.seq {
+			if len(m.residentEvents) >= maxResidentEvents {
+				// Bounded: a resident that runs for days must not grow the panel without limit. The oldest
+				// events leave memory; the journal on the agent side keeps them.
+				m.residentEvents = append(m.residentEvents[:0:0], m.residentEvents[len(m.residentEvents)-maxResidentEvents/2:]...)
+			}
 			m.residentEvents = append(m.residentEvents, e)
 			m.chat.seq = e.Seq
 			if e.Kind == "assistant" {
@@ -503,13 +511,6 @@ func (m envModel) chatComposer() string {
 			}
 			input = envClip(input, max(18, m.width-6)) + "\n" + input
 		}
-	}
-	if m.mode == "agentname" {
-		label = "Agent name · Enter selects · Esc cancels"
-		input = terminalText(m.edit, false) + "█"
-	}
-	if m.mode == "agentgoal" || m.mode == "agentsteer" {
-		input = terminalText(m.edit, true) + "█"
 	}
 	return envBorder.Width(max(18, m.width-2)).Render(envDim.Render(label) + "\n" + input)
 }

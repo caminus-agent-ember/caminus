@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -91,7 +93,6 @@ type envModel struct {
 	agentName      string
 	defaultAgent   string
 	pendingLast    string
-	steerGoal      string
 	resident       residentStatus
 	residentEvents []residentEvent
 	goalSel        int
@@ -265,13 +266,20 @@ func serversScript() string {
 	return `for p in $(seq 8092 8101); do printf 'PORT %d\n' "$p"; curl -s --max-time 1 "http://127.0.0.1:$p/props"; echo; done`
 }
 
+// sshRefresh fetches only what the visible page shows. Every round used to run all four scripts every 2 s on every
+// page, pages nobody could open included, and the servers script alone can take ten seconds.
 func sshRefresh(m envModel) []tea.Cmd {
-	return []tea.Cmd{
-		sshRun(m, "jobs", jobsScript()),
-		sshRun(m, "procs", procsScript(m.user)),
-		sshRun(m, "notes", notesScript(m.bridge)),
-		sshRun(m, "servers", serversScript()),
+	switch m.tab {
+	case 1:
+		return []tea.Cmd{sshRun(m, "jobs", jobsScript())}
+	case 2:
+		return []tea.Cmd{sshRun(m, "procs", procsScript(m.user))}
+	case 3:
+		return []tea.Cmd{sshRun(m, "notes", notesScript(m.bridge))}
+	case 4:
+		return []tea.Cmd{sshRun(m, "servers", serversScript())}
 	}
+	return nil
 }
 
 // ---------------------------------------------------------------- bridge and audit (pure, tested)
@@ -403,9 +411,25 @@ func appendAudit(path string, event map[string]any) error {
 	return err
 }
 
+// tailLines returns the last n lines, reading at most the file's last 256 KiB: the audit log only grows, and
+// reading all of it twice a second grew with it.
 func tailLines(path string, n int) []string {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	const window = 256 << 10
+	var data []byte
+	if st, err := f.Stat(); err == nil && st.Size() > window {
+		data = make([]byte, window)
+		if _, err := f.ReadAt(data, st.Size()-window); err != nil {
+			return nil
+		}
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			data = data[i+1:] // drop the partial first line
+		}
+	} else if data, err = io.ReadAll(f); err != nil {
 		return nil
 	}
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
@@ -511,14 +535,21 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tickN++
 		m.refreshLocal()
 		cmds := []tea.Cmd{tickCmd()}
-		if m.tickN%2 == 0 {
+		// The SSH probe is a liveness check, not data: every 10 s is enough (it ran every second).
+		if m.tickN%20 == 0 {
 			cmds = append(cmds, probeCmd(m))
 		}
 		if m.tickN%4 == 0 {
 			cmds = append(cmds, sshRefresh(m)...)
-			if m.tab == 6 || m.tab == 7 || m.tab == 8 || m.tab == 3 {
-				cmds = append(cmds, residentRefresh(m))
-			}
+		}
+		// With the live reader open the conversation receives its events from the stream; the status poll
+		// only catches goal-list changes, so it slows to every 5 s there.
+		residentEvery := 4
+		if m.tab == 6 && m.chat.stream != nil {
+			residentEvery = 10
+		}
+		if m.tickN%residentEvery == 0 && (m.tab == 6 || m.tab == 7 || m.tab == 8 || m.tab == 3) {
+			cmds = append(cmds, residentRefresh(m))
 		}
 		// The conversation page keeps one live reader open; it is started here so a page that was
 		// entered without a key press (a reopened session) streams too.
@@ -700,7 +731,9 @@ func (m *envModel) refreshLocal() {
 	if m.sel >= len(m.reqs) {
 		m.sel = max(0, len(m.reqs)-1)
 	}
-	m.events = tailLines(m.auditPath, 200)
+	if m.tab == 5 {
+		m.events = tailLines(m.auditPath, 200)
+	}
 	m.syncQuestion()
 }
 
@@ -712,12 +745,13 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 			return m.submitInput()
 		case "esc":
 			m.mode, m.edit, m.newJob = "normal", "", ""
-			m.steerGoal = ""
 			m.editRequest = nil
 			return m, nil
 		case "backspace":
 			if len(m.edit) > 0 {
-				m.edit = m.edit[:len(m.edit)-1]
+				// Remove the last character, not the last byte: cutting a byte split multi-byte text.
+				_, size := utf8.DecodeLastRuneInString(m.edit)
+				m.edit = m.edit[:len(m.edit)-size]
 			}
 			return m, nil
 		default:
@@ -753,24 +787,33 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 	case "tab":
 		m.tab = nextEnvTab(m.tab, 1)
 		m.pageScroll = 0
+		// A page fetches its data when it opens; nothing polls the pages that are not on screen.
+		m.refreshLocal()
+		cmds := sshRefresh(m)
 		if m.tab == 3 || m.tab == 7 {
-			return m, residentSessions(m)
+			cmds = append(cmds, residentSessions(m))
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 	case "shift+tab":
 		m.tab = nextEnvTab(m.tab, -1)
 		m.pageScroll = 0
+		// A page fetches its data when it opens; nothing polls the pages that are not on screen.
+		m.refreshLocal()
+		cmds := sshRefresh(m)
 		if m.tab == 3 || m.tab == 7 {
-			return m, residentSessions(m)
+			cmds = append(cmds, residentSessions(m))
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 	case "1", "2", "3", "4", "5":
 		m.tab = envNavigation[int(k[0]-'1')]
 		m.pageScroll = 0
+		// A page fetches its data when it opens; nothing polls the pages that are not on screen.
+		m.refreshLocal()
+		cmds := sshRefresh(m)
 		if m.tab == 3 || m.tab == 7 {
-			return m, residentSessions(m)
+			cmds = append(cmds, residentSessions(m))
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 	case "r":
 		m.refreshLocal()
 		return m, tea.Batch(append(sshRefresh(m), residentRefresh(m))...)
@@ -782,8 +825,6 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 		return m.jobKeys(k)
 	case 3:
 		return m.noteKeys(k)
-	case 6:
-		return m.residentKeys(k)
 	case 7:
 		return m.sessionKeys(k)
 	}
@@ -792,28 +833,6 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 
 func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 	switch m.mode {
-	case "agentgoal":
-		text := m.edit
-		m.mode, m.edit = "normal", ""
-		if strings.TrimSpace(text) == "" {
-			return m, nil
-		}
-		return m, residentAction(m, []string{"send", m.agentName, "--stdin", "--json"}, text)
-	case "agentsteer":
-		text, goal := m.edit, m.steerGoal
-		m.mode, m.edit, m.steerGoal = "normal", "", ""
-		if strings.TrimSpace(text) == "" || goal == "" {
-			return m, nil
-		}
-		// The steering draft is the explicit form: it redirects the goal rather than nudging it.
-		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--steer", "--stdin", "--json"}, text)
-	case "agentname":
-		m.agentName = strings.TrimSpace(m.edit)
-		m.mode, m.edit, m.goalSel = "normal", "", 0
-		m.resident, m.residentEvents, m.chat = residentStatus{}, nil, residentChat{}
-		m.residentEpoch++
-		m.initChat()
-		return m, residentRefresh(m)
 	case "sessionnew":
 		name := strings.TrimSpace(m.edit)
 		m.mode, m.edit = "normal", ""
@@ -1099,12 +1118,6 @@ func (m envModel) render() string {
 		b.WriteString(envBorder.Render(m.pane()))
 	}
 	switch m.mode {
-	case "agentgoal":
-		b.WriteString("\n\n" + envWarn.Render("goal for "+m.agentName+" (enter sends, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
-	case "agentsteer":
-		b.WriteString("\n\n" + envWarn.Render("steer goal "+terminalText(m.steerGoal, false)+" (enter sends, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
-	case "agentname":
-		b.WriteString("\n\n" + envWarn.Render("resident agent name:") + "\n" + terminalText(m.edit, false) + "█")
 	case "sessionnew":
 		b.WriteString("\n\n" + envWarn.Render("new session name (Enter creates; Esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "edit":
@@ -1140,8 +1153,6 @@ func (m envModel) pane() string {
 		return m.notesPane() + "\n\n" + envHead.Render("SESSION MEMORY · "+residentText(m.agentName)) + "\n" + residentText(m.sessionMemory)
 	case 4:
 		return m.ctxPane()
-	case 6:
-		return m.residentPane()
 	case 7:
 		return m.sessionsPane()
 	case 8:

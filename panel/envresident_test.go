@@ -21,7 +21,9 @@ func TestResidentGoalCommandUsesStdin(t *testing.T) {
 	}
 }
 
-func TestResidentSteeringCapturesGoalAndUsesStdin(t *testing.T) {
+// The chat's /steer is the one steering path: it redirects the targeted goal, and the text travels on stdin so
+// shell syntax in it stays literal. (This replaces the tests of the removed agent page's steering editor.)
+func TestChatSteerTargetsGoalAndUsesStdin(t *testing.T) {
 	dir := t.TempDir()
 	argsPath, inputPath := filepath.Join(dir, "args"), filepath.Join(dir, "input")
 	cli := filepath.Join(dir, "fake-cli")
@@ -32,67 +34,24 @@ func TestResidentSteeringCapturesGoalAndUsesStdin(t *testing.T) {
 	t.Setenv("STEER_ARGS", argsPath)
 	t.Setenv("STEER_INPUT", inputPath)
 	m := envModel{cli: []string{cli}, agentName: "resident", resident: residentStatus{Goals: []residentGoal{{ID: "original", State: "working"}}}}
-	next, cmd := m.residentKeys("t")
-	m = next.(envModel)
-	if cmd != nil || m.mode != "agentsteer" || m.steerGoal != "original" {
-		t.Fatalf("steering editor did not capture the selected goal: %+v", m)
-	}
-	// A background refresh replaces the selection while the user types.
-	m.resident.Goals = []residentGoal{{ID: "different", State: "working"}}
+	m.initChat()
+	m.chat.target = "original"
 	message := "Try another approach; literal $(text) stays in stdin."
-	m.edit = message
-	next, cmd = m.submitInput()
-	m = next.(envModel)
-	if cmd == nil || m.steerGoal != "" || m.mode != "normal" {
-		t.Fatal("submission state was not cleared")
+	_, cmd := m.chatSlash("/steer " + message)
+	if cmd == nil {
+		t.Fatal("/steer sent nothing")
 	}
 	if result := cmd().(residentActionMsg); strings.Contains(result.text, "error") {
 		t.Fatal(result.text)
 	}
 	args, _ := os.ReadFile(argsPath)
 	input, _ := os.ReadFile(inputPath)
-	// The steering draft is the explicit form: it redirects the goal, so it carries --steer.
 	if string(args) != "env\nagent\nsend\nresident\n--goal-id\noriginal\n--steer\n--stdin\n--json\n" || string(input) != message {
 		t.Fatalf("wrong steering destination or input: %q / %q", args, input)
 	}
-}
-
-func TestResidentSteeringRejectsFinishedGoalsAndCancelsDraft(t *testing.T) {
-	for _, state := range []string{"completed", "cancelled"} {
-		m := envModel{resident: residentStatus{Goals: []residentGoal{{ID: "finished", State: state}}}}
-		next, cmd := m.residentKeys("t")
-		if cmd != nil || next.(envModel).mode == "agentsteer" {
-			t.Fatalf("steering offered for %s", state)
-		}
-	}
-	m := envModel{mode: "agentsteer", steerGoal: "original", edit: "a draft"}
-	next, cmd := m.onKey("esc")
-	if cmd != nil || next.(envModel).steerGoal != "" || next.(envModel).edit != "" {
-		t.Fatal("escape sent or retained a steering draft")
-	}
-	m = envModel{mode: "agentsteer", steerGoal: "original", edit: "  "}
-	_, cmd = m.submitInput()
-	if cmd != nil {
-		t.Fatal("blank steering became a send")
-	}
-}
-
-func TestResidentPaneShowsHumanSteering(t *testing.T) {
-	m := envModel{agentName: "resident", resident: residentStatus{Goals: []residentGoal{{ID: "g", State: "working"}}},
-		residentEvents: []residentEvent{{Goal: "g", Kind: "user_message", Data: map[string]any{"text": "Use the installed utility."}}}}
-	if !strings.Contains(m.residentPane(), "Use the installed utility.") {
-		t.Fatal("human steering absent from activity feed")
-	}
-}
-
-func TestResidentPaneRetainsGoalAndSanitizesOutput(t *testing.T) {
-	m := envModel{agentName: "resident", resident: residentStatus{DaemonAlive: true, Goals: []residentGoal{{ID: "g", Prompt: "implement feature", State: "waiting_root"}}},
-		residentEvents: []residentEvent{{Goal: "g", Kind: "assistant", Data: map[string]any{"content": "observed\x1b[2Joutput"}}}}
-	view := m.residentPane()
-	for _, s := range []string{"resident", "listening", "implement feature", "waiting_root", "observed"} {
-		if !strings.Contains(view, s) {
-			t.Fatalf("missing %q: %s", s, view)
-		}
+	m.chat.target = ""
+	if _, cmd := m.chatSlash("/steer something"); cmd != nil {
+		t.Fatal("/steer without a target goal must not send")
 	}
 	if strings.ContainsRune(residentText("observed\x1b[2Joutput"), '\x1b') {
 		t.Fatal("agent terminal escape retained")

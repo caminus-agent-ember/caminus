@@ -99,7 +99,7 @@ func startStream(m envModel) tea.Cmd {
 	cli := append([]string{}, m.cli...)
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
-		argv := append(append([]string{}, cli[1:]...), "env", "agent", "stream", name, "--interval", "0.05")
+		argv := append(append([]string{}, cli[1:]...), "env", "agent", "stream", name, "--interval", "0.1")
 		cmd := exec.CommandContext(ctx, cli[0], argv...)
 		out, err := cmd.StdoutPipe()
 		if err == nil {
@@ -193,106 +193,6 @@ func residentAction(m envModel, args []string, input string) tea.Cmd {
 	}
 }
 
-func (m envModel) residentKeys(k string) (tea.Model, tea.Cmd) {
-	if m.agentName == "" {
-		m.agentName = "resident"
-	}
-	switch k {
-	case "n", "enter":
-		m.mode, m.edit = "agentgoal", ""
-		m.steerGoal = ""
-	case "t":
-		if m.goalSel < 0 || m.goalSel >= len(m.resident.Goals) {
-			m.msg = "Select a goal to steer. Use n for a new goal."
-			return m, nil
-		}
-		goal := m.resident.Goals[m.goalSel]
-		if goal.ID == "" || goal.State == "completed" || goal.State == "cancelled" {
-			m.msg = "That goal is finished. Use n for a new goal."
-			return m, nil
-		}
-		m.mode, m.edit, m.steerGoal = "agentsteer", "", goal.ID
-		m.msg = "Steering is read between model steps; human/root waits and paused goals still need their normal answer or resume."
-	case "m":
-		m.mode, m.edit = "agentname", m.agentName
-	case "s":
-		return m, residentAction(m, []string{"start", m.agentName, "--json"}, "")
-	case "x":
-		return m, residentAction(m, []string{"stop", m.agentName, "--json"}, "")
-	case "c":
-		if m.goalSel < len(m.resident.Goals) {
-			return m, residentAction(m, []string{"cancel", m.agentName, m.resident.Goals[m.goalSel].ID, "--json"}, "")
-		}
-	case "up", "k":
-		if m.goalSel > 0 {
-			m.goalSel--
-		}
-	case "down", "j":
-		if m.goalSel+1 < len(m.resident.Goals) {
-			m.goalSel++
-		}
-	}
-	return m, nil
-}
-
 func residentText(s string) string {
 	return terminalText(s, true)
-}
-
-func (m envModel) residentPane() string {
-	state := "stopped"
-	if m.resident.DaemonAlive {
-		state = "listening"
-	}
-	lines := []string{envHead.Render(fmt.Sprintf("RESIDENT %s · %s", m.agentName, state)), "n: new goal · t: steer selected goal · s: start · x: stop runtime · c: cancel · m: agent"}
-	if len(m.resident.Goals) == 0 {
-		return strings.Join(append(lines, "\nWaiting for your first goal."), "\n")
-	}
-	for i, g := range m.resident.Goals {
-		if i >= 8 {
-			break
-		}
-		mark := "  "
-		if i == m.goalSel {
-			mark = "> "
-		}
-		prompt := strings.Split(residentText(g.Prompt), "\n")[0]
-		if len([]rune(prompt)) > 100 {
-			prompt = string([]rune(prompt)[:100]) + "…"
-		}
-		lines = append(lines, fmt.Sprintf("%s[%s] %s", mark, g.State, prompt))
-	}
-	if m.goalSel < len(m.resident.Goals) {
-		g := m.resident.Goals[m.goalSel]
-		lines = append(lines, "", fmt.Sprintf("%s · %d model steps", g.ID, g.Steps), residentText(g.Summary), residentText(g.Error))
-		var activity []string
-		for _, e := range m.residentEvents {
-			if e.Goal != g.ID {
-				continue
-			}
-			text := ""
-			if s, ok := e.Data["content"].(string); ok {
-				text = s
-			}
-			if result, ok := e.Data["result"].(map[string]any); ok {
-				if s, ok := result["output"].(string); ok {
-					text = s
-				}
-			}
-			if s, ok := e.Data["question"].(string); ok {
-				text = s
-			}
-			if e.Kind == "user_message" {
-				if s, ok := e.Data["text"].(string); ok {
-					text = s
-				}
-			}
-			if text != "" {
-				activity = append(activity, e.Kind+": "+residentText(text))
-			}
-		}
-		joined := strings.Join(activity, "\n")
-		lines = append(lines, joined)
-	}
-	return strings.Join(lines, "\n")
 }

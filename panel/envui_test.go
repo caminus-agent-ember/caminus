@@ -140,6 +140,7 @@ func TestViewShowsQueueAndAudit(t *testing.T) {
 		}
 	}
 	m.tab = 5
+	m.refreshLocal() // a page reads its data when it opens (switching tabs calls this)
 	v = m.render()
 	if !strings.Contains(v, `"event":"run"`) {
 		t.Fatalf("audit tab missing the event:\n%s", v)
