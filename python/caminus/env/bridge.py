@@ -1,0 +1,123 @@
+"""The root bridge (docs/specs/spec-agent-env.md section 4): the agent user files a request, only the invoking user's
+side answers it and executes it under sudo. Files are written atomically (tmp + rename) with umask 007 so the other
+user in BRIDGE_GROUP can read them; the harness never trusts a request's content beyond showing it to the human.
+
+  req/<id>.json   {'id', 'pid', 'user', 'cwd', 'cmd', 'ts'}          (agent side writes)
+  res/<id>.json   {'id', 'decision', 'cmd', 'approved_by', 'rc', 'out', 'err', 'ts'}   (harness side writes)
+"""
+import json
+import os
+import subprocess
+import time
+import uuid
+
+REQ, RES = 'req', 'res'
+
+
+def _dirs(bridge):
+    return os.path.join(bridge, REQ), os.path.join(bridge, RES)
+
+
+def _write_atomic(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f'{path}.tmp.{os.getpid()}'
+    with open(tmp, 'w') as f:
+        json.dump(obj, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def submit(bridge, kind, cmd=None, text=None, choices=None, cwd=None, timeout=3600.0, poll=0.2):
+    """agent side: file a request and block until the human answers; returns the result dict.
+    kind 'root' carries cmd, kind 'question' carries text and optional choices.
+    (raises TimeoutError when nobody answers within timeout seconds)"""
+    reqd, resd = _dirs(bridge)
+    rid = uuid.uuid4().hex[:16]
+    req = {'id': rid, 'pid': os.getpid(), 'user': _user(), 'cwd': cwd or os.getcwd(), 'kind': kind, 'ts': time.time()}
+    if kind == 'root':
+        req['cmd'] = cmd
+    if kind == 'question':
+        req['text'] = text
+        if choices:
+            req['choices'] = list(choices)
+    _write_atomic(os.path.join(reqd, rid + '.json'), req)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        p = os.path.join(resd, rid + '.json')
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+        time.sleep(poll)
+    raise TimeoutError(f'no answer to {kind} request {rid} within {timeout:g}s')
+
+
+def pending(bridge):
+    """harness side: the requests without an answer yet, oldest first (raises when the bridge dir exists but
+    cannot be read — e.g. this session predates the bridge group)"""
+    reqd, resd = _dirs(bridge)
+    out = []
+    if not os.path.isdir(reqd):
+        if os.path.exists(reqd):
+            raise PermissionError(f'{reqd} exists but is not readable (re-login to pick up the bridge group)')
+        return out
+    for name in sorted(os.listdir(reqd)):
+        if not name.endswith('.json'):
+            continue
+        rid = name[:-len('.json')]
+        if os.path.exists(os.path.join(resd, rid + '.json')):
+            continue
+        with open(os.path.join(reqd, name)) as f:
+            out.append(json.load(f))
+    return out
+
+
+def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err='', answer_text=''):
+    """harness side: write the answer file; decision is 'approved', 'edited', 'denied' or 'answered'"""
+    _write_atomic(os.path.join(_dirs(bridge)[1], rid + '.json'),
+                  {'id': rid, 'decision': decision, 'cmd': cmd, 'approved_by': actor,
+                   'rc': rc, 'out': out, 'err': err, 'answer': answer_text, 'ts': time.time()})
+
+
+def say(bridge, text, actor):
+    """harness side: leave a steering note for the agent (notes/<id>.json; the agent's env-note drains them)"""
+    nid = uuid.uuid4().hex[:16]
+    _write_atomic(os.path.join(bridge, 'notes', nid + '.json'),
+                  {'id': nid, 'from': actor, 'text': text, 'ts': time.time()})
+    return nid
+
+
+def notes(bridge):
+    """the undrained steering notes, oldest first"""
+    nd = os.path.join(bridge, 'notes')
+    out = []
+    if not os.path.isdir(nd):
+        return out
+    for name in sorted(os.listdir(nd)):
+        if name.endswith('.json'):
+            with open(os.path.join(nd, name)) as f:
+                out.append(json.load(f))
+    return out
+
+
+def drain_notes(bridge):
+    """agent side: read and remove all pending notes; returns them oldest first"""
+    nd = os.path.join(bridge, 'notes')
+    out = notes(bridge)
+    for n in out:
+        try:
+            os.remove(os.path.join(nd, n['id'] + '.json'))
+        except OSError:
+            pass
+    return out
+
+
+def execute_root(cmd, runner=subprocess.run):
+    """harness side: run exactly the string the human approved, as the invoking user under sudo (sudo asks for the
+    human's password on the controlling terminal); returns the CompletedProcess"""
+    return runner(['sudo', 'sh', '-c', cmd], capture_output=True, text=True)
+
+
+def _user():
+    import getpass
+    return getpass.getuser()
