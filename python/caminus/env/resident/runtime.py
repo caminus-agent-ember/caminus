@@ -408,7 +408,11 @@ class Runtime:
         try:
             with self.store.transaction():
                 rows = list(self.store.db.execute('SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
-                messages = g['messages'] + [dict(role='user',content=r['text']) for r in rows]
+                # Steers are ordinary user text in the transcript, so they carry the latest-wins rule with
+                # them: history length differs turn to turn and a terse prefix is what makes a mid-goal
+                # redirect win over the older instructions it contradicts.
+                tag = '[steer, supersedes earlier instructions where they conflict] '
+                messages = g['messages'] + [dict(role='user',content=tag+r['text']) for r in rows]
                 if rows:
                     self.store.update(gid,messages=messages)
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])

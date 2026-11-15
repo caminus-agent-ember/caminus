@@ -150,7 +150,11 @@ class Resident(unittest.TestCase):
         self.replies(call('finish',dict(summary='Followed the steering.')))
         self.cmd('once',['--goal-id',first['id']])
         request=[v for k,v in Endpoint.seen if k==self.key][-1]
-        self.assertEqual(sum(m.get('content')=='Use an existing utility before building.' for m in request['messages']),1)
+        steers=[m.get('content','') for m in request['messages']
+                if (m.get('content') or '').find('Use an existing utility before building.')>=0]
+        self.assertEqual(len(steers),1,'the steer must reach the model exactly once')
+        self.assertTrue(steers[0].startswith('[steer, supersedes earlier instructions where they conflict]'),
+                        f'a steer must carry the latest-wins rule, got {steers[0]!r}')
         rejected=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Too late.',code=1)
         self.assertIn('goal finished',rejected['error'])
 
@@ -221,7 +225,7 @@ class Resident(unittest.TestCase):
                         rt.store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(gid,'New human direction.'))
                         summary='Earlier result.'
                     else:
-                        self.observed=any(m.get('content')=='New human direction.' for m in messages)
+                        self.observed=any((m.get('content') or '').endswith('New human direction.') and m.get('content','').startswith('[steer,') for m in messages)
                         summary='Followed the new direction.'
                     return call('finish',dict(summary=summary)) if finish_tool else dict(role='assistant',content=summary)
             model=Model();rt=Runtime(self.home,model=model)
