@@ -243,6 +243,29 @@ permission request (an irreversible change, an action in your name, spending mon
 is not run. Each one is recorded (`question_unanswered`, `root_unanswered`), and you
 can steer the goal when you are back.
 
+## Brains: providers, models and effort
+
+A resident's brain is any model its providers serve. A provider is an endpoint the agent can reach: the local
+Caminus server, or a paid API through your key relay (the agent never holds the key):
+
+```sh
+caminus env relay --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --ttl 86400   # http://127.0.0.1:8765/v1
+caminus env relay --provider deepinfra --cap-usd 3 --ttl 86400                              # http://127.0.0.1:8766/v1/openai
+caminus env agent provider NAME add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
+caminus env agent provider NAME add deepinfra --kind deepinfra --endpoint http://127.0.0.1:8766/v1/openai --relay
+caminus env agent models NAME --refresh        # what each provider serves: window, output cap, effort levels, prices
+caminus env agent model NAME zai-org/GLM-5.2   # pick one (provider/id when two serve it)
+caminus env agent effort NAME high             # among the levels that model offers
+```
+
+Each relay reads its key from a file only you can read (`~/.config/anthropic/api_key`,
+`~/.config/caminus/deepinfra-key`; it refuses one others can read), keeps a daily dollar cap and exits after `--ttl`.
+The Anthropic relay allows the models you name; the DeepInfra relay allows any chat model DeepInfra publishes a price
+for, priced from its own list. The catalog is what the providers report: Anthropic's model list gives each model's
+window, output cap, thinking and effort levels; DeepInfra's gives window, prices and whether it takes
+`reasoning_effort`. In the panel, `/model` opens the list (Enter picks) and `/effort LEVEL` sets the depth; a running
+resident takes either at its next turn.
+
 ## The advisor and two brains
 
 `caminus env agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the
