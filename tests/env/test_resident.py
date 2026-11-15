@@ -756,6 +756,66 @@ class Resident(unittest.TestCase):
             self.assertNotIn('cache_control',json.dumps(wire.requests[0][2]),'a one-shot call would pay the write premium for nothing')
         finally:rt.mail.close();rt.store.close()
 
+    # ---- two brains -------------------------------------------------------------------------------------------
+
+    def brains(self,primary_up=True):
+        from caminus.env.resident.model import ModelError
+        class Fake:
+            remote=False
+            def __init__(self,name,replies,up=True,remote=False):
+                self.config=dict(model=name);self.replies=list(replies);self.up=up;self.remote=remote
+                self.last_usage=dict(prompt_tokens=10000,completion_tokens=500);self.last_call={};self.calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def probe(self,timeout=3.0):return self.up
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None,**k):
+                self.calls+=1
+                if not self.up:raise ModelError('connection refused')
+                return self.replies.pop(0)
+        return Fake
+
+    def test_fallback_takes_over_while_the_primary_is_down_and_hands_back(self):
+        Fake=self.brains()
+        out=self.cmd('fallback',['--model','claude-haiku-5-5','--endpoint','http://127.0.0.1:8765/v1','--api','anthropic','--context','100000','--budget-usd','0.5'])
+        self.assertEqual((out['fallback']['model'],out['fallback']['budget_usd']),('claude-haiku-5-5',0.5))
+        primary=Fake('k3-coder',[call('finish',dict(summary='Back on the local brain.'))],up=False)
+        runtime_cls=Runtime
+        fb=Fake('claude-haiku-5-5',[call('terminal',dict(command='printf hi'))],remote=True)
+        rt=runtime_cls.__new__(runtime_cls);rt.fallback_model=fb;runtime_cls.__init__(rt,self.home,model=primary)
+        try:
+            gid=rt.store.enqueue('Say hi, then finish.')
+            for _ in range(6):
+                rt.tick(gid)
+                if fb.calls:break
+            self.assertEqual(fb.calls,1,'the turn went to the fallback at once');self.assertGreaterEqual(primary.calls,1)
+            kinds=[e['kind'] for e in rt.store.events()]
+            self.assertIn('brain',kinds)
+            self.assertGreater(json.loads((self.home/'fallback.json').read_text())[__import__('datetime').date.today().isoformat()]['usd'],0)
+            log=[json.loads(l) for l in (self.home/'failures.jsonl').read_text().splitlines()]
+            self.assertEqual(log[0]['who'],'resident','the primary failure is recorded')
+            primary.up=True;rt.brains.down_until=time.time()-1
+            for _ in range(8):
+                if rt.store.goal(gid)['state']=='completed':break
+                rt.tick(gid)
+            self.assertEqual(rt.store.goal(gid)['state'],'completed','back on the primary once it answers its probe')
+            brain_events=[e['data']['brain'] for e in rt.store.events() if e['kind']=='brain']
+            self.assertEqual(brain_events,['fallback','primary'])
+        finally:rt.mail.close();rt.store.close()
+        self.assertIsNone(self.cmd('fallback',['--off'])['fallback'])
+
+    def test_fallback_respects_its_allowance_and_free_time_budget(self):
+        Fake=self.brains()
+        self.cmd('fallback',['--model','claude-haiku-5-5','--endpoint','http://127.0.0.1:8765/v1','--api','anthropic','--context','100000','--budget-usd','0'])
+        primary=Fake('k3-coder',[],up=False);fb=Fake('claude-haiku-5-5',[],remote=True)
+        rt=Runtime.__new__(Runtime);rt.fallback_model=fb;Runtime.__init__(rt,self.home,model=primary)
+        try:
+            gid=rt.store.enqueue('Work while the server is down.')
+            for _ in range(4):rt.tick(gid)
+            self.assertEqual(fb.calls,0,'with the work allowance spent the goal waits for the primary')
+            self.assertEqual(rt.store.goal(gid)['state'],'waiting_model')
+        finally:rt.mail.close();rt.store.close()
+        self.cmd('fallback',['--model','gpt-unpriced','--endpoint','https://api.example.com/v1'],code=1)
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)

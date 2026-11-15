@@ -146,7 +146,7 @@ class FreeTime:
         now = time.time()
         if now - float(state.get('last_end', 0)) < float(cfg['rest_seconds']):
             return None
-        if getattr(self.rt.model, 'remote', False):
+        if self.rt.brains.next_is_remote():
             if self._price_unknown():
                 return self._note_once(state, 'unpriced', 'free time needs a known price on a remote model')
             if self.spent_today() >= float(cfg['budget_usd']):
@@ -157,7 +157,7 @@ class FreeTime:
         return gid
 
     def _price_unknown(self):
-        return price(self.rt.config.get('model', ''), {}) is None
+        return price(self.rt.brains.next_model_name(), {}) is None
 
     def _note_once(self, state, reason, text):
         day = self._day(state)
@@ -262,7 +262,8 @@ class FreeTime:
         if not self.is_free(gid) or not getattr(self.rt.model, 'remote', False):
             return
         served = (getattr(self.rt.model, 'last_call', None) or {}).get('served')
-        usd = price(self.rt.config.get('model', ''), getattr(self.rt.model, 'last_usage', {}) or {}, served) or 0.0
+        name = (getattr(self.rt.model, 'config', None) or {}).get('model') or self.rt.config.get('model', '')
+        usd = price(name, getattr(self.rt.model, 'last_usage', {}) or {}, served) or 0.0
         state = self._state()
         day = self._day(state)
         day['usd'] = round(day['usd'] + usd, 6)

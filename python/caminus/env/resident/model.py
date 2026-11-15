@@ -145,6 +145,17 @@ class Model:
         except (OSError, ValueError) as e:
             raise ModelError(str(e)) from e
 
+    def probe(self, timeout=3.0):
+        """whether the server answers at all (a local server's /props, a short timeout); a remote API is assumed up"""
+        if self.remote or self.api == 'anthropic':
+            return True
+        try:
+            with self.opener(urllib.request.Request(self.root + '/props', None, self.headers()), timeout=timeout) as r:
+                r.read(65536)
+            return True
+        except (OSError, ValueError, urllib.error.HTTPError):
+            return False
+
     def context_size(self):
         if self.context is None:
             p = self.request(self.root + '/props')
