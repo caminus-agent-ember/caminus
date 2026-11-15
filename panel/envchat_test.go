@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,7 +239,10 @@ func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
 		if !utf8.ValidString(plain) {
 			t.Fatal("wrapping split a UTF-8 character")
 		}
-		if !strings.Contains(strings.Join(strings.Fields(plain), ""), text) {
+		// The card rule sits at the start of every wrapped line, so drop it before asking whether the
+		// unbroken run survived: the invariant is that no character is lost or split, not that the gutter
+		// is invisible.
+		if !strings.Contains(strings.ReplaceAll(strings.Join(strings.Fields(plain), ""), "│", ""), text) {
 			t.Fatal("long output disappeared during wrapping/resize")
 		}
 		for _, line := range strings.Split(m.chat.content, "\n") {
@@ -270,7 +274,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /resume /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -699,15 +703,48 @@ func TestLiveWindowTakesHalfTheBodyAndLeavesTheRestToTheTranscript(t *testing.T)
 	}
 }
 
+// sgr is the escape a color renders as, so a test can assert a palette role without hardcoding its hex.
+func sgr(color color.Color) string {
+	out := lipgloss.NewStyle().Foreground(color).Render("x")
+	return strings.SplitN(out, "x", 2)[0]
+}
+
 func TestLiveTextIsColoredLikeTheTranscript(t *testing.T) {
 	m := chatFixture(t)
 	m.chat.live = residentLive{active: true, turn: "t1", text: "run `go test ./...` now", tools: []string{"terminal"}}
 	block := m.liveBlock(m.width)
-	if !strings.Contains(block, "38;2;143;188;187") { // cTeal: inline code
+	if !strings.Contains(block, sgr(cTeal)) {
 		t.Fatalf("inline code is not colored:\n%q", block)
 	}
-	if !strings.Contains(block, "38;2;208;135;112") { // cOrange: a tool running
+	if !strings.Contains(block, sgr(cOrange)) {
 		t.Fatalf("the running tool is not colored:\n%q", block)
+	}
+}
+
+func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 30
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "goal_queued", Data: map[string]any{"prompt": "fix the build"}},
+		{Seq: 2, Goal: "g1", Kind: "assistant", Data: map[string]any{"content": "on it"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	lines := strings.Split(ansi.Strip(m.chat.content), "\n")
+	if !strings.HasPrefix(lines[0], "YOU · goal") {
+		t.Fatalf("the first line is not the goal's label: %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "│ fix the build") {
+		t.Fatalf("the body is not behind the card rule: %q", lines[1])
+	}
+	var seen bool
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "AGENT") {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatalf("the reply has no label:\n%s", strings.Join(lines, "\n"))
 	}
 }
 

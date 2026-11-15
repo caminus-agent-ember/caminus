@@ -58,11 +58,19 @@ class Store:
             id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
             text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS peer_deliveries(id TEXT PRIMARY KEY, goal TEXT, error TEXT);
+          -- A request is work the user asked for that only the runtime loop may do: compaction needs the
+          -- model and the single writer, so the CLI records the wish and the loop performs it.
+          CREATE TABLE IF NOT EXISTS requests(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
+            kind TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT 'new', error TEXT NOT NULL DEFAULT '',
+            created REAL NOT NULL DEFAULT 0, updated REAL NOT NULL DEFAULT 0);
           -- Every tick asks for a goal's unconsumed inbox rows, its pending actions and whether
           -- discovery already ran; without these the answer is a full scan of a table that only grows.
           CREATE INDEX IF NOT EXISTS inbox_goal ON inbox(goal,consumed);
           CREATE INDEX IF NOT EXISTS actions_goal ON actions(goal,state);
           CREATE INDEX IF NOT EXISTS events_goal ON events(goal,kind);
+          CREATE INDEX IF NOT EXISTS requests_open ON requests(kind,state);
         ''')
 
     def close(self):
@@ -128,6 +136,33 @@ class Store:
 
     def actions(self, gid):
         return [dict(r) for r in self.db.execute("SELECT * FROM actions WHERE goal=? AND state!='done' ORDER BY rowid", (gid,))]
+
+    def request(self, goal, kind, data=None):
+        """Record work only the runtime loop can do (compaction needs the model and the single writer) and
+        return its id. The loop performs it on its next pass; the CLI never does it behind the loop's back."""
+        now = time.time()
+        cur = self.db.execute('INSERT INTO requests(goal,kind,data,state,created,updated) VALUES(?,?,?,?,?,?)',
+                              (goal, kind, json.dumps(data or {}), 'new', now, now))
+        return cur.lastrowid
+
+    def pending_request(self, goal, kind):
+        r = self.db.execute("SELECT * FROM requests WHERE goal=? AND kind=? AND state='new' ORDER BY id LIMIT 1",
+                            (goal, kind)).fetchone()
+        return dict(r) if r else None
+
+    def pending_requests(self, kind):
+        """Every goal with an unstarted request of this kind, oldest request first."""
+        return [r['goal'] for r in self.db.execute(
+            "SELECT goal, MIN(id) AS first FROM requests WHERE kind=? AND state='new' GROUP BY goal ORDER BY first", (kind,))]
+
+    def settle_request(self, rid, state, error=''):
+        self.db.execute('UPDATE requests SET state=?, error=?, updated=? WHERE id=?', (state, error, time.time(), rid))
+
+    def latest_goal(self):
+        r = self.db.execute('SELECT id FROM goals ORDER BY created DESC LIMIT 1').fetchone()
+        if r is None:
+            raise ValueError('no goals yet')
+        return r['id']
 
     def model_reply(self, gid, message, reasoning=''):
         """Store one reply. reasoning is displayed with the reply but never sent back to the model:

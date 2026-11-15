@@ -23,7 +23,7 @@ from .prompt import render as render_prompt
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','unit','start','stop','peers','message','mail','discover','prompt'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -73,6 +73,8 @@ def parser():
             p.add_argument('--once',action='store_true',help='print the live snapshots once and exit')
         if op in ('resume','cancel'):
             p.add_argument('goal_id')
+        if op=='compact':
+            p.add_argument('goal_id',nargs='?',help='goal to compact; defaults to the most recent one')
     return ap
 
 
@@ -222,6 +224,34 @@ def main(argv=None,stdin=None):
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0
+        if a.op=='compact':
+            # Compaction needs the model and the single writer, so a live runtime performs it on its next
+            # pass; with no daemon the CLI takes the lock and does it here.
+            gid=a.goal_id or store.latest_goal()
+            beat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
+            if alive(beat.get('pid')):
+                rid=store.request(gid,'compact')
+                store.event('compact_requested',dict(request=rid),gid)
+                if a.json:emit(dict(goal=gid,queued=True,request=rid),True)
+                else:print(f"compaction queued for {gid[:8]}; the runtime performs it on its next pass",flush=True)
+                store.close();return 0
+            with runtime_lock(home):
+                runtime=Runtime(home)
+                try:
+                    rid=runtime.store.request(gid,'compact')
+                    runtime.compact_request(gid)
+                    done=runtime.store.db.execute('SELECT state,error FROM requests WHERE id=?',(rid,)).fetchone()
+                finally:runtime.mail.close();runtime.store.close()
+            if done['state']=='failed':
+                if a.json:emit(dict(goal=gid,failed=True,error=done['error']),True)
+                else:print(f"{gid[:8]}: not compacted — {done['error']}",flush=True)
+                store.close();return 1
+            row=store.db.execute("SELECT data FROM events WHERE goal=? AND kind='compacted' ORDER BY seq DESC LIMIT 1",(gid,)).fetchone()
+            data=json.loads(row['data']) if row else {}
+            if a.json:emit(dict(goal=gid,**data),True)
+            else:print(f"{gid[:8]}: compacted {data.get('before')} → {data.get('after')} messages "
+                       f"({data.get('before_tokens')} → {data.get('after_tokens')} tokens)",flush=True)
+            store.close();return 0
         if a.op=='stream':
             # NDJSON, one line per change of a live snapshot: a UI holds one process instead of polling the
             # agent's home over SSH. The first line of a turn carries the whole text (reset), later lines

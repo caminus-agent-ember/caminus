@@ -1079,6 +1079,7 @@ var (
 	envSel    = lipgloss.NewStyle().Background(cGray).Foreground(cText)
 	envHead   = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
 	envDim    = lipgloss.NewStyle().Foreground(cMuted)
+	envThink  = lipgloss.NewStyle().Foreground(cThink)
 	envWarn   = lipgloss.NewStyle().Foreground(cYellow)
 	envTool   = lipgloss.NewStyle().Foreground(cOrange)
 	envCode   = lipgloss.NewStyle().Foreground(cTeal)

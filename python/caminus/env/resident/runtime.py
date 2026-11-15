@@ -237,14 +237,16 @@ class Runtime:
         """
         atomic_json(self.home / 'context.json', dict(goal=gid, tokens=tokens, size=size, ts=time.time()))
 
-    def _compact(self, gid, messages):
+    def _compact(self, gid, messages, force=False):
+        """Summarize the transcript into working memory. Automatic compaction waits for the trigger; a
+        user's /compact sets force, because asking for it is the point."""
         system = self.system()
         size = self.model.context_size()
         reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
         before_tokens = self.model.tokens([system, *messages], TOOLS)
         trigger_tokens = int(size * self.config.get('compact_threshold', .85))
         target_tokens = int(size * self.config.get('compact_target_ratio', .2))
-        if before_tokens < trigger_tokens and before_tokens + reserve < size:
+        if not force and before_tokens < trigger_tokens and before_tokens + reserve < size:
             self.context_note(gid, before_tokens, size)
             return messages
         if len(messages) < 2:
@@ -389,11 +391,30 @@ class Runtime:
                 self.store.event('model_unavailable',dict(error=str(e)),gid)
             return False
 
+    def compact_request(self, gid):
+        """Perform a compaction the user asked for through /compact. A failure is recorded and reported,
+        never raised: the loop keeps serving the other goals."""
+        req = self.store.pending_request(gid, 'compact')
+        if req is None:
+            return False
+        self.store.settle_request(req['id'], 'running')
+        try:
+            self._compact(gid, self.store.goal(gid)["messages"], force=True)
+        except Exception as e:
+            error = type(e).__name__ + ': ' + str(e)
+            self.store.settle_request(req['id'], 'failed', error)
+            self.store.event('compact_failed', dict(error=error), gid)
+            return True
+        self.store.settle_request(req['id'], 'done')
+        return True
+
     def run(self, target=None, stop=None, poll=.2, observe=None):
         """Same loop for daemon and oneshot; callers own the process lock."""
         last_heartbeat=0
         while stop is None or not stop():
             self.mail.receive(self.store)
+            for gid in self.store.pending_requests('compact'):
+                self.compact_request(gid)
             progressed = False
             goals = [target] if target else self.store.next_goal()
             for gid in goals:

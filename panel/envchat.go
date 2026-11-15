@@ -80,7 +80,7 @@ func (l residentLive) body(width int) []string {
 	var out []string
 	if l.reasoning != "" {
 		for _, ln := range strings.Split(ansi.Hardwrap(l.reasoning, width, true), "\n") {
-			out = append(out, envDim.Render(ln))
+			out = append(out, envThink.Render(ln))
 		}
 	}
 	for _, name := range l.tools {
@@ -207,7 +207,7 @@ func (m *envModel) syncChat() {
 	changed := m.chat.rendered != len(m.residentEvents)
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		if block := m.chat.eventBlock(e); block != "" {
-			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
+			m.chat.content += ansi.Hardwrap(eventCard(block), w, true) + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
@@ -308,6 +308,25 @@ func (c *residentChat) renderMarkdown(text string) string {
 		}
 	}
 	return text
+}
+
+// eventCard frames one event: its label, then its body behind a dim left rule, so the conversation reads as a
+// stack of blocks instead of one wall of text. Blank lines stay blank, so a card can breathe.
+func eventCard(block string) string {
+	lines := strings.Split(strings.TrimRight(block, "\n"), "\n")
+	if len(lines) < 2 {
+		return block
+	}
+	var b strings.Builder
+	b.WriteString(lines[0])
+	for _, ln := range lines[1:] {
+		if strings.TrimSpace(ansi.Strip(ln)) == "" {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString("\n" + envDim.Render("│ ") + ln)
+	}
+	return b.String()
 }
 
 func fenced(text, language string) string {
@@ -606,7 +625,7 @@ func (m envModel) renderChat() string {
 	status = append(status, envDim.Render("Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
 	foot := clip(strings.Join(status, " · "))
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
+		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
 	}
 	body := []string{head, m.chat.transcript.View()}
 	if live := m.liveBlock(w); live != "" {
@@ -887,6 +906,16 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		clear()
 		return m, residentAction(m, []string{"cancel", m.agentName, g.ID, "--json"}, "")
+	case "/compact":
+		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
+		// pass rather than writing history from here.
+		g := m.selectedResidentGoal()
+		args := []string{"compact", m.agentName}
+		if g != nil {
+			args = append(args, g.ID)
+		}
+		clear()
+		return m, residentAction(m, args, "")
 	case "/resume":
 		g := m.selectedResidentGoal()
 		if g == nil {
@@ -907,6 +936,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 var slashCommands = []struct{ name, hint string }{
 	{"/agent", "open another session NAME"},
 	{"/cancel", "cancel the selected goal"},
+	{"/compact", "summarize this goal's history into memory now"},
 	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "list goals"},
 	{"/help", "toggle the help footer"},

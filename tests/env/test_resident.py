@@ -449,6 +449,76 @@ class Resident(unittest.TestCase):
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
+    def test_compact_request_compacts_below_the_threshold_and_settles(self):
+        class SmallModel:
+            def __init__(self):self.summaries=0
+            def context_size(self):return 16384
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                if tools:return call('finish',dict(summary='done'))
+                self.summaries+=1
+                return dict(role='assistant',content='Earlier work summarized.')
+        model=SmallModel();rt=Runtime(self.home,model=model)
+        try:
+            gid=rt.store.enqueue('Keep going.')
+            rt.store.update(gid,messages=rt.store.goal(gid)['messages']+
+                            [dict(role='assistant',content='note %d'%i) for i in range(12)])
+            before=len(rt.store.goal(gid)['messages'])
+            rid=rt.store.request(gid,'compact')
+            self.assertTrue(rt.compact_request(gid))
+            self.assertLess(len(rt.store.goal(gid)['messages']),before)
+            self.assertEqual(model.summaries,1)
+            self.assertEqual(rt.store.db.execute('SELECT state FROM requests WHERE id=?',(rid,)).fetchone()['state'],'done')
+            self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_compact_request_records_why_it_could_not_compact(self):
+        class RefusingModel:
+            def context_size(self):return 16384
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,*a,**k):raise AssertionError('a goal that cannot be compacted must not reach the model')
+        rt=Runtime(self.home,model=RefusingModel())
+        try:
+            gid=rt.store.enqueue('x')
+            rid=rt.store.request(gid,'compact')
+            self.assertTrue(rt.compact_request(gid))
+            row=rt.store.db.execute('SELECT state,error FROM requests WHERE id=?',(rid,)).fetchone()
+            self.assertEqual(row['state'],'failed')
+            self.assertTrue(row['error'])
+            self.assertTrue(any(e['kind']=='compact_failed' for e in rt.store.events()))
+            self.assertEqual(rt.store.goal(gid)['state'],'queued','a failed compaction must not change the goal')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_run_performs_a_queued_compaction_for_an_idle_goal(self):
+        class QuietModel:
+            def context_size(self):return 16384
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                return dict(role='assistant',content='Summarized earlier turns.')
+        rt=Runtime(self.home,model=QuietModel())
+        try:
+            gid=rt.store.enqueue('Idle goal.')
+            rt.store.update(gid,state='completed',messages=rt.store.goal(gid)['messages']+
+                            [dict(role='assistant',content='turn %d'%i) for i in range(10)])
+            rt.store.request(gid,'compact')
+            rt.run(stop=lambda: rt.store.db.execute("SELECT 1 FROM requests WHERE state='done'").fetchone() is not None)
+            self.assertEqual(rt.store.goal(gid)['state'],'completed')
+            self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_compact_command_queues_for_a_live_runtime_and_runs_without_one(self):
+        self.replies(call('finish',dict(summary='done')),dict(role='assistant',content='Summarized earlier turns.'))
+        gid=self.cmd('once',extra=['--goal','finish the job','--max-steps','2'])['id']
+        (self.home/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),ts=time.time(),state='listening')))
+        queued=self.cmd('compact',extra=[gid])
+        self.assertTrue(queued['queued'])
+        self.assertEqual(queued['goal'],gid)
+        (self.home/'heartbeat.json').unlink()
+        done=self.cmd('compact',extra=[gid])
+        self.assertEqual(done['goal'],gid)
+        self.assertIn('before',done)
+        self.assertLessEqual(done['after'],done['before'])
+
     def test_million_token_compaction_targets_twenty_percent_with_large_recent_tools(self):
         class BoundedModel:
             def context_size(self):return 1048574

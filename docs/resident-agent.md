@@ -84,6 +84,7 @@ agent:
 | `/goals`, `/goal ID` | List goals or select an unambiguous ID/prefix to steer |
 | `/newsession NAME`, `/session NAME`, `/sessions` | Create/open a named resident, or return home |
 | `/cancel`, `/resume` | Cancel or resume the selected goal |
+| `/compact` | Summarize the selected goal's history into working memory now, even below the automatic threshold |
 | `/start`, `/stop` | Control this session's resident loop; inference stays separate |
 | `/requests` | Open human questions and root approvals |
 | `/remember TEXT` | Append to the selected session's durable MEMORY.md |
