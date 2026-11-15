@@ -197,8 +197,11 @@ func (m *envModel) syncChat() {
 	}
 }
 
-// liveHeight is the live window's line count: a quarter of the page, so the transcript keeps most of it.
-func (m envModel) liveHeight() int { return min(9, max(3, m.height/4)) }
+// liveHeight is the live window's line count: half the page while a reply is being written, because at a few
+// hundred tokens a second a small window is unreadable. The transcript keeps at least a few lines above it.
+func (m envModel) liveHeight() int {
+	return max(10, min(m.height/2, max(6, m.height-14)))
+}
 
 // liveTop is the first visible line: the tail while following, the held position otherwise.
 func (m envModel) liveTop(body int) int {
@@ -564,7 +567,15 @@ func (m envModel) renderChat() string {
 func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
-	if _, ok := msg.(tea.MouseWheelMsg); ok {
+	if wheel, ok := msg.(tea.MouseWheelMsg); ok {
+		if m.chat.live.active {
+			if wheel.Button == tea.MouseWheelUp {
+				m.scrollLive(-3)
+			} else {
+				m.scrollLive(3)
+			}
+			return m, nil
+		}
 		m.chat.transcript, cmd = m.chat.transcript.Update(msg)
 	} else if m.chat.question != nil && m.chat.questionArmed {
 		if m.chat.questionCustom {
@@ -602,9 +613,17 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.onKey(k)
 	case "pgup":
+		if m.chat.live.active {
+			m.scrollLive(-m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
+		if m.chat.live.active {
+			m.scrollLive(m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageDown()
 		return m, nil
 	case "ctrl+l":
@@ -908,9 +927,17 @@ func (m envModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "pgup":
+		if m.chat.live.active {
+			m.scrollLive(-m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
+		if m.chat.live.active {
+			m.scrollLive(m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageDown()
 		return m, nil
 	case "tab", "shift+tab":

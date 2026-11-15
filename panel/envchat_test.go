@@ -631,7 +631,7 @@ func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
 	m := chatFixture(t)
 	m.height = 30
 	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
-		reasoning: strings.Repeat("thinking line ", 80), reset: true})
+		reasoning: strings.Repeat("thinking line ", 200), reset: true})
 	m = next.(envModel)
 	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "THINKING · live") {
 		t.Fatalf("the live window is not following:\n%s", ansi.Strip(m.liveBlock(m.width)))
