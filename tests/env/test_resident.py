@@ -422,6 +422,38 @@ class Resident(unittest.TestCase):
             self.assertTrue(any(l['who'].startswith('gpu window') for l in leases.held(rt)),'the window\'s lease is not the agent\'s to remove')
         finally:rt.mail.close();rt.store.close()
 
+    def test_report_budget_and_schedule(self):
+        from caminus.env.resident import agenda
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Long job.')
+            self.assertEqual(agenda.report(rt,gid,'fyi','halfway there')['delivered'],'fyi')
+            self.assertEqual(agenda.report(rt,gid,'need_you','the disk is full')['delivered'],'need_you')
+            self.assertEqual([e['data']['level'] for e in rt.store.events() if e['kind']=='report'],['fyi','need_you'])
+            free=rt.store.enqueue('Free time.',kind='free')
+            with self.assertRaises(ValueError):agenda.report(rt,free,'need_you','look at this')
+            b=agenda.budget(rt,gid)
+            self.assertEqual(b['goal']['steps'],0);self.assertIn('elapsed_min',b['goal'])
+            self.assertIn('no metered brain',str(b['spend']))
+            with self.assertRaises(ValueError):agenda.schedule(rt,gid,0,'too soon')
+            with self.assertRaises(ValueError):agenda.schedule(rt,gid,10,'')
+            agenda.schedule(rt,gid,10,'check the build log')
+            self.assertFalse(rt._tick(gid),'a scheduled goal does not take a turn')
+            # time passes: it wakes with the note as a nudge
+            rt.store.update(gid,wake_at=time.time()-1)
+            self.assertFalse(agenda.wake_due(rt,gid,rt.store.goal(gid)))
+            rows=list(rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,)))
+            self.assertEqual([r[0] for r in rows],['[scheduled wake-up] check the build log'])
+            self.assertIsNone(rt.store.goal(gid)['wake_at'])
+            # a message wakes it early, without a second nudge
+            other=rt.store.enqueue('Another.')
+            agenda.schedule(rt,other,60,'later')
+            rt.store.db.execute("INSERT INTO inbox(goal,text) VALUES(?,?)",(other,'are you there?'))
+            self.assertFalse(agenda.wake_due(rt,other,rt.store.goal(other)))
+            self.assertTrue(any(e['kind']=='woke' and e['data']['early'] for e in rt.store.events()))
+            self.assertEqual(rt.store.db.execute("SELECT count(*) FROM inbox WHERE goal=? AND text LIKE '[scheduled%'",(other,)).fetchone()[0],0)
+        finally:rt.mail.close();rt.store.close()
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)

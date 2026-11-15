@@ -1242,3 +1242,23 @@ func TestSpilledOutputCardNamesTheFile(t *testing.T) {
 		t.Fatalf("the card does not name the file:\n%s", v)
 	}
 }
+
+// A need_you report stands out as a turn; fyi, scheduling and waking are quiet notes.
+func TestReportsAndScheduleNotes(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "report", Data: map[string]any{"level": "need_you", "text": "the disk is full"}},
+		{Seq: 2, Goal: "g1", Kind: "report", Data: map[string]any{"level": "fyi", "text": "halfway there"}},
+		{Seq: 3, Goal: "g1", Kind: "scheduled", Data: map[string]any{"wake_at": float64(1794780000), "note": "check the build"}},
+		{Seq: 4, Goal: "g1", Kind: "woke", Data: map[string]any{"note": "check the build"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{"! needs you", "the disk is full", "fyi: halfway there", "parked until", "check the build", "woke up"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
+	}
+}

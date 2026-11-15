@@ -593,6 +593,16 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			}
 		}
 		return toolCard("error", strings.ReplaceAll(e.Kind, "_", " "), firstLine(text), false, true, body, w)
+	case "report":
+		if str("level") == "need_you" {
+			return turn("!", "needs you", cRed, c.renderMarkdown(str("text")))
+		}
+		return toolCard("note", "fyi: "+firstLine(str("text")), "", true, c.expanded, lines(str("text"), 20), w)
+	case "scheduled":
+		at, _ := e.Data["wake_at"].(float64)
+		return toolCard("note", "parked until "+time.Unix(int64(at), 0).Format("15:04"), firstLine(str("note")), true, false, nil, w)
+	case "woke":
+		return toolCard("note", "woke up", firstLine(str("note")), true, false, nil, w)
 	case "brain":
 		return toolCard("note", "now answering: "+residentText(str("model")), str("brain"), true, false, nil, w)
 	}
