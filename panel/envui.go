@@ -79,6 +79,7 @@ var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "a
 var envNavigation = []int{7, 5, 8, 3, 4}
 
 type envModel struct {
+	notes notifier // desktop notifications already shown (notify.go)
 	user           string
 	bridge         string
 	auditPath      string
@@ -708,6 +709,7 @@ func (m *envModel) refreshLocal() {
 			}
 		}
 		m.reqs = vis
+		m.notifyRequests()
 	}
 	if m.sel >= len(m.reqs) {
 		m.sel = max(0, len(m.reqs)-1)

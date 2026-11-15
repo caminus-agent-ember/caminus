@@ -214,6 +214,7 @@ func (m *envModel) receiveResident(msg residentMsg) {
 	if msg.status.LastEvent >= m.resident.LastEvent {
 		m.resident = msg.status
 	}
+	defer m.notifyResident(msg.events)
 	for _, e := range msg.events {
 		if e.Seq > m.chat.seq {
 			if len(m.residentEvents) >= maxResidentEvents {

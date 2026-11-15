@@ -1367,3 +1367,29 @@ func TestStatusLineShowsSpendOnAPaidBrain(t *testing.T) {
 		t.Fatalf("the goal's spend and today's are in the status line:\n%s", view)
 	}
 }
+
+func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
+	var got []string
+	old := notifyRun
+	notifyRun = func(u, title, body string) { got = append(got, u+"|"+title+"|"+body) }
+	defer func() { notifyRun = old }()
+	m := chatFixture(t)
+	m.reqs = []envReq{{ID: "old", Kind: "question", Text: "already pending"}}
+	m.notifyRequests()
+	if len(got) != 0 {
+		t.Fatalf("what is pending at start is not announced: %v", got)
+	}
+	m.reqs = append(m.reqs, envReq{ID: "new", Cmd: "apt-get install jq"})
+	m.notifyRequests()
+	m.notifyRequests()
+	if len(got) != 1 || !strings.Contains(got[0], "critical|Caminus: root approval needed|apt-get install jq") {
+		t.Fatalf("one notification for the new root request: %v", got)
+	}
+	m.notifyResident(nil) // first pass: silent
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "g2", State: "completed", Summary: "Report written."})
+	m.notifyResident([]residentEvent{{Seq: 99, Kind: "report", Data: map[string]any{"level": "need_you", "text": "the disk is full"}}})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "needs you|the disk is full") || !strings.Contains(joined, "goal done|Report written.") {
+		t.Fatalf("need_you and a finished goal are announced: %v", got)
+	}
+}
