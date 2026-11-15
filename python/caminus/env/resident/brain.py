@@ -88,7 +88,7 @@ class Brains:
     def choose(self, gid):
         """the model for this goal's next turn"""
         if self.fallback is None:
-            return self.primary
+            return self.rt.model            # one brain: whatever the runtime holds, untouched
         use = 'primary' if self._primary_up() or not self._allowed(gid) else 'fallback'
         if self.last.get(gid) != use:
             if gid in self.last or use == 'fallback':
@@ -100,13 +100,15 @@ class Brains:
     def next_is_remote(self, gid=None):
         """whether a new goal would run on a remote (priced) model now; free time asks before it starts a stretch"""
         if self.fallback is None:
-            return bool(getattr(self.primary, 'remote', False))
+            return bool(getattr(self.rt.model, 'remote', False))
         if getattr(self.primary, 'remote', False):
             return True
         return time.time() < self.down_until and bool(getattr(self.fallback, 'remote', False))
 
     def next_model_name(self):
-        if self.fallback is not None and time.time() < self.down_until:
+        if self.fallback is None:
+            return (getattr(self.rt.model, 'config', None) or {}).get('model') or self.rt.config.get('model', '')
+        if time.time() < self.down_until:
             return self.fallback.config.get('model', '')
         return self.primary.config.get('model', '') if hasattr(self.primary, 'config') else self.rt.config.get('model', '')
 
