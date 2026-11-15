@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type residentSessionsMsg struct {
@@ -17,6 +19,32 @@ type residentSessionsMsg struct {
 }
 
 type residentCreatedMsg struct{ name, err string }
+
+func envClip(text string, width int) string {
+	if width <= 0 {
+		width = 110
+	}
+	return ansi.Truncate(text, width, "")
+}
+
+func (m envModel) detailViewport() viewport.Model {
+	w, h := m.width, m.height
+	if w <= 0 {
+		w = 110
+	}
+	if h <= 0 {
+		h = 32
+	}
+	reserve := 8
+	if m.mode != "" && m.mode != "normal" {
+		reserve += 4
+	}
+	view := viewport.New(viewport.WithWidth(max(1, w-2)), viewport.WithHeight(max(1, h-reserve)))
+	view.SoftWrap = true
+	view.SetContent(m.pane())
+	view.SetYOffset(m.pageScroll)
+	return view
+}
 
 func nextEnvTab(current, delta int) int {
 	for i, id := range envNavigation {

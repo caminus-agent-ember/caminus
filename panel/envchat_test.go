@@ -192,3 +192,29 @@ func TestChatRejectsResponsesFromAnEarlierVisitToTheSameSession(t *testing.T) {
 		t.Fatal("stale status redirected a just-submitted goal")
 	}
 }
+
+func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
+	m := envModel{tab: 5, width: 80, height: 24, mode: "normal"}
+	for i := 0; i < 90; i++ {
+		m.events = append(m.events, fmt.Sprintf("audit entry %d with a long but readable message", i))
+	}
+	frame := m.render()
+	if len(strings.Split(frame, "\n")) > m.height {
+		t.Fatal("audit page exceeded terminal height")
+	}
+	for _, line := range strings.Split(frame, "\n") {
+		if ansi.StringWidth(line) > m.width {
+			t.Fatal("audit page exceeded terminal width")
+		}
+	}
+	next, _ := m.onKey("pgdown")
+	m = next.(envModel)
+	if m.pageScroll == 0 || ansi.Strip(m.render()) == ansi.Strip(frame) {
+		t.Fatal("Page Down did not scroll audit")
+	}
+	next, _ = m.onKey("1")
+	m = next.(envModel)
+	if m.tab != 7 || m.pageScroll != 0 {
+		t.Fatal("opening sessions retained another page's scroll offset")
+	}
+}

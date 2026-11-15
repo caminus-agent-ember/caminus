@@ -95,6 +95,7 @@ type envModel struct {
 	sessionNames   []string
 	sessionSel     int
 	sessionMemory  string
+	pageScroll     int
 
 	tab     int
 	reqs    []envReq
@@ -589,6 +590,13 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.chatKey(msg)
 		}
 		return m.onKey(msg.String())
+	case tea.MouseWheelMsg:
+		if m.tab != 6 && (m.mode == "normal" || m.mode == "") {
+			view := m.detailViewport()
+			view, _ = view.Update(msg)
+			m.pageScroll = view.YOffset()
+			return m, nil
+		}
 	}
 	if m.tab == 6 && m.chat.ready && (m.mode == "" || m.mode == "normal") {
 		return m.chatUpdate(msg)
@@ -638,23 +646,44 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.tab != 6 {
+		switch k {
+		case "pgup", "pgdown", "home", "end":
+			view := m.detailViewport()
+			switch k {
+			case "pgup":
+				view.PageUp()
+			case "pgdown":
+				view.PageDown()
+			case "home":
+				view.GotoTop()
+			case "end":
+				view.GotoBottom()
+			}
+			m.pageScroll = view.YOffset()
+			return m, nil
+		}
+	}
 	switch k {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "tab":
 		m.tab = nextEnvTab(m.tab, 1)
+		m.pageScroll = 0
 		if m.tab == 3 || m.tab == 7 {
 			return m, residentSessions(m)
 		}
 		return m, nil
 	case "shift+tab":
 		m.tab = nextEnvTab(m.tab, -1)
+		m.pageScroll = 0
 		if m.tab == 3 || m.tab == 7 {
 			return m, residentSessions(m)
 		}
 		return m, nil
 	case "1", "2", "3", "4", "5":
 		m.tab = envNavigation[int(k[0]-'1')]
+		m.pageScroll = 0
 		if m.tab == 3 || m.tab == 7 {
 			return m, residentSessions(m)
 		}
@@ -987,7 +1016,12 @@ func (m envModel) render() string {
 		}
 	}
 	b.WriteString("\n\n")
-	b.WriteString(envBorder.Render(m.pane()))
+	if m.tab == 7 || m.tab == 5 || m.tab == 8 || m.tab == 3 || m.tab == 4 {
+		view := m.detailViewport()
+		b.WriteString(envBorder.Width(view.Width()).Render(view.View()))
+	} else {
+		b.WriteString(envBorder.Render(m.pane()))
+	}
 	switch m.mode {
 	case "agentgoal":
 		b.WriteString("\n\n" + envWarn.Render("goal for "+m.agentName+" (enter sends, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
@@ -1013,8 +1047,8 @@ func (m envModel) render() string {
 		b.WriteString("\n\n" + envWarn.Render("new job "+m.newJob+" — command (enter spawns it detached, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	}
 	status := fmt.Sprintf("ssh: %s  requests: %d  jobs: %d  msg: %s", map[bool]string{true: "OK", false: "FAIL"}[m.sshOK], len(m.reqs), len(m.jobs), terminalText(m.msg, true))
-	b.WriteString("\n\n" + envDim.Render(status))
-	b.WriteString("\n" + envDim.Render("Tab/1–5 pages · sessions: Enter open, n new · requests: a/e/d/s · q quit · r refresh"))
+	b.WriteString("\n\n" + envDim.Render(envClip(status, m.width)))
+	b.WriteString("\n" + envDim.Render(envClip("Tab/1–5 pages · Enter open · n new · PgUp/PgDn scroll · q quit · r refresh", m.width)))
 	return b.String()
 }
 
@@ -1127,9 +1161,7 @@ func (m envModel) auditPane() string {
 func (m envModel) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
-	if m.tab == 6 {
-		v.MouseMode = tea.MouseModeCellMotion
-	}
+	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = "caminus env"
 	return v
 }
