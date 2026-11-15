@@ -1393,3 +1393,54 @@ func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
 		t.Fatalf("need_you and a finished goal are announced: %v", got)
 	}
 }
+
+func TestComposerExtras(t *testing.T) {
+	m := chatFixture(t)
+	// Ctrl+R: earlier prompts containing the draft, newest first
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 900, Kind: "goal_queued", Data: map[string]any{"prompt": "fix the parser tests"}},
+		residentEvent{Seq: 901, Kind: "user_message", Data: map[string]any{"text": "also run the parser benchmark"}})
+	m.chat.compose.SetValue("parser")
+	next, _, ok := m.composerKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if !ok || next.chat.compose.Value() != "also run the parser benchmark" {
+		t.Fatalf("Ctrl+R gives the newest matching prompt: %q", next.chat.compose.Value())
+	}
+	next, _, _ = next.composerKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if next.chat.compose.Value() != "fix the parser tests" {
+		t.Fatalf("a second Ctrl+R goes further back: %q", next.chat.compose.Value())
+	}
+	// Ctrl+X Ctrl+E opens the editor (here: true, which returns at once)
+	t.Setenv("VISUAL", "true")
+	n2, _, _ := m.composerKey(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	if _, cmd, ok := n2.composerKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}); !ok || cmd == nil {
+		t.Fatal("Ctrl+X then Ctrl+E opens the editor")
+	}
+	if _, _, ok := m.composerKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}); ok {
+		t.Fatal("Ctrl+E alone still folds the cards (not the editor)")
+	}
+	// !cmd: the output lands in the draft, fenced
+	m = m.bangDone(bangDoneMsg{cmd: "df -h ~", output: "/dev/x 100G 40G"})
+	if v := m.chat.compose.Value(); !strings.Contains(v, "```\n$ df -h ~\n/dev/x 100G 40G\n```") {
+		t.Fatalf("the command and its output are in the draft: %q", v)
+	}
+	// Ctrl+O: every line of the open cards
+	next, _, _ = m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if !next.chat.full {
+		t.Fatal("Ctrl+O shows every line")
+	}
+	// custom commands: a markdown file, $ARGUMENTS replaced, offered by autocomplete
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	_ = os.MkdirAll(filepath.Join(dir, "caminus", "commands"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "caminus", "commands", "review.md"), []byte("---\ndescription: review\n---\nReview $ARGUMENTS for bugs."), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "caminus", "commands", "goals.md"), []byte("shadowing a built-in is ignored"), 0o644)
+	if got := customNames(); fmt.Sprint(got) != "[/review]" {
+		t.Fatalf("custom commands: %v", got)
+	}
+	if got := slashMatches("/rev"); fmt.Sprint(got) != "[/review]" {
+		t.Fatalf("autocomplete offers the custom command: %v", got)
+	}
+	if body, _ := expandCustom(customCommands()["/review"], "panel/shell.go"); body != "Review panel/shell.go for bugs." {
+		t.Fatalf("expanded: %q", body)
+	}
+}

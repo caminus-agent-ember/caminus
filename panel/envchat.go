@@ -50,6 +50,10 @@ type residentChat struct {
 	models                                  modelsState // the Models overlay (/model)
 	studio                                  studioState // the Studio overlay (/studio)
 	recap                                   string      // the "while you were away" card, until Esc
+	chordAt                                 time.Time   // Ctrl+X pressed: Ctrl+E within 2 s opens $EDITOR
+	histQuery                               string      // Ctrl+R: the draft it searches for
+	histIdx                                 int         // Ctrl+R: how far back it is
+	full                                    bool        // Ctrl+O: cards show every line
 	recapNow                                float64     // when the recap was taken: saved as seen on dismiss
 	recapAsked                              int         // recapNotAsked, recapAtOpen or recapOnDemand
 	page, pageTop                           int         // an old page shown as an overlay (-1: none), and its scroll
@@ -449,8 +453,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	}
 	lines := func(s string, limit int) []string {
 		all := strings.Split(strings.TrimRight(strings.ReplaceAll(residentText(s), "\r\n", "\n"), "\n"), "\n")
+		if c.full {
+			limit = max(limit, 5000) // Ctrl+O: the whole output, bounded so one card cannot stall the screen
+		}
 		if len(all) > limit {
-			all = append([]string{fmt.Sprintf("… %d earlier lines", len(all)-limit)}, all[len(all)-limit:]...)
+			all = append([]string{fmt.Sprintf("… %d earlier lines (Ctrl+O shows all)", len(all)-limit)}, all[len(all)-limit:]...)
 		}
 		return all
 	}
@@ -955,6 +962,9 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if next, cmd, ok := m.composerKey(msg); ok {
+		return next, cmd
+	}
 	k := msg.String()
 	switch k {
 	case "ctrl+c":
@@ -1104,6 +1114,10 @@ func (m envModel) submitCompose() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "/") {
 		return m.chatSlash(trimmed)
 	}
+	if strings.HasPrefix(trimmed, "!") && len(trimmed) > 1 {
+		m.msg = "running in the agent's account…"
+		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
+	}
 	return m.sendCompose(text)
 }
 
@@ -1115,6 +1129,9 @@ func (m envModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true
 	return m, func() tea.Msg {
+		if strings.Contains(text, "@") {
+			text = expandAttachments(m, text) // @path: the file, read as the agent, goes with the message
+		}
 		out, err := residentCommand(m, args, text).CombinedOutput()
 		if err != nil {
 			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
@@ -1360,6 +1377,15 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		return m, residentAction(m, []string{"resume", m.agentName, g.ID, "--json"}, "")
 	default:
+		if path, ok := customCommands()[command]; ok {
+			body, err := expandCustom(path, arg)
+			if err != nil {
+				m.msg = "custom command: " + err.Error()
+				return m, nil
+			}
+			clear()
+			return m.sendCompose(body)
+		}
 		m.msg = "Unknown command. /help lists commands; //text sends a message; your draft is retained."
 	}
 	m.syncChat()
@@ -1420,6 +1446,11 @@ func slashMatches(draft string) []string {
 	for _, c := range slashCommands {
 		if strings.HasPrefix(c.name, draft) {
 			out = append(out, c.name)
+		}
+	}
+	for _, n := range customNames() {
+		if strings.HasPrefix(n, draft) {
+			out = append(out, n)
 		}
 	}
 	return out

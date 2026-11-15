@@ -79,7 +79,7 @@ var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "a
 var envNavigation = []int{7, 5, 8, 3, 4}
 
 type envModel struct {
-	notes notifier // desktop notifications already shown (notify.go)
+	notes          notifier // desktop notifications already shown (notify.go)
 	user           string
 	bridge         string
 	auditPath      string
@@ -588,6 +588,16 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	case modelsLoadedMsg:
 		return m.modelsLoaded(msg), nil
+	case editorDoneMsg:
+		if msg.err != "" {
+			m.msg = msg.err
+		} else {
+			m.chat.compose.SetValue(msg.text)
+			m.msg = "draft back from the editor"
+		}
+		return m, m.chat.compose.Focus()
+	case bangDoneMsg:
+		return m.bangDone(msg), m.chat.compose.Focus()
 	case recapMsg:
 		return m.receiveRecap(msg), nil
 	case studioMsg:
