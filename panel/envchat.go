@@ -638,7 +638,7 @@ func (m envModel) renderChat() string {
 	status = append(status, envDim.Render("Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
 	foot := clip(strings.Join(status, " · "))
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
+		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
 	}
 	body := []string{head, m.chat.transcript.View()}
 	if live := m.liveBlock(w); live != "" {
@@ -929,6 +929,22 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		clear()
 		return m, residentAction(m, args, "")
+	case "/theme":
+		// The panel's colors; the transcript's markdown is rebuilt below to pick
+		// up the new roles. Nothing else in the session changes.
+		name := strings.TrimSpace(arg)
+		if name == "" {
+			m.msg = "themes: " + strings.Join(themeNames(), ", ") + " · /theme NAME"
+			return m, nil
+		}
+		if err := themeSet(name); err != nil {
+			m.msg = "no such theme: " + name + " · /theme lists"
+			return m, nil
+		}
+		m.chat.markdown = nil
+		m.msg = "theme: " + name
+		m.syncChat()
+		return m, nil
 	case "/resume":
 		g := m.selectedResidentGoal()
 		if g == nil {
@@ -963,6 +979,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/sessions", "open the Sessions homepage"},
 	{"/start", "run this session's loop"},
 	{"/stop", "stop this session's loop"},
+	{"/theme", "switch panel colors NAME; /theme lists"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.

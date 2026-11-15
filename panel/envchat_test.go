@@ -16,6 +16,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"io/fs"
 )
 
 // chatFixture isolates the panel's user-state writes (last-session file) in a
@@ -274,7 +275,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -769,5 +770,119 @@ func TestMarkdownColorsFencedCodeWithTheNordTheme(t *testing.T) {
 	}
 	if spans := strings.Count(out, "38;2;"); spans < 3 {
 		t.Fatalf("fenced code has %d colored spans, expected syntax coloring:\n%q", spans, out)
+	}
+}
+
+// themeFixture saves the panel's theme state and restores it after the test;
+// the theme is global and no test may leave a switched palette behind.
+func themeFixture(tb testing.TB) {
+	tb.Helper()
+	saved := themeCurrent
+	tb.Cleanup(func() {
+		themeCurrent = saved
+		applyThemeStyles()
+	})
+}
+
+func TestThemeParsesTheEmbeddedCaminusFile(t *testing.T) {
+	data, err := fs.ReadFile(themeFS, "themes/caminus.theme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, bad := parseTheme(data)
+	if len(bad) != 0 {
+		t.Fatalf("the built-in caminus theme has bad lines: %v", bad)
+	}
+	for _, role := range []string{"text", "accent", "ok", "warn", "action", "hot", "user", "chrome", "code_theme"} {
+		if got[role] == "" {
+			t.Fatalf("the built-in caminus theme does not set %s", role)
+		}
+	}
+}
+
+func TestThemeLoadSwitchesRolesAndStyles(t *testing.T) {
+	themeFixture(t)
+	before := themeRole("accent")
+	if err := themeLoad("nord"); err != nil {
+		t.Fatal(err)
+	}
+	after := themeRole("accent")
+	if before == after {
+		t.Fatalf("loading nord left accent at %s", after)
+	}
+	if envTitle.Render("x") == "" {
+		t.Fatal("the rebuilt styles no longer render")
+	}
+	if themeLoad("no-such-theme") == nil {
+		t.Fatal("a nonexistent theme loaded without error")
+	}
+	if themeRole("accent") != after {
+		t.Fatal("a failed load changed the palette")
+	}
+}
+
+func TestThemeNamesListTheBuiltins(t *testing.T) {
+	names := themeNames()
+	for _, want := range []string{"caminus", "nord", "catppuccin-mocha", "dracula", "gruvbox-dark", "tokyo-night"} {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s missing from themeNames: %v", want, names)
+		}
+	}
+}
+
+func TestThemeParseToleratesBtopKeysAndUnknownLines(t *testing.T) {
+	text := `# a comment
+main_fg = #e5e9f0
+title_fg = #88c0d0
+cpu_load_start_low = #abcdef
+not a mapping at all
+code_theme = monokai
+`
+	got, bad := parseTheme([]byte(text))
+	if got["text"] != "#e5e9f0" || got["accent"] != "#88c0d0" || got["code_theme"] != "monokai" {
+		t.Fatalf("the aliases or code_theme did not land: %v", got)
+	}
+	if _, present := got["cpu_load_start_low"]; present {
+		t.Fatalf("an unmapped btop key was applied as a role: %v", got)
+	}
+	if len(bad) != 1 || !strings.Contains(bad[0], "not a mapping") {
+		t.Fatalf("only lines that are not key = value should be bad, got %v", bad)
+	}
+}
+
+func TestThemeSetPersistsAndTheSlashCommandSwitches(t *testing.T) {
+	themeFixture(t)
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	m := chatFixture(t)
+	tm, _ := m.chatSlash("/theme")
+	list := tm.(envModel)
+	if !strings.Contains(list.msg, "caminus") || !strings.Contains(list.msg, "nord") {
+		t.Fatalf("/theme does not list themes: %q", list.msg)
+	}
+	tn, _ := m.chatSlash("/theme nope")
+	nope := tn.(envModel)
+	if !strings.Contains(nope.msg, "no such theme") {
+		t.Fatalf("/theme nope did not report the failure: %q", nope.msg)
+	}
+	ts, _ := m.chatSlash("/theme nord")
+	m = ts.(envModel)
+	// syncChat rebuilds the renderer straight away when markdown was nilled, so
+	// the next reply is styled in the new theme, not the old one.
+	if m.chat.markdown == nil {
+		t.Fatal("/theme nord left the markdown renderer unbuilt")
+	}
+	if themeRole("accent") != "#88c0d0" {
+		t.Fatalf("/theme nord did not switch the palette: %s", themeRole("accent"))
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, "caminus", "panel-theme"))
+	if err != nil || strings.TrimSpace(string(saved)) != "nord" {
+		t.Fatalf("the choice was not persisted (err=%v): %q", err, saved)
 	}
 }

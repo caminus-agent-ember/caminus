@@ -39,7 +39,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 )
 
 type envReq struct {
@@ -1073,22 +1072,8 @@ func currentUser() string {
 }
 
 // ---------------------------------------------------------------- view
-
-var (
-	envTitle  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	envSel    = lipgloss.NewStyle().Background(cGray).Foreground(cText)
-	envHead   = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
-	envDim    = lipgloss.NewStyle().Foreground(cMuted)
-	envThink  = lipgloss.NewStyle().Foreground(cThink)
-	envWarn   = lipgloss.NewStyle().Foreground(cYellow)
-	envTool   = lipgloss.NewStyle().Foreground(cOrange)
-	envCode   = lipgloss.NewStyle().Foreground(cTeal)
-	envCtxHot = lipgloss.NewStyle().Foreground(cRed)
-	envCtxOK  = lipgloss.NewStyle().Foreground(cGreen)
-	envBusy   = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
-	envTabOn  = lipgloss.NewStyle().Bold(true).Background(cGray).Foreground(cText)
-	envBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray)
-)
+// The named styles (envTitle, envSel, ...) live in theme.go, built from the
+// theme's roles; a theme switch rebuilds them there.
 
 func (m envModel) render() string {
 	if m.tab == 6 {
