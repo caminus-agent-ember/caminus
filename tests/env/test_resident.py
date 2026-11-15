@@ -816,6 +816,14 @@ class Resident(unittest.TestCase):
         finally:rt.mail.close();rt.store.close()
         self.cmd('fallback',['--model','gpt-unpriced','--endpoint','https://api.example.com/v1'],code=1)
 
+    def test_terminal_output_has_no_carriage_returns_from_the_pty(self):
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        out=t.call(sid,dict(command="printf 'one\\ntwo\\n'",yield_ms=2000))
+        while out.get('running'):
+            out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=500,offset=0))
+        text=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0,offset=0))['output']
+        self.assertIn('one\ntwo',text);self.assertNotIn('\r\n',text,'a PTY line ending would corrupt a patch built from it')
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)
