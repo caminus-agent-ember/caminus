@@ -51,7 +51,8 @@ func TestResidentSteeringCapturesGoalAndUsesStdin(t *testing.T) {
 	}
 	args, _ := os.ReadFile(argsPath)
 	input, _ := os.ReadFile(inputPath)
-	if string(args) != "env\nagent\nsend\nresident\n--goal-id\noriginal\n--stdin\n--json\n" || string(input) != message {
+	// The steering draft is the explicit form: it redirects the goal, so it carries --steer.
+	if string(args) != "env\nagent\nsend\nresident\n--goal-id\noriginal\n--steer\n--stdin\n--json\n" || string(input) != message {
 		t.Fatalf("wrong steering destination or input: %q / %q", args, input)
 	}
 }

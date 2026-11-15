@@ -98,7 +98,7 @@ class Resident(unittest.TestCase):
     def steers(self,gid):
         import sqlite3
         db=sqlite3.connect(self.home/'agent.sqlite3');db.row_factory=sqlite3.Row
-        try:return [dict(r) for r in db.execute('SELECT id,text FROM steers WHERE goal=? ORDER BY id',(gid,))]
+        try:return [dict(r) for r in db.execute('SELECT id,text,kind FROM steers WHERE goal=? ORDER BY id',(gid,))]
         finally:db.close()
     def respond(self,rid,decision,**fields):
         d=self.bridge/'res';d.mkdir(parents=True,exist_ok=True)
@@ -148,7 +148,7 @@ class Resident(unittest.TestCase):
         words='skip the unit tests for now, focus the C ABI'
         self.replies(call('define_done',dict(check='the ABI builds')))
         goal=self.cmd('once',['--goal','Build the C ABI and run its tests. '*80],code=24)
-        self.cmd('send',[words,'--goal-id',goal['id']])
+        self.cmd('send',[words,'--goal-id',goal['id'],'--steer'])
         self.replies(dict(role='assistant',content='Summary of earlier work.'))
         self.cmd('compact',[goal['id']])
         self.replies(call('verify',dict(evidence='the ABI built')),call('finish',dict(summary='Done.')))
@@ -164,15 +164,32 @@ class Resident(unittest.TestCase):
         words='stop at the ABI, do not touch the CLI'
         self.replies(call('define_done',dict(check='the ABI builds')))
         goal=self.cmd('once',['--goal','Build everything. '*80],code=24)
-        self.cmd('send',[words,'--goal-id',goal['id']])
+        self.cmd('send',[words,'--goal-id',goal['id'],'--steer'])
         # Compaction and the steer land on the same tick: the CLI compaction files the steer first.
         self.replies(dict(role='assistant',content='Summary of earlier work.'))
         self.cmd('compact',[goal['id']])
         self.replies(call('verify',dict(evidence='the ABI built')),call('finish',dict(summary='Done.')))
         self.cmd('once',['--goal-id',goal['id']])
         body=json.dumps(Endpoint.seen[-1][1])
-        self.assertIn('[steers, restated verbatim after compaction',body)
+        self.assertIn('restated verbatim after compaction',body)
         self.assertIn(words,body)
+
+
+    def test_a_plain_message_is_a_nudge_that_keeps_the_plan(self):
+        self.gates_on()
+        words='also check the exit code while you are in there'
+        self.replies(call('define_done',dict(check='the ABI builds')))
+        goal=self.cmd('once',['--goal','Build the C ABI and run its tests.'],code=24)
+        queued=self.cmd('send',[words,'--goal-id',goal['id']])
+        self.assertTrue(queued['queued'])
+        self.replies(call('verify',dict(evidence='the ABI built')),call('finish',dict(summary='Done.')))
+        self.cmd('once',['--goal-id',goal['id']])
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('[nudge #',body)
+        self.assertIn('keeps your plan',body)
+        self.assertNotIn('Drop your current plan',body)
+        self.assertEqual([(x['text'],x['kind']) for x in self.steers(goal['id'])],[(words,'nudge')])
+
 
     def test_the_same_call_failing_twice_is_refused(self):
         self.gates_on()
@@ -250,7 +267,7 @@ class Resident(unittest.TestCase):
     def test_steering_updates_same_goal_without_implicitly_resuming_it(self):
         self.replies(call('terminal',dict(command='printf ready')))
         first=self.cmd('once',['--goal','Work on this goal.','--max-steps','1'],code=22)
-        sent=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Use an existing utility before building.')
+        sent=self.cmd('send',['--goal-id',first['id'],'--steer','--stdin'],stdin='Use an existing utility before building.')
         self.assertEqual(sent['id'],first['id']);self.assertTrue(sent['queued'])
         status=self.cmd('status')
         self.assertEqual(len(status['goals']),1);self.assertEqual(status['goals'][0]['state'],'paused')
@@ -329,7 +346,7 @@ class Resident(unittest.TestCase):
                 def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                     self.calls+=1
                     if self.calls==1:
-                        rt.store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(gid,'New human direction.'))
+                        rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'New human direction.','steer'))
                         summary='Earlier result.'
                     else:
                         self.observed=any((m.get('content') or '').endswith('New human direction.') and m.get('content','').startswith('[steer #') for m in messages)

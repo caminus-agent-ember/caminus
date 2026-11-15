@@ -136,9 +136,12 @@ files. This is a Unix account, not a security sandbox.
 A goal runs as ticks. The runtime owns the boundaries a model tends to skip
 under pressure, and the model owns the inside of a tick.
 
-The runtime files every steer verbatim in a `steers` table as well as tagging it
-in the transcript, so a compaction and the finish report can quote the human
-rather than a summary of them. After a compaction it restates the goal and every
+A message to a working goal is a **nudge** by default: it adds to the work in
+hand and keeps the plan. `--steer` (or `/steer TEXT` in the panel) is the heavy
+form: it supersedes conflicting instructions, voids the plan and may move the
+goal, so it has to be asked for. Both are filed verbatim in a `steers` table
+with their kind, as well as tagged in the transcript, so a compaction and the
+finish report can quote the human rather than a summary of them. After a compaction it restates the goal and every
 steer word for word, bounded at 8 KB with the newest steers kept whole.
 
 `define_done` states what done looks like as something checkable, and `verify`

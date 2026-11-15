@@ -66,6 +66,9 @@ def parser():
             p.add_argument('--goal-id',help='resume an existing goal, or send it a steering message')
         if op=='send':
             p.add_argument('--continue',dest='continue_goal',action='store_true',help='allow an explicit follow-up to a completed goal, preserving its conversation')
+            p.add_argument('--steer',action='store_true',
+                           help='redirect the goal: the message supersedes conflicting instructions and voids the '
+                                'plan. Without it a message is a nudge, which keeps the plan.')
         if op in ('once','resume'):
             p.add_argument('--max-steps',type=int,help='optional test budget; production daemon has no step limit')
             p.add_argument('--max-seconds',type=float,help='optional test budget, retained in the goal checkpoint')
@@ -304,8 +307,9 @@ def main(argv=None,stdin=None):
                     if state=='completed':
                         store.update(a.goal_id,state='working',summary='',error='',deadline=None,step_limit=None)
                         store.event('goal_continued',{},a.goal_id)
-                    store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(a.goal_id,text))
-                    store.event('user_message',dict(text=text),a.goal_id)
+                    store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',
+                                     (a.goal_id,text,'steer' if a.steer else 'nudge'))
+                    store.event('user_message',dict(text=text,kind='steer' if a.steer else 'nudge'),a.goal_id)
                     # A paused goal keeps the text but will not read it until someone resumes: say so
                     # rather than reporting a delivery the agent will never act on.
                     resume_required=state in ('paused','error','waiting_user','waiting_root')

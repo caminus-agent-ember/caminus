@@ -960,6 +960,17 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		clear()
 		return m, residentAction(m, args, "")
+	case "/steer":
+		// A steer redirects: it supersedes conflicting instructions and voids the plan. A plain message in the
+		// composer is a nudge, which keeps the plan, so the heavy one has to be asked for.
+		text := strings.TrimSpace(arg)
+		if text == "" || m.chat.target == "" {
+			m.msg = "usage: /steer TEXT — redirects the goal; a plain message nudges it"
+			return m, nil
+		}
+		clear()
+		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", m.chat.target,
+			"--steer", "--stdin", "--json"}, text)
 	case "/theme":
 		// The panel's colors; the transcript's markdown is rebuilt below to pick
 		// up the new roles. Nothing else in the session changes.
@@ -1009,6 +1020,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/session", "open a session NAME"},
 	{"/sessions", "open the Sessions homepage"},
 	{"/start", "run this session's loop"},
+	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/stop", "stop this session's loop"},
 	{"/theme", "switch panel colors NAME; /theme lists"},
 }

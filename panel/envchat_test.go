@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -262,11 +263,20 @@ func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
 	}
 }
 
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	if got := slashMatches("/se"); fmt.Sprint(got) != "[/session /sessions]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); len(got) != 4 || got[0] != "/session" || got[3] != "/stop" {
+	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop]" {
+		t.Fatalf("unexpected matches: %v", got)
+	}
+	if got := slashMatches("/s"); len(got) != 5 || got[0] != "/session" || got[4] != "/stop" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -275,7 +285,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /steer /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}

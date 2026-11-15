@@ -805,7 +805,8 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(text) == "" || goal == "" {
 			return m, nil
 		}
-		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--stdin", "--json"}, text)
+		// The steering draft is the explicit form: it redirects the goal rather than nudging it.
+		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--steer", "--stdin", "--json"}, text)
 	case "agentname":
 		m.agentName = strings.TrimSpace(m.edit)
 		m.mode, m.edit, m.goalSel = "normal", "", 0

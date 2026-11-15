@@ -179,10 +179,15 @@ class Runtime:
         else:
             lines.append('LOOP: done = ' + g['done_check'])
         steers = self.store.steers(gid)
-        if steers:
+        steers_only = [st for st in steers if (st.get('kind') or 'steer') == 'steer']
+        if steers_only:
             lines.append('LOOP: %d steer(s) on this goal; the newest is #%d and supersedes the older ones '
                          'where they conflict. Drop any plan that contradicts it.'
-                         % (len(steers), steers[-1]['id']))
+                         % (len(steers_only), steers_only[-1]['id']))
+        nudges = [st for st in steers if (st.get('kind') or 'steer') == 'nudge']
+        if nudges:
+            lines.append('LOOP: %d nudge(s) on this goal; the newest is #%d. They add to the work in hand '
+                         'and do not by themselves change the plan.' % (len(nudges), nudges[-1]['id']))
         rows = list(self.store.db.execute(
             'SELECT signature,count,last_error FROM failures WHERE goal=? AND count>=2 ORDER BY count DESC LIMIT 3',
             (gid,)))
@@ -507,11 +512,12 @@ class Runtime:
             if room <= 0:
                 break
             text = st['text'][:room]
-            kept.append('[steer #%s] %s%s' % (st['id'], text,
+            kept.append('[%s #%s] %s%s' % (st.get('kind') or 'steer', st['id'], text,
                         '\n[truncated]' if len(st['text']) > len(text) else ''))
             used += len(text)
         if kept:
-            parts.append('[steers, restated verbatim after compaction, newest first]\n' + '\n'.join(kept))
+            parts.append('[steers and nudges, restated verbatim after compaction, newest first]\n'
+                         + '\n'.join(kept))
         if not parts:
             return messages
         return messages + [dict(role='user', content='\n\n'.join(parts))]
@@ -672,7 +678,8 @@ class Runtime:
             return True
         try:
             with self.store.transaction():
-                rows = list(self.store.db.execute('SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
+                rows = list(self.store.db.execute(
+                    'SELECT id,text,kind FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
                 # Steers are ordinary user text in the transcript, so they carry the latest-wins rule with
                 # them: history length differs turn to turn and a terse prefix is what makes a mid-goal
                 # redirect win over the older instructions it contradicts. Each one is also filed verbatim
@@ -680,11 +687,18 @@ class Runtime:
                 # summary cannot.
                 messages = g['messages']
                 for r in rows:
-                    steer_id = self.store.add_steer(gid, r['text'])
-                    messages = messages + [dict(role='user', content=(
-                        f'[steer #{steer_id}, supersedes earlier instructions where they conflict. '
-                        f'Drop your current plan; if this changes the goal, restate what done looks like with '
-                        f'define_done.] ' + r['text']))]
+                    kind = r['kind'] or 'nudge'
+                    steer_id = self.store.add_steer(gid, r['text'], kind)
+                    if kind == 'steer':
+                        # A steer redirects: it outranks the plan and may move the goal itself.
+                        tag = (f'[steer #{steer_id}, supersedes earlier instructions where they conflict. '
+                               f'Drop your current plan; if this changes the goal, restate what done looks '
+                               f'like with define_done.] ')
+                    else:
+                        # A nudge adds to the work in hand: it keeps the plan unless it plainly contradicts it.
+                        tag = (f'[nudge #{steer_id}, keeps your plan: fold this into what you are doing '
+                               f'unless it contradicts the goal.] ')
+                    messages = messages + [dict(role='user', content=tag + r['text'])]
                 if rows:
                     self.store.update(gid, messages=messages, steer_seq=rows[-1]['id'])
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])

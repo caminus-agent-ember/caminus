@@ -56,11 +56,13 @@ class Store:
             goal TEXT, kind TEXT NOT NULL, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS inbox(
             id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
-            text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
+            text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL DEFAULT 'nudge');
           CREATE TABLE IF NOT EXISTS peer_deliveries(id TEXT PRIMARY KEY, goal TEXT, error TEXT);
           -- Every steer, verbatim and at goal level: compaction and the finish report must be able to
           -- quote what the human actually said, which a summarised transcript cannot.
-          CREATE TABLE IF NOT EXISTS steers(id INTEGER PRIMARY KEY, goal TEXT, text TEXT, ts REAL);
+          CREATE TABLE IF NOT EXISTS steers(id INTEGER PRIMARY KEY, goal TEXT, text TEXT, ts REAL,
+                                            kind TEXT NOT NULL DEFAULT 'steer');
           -- Failures by signature, so "the same failure twice" is a fact about this call, not a mood.
           CREATE TABLE IF NOT EXISTS failures(id INTEGER PRIMARY KEY, goal TEXT, signature TEXT,
                                               count INTEGER, last_error TEXT, ts REAL,
@@ -143,6 +145,11 @@ class Store:
                            ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT')):
             if name not in have:
                 self.db.execute('ALTER TABLE goals ADD COLUMN ' + name + ' ' + decl)
+        for table, name, decl in (('inbox','kind',"TEXT NOT NULL DEFAULT 'nudge'"),
+                                  ('steers','kind',"TEXT NOT NULL DEFAULT 'steer'")):
+            have = {r['name'] for r in self.db.execute('PRAGMA table_info(' + table + ')')}
+            if have and name not in have:
+                self.db.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + decl)
         have = {r['name'] for r in self.db.execute('PRAGMA table_info(failures)')}
         if have and 'last_error' not in have:
             self.db.execute('ALTER TABLE failures ADD COLUMN last_error TEXT')
@@ -159,13 +166,15 @@ class Store:
         sql = ','.join(k + '=?' for k in fields)
         self.db.execute('UPDATE goals SET ' + sql + ' WHERE id=?', [*fields.values(), gid])
 
-    def add_steer(self, gid, text):
+    def add_steer(self, gid, text, kind='steer'):
         """Keep the human's words verbatim at goal level, and return the id it was filed under."""
-        cur = self.db.execute('INSERT INTO steers(goal,text,ts) VALUES(?,?,?)', (gid, text, time.time()))
+        cur = self.db.execute('INSERT INTO steers(goal,text,ts,kind) VALUES(?,?,?,?)',
+                              (gid, text, time.time(), kind))
         return cur.lastrowid
 
     def steers(self, gid):
-        return [dict(r) for r in self.db.execute('SELECT id,text,ts FROM steers WHERE goal=? ORDER BY id', (gid,))]
+        return [dict(r) for r in self.db.execute(
+            'SELECT id,text,ts,kind FROM steers WHERE goal=? ORDER BY id', (gid,))]
 
     def note_failure(self, gid, signature, error):
         """Count one more occurrence of a failure signature and return the new count."""
