@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -695,5 +696,31 @@ func TestLiveWindowTakesHalfTheBodyAndLeavesTheRestToTheTranscript(t *testing.T)
 	transcript := m.chat.transcript.Height()
 	if transcript < body-live-2 || transcript > body-live+2 {
 		t.Fatalf("transcript is %d lines, expected about %d", transcript, body-live)
+	}
+}
+
+func TestLiveTextIsColoredLikeTheTranscript(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.live = residentLive{active: true, turn: "t1", text: "run `go test ./...` now", tools: []string{"terminal"}}
+	block := m.liveBlock(m.width)
+	if !strings.Contains(block, "38;2;143;188;187") { // cTeal: inline code
+		t.Fatalf("inline code is not colored:\n%q", block)
+	}
+	if !strings.Contains(block, "38;2;208;135;112") { // cOrange: a tool running
+		t.Fatalf("the running tool is not colored:\n%q", block)
+	}
+}
+
+func TestMarkdownColorsFencedCodeWithTheNordTheme(t *testing.T) {
+	r, err := glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(80))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Render("```go\nfunc main() { println(\"hi\", 42) }\n```\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spans := strings.Count(out, "38;2;"); spans < 3 {
+		t.Fatalf("fenced code has %d colored spans, expected syntax coloring:\n%q", spans, out)
 	}
 }

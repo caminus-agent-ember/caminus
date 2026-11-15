@@ -2,7 +2,10 @@
 
 package main
 
-import "charm.land/lipgloss/v2"
+import (
+	"charm.land/glamour/v2/ansi"
+	"charm.land/lipgloss/v2"
+)
 
 // The panel's one color theme. Every view — monitor, control panel and the
 // resident env views — draws from this palette, so a role (accent, healthy,
@@ -25,3 +28,55 @@ var (
 	cTeal   = lipgloss.Color("#8fbcbb") // quiet positive chrome
 	cGray   = lipgloss.Color("#4c566a") // selection background, borders
 )
+
+// ---------- markdown ----------
+
+// envMarkdownStyle is the transcript's markdown in the same palette as the views: headings take the roles
+// (frost for h1, blue for h2, teal for h3), inline code the teal accent on the darkest chrome, and fenced
+// blocks the Nord chroma theme, so code in a reply is colored the way the monitor colors it.
+func envMarkdownStyle() ansi.StyleConfig {
+	color := func(s string) *string { return &s }
+	flag := func(b bool) *bool { return &b }
+	indent := func(u uint) *uint { return &u }
+
+	var st ansi.StyleConfig
+	st.Document.Margin = indent(0)
+	st.Document.Color = color("#d8dee9")
+
+	st.Heading.Color = color("#88c0d0")
+	st.Heading.Bold = flag(true)
+	st.H1.Color = color("#88c0d0")
+	st.H1.Bold = flag(true)
+	st.H2.Color = color("#81a1c1")
+	st.H2.Bold = flag(true)
+	st.H3.Color = color("#8fbcbb")
+	st.H3.Bold = flag(true)
+	st.H4.Color = color("#b48ead")
+	st.H5.Color = color("#a3be8c")
+	st.H6.Color = color("#6b7489")
+
+	st.Emph.Italic = flag(true)
+	st.Strong.Bold = flag(true)
+	st.Strikethrough.CrossedOut = flag(true)
+	st.Link.Color = color("#81a1c1")
+	st.LinkText.Color = color("#88c0d0")
+	st.LinkText.Underline = flag(true)
+
+	st.Code.Color = color("#8fbcbb")
+	st.Code.BackgroundColor = color("#3b4252")
+	st.CodeBlock.Theme = "nord"
+	st.CodeBlock.Color = color("#d8dee9")
+	st.CodeBlock.BackgroundColor = color("#2e3440")
+	st.CodeBlock.Margin = indent(1)
+
+	st.BlockQuote.Color = color("#6b7489")
+	st.BlockQuote.Indent = indent(1)
+	st.HorizontalRule.Color = color("#3b4252")
+	st.Item.Color = color("#88c0d0")
+	st.Enumeration.Color = color("#88c0d0")
+	st.Table.Color = color("#4c566a")
+	st.Table.CenterSeparator = color("┼")
+	st.Table.ColumnSeparator = color("│")
+	st.Table.RowSeparator = color("─")
+	return st
+}

@@ -53,6 +53,28 @@ type residentLive struct {
 	top                   int
 }
 
+// highlightLive colors the inline code spans of a streaming line, so live text reads like the rendered
+// transcript: `code` in the frost accent, everything else as written. Plain text otherwise - this runs on
+// every snapshot, so it stays a single pass with no parsing.
+func highlightLive(line string) string {
+	var b strings.Builder
+	for {
+		open := strings.IndexByte(line, '`')
+		if open < 0 {
+			b.WriteString(line)
+			return b.String()
+		}
+		shut := strings.IndexByte(line[open+1:], '`')
+		if shut < 0 {
+			b.WriteString(line)
+			return b.String()
+		}
+		b.WriteString(line[:open])
+		b.WriteString(envCode.Render(line[open+1 : open+1+shut]))
+		line = line[open+1+shut+1:]
+	}
+}
+
 // body is the live reply as wrapped lines: its reasoning, the tools it started, then the text.
 func (l residentLive) body(width int) []string {
 	var out []string
@@ -62,10 +84,12 @@ func (l residentLive) body(width int) []string {
 		}
 	}
 	for _, name := range l.tools {
-		out = append(out, envWarn.Render("RUN · "+residentText(name)+" …"))
+		out = append(out, envDim.Render("RUN · ")+envTool.Render(residentText(name))+envDim.Render(" …"))
 	}
 	if l.text != "" {
-		out = append(out, strings.Split(ansi.Hardwrap(l.text, width, true), "\n")...)
+		for _, ln := range strings.Split(ansi.Hardwrap(l.text, width, true), "\n") {
+			out = append(out, highlightLive(ln))
+		}
 	}
 	if len(out) == 0 {
 		out = []string{envDim.Render("generating…")}
@@ -177,7 +201,7 @@ func (m *envModel) syncChat() {
 		m.chat.transcript.SetHeight(max(1, m.chat.transcript.Height()-3))
 	}
 	if m.chat.renderWidth != w || m.chat.markdown == nil {
-		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(max(10, w-4)))
+		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(max(10, w-4)))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
 	changed := m.chat.rendered != len(m.residentEvents)

@@ -1080,6 +1080,8 @@ var (
 	envHead   = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
 	envDim    = lipgloss.NewStyle().Foreground(cMuted)
 	envWarn   = lipgloss.NewStyle().Foreground(cYellow)
+	envTool   = lipgloss.NewStyle().Foreground(cOrange)
+	envCode   = lipgloss.NewStyle().Foreground(cTeal)
 	envCtxHot = lipgloss.NewStyle().Foreground(cRed)
 	envCtxOK  = lipgloss.NewStyle().Foreground(cGreen)
 	envBusy   = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
