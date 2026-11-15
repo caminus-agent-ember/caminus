@@ -1664,3 +1664,13 @@ func TestEmberStaysUpWithTheLatestThoughts(t *testing.T) {
 		t.Fatalf("live thoughts append below the past ones:\n%s", live)
 	}
 }
+
+func TestARecoveredCutOffIsANoteNotAnError(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.cards, m.chat.renderWidth = false, 140
+	block := ansi.Strip(m.chat.eventBlock(residentEvent{Seq: 700, Kind: "model_truncated", Data: map[string]any{
+		"error": "model output budget exhausted; increase --max-tokens and resume this goal", "recovered": true, "streak": 1.0}}))
+	if strings.Contains(block, "error") || strings.Contains(block, "--max-tokens") || !strings.Contains(block, "retries in smaller pieces (1 of 3") {
+		t.Fatalf("a handled cut-off is a quiet note:\n%s", block)
+	}
+}
