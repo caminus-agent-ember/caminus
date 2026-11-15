@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,6 +89,8 @@ type envModel struct {
 	key            string
 	cli            []string
 	agentName      string
+	defaultAgent   string
+	pendingLast    string
 	steerGoal      string
 	resident       residentStatus
 	residentEvents []residentEvent
@@ -171,8 +174,12 @@ func envMain(args []string) {
 		}
 	}
 	m := envModel{user: *user, bridge: *bridge, auditPath: *audit, key: *key, cli: cliArgv,
-		agentName: *agent, tab: 7, seen: map[string]bool{}, mode: "normal", width: 110, height: 32}
+		agentName: *agent, defaultAgent: *agent, tab: 7, seen: map[string]bool{}, mode: "normal",
+		width: 110, height: 32}
 	m.initChat()
+	// Open directly into the last conversation; the first session list decides
+	// whether that session still exists (residentSessionsMsg below).
+	openLastSession(&m)
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "caminus-panel env:", err)
@@ -540,6 +547,21 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionNames, m.sessionMemory = msg.names, msg.memory
 			if msg.err != "" {
 				m.msg = msg.err
+			}
+			if m.pendingLast != "" {
+				last := m.pendingLast
+				m.pendingLast = ""
+				if last != m.defaultAgent && len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, last) {
+					m.agentName = m.defaultAgent
+					m.residentEpoch++
+					m.resident, m.residentEvents, m.chat = residentStatus{}, nil, residentChat{}
+					m.goalSel, m.sessionMemory = 0, ""
+					m.tab = 7
+					m.initChat()
+					m.syncChat()
+					m.msg = "session " + terminalText(last, true) + " no longer exists; pick another"
+					return m, tea.Batch(residentRefresh(m), residentSessions(m))
+				}
 			}
 		}
 		return m, nil

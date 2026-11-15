@@ -33,7 +33,8 @@ systemd user service; linger, provisioned by `env setup`, keeps it alive after
 logout. Stopping the resident does not stop its inference server. Terminal workers
 survive a resident restart, so long commands can be inspected rather than repeated.
 
-The panel opens on **Sessions**. Select a named resident and press Enter for its
+The panel reopens your last conversation directly; the Sessions page is one
+Tab away. Select a named resident and press Enter for its
 conversation; `n` creates a fresh named session with the same model settings,
 separate memory/history, and its own persistent runtime. Existing sessions are
 never overwritten. The five main pages are Sessions, Audit, Settings, Notes &
@@ -54,12 +55,16 @@ context compaction does not remove UI history. Markdown and fenced code render
 with syntax highlighting; terminal commands and outputs have separate labels.
 Page Up/Down and the mouse wheel scroll; incoming activity preserves the reading
 position. Ctrl+L follows the latest activity. Escape switches to browsing without
-deleting a draft; Enter returns to typing. The footer shows the configured model,
+deleting a draft; Enter returns to typing. Ctrl+P opens a session switcher that
+filters by name without leaving the conversation. When the draft is a `/` token,
+matching commands appear next to the composer and Tab cycles through them. The
+footer shows the configured model,
 context capacity, selected goal state/steps and pending request count. Context
 capacity is not presented as a measured current token count. Updates arrive at
 model/tool event boundaries, not as token-by-token private reasoning.
 
-Most controls use slash commands:
+Most controls use slash commands (type `/` in the composer and Tab completes
+the highlighted name):
 
 | Command | Action |
 |---|---|

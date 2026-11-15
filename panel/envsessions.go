@@ -6,6 +6,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
@@ -106,10 +108,76 @@ func (m *envModel) openResident(name string) {
 		m.goalSel = 0
 		m.sessionMemory = ""
 	}
+	m.pendingLast = ""
 	m.tab = 6
 	m.msg = ""
 	m.initChat()
 	m.syncChat()
+	if validSessionName(m.agentName) {
+		saveLastSession(m.agentName)
+	}
+}
+
+// openLastSession reopens the last conversation at launch. The first session
+// list message falls back to the homepage when the session no longer exists.
+func openLastSession(m *envModel) {
+	last := loadLastSession()
+	if last == "" {
+		return
+	}
+	m.openResident(last)
+	m.pendingLast = last
+}
+
+// validSessionName accepts the session names the panel feeds openResident; it
+// only rules out values that could never come from the bus or CLI.
+func validSessionName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, r := range name {
+		if r == '\n' || r == '\x00' || r == '\r' || r < 0x20 {
+			return false
+		}
+	}
+	return strings.TrimSpace(name) == name
+}
+
+// The last opened conversation persists in the user's state dir so the next
+// launch opens it directly. Failures fall back to the Sessions homepage silently.
+func lastSessionPath() string {
+	state := os.Getenv("XDG_STATE_HOME")
+	if state == "" {
+		if h, err := os.UserHomeDir(); err == nil {
+			state = filepath.Join(h, ".local", "state")
+		} else {
+			return ""
+		}
+	}
+	return filepath.Join(state, "caminus", "envui-last-session")
+}
+
+func loadLastSession() string {
+	b, err := os.ReadFile(lastSessionPath())
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimRight(string(b), "\n")
+	if !validSessionName(name) {
+		return ""
+	}
+	return name
+}
+
+func saveLastSession(name string) {
+	path := lastSessionPath()
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, []byte(name+"\n"), 0o600)
 }
 
 func (m envModel) sessionKeys(k string) (tea.Model, tea.Cmd) {
@@ -129,6 +197,26 @@ func (m envModel) sessionKeys(k string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	}
 	return m, nil
+}
+
+// pickerNames lists the sessions the Ctrl+P query still matches; an empty list
+// keeps the current name so the switcher can always reopen it.
+func (m envModel) pickerNames() []string {
+	names := m.sessionNames
+	if len(names) == 0 {
+		names = []string{m.agentName}
+	}
+	query := strings.ToLower(m.chat.pickerQuery)
+	if query == "" {
+		return names
+	}
+	var out []string
+	for _, n := range names {
+		if strings.Contains(strings.ToLower(n), query) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func (m envModel) sessionsPane() string {
@@ -160,7 +248,7 @@ func (m envModel) residentSettingsPane() string {
 		fmt.Sprintf("Compaction: %.0f%% trigger → %.0f%% target", m.resident.CompactThreshold*100, m.resident.CompactTarget*100),
 		"", "Settings shown here are read-only; new sessions inherit the selected session's model settings.",
 		"Root approval happens in /requests; credentials and passwords are never displayed here.",
-		"", "Conversation: Enter sends · Alt+Enter adds a line · Escape browses history",
+		"", "Conversation: Enter sends · Alt+Enter adds a line · Escape browses history · Ctrl+P switches session",
 		"Scrollback: Page Up/Down or mouse wheel · Ctrl+L follows new activity",
 		"Session commands: /new, /goals, /goal ID, /newsession NAME, /session NAME",
 		"Controls: /start, /stop, /cancel, /resume, /requests, /remember TEXT, /help"}, "\n")

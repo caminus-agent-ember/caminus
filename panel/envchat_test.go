@@ -249,3 +249,169 @@ func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
 		}
 	}
 }
+
+func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
+	if got := slashMatches("/se"); fmt.Sprint(got) != "[/session /sessions]" {
+		t.Fatalf("unexpected matches: %v", got)
+	}
+	if got := slashMatches("/s"); len(got) != 4 || got[0] != "/session" || got[3] != "/stop" {
+		t.Fatalf("unexpected matches: %v", got)
+	}
+	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
+		if got := slashMatches(draft); got != nil {
+			t.Fatalf("unexpected matches for %q: %v", draft, got)
+		}
+	}
+	for _, c := range slashCommands {
+		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /resume /", c.name+" ") {
+			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
+		}
+	}
+	m := chatFixture()
+	m.chat.compose.SetValue("/s")
+	next, done := m.cycleSlash()
+	m = next.(envModel)
+	if !done || m.chat.compose.Value() != "/session " {
+		t.Fatalf("first Tab gave %q", m.chat.compose.Value())
+	}
+	next, done = m.cycleSlash()
+	m = next.(envModel)
+	if !done || m.chat.compose.Value() != "/sessions " {
+		t.Fatalf("second Tab gave %q", m.chat.compose.Value())
+	}
+	next, done = m.cycleSlash()
+	m = next.(envModel)
+	if !done || m.chat.compose.Value() != "/start " {
+		t.Fatalf("cycle skipped a longer command: %q", m.chat.compose.Value())
+	}
+	m.chat.compose.SetValue("/new steer me")
+	next, done = m.cycleSlash()
+	if done {
+		t.Fatal("Tab completed an argument draft")
+	}
+	if m.chat.compose.Value() != "/new steer me" {
+		t.Fatal("cycle changed the draft")
+	}
+}
+
+func TestQuickSwitcherOpensRecordsAndFiltersSessions(t *testing.T) {
+	m := chatFixture()
+	m.sessionNames = []string{"research", "resident"}
+	m.chat.compose.SetValue("an unsent draft")
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	m = next.(envModel)
+	if !m.chat.picker || m.chat.pickerQuery != "" {
+		t.Fatal("Ctrl+P did not open the switcher")
+	}
+	if m.chat.compose.Value() != "an unsent draft" {
+		t.Fatal("the switcher destroyed the draft")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = next.(envModel)
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	m = next.(envModel)
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'h', Text: "h"})
+	m = next.(envModel)
+	if names := m.pickerNames(); len(names) != 1 || names[0] != "research" {
+		t.Fatalf("filter failed: %v", names)
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(envModel)
+	if m.chat.picker || !m.chat.compose.Focused() || m.chat.compose.Value() != "an unsent draft" {
+		t.Fatal("Escape did not restore the composer")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	m = next.(envModel)
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(envModel)
+	if m.agentName != "research" || m.chat.picker || m.chat.compose.Value() != "" {
+		t.Fatalf("Enter did not open the selected session: %q", m.agentName)
+	}
+	// A question arriving with the switcher open keeps F2 as the explicit takeover.
+	m2 := chatFixture()
+	m2.sessionNames = []string{"resident"}
+	m2.chat.picker = true
+	wrong := envReq{ID: "q1", Kind: "question"}
+	m2.chat.question = &wrong
+	next, _ = m2.chatKey(tea.KeyPressMsg{Code: tea.KeyF2})
+	m2 = next.(envModel)
+	if m2.chat.picker || !m2.chat.questionArmed || m2.chat.compose.Focused() {
+		t.Fatal("F2 with the switcher open did not take over the question")
+	}
+}
+
+func TestLaunchReopensLastSessionAndFallsBackWhenGone(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	saveLastSession("research")
+	if got := loadLastSession(); got != "research" {
+		t.Fatalf("round trip lost the session: %q", got)
+	}
+	saveLastSession("\x01bad\nname")
+	if got := loadLastSession(); got != "" {
+		t.Fatalf("unsanitary name loaded: %q", got)
+	}
+	m := envModel{agentName: "resident", defaultAgent: "resident", tab: 7, width: 90, height: 28}
+	m.initChat()
+	saveLastSession("research")
+	openLastSession(&m)
+	if m.agentName != "research" || m.tab != 6 || m.pendingLast != "research" {
+		t.Fatal("launch did not reopen the last session")
+	}
+	next, _ := m.Update(residentSessionsMsg{agent: "research", names: []string{"resident", "research"}})
+	m = next.(envModel)
+	if m.tab != 6 || m.pendingLast != "" || m.agentName != "research" {
+		t.Fatal("an existing last session was rejected")
+	}
+	m2 := envModel{agentName: "resident", defaultAgent: "resident", tab: 7, width: 90, height: 28}
+	m2.initChat()
+	saveLastSession("ghost")
+	openLastSession(&m2)
+	next, _ = m2.Update(residentSessionsMsg{agent: "ghost", names: []string{"resident"}})
+	m2 = next.(envModel)
+	if m2.tab != 7 || m2.agentName != "resident" || !m2.chat.ready {
+		t.Fatal("a vanished session did not fall back to the homepage")
+	}
+}
+
+func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
+	for _, size := range [][2]int{{40, 16}, {110, 32}} {
+		m := chatFixture()
+		m.width, m.height = size[0], size[1]
+		for i := 2; i < 60; i++ {
+			m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+				events: []residentEvent{{Seq: i, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "text line"}}}})
+		}
+		m.chat.compose.SetValue("/s")
+		frame := ansi.Strip(m.render())
+		rows := strings.Split(frame, "\n")
+		if len(rows) > size[1] {
+			t.Fatalf("%v: %d lines overflow the terminal", size, len(rows))
+		}
+		for _, row := range rows {
+			if ansi.StringWidth(row) > size[0] {
+				t.Fatalf("%v: line too wide: %q", size, row)
+			}
+		}
+		if !strings.Contains(frame, "Tab completes") || !strings.Contains(frame, "/session") {
+			t.Fatalf("%v: autocomplete hint missing", size)
+		}
+		if len(rows) < 3 {
+			t.Fatal("frame lost the header and footer lines")
+		}
+		if !strings.Contains(frame, "Ctrl+P sessions") && !strings.Contains(frame, "session") {
+			t.Fatalf("%v: footer lost the switcher hint", size)
+		}
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+		m = next.(envModel)
+		frame = ansi.Strip(m.render())
+		if !strings.Contains(frame, "OPEN SESSION") {
+			t.Fatalf("%v: switcher panel missing", size)
+		}
+		for _, row := range strings.Split(frame, "\n") {
+			if ansi.StringWidth(row) > size[0] {
+				t.Fatalf("%v: switcher line too wide", size)
+			}
+		}
+	}
+}

@@ -32,6 +32,11 @@ type residentChat struct {
 	questionArmed                           bool
 	questionInput                           textarea.Model
 	questionDeferred, questionError         string
+	picker                                  bool
+	pickerQuery                             string
+	pickerSel                               int
+	slashIdx                                int
+	slashToken, slashText                   string
 }
 
 type residentComposeResult struct {
@@ -122,7 +127,8 @@ func (m *envModel) syncChat() {
 	}
 	oldBottom := m.chat.transcript.AtBottom()
 	m.chat.transcript.SetWidth(w)
-	m.chat.transcript.SetHeight(max(1, h-3-lipgloss.Height(m.chatComposer())-2))
+	// One header line and one footer line surround the transcript.
+	m.chat.transcript.SetHeight(max(1, h-1-lipgloss.Height(m.chatBottom())-1))
 	if m.chat.help {
 		m.chat.transcript.SetHeight(max(1, m.chat.transcript.Height()-3))
 	}
@@ -277,6 +283,16 @@ func (m envModel) chatComposer() string {
 		label += " · browsing history; Enter to type"
 	}
 	input := m.chat.compose.View()
+	if (m.mode == "" || m.mode == "normal") && !m.chat.sending {
+		value := strings.TrimRight(m.chat.compose.Value(), " ")
+		if matches := slashMatches(value); !(len(matches) == 1 && matches[0] == value) && len(matches) > 0 {
+			lines := matches
+			if len(lines) > 4 {
+				lines = lines[:4]
+			}
+			input = envDim.Render(envClip("Tab completes · "+strings.Join(lines, "  "), max(18, m.width-6))) + "\n" + input
+		}
+	}
 	if m.mode == "agentname" {
 		label = "Agent name · Enter selects · Esc cancels"
 		input = terminalText(m.edit, false) + "█"
@@ -287,14 +303,20 @@ func (m envModel) chatComposer() string {
 	return envBorder.Width(max(18, m.width-2)).Render(envDim.Render(label) + "\n" + input)
 }
 
+// chatBottom renders whatever occupies the composer slot: the steering draft,
+// the inline question or the Ctrl+P session switcher. syncChat sizes the
+// transcript against its measured height.
+func (m envModel) chatBottom() string {
+	if m.chat.picker {
+		return m.pickerBox()
+	}
+	return m.chatComposer()
+}
+
 func (m envModel) renderChat() string {
 	m.syncChat()
 	w := max(20, m.width)
 	clip := func(s string) string { return ansi.Truncate(s, w, "") }
-	var names []string
-	for _, i := range envNavigation {
-		names = append(names, envDim.Render(tabs[i]))
-	}
 	state := "stopped"
 	if m.resident.DaemonAlive {
 		state = "listening"
@@ -309,8 +331,9 @@ func (m envModel) renderChat() string {
 		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		indicator = frames[m.tickN%len(frames)]
 	}
-	head := clip(envTitle.Render("CAMINUS")+" · "+residentText(m.agentName)) + "\n" + clip(strings.Join(names, "  ")) + "\n" + clip(envHead.Render(indicator+" "+state)+fmt.Sprintf(" · %d steps", steps))
-	status := fmt.Sprintf("%s · %s · ctx %d · SSH %s · %d requests", residentText(m.resident.Model), residentText(m.agentName), m.resident.Context, map[bool]string{true: "OK", false: "…"}[m.sshOK], len(m.reqs))
+	head := clip(envTitle.Render("CAMINUS") + " · " + residentText(m.agentName) +
+		"  " + envHead.Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
+	status := fmt.Sprintf("%s · ctx %d · SSH %s · %d requests", residentText(m.resident.Model), m.resident.Context, map[bool]string{true: "OK", false: "…"}[m.sshOK], len(m.reqs))
 	if !m.chat.transcript.AtBottom() {
 		status += fmt.Sprintf(" · history %.0f%%", m.chat.transcript.ScrollPercent()*100)
 	}
@@ -320,11 +343,11 @@ func (m envModel) renderChat() string {
 	if m.msg != "" {
 		status += " · " + terminalText(m.msg, false)
 	}
-	foot := clip(envDim.Render(status)) + "\n" + clip(envDim.Render("Enter send · Alt+Enter newline · PgUp/PgDn scroll · /help · Tab panes · Ctrl+C quit"))
+	foot := clip(envDim.Render(status + " · Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
 	if m.chat.help {
 		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
 	}
-	return strings.Join([]string{head, m.chat.transcript.View(), m.chatComposer(), foot}, "\n")
+	return strings.Join([]string{head, m.chat.transcript.View(), m.chatBottom(), foot}, "\n")
 }
 
 func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -344,6 +367,9 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.initChat()
+	if m.chat.picker {
+		return m.pickerKey(msg)
+	}
 	if m.chat.question != nil {
 		return m.questionKey(msg)
 	}
@@ -355,7 +381,14 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch k {
 	case "ctrl+c":
 		return m, tea.Quit
+	case "ctrl+p":
+		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
+		m.chat.compose.Blur()
+		return m, residentSessions(m)
 	case "tab", "shift+tab":
+		if next, done := m.cycleSlash(); done {
+			return next, nil
+		}
 		return m.onKey(k)
 	case "pgup":
 		m.chat.transcript.PageUp()
@@ -562,4 +595,158 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	}
 	m.syncChat()
 	return m, nil
+}
+
+// slashCommands backs the composer autocomplete; every name must be handled by
+// chatSlash. The list stays in one place so the two never drift apart.
+var slashCommands = []struct{ name, hint string }{
+	{"/agent", "open another session NAME"},
+	{"/cancel", "cancel the selected goal"},
+	{"/goal", "select a goal by ID prefix"},
+	{"/goals", "list goals"},
+	{"/help", "toggle the help footer"},
+	{"/new", "start a new goal"},
+	{"/newsession", "create a session NAME"},
+	{"/quit", "close the UI; the daemon continues"},
+	{"/remember", "append TEXT to this session's memory"},
+	{"/requests", "open questions and root approvals"},
+	{"/resume", "resume the selected goal"},
+	{"/session", "open a session NAME"},
+	{"/sessions", "open the Sessions homepage"},
+	{"/start", "run this session's loop"},
+	{"/stop", "stop this session's loop"},
+}
+
+// slashMatches returns the commands whose name the draft token still prefixes.
+// An exact command stays listed so repeated Tab can cycle across the longer
+// names sharing its prefix; arguments or a multiline draft get nothing.
+func slashMatches(draft string) []string {
+	if draft == "" || !strings.HasPrefix(draft, "/") {
+		return nil
+	}
+	if strings.ContainsAny(draft, " \n") {
+		return nil
+	}
+	var out []string
+	for _, c := range slashCommands {
+		if strings.HasPrefix(c.name, draft) {
+			out = append(out, c.name)
+		}
+	}
+	return out
+}
+
+// cycleSlash completes the draft to the next matching command on Tab without
+// altering what the user has typed beyond the command token. Tab cycles across
+// every command sharing the originally typed prefix (so /s can reach /start and
+// /stop); an exact, unique token leaves Tab free for the page navigation.
+func (m envModel) cycleSlash() (tea.Model, bool) {
+	value := m.chat.compose.Value()
+	trimmed := strings.TrimRight(value, " ")
+	token := trimmed
+	if trimmed == m.chat.slashText || trimmed == m.chat.slashToken {
+		token = m.chat.slashToken // continue an in-progress cycle over the original prefix
+	} else {
+		m.chat.slashIdx = 0
+	}
+	matches := slashMatches(token)
+	if len(matches) == 0 {
+		return m, false
+	}
+	pick := matches[m.chat.slashIdx%len(matches)]
+	m.chat.slashIdx++
+	m.chat.slashToken = token
+	m.chat.slashText = pick
+	if pick == trimmed {
+		return m, false
+	}
+	m.chat.compose.SetValue(pick + " ")
+	return m, true
+}
+
+// The Ctrl+P switcher selects another session without leaving the conversation
+// page. Enter opens the highlighted session; the section replaces the composer
+// slot, so it reuses the composer's measured height.
+func (m envModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch k {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "pgup":
+		m.chat.transcript.PageUp()
+		return m, nil
+	case "pgdown":
+		m.chat.transcript.PageDown()
+		return m, nil
+	case "tab", "shift+tab":
+		return m.onKey(k)
+	case "esc":
+		m.chat.picker = false
+		return m, m.chat.compose.Focus()
+	case "f2":
+		m.chat.picker = false
+		if m.chat.question != nil {
+			m.chat.questionArmed = true
+			m.chat.compose.Blur()
+			if m.chat.questionCustom {
+				return m, m.chat.questionInput.Focus()
+			}
+			return m, nil
+		}
+		return m, m.chat.compose.Focus()
+	case "up", "k":
+		m.chat.pickerSel = max(0, m.chat.pickerSel-1)
+	case "down", "j":
+		m.chat.pickerSel++
+	case "enter":
+		names := m.pickerNames()
+		if len(names) == 0 {
+			return m, nil
+		}
+		name := names[min(m.chat.pickerSel, len(names)-1)]
+		if name == m.agentName {
+			m.chat.picker = false
+			return m, m.chat.compose.Focus()
+		}
+		m.openResident(name)
+		return m, tea.Batch(residentRefresh(m), residentSessions(m))
+	case "backspace":
+		if query := []rune(m.chat.pickerQuery); len(query) > 0 {
+			m.chat.pickerQuery = string(query[:len(query)-1])
+		}
+	default:
+		if r := msgRunes(k); r != nil {
+			m.chat.pickerQuery += string(r)
+		}
+	}
+	m.chat.pickerSel = max(0, min(m.chat.pickerSel, len(m.pickerNames())-1))
+	return m, nil
+}
+
+func (m envModel) pickerBox() string {
+	names := m.pickerNames()
+	w := max(18, m.width-2)
+	maxRows := max(1, m.height-8)
+	first := 0
+	if len(names) > maxRows {
+		first = max(0, min(m.chat.pickerSel-maxRows+1, len(names)-maxRows))
+	}
+	rows := []string{envWarn.Render("OPEN SESSION"), "› " + residentText(m.chat.pickerQuery) + "█", ""}
+	if len(names) == 0 {
+		rows = append(rows, envDim.Render("no matching session"))
+	}
+	for idx, name := range names[first:min(maxRows, len(names))] {
+		idx += first
+		mark := "  "
+		if idx == m.chat.pickerSel {
+			mark = "› "
+		}
+		row := mark + residentText(name)
+		if idx == m.chat.pickerSel {
+			row = lipgloss.NewStyle().Bold(true).Render(row)
+		}
+		rows = append(rows, envClip(row, w-4))
+	}
+	hint := "Enter opens · ↑/↓ choose · Esc cancels"
+	return envBorder.Width(w).Render(strings.Join(rows, "\n") + "\n" + envDim.Render(envClip(hint, w-4)))
 }
