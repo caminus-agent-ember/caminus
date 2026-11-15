@@ -35,7 +35,9 @@ ANTHROPIC_VERSION = '2026-10-21'
 
 # USD per million tokens (input, output, cache read, 5-minute cache write), below and above a prompt-length line.
 # From the Claude API reference as cached 2026-11-03: check live pricing before budgeting on these numbers.
-PRICES = {'claude-haiku-5-5': ((0.10, 0.50, 0.01, 0.125), (0.50, 2.50, 0.05, 0.625), 100_000)}
+PRICES = {'claude-haiku-5-5': ((0.10, 0.50, 0.01, 0.125), (0.50, 2.50, 0.05, 0.625), 100_000),
+          'claude-sonnet-5-5': ((2.00, 10.00, 0.10, 2.50),) * 2 + (10**9,),
+          'claude-opus-5-5': ((4.00, 20.00, 0.20, 5.00),) * 2 + (10**9,)}
 
 
 def price(model, usage):
@@ -391,7 +393,10 @@ class Model:
                                   input_schema=t['function']['parameters']) for t in tools]
         # Thinking stays off: the store keeps no thinking blocks, and replaying a turn without them is a
         # history edit. 'disabled' is accepted up to effort high, so the effort is set rather than defaulted.
-        body['thinking'] = dict(type='disabled')
+        # thinking 'adaptive' (the advisor: current Opus and Sonnet refuse thinking off) leaves it to the model;
+        # thinking blocks in the reply are skipped, since nothing replays them.
+        if self.config.get('thinking', 'disabled') == 'disabled':
+            body['thinking'] = dict(type='disabled')
         body['output_config'] = dict(effort=self.config.get('effort', 'medium'))
         return body
 
@@ -399,8 +404,10 @@ class Model:
         body = self._to_anthropic(messages, tools, model)
         body['max_tokens'] = max_tokens
         body['stream'] = True
-        if self.config.get('effort', 'medium') not in ('low', 'medium', 'high'):
-            raise ValueError('effort must be low, medium or high while thinking is off')
+        allowed = ('low', 'medium', 'high') if self.config.get('thinking', 'disabled') == 'disabled' else (
+            'low', 'medium', 'high', 'xhigh', 'max')
+        if self.config.get('effort', 'medium') not in allowed:
+            raise ValueError('effort must be one of %s here' % ', '.join(allowed))
         return self._anthropic_stream(body, on_delta or (lambda kind, value: None))
 
     def _anthropic_stream(self, body, on_delta):

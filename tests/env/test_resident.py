@@ -644,6 +644,48 @@ class Resident(unittest.TestCase):
             self.assertIn('While you were away (1 stretch)',text);self.assertIn('tide pools',text)
         finally:rt.mail.close();rt.store.close()
 
+    # ---- advisor ----------------------------------------------------------------------------------------------
+
+    def test_advisor_configured_priced_capped_and_known_to_the_agent(self):
+        self.assertIsNone(self.cmd('advisor')['advisor'])
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make the build pass.')
+            self.assertNotIn('ADVISOR',rt.context_message(gid)['content'],'no advisor: nothing advertised')
+            with self.assertRaises(ValueError) as c:rt.advisor.ask(gid,'what now?')
+            self.assertIn('no advisor is configured',str(c.exception))
+        finally:rt.mail.close();rt.store.close()
+        out=self.cmd('advisor',['--model','claude-opus-5-5','--endpoint','http://127.0.0.1:8766/v1','--budget-usd','0.05','--calls-per-goal','2'])
+        self.assertEqual((out['advisor']['model'],out['advisor']['budget_usd'],out['advisor']['calls_per_goal']),('claude-opus-5-5',0.05,2))
+        self.cmd('advisor',['--model','some-unpriced-model'],code=1)
+        rt=Runtime(self.home)
+        try:
+            rt.advisor_opener=wire=Wire(sse('Check the linker flags first; you have not verified -lm.',stop='end_turn'),
+                                        sse('Second opinion.'),sse('Third.'))
+            gid=rt.store.enqueue('Make the build pass.')
+            rt.store.update(gid,done_check='make exits 0')
+            self.assertIn('ADVISOR: claude-opus-5-5 is available',rt.context_message(gid)['content'])
+            self.assertIn('2 calls left',rt.context_message(gid)['content'])
+            got=rt.advisor.ask(gid,'The link step fails with undefined sqrt. What am I missing?')
+            self.assertIn('linker flags',got['advice']);self.assertEqual(got['calls_left'],1)
+            url,headers,body=wire.requests[0]
+            self.assertTrue(url.endswith('/v1/messages'));self.assertEqual(body['model'],'claude-opus-5-5')
+            self.assertNotIn('thinking',body,'Opus 5.5 refuses thinking off: the advisor leaves it adaptive')
+            self.assertNotIn('tools',body,'the advisor cannot run anything')
+            self.assertIn('make exits 0',json.dumps(body),'the brief carries the done check')
+            self.assertGreater(got['usd'],0)
+            self.assertTrue(any(e['kind']=='advice' for e in rt.store.events()))
+            rt.advisor.ask(gid,'And then?')
+            with self.assertRaises(ValueError) as c:rt.advisor.ask(gid,'A third?')
+            self.assertIn('used its 2 advisor calls',str(c.exception))
+            other=rt.store.enqueue('Another goal.')
+            state=json.loads((self.home/'advisor.json').read_text())
+            day=next(iter(state.values()));day['usd']=1.0;(self.home/'advisor.json').write_text(json.dumps(state))
+            with self.assertRaises(ValueError) as c:rt.advisor.ask(other,'Budget?')
+            self.assertIn('budget is spent',str(c.exception))
+        finally:rt.mail.close();rt.store.close()
+        self.assertIsNone(self.cmd('advisor',['--off'])['advisor'])
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)

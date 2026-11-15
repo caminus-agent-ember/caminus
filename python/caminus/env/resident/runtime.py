@@ -15,6 +15,7 @@ from .mail import Mail
 from . import approval, discovery
 from .prompt import render as render_prompt
 from .freetime import FreeTime, KINDS as FREE_KINDS
+from .advisor import Advisor
 
 PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
@@ -55,6 +56,12 @@ TOOLS = [
          dict(paths={'type':'array','items':{'type':'string'}}, label={'type':'string'}), ('paths',)),
     tool('rollback', 'Restore a checkpoint\'s paths exactly as they were when it was taken.',
          dict(id={'type':'string'}), ('id',)),
+    tool('advisor', 'Consult your advisor, a stronger model your human set up for you, on their key and within their '
+         'limits. Use it when you are stuck after a real attempt, before a risky or irreversible step, or before declaring '
+         'a hard goal done. It sees a brief of your goal and recent work plus your question; it cannot run anything. Each '
+         'call costs money: ask one specific question, with what you tried and what you saw. The context line ADVISOR '
+         'says whether it is available and what is left.',
+         dict(question={'type':'string'}, context={'type':'string'}), ('question',)),
     tool('finish', 'Report the completed goal and verified results to your human. List any unverified or blocked work honestly.',
          dict(summary={'type':'string'}, open={'type':'string'}), ('summary',)),
 ]
@@ -140,6 +147,7 @@ class Runtime:
         self.progress = {}
         self.plain_replies = {}  # goal -> consecutive plain-text replies; reset by any reply with tool calls
         self.free = FreeTime(self)
+        self.advisor = Advisor(self)
 
     def system(self,gid=None):
         """The stable prefix, and nothing else.
@@ -167,6 +175,8 @@ class Runtime:
             parts.append(p.name + ':\n' + text)
         if (note := self._context_budget(gid)):
             parts.append(note.strip())
+        if (line := self.advisor.status_line(gid)):
+            parts.append(line)
         if gid:
             parts.append(self._loop_state(gid))
         return dict(role='system', content='\n\n'.join(p for p in parts if p)) if parts else None
@@ -473,8 +483,8 @@ class Runtime:
                     result = self._rollback(action['goal'], args['id'])
                 elif name == 'terminal':
                     result = self.terminal.call(action['id'],{**args,'yield_ms':0})
-                elif name == 'discover':
-                    result = None         # local catalog queries stay outside the write transaction
+                elif name in ('discover', 'advisor'):
+                    result = None         # catalog queries and the advisor's network call stay outside the write transaction
                 elif name == 'peers':
                     result = dict(peers=self.mail.peers())
                 elif name == 'send_message':
@@ -501,6 +511,8 @@ class Runtime:
                 result = self.terminal.call(action['id'], {k:v for k,v in args.items() if k not in ('command','stdin','signal','cwd')} | {'session':result['session']})
             elif name == 'discover':
                 result = discovery.discover(self.home, **args)
+            elif name == 'advisor':
+                result = self.advisor.ask(action['goal'], args.get('question'), args.get('context', ''))
         except (OSError, ValueError, KeyError, TypeError) as e:
             result = dict(error=str(e))
         failure = self._failure_text(result)
