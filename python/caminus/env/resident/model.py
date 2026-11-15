@@ -37,14 +37,23 @@ ANTHROPIC_VERSION = '2026-10-21'
 # From the Claude API reference as cached 2026-11-03: check live pricing before budgeting on these numbers.
 PRICES = {'claude-haiku-5-5': ((0.10, 0.50, 0.01, 0.125), (0.50, 2.50, 0.05, 0.625), 100_000),
           'claude-sonnet-5-5': ((2.00, 10.00, 0.10, 2.50),) * 2 + (10**9,),
-          'claude-opus-5-5': ((4.00, 20.00, 0.20, 5.00),) * 2 + (10**9,)}
+          'claude-opus-5-5': ((4.00, 20.00, 0.20, 5.00),) * 2 + (10**9,),
+          'claude-opus-4-8': ((5.00, 25.00, 0.50, 6.25),) * 2 + (10**9,)}
+# Models that accept Anthropic's server-side refusal fallback in its "default" form (Haiku 5.5 does not: its refusals
+# have no server-side fallback). The same list as the Qwen Code advisor's ANTHROPIC_FALLBACK_MODELS.
+FALLBACK_MODELS = ('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-fable-5-1')
+FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 
 
-def price(model, usage):
-    """the USD cost of one call's usage on a priced model, or None when the model's price is not known"""
+def price(model, usage, served=None):
+    """the USD cost of one call's usage on a priced model, or None when the model's price is not known. When a fallback
+    served the call (served differs from model), it is priced at the serving model's rates, or at the highest known
+    rates when that model is not in the table: an estimate that errs high."""
     row = PRICES.get(model)
     if row is None:
         return None
+    if served and served != model:
+        row = PRICES.get(served) or max(PRICES.values(), key=lambda r: r[0][1])
     low, high, line = row
     usage = usage or {}
     read = usage.get('cache_read_input_tokens') or 0
@@ -59,7 +68,8 @@ LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
 
 def http_error(e):
-    """a ModelError carrying the status, the provider's reason (the body's first 2 KB) and any retry-after"""
+    """a ModelError carrying the status, the provider's reason (the body's first 2 KB), any retry-after and the
+    provider's request id (for a support ticket)"""
     try:
         detail = e.read(2048).decode('utf-8', 'replace').strip()
     except (OSError, ValueError):
@@ -68,6 +78,7 @@ def http_error(e):
         e.close()
     err = ModelError(str(e) + (': ' + detail if detail else ''))
     err.status = e.code      # a refusal must not be retried like an outage
+    err.request_id = (e.headers or {}).get('request-id')
     try:
         err.retry_after = float((e.headers or {}).get('retry-after') or 0) or None
     except (TypeError, ValueError):
@@ -98,8 +109,9 @@ class Model:
         self.counter = True
         self.last_usage = {}
         self.last_speed = None
+        self.last_call = {}      # the newest Messages API call: requested and serving model, fallback, stop, request id
 
-    def headers(self, stream=False):
+    def headers(self, stream=False, beta=None):
         name = self.config.get('api_key_env', 'CAMINUS_AGENT_API_KEY')
         key = os.environ.get(name)
         headers = {'Content-Type': 'application/json'}
@@ -114,6 +126,8 @@ class Model:
                 err.status = 401
                 raise err
             headers['anthropic-version'] = ANTHROPIC_VERSION
+            if beta:
+                headers['anthropic-beta'] = beta
         else:
             headers['Authorization'] = 'Bearer ' + (key or 'caminus-local')
         return headers
@@ -398,6 +412,10 @@ class Model:
         if self.config.get('thinking', 'disabled') == 'disabled':
             body['thinking'] = dict(type='disabled')
         body['output_config'] = dict(effort=self.config.get('effort', 'medium'))
+        if self.config.get('fallbacks') and body['model'] in FALLBACK_MODELS:
+            # A safety classifier can decline a legitimate request (cyber work on one's own machine trips it); the
+            # server then re-runs it on a fallback model in the same call. Off for models that do not accept it.
+            body['fallbacks'] = self.config['fallbacks']
         return body
 
     def _anthropic(self, messages, tools, max_tokens, model, on_delta):
@@ -412,13 +430,17 @@ class Model:
 
     def _anthropic_stream(self, body, on_delta):
         """read a Messages API event stream into the reply shape complete() returns"""
-        req = urllib.request.Request(self.base + '/messages', json.dumps(body).encode(), self.headers(stream=True))
+        req = urllib.request.Request(self.base + '/messages', json.dumps(body).encode(),
+                                     self.headers(stream=True, beta=FALLBACK_BETA if 'fallbacks' in body else None))
         text, blocks, stop, usage, details = [], {}, None, {}, None
+        served, declined, fallback_ran, request_id = body.get('model'), [], False, None
+        self.last_call = dict(model=body.get('model'))
         self.last_speed = None
         t_first = t_last = None
         done = False
         try:
             with self.opener(req, timeout=float(self.config.get('timeout', 900))) as r:
+                request_id = (getattr(r, 'headers', None) or {}).get('request-id')
                 for raw in r:
                     line = raw.decode('utf-8', 'replace').strip()
                     if not line.startswith('data:'):
@@ -428,8 +450,14 @@ class Model:
                     now = time.monotonic()
                     if kind == 'message_start':
                         usage.update((ev.get('message') or {}).get('usage') or {})
+                        served = (ev.get('message') or {}).get('model') or served
                     elif kind == 'content_block_start':
                         block = ev['content_block']
+                        if block.get('type') == 'fallback':
+                            # a switch point: the model named in 'from' declined and the one in 'to' continued
+                            fallback_ran = True
+                            declined.append(((block.get('from') or {}).get('model')))
+                            served = (block.get('to') or {}).get('model') or served
                         blocks[ev['index']] = slot = dict(type=block['type'], id=block.get('id', ''),
                                                           name=block.get('name', ''), json='')
                         if slot['type'] == 'tool_use' and on_delta('tool', slot['name']) is False:
@@ -449,18 +477,25 @@ class Model:
                         stop = (ev.get('delta') or {}).get('stop_reason') or stop
                         details = (ev.get('delta') or {}).get('stop_details') or details
                         usage.update(ev.get('usage') or {})
+                        if any((i or {}).get('type') == 'fallback_message' for i in (usage.get('iterations') or [])):
+                            fallback_ran = True
                     elif kind == 'message_stop':
                         done = True
                         break
                     elif kind == 'error':
                         err = ev.get('error') or {}
-                        raise ModelError('%s: %s' % (err.get('type', 'error'), err.get('message', '')))
+                        e = ModelError('%s: %s' % (err.get('type', 'error'), err.get('message', '')))
+                        e.request_id = request_id
+                        raise e
         except (Cancelled, ModelError):
             raise
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             raise ModelError(str(e)) from e
+        self.last_call = dict(model=body.get('model'), served=served, fallback_ran=fallback_ran,
+                              declined_by=[m for m in declined if m], stop_reason=stop,
+                              stop_category=(details or {}).get('category'), request_id=request_id)
         read = usage.get('cache_read_input_tokens') or 0
         wrote = usage.get('cache_creation_input_tokens') or 0
         out_tokens = usage.get('output_tokens') or 0
@@ -475,8 +510,11 @@ class Model:
             raise ModelTruncated(out, 'the reply ended before it was complete; nothing was executed', retryable=True)
         if stop == 'refusal':
             category = (details or {}).get('category')
-            raise ModelRefused('the provider declined this request' + (' (%s)' % category if category else '')
-                               + '; rephrase the goal or use another model')
+            e = ModelRefused('the provider declined this request' + (' (%s)' % category if category else '')
+                             + ('' if not fallback_ran else ' after a server-side fallback')
+                             + '; rephrase the goal or use another model')
+            e.category, e.request_id, e.call = category, request_id, self.last_call
+            raise e
         if stop == 'max_tokens':
             raise ModelTruncated(out)
         calls = []

@@ -9,7 +9,7 @@ import time
 import uuid
 
 from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled
-from .store import Store, atomic_json
+from .store import log_failure, Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
 from . import approval, discovery
@@ -833,6 +833,7 @@ class Runtime:
             # Cancelled between two streamed pieces: the model was closed, nothing was stored.
             return True
         except ModelError as e:
+            self._record_failure(gid, e)
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return True
                 if isinstance(e,ModelTruncated) and getattr(e,'retryable',False):
@@ -860,6 +861,19 @@ class Runtime:
                 self.store.update(gid,state='waiting_model',error=str(e))
                 self.store.event('model_unavailable',dict(error=str(e),attempt=attempt),gid)
             return False
+
+    def _record_failure(self, gid, e, who='resident', **extra):
+        """every failed or refused model call goes to failures.jsonl, with what a debugger needs"""
+        try:
+            kind = self.store.goal(gid).get('kind', 'work')
+        except ValueError:
+            kind = None
+        call = getattr(e, 'call', None) or getattr(self.model, 'last_call', None) or {}
+        log_failure(self.home, dict(goal=gid, goal_kind=kind, who=who, error_type=type(e).__name__, error=str(e)[:2048],
+                                    status=getattr(e, 'status', None), retry_after=getattr(e, 'retry_after', None),
+                                    category=getattr(e, 'category', None), request_id=getattr(e, 'request_id', None),
+                                    retryable=getattr(e, 'retryable', None), model=self.config.get('model'),
+                                    endpoint=self.config.get('endpoint'), call=call, **extra))
 
     def _schedule_retry(self, gid, e):
         """Book the next attempt after a failed model call, or stop the goal when the retry budget is spent.

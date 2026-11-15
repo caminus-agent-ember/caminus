@@ -213,7 +213,8 @@ class FreeTime:
         """Price the turn that just ran, when it was free time on a remote model."""
         if not self.is_free(gid) or not getattr(self.rt.model, 'remote', False):
             return
-        usd = price(self.rt.config.get('model', ''), getattr(self.rt.model, 'last_usage', {}) or {}) or 0.0
+        served = (getattr(self.rt.model, 'last_call', None) or {}).get('served')
+        usd = price(self.rt.config.get('model', ''), getattr(self.rt.model, 'last_usage', {}) or {}, served) or 0.0
         state = self._state()
         day = self._day(state)
         day['usd'] = round(day['usd'] + usd, 6)

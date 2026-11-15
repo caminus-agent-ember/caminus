@@ -16,15 +16,23 @@ Configuration, in config.json under "advisor" (absent: no advisor; the tool answ
     effort         medium Messages API effort for the advisor (its thinking stays adaptive: the current Opus and
                           Sonnet do not accept thinking off)
     max_tokens     4096   the advice length budget, thinking included
+    fallbacks      default Anthropic's server-side refusal fallback: a safety classifier can decline legitimate work on
+                          one's own machine (the cyber category trips easily), and the server then re-runs the request
+                          on a fallback model in the same call; false/null turns it off
+
+Every failure is recorded in failures.jsonl (who 'advisor'): an error, a hard refusal (stop_reason refusal, with its
+category), a soft refusal (advice that declines in words: refusal.py, the Qwen Code advisor's detector), and a call that
+a server-side fallback rescued. Refusal records keep the brief, so the call can be rerun against other models.
 """
 import datetime
 import json
 import urllib.request
 
-from .model import Model, ModelError, price
-from .store import atomic_json
+from .model import Model, ModelError, ModelRefused, price
+from .refusal import refusal_kind
+from .store import atomic_json, log_failure
 
-DEFAULTS = dict(budget_usd=1.0, calls_per_goal=5, effort='medium', max_tokens=4096)
+DEFAULTS = dict(budget_usd=1.0, calls_per_goal=5, effort='medium', max_tokens=4096, fallbacks='default')
 
 BRIEF = ('You are the advisor to an autonomous agent that works in its own Unix account on its human\'s Linux '
          'machine. It consults you when it is stuck, before a risky step, or before declaring a hard goal done. You '
@@ -55,7 +63,9 @@ class Advisor:
         return float(self._state().get(datetime.date.today().isoformat(), {}).get('usd', 0.0))
 
     def calls(self, gid):
-        return sum(1 for e in self.rt.store.events() if e['goal'] == gid and e['kind'] == 'advice')
+        # refused and failed calls count too: each may be billed, and a refusal must not invite endless retries
+        return sum(1 for e in self.rt.store.events()
+                   if e['goal'] == gid and e['kind'] in ('advice', 'advice_refused', 'advice_failed'))
 
     def status_line(self, gid):
         """the line the per-turn context carries, so the resident knows what it can still ask"""
@@ -84,24 +94,55 @@ class Advisor:
         model = Model(dict(model=cfg['model'], endpoint=cfg['endpoint'], api='anthropic',
                            context=int(cfg.get('context', 200000)), max_tokens=int(cfg['max_tokens']),
                            api_key_env=cfg.get('api_key_env', 'CAMINUS_ADVISOR_API_KEY'), effort=cfg['effort'],
-                           thinking='adaptive', timeout=float(cfg.get('timeout', 300))),
+                           thinking='adaptive', timeout=float(cfg.get('timeout', 300)),
+                           fallbacks=cfg.get('fallbacks') or None),
                       opener=getattr(self.rt, 'advisor_opener', None) or urllib.request.urlopen)
         model.counter = False                     # the brief is small; no count_tokens round trip per question
-        messages = [dict(role='system', content=BRIEF),
-                    dict(role='user', content=self._brief(gid, context) + '\n\nQUESTION FROM THE AGENT:\n' + question)]
+        brief = self._brief(gid, context) + '\n\nQUESTION FROM THE AGENT:\n' + question
+        messages = [dict(role='system', content=BRIEF), dict(role='user', content=brief)]
         try:
             reply = model.complete(messages, max_tokens=int(cfg['max_tokens']))
         except ModelError as e:
-            raise ValueError('the advisor did not answer: %s' % e)
-        usd = price(cfg['model'], model.last_usage) or 0.0
+            refused = isinstance(e, ModelRefused)
+            self._spend(cfg, model)            # a refused or failed call can still have been billed
+            log_failure(self.rt.home, dict(goal=gid, who='advisor', model=cfg['model'], error_type=type(e).__name__,
+                                           error=str(e)[:2048], status=getattr(e, 'status', None),
+                                           category=getattr(e, 'category', None), request_id=getattr(e, 'request_id', None),
+                                           call=model.last_call, question=question[:1000],
+                                           brief=brief if refused else None))
+            self.rt.store.event('advice_refused' if refused else 'advice_failed',
+                                dict(error=str(e)[:500], category=getattr(e, 'category', None)), gid)
+            raise ValueError(('the advisor declined this question%s; decide with what you have, or ask it differently'
+                              % (' (%s)' % e.category if getattr(e, 'category', None) else '')) if refused
+                             else 'the advisor did not answer: %s' % e)
+        usd = self._spend(cfg, model)
+        call = model.last_call or {}
+        soft = refusal_kind(reply['content'])
+        if soft or call.get('fallback_ran'):
+            log_failure(self.rt.home, dict(goal=gid, who='advisor', model=cfg['model'],
+                                           error_type='soft refusal' if soft else 'fallback',
+                                           error=('the advice declines (%s)' % soft) if soft else
+                                           'declined by %s; answered by %s (server-side fallback)'
+                                           % (', '.join(call.get('declined_by') or ['?']), call.get('served')),
+                                           call=call, question=question[:1000], brief=brief,
+                                           advice=reply['content'][:2000]))
+        if soft:
+            self.rt.store.event('advice_refused', dict(error='soft refusal: ' + soft, model=call.get('served')), gid)
+            raise ValueError('the advisor declined this question (in its reply); decide with what you have, '
+                             'or ask it differently')
+        self.rt.store.event('advice', dict(question=question[:500], model=cfg['model'], served=call.get('served'),
+                                           fallback=bool(call.get('fallback_ran')), usd=round(usd, 6)), gid)
+        return dict(advice=reply['content'], model=call.get('served') or cfg['model'], usd=round(usd, 5),
+                    calls_left=max(0, int(cfg['calls_per_goal']) - self.calls(gid)))
+
+    def _spend(self, cfg, model):
+        usd = price(cfg['model'], model.last_usage, (model.last_call or {}).get('served')) or 0.0
         state = self._state()
         day = state.setdefault(datetime.date.today().isoformat(), dict(usd=0.0, calls=0))
         day['usd'] = round(day['usd'] + usd, 6)
         day['calls'] += 1
         atomic_json(self.path, state)
-        self.rt.store.event('advice', dict(question=question[:500], model=cfg['model'], usd=round(usd, 6)), gid)
-        return dict(advice=reply['content'], model=cfg['model'], usd=round(usd, 5),
-                    calls_left=max(0, int(cfg['calls_per_goal']) - self.calls(gid)))
+        return usd
 
     def _brief(self, gid, context):
         g = self.rt.store.goal(gid)

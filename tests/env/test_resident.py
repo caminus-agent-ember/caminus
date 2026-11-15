@@ -687,6 +687,44 @@ class Resident(unittest.TestCase):
         finally:rt.mail.close();rt.store.close()
         self.assertIsNone(self.cmd('advisor',['--off'])['advisor'])
 
+    def test_advisor_fallback_refusals_and_the_failure_log(self):
+        self.cmd('advisor',['--model','claude-opus-5-5','--endpoint','http://127.0.0.1:8766/v1','--calls-per-goal','5'])
+        rescued=sse('Rescued advice: check the firewall rule order.')
+        rescued[0]['message']['model']='claude-opus-5-5'
+        rescued.insert(1,dict(type='content_block_start',index=9,content_block=dict(type='fallback',
+                         **{'from':dict(model='claude-opus-5-5'),'to':dict(model='claude-opus-4-8')})))
+        rt=Runtime(self.home)
+        try:
+            rt.advisor_opener=wire=Wire(rescued,
+                                        sse('',stop='refusal',stop_details=dict(type='refusal',category='cyber')),
+                                        sse("I'm sorry, but I can't help with that."),
+                                        (529,'{"type":"error","error":{"type":"overloaded_error"}}',{'request-id':'req_x'}))
+            gid=rt.store.enqueue('Harden my own SSH config.')
+            got=rt.advisor.ask(gid,'Which sshd settings first?')
+            url,headers,body=wire.requests[0]
+            h={k.lower():v for k,v in headers.items()}
+            self.assertEqual(body.get('fallbacks'),'default','Opus 5.5 asks for the server-side fallback')
+            self.assertEqual(h.get('anthropic-beta'),'server-side-fallback-2026-07-01')
+            self.assertEqual(got['model'],'claude-opus-4-8','the serving model is reported')
+            for q in ('Refused?','Soft?','Overloaded?'):
+                with self.assertRaises(ValueError):rt.advisor.ask(gid,q)
+            log=[json.loads(l) for l in (self.home/'failures.jsonl').read_text().splitlines()]
+            kinds=[(r['who'],r['error_type']) for r in log]
+            self.assertEqual(kinds,[('advisor','fallback'),('advisor','ModelRefused'),('advisor','soft refusal'),('advisor','ModelError')])
+            self.assertEqual(log[0]['call']['declined_by'],['claude-opus-5-5'])
+            self.assertEqual(log[1]['category'],'cyber');self.assertIn('Refused?',log[1]['brief'],'a refusal keeps its brief for a rerun')
+            self.assertEqual((log[3]['status'],log[3]['request_id']),(529,'req_x'))
+            self.assertEqual(oct((self.home/'failures.jsonl').stat().st_mode&0o777),'0o600')
+            self.assertEqual(rt.advisor.calls(gid),4,'refused and failed calls count against the cap')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_resident_model_failures_are_logged(self):
+        self.replies({'_status':401})
+        self.cmd('once',['--goal','Fail on auth.'],code=1)
+        log=[json.loads(l) for l in (self.home/'failures.jsonl').read_text().splitlines()]
+        self.assertEqual((log[-1]['who'],log[-1]['status'],log[-1]['goal_kind']),('resident',401,'work'))
+        self.assertIn('refused by the fixture',log[-1]['error'],'the provider reason is kept')
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)
