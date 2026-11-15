@@ -23,6 +23,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -198,16 +199,26 @@ func tickCmd() tea.Cmd {
 }
 
 func sshCmd(m envModel, what, script string) *exec.Cmd {
-	c := exec.Command("ssh", "-i", m.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+	cmd, _ := sshCmdTimeout(m, what, script)
+	return cmd
+}
+
+// sshCmdTimeout bounds a remote call: a stalled SSH session must not leave a child running for the life
+// of the panel, and the caller releases the timer as soon as the call returns.
+func sshCmdTimeout(m envModel, what, script string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	c := exec.CommandContext(ctx, "ssh", "-i", m.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
 		"-o", "ControlMaster=auto", "-o", "ControlPath="+filepath.Join(os.TempDir(), "caminus-envui-%r@%h:%p"),
 		m.user+"@127.0.0.1", "bash", "-s")
 	c.Stdin = strings.NewReader(script)
-	return c
+	return c, cancel
 }
 
 func sshRun(m envModel, what, script string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := sshOutput(sshCmd(m, what, script))
+		cmd, cancel := sshCmdTimeout(m, what, script)
+		defer cancel()
+		out, err := sshOutput(cmd)
 		return sshOutMsg{what: what, out: out, err: err}
 	}
 }
@@ -224,7 +235,9 @@ func sshOutput(cmd *exec.Cmd) (string, error) {
 
 func probeCmd(m envModel) tea.Cmd {
 	return func() tea.Msg {
-		out, err := sshOutput(sshCmd(m, "probe", "id -un"))
+		cmd, cancel := sshCmdTimeout(m, "probe", "id -un")
+		defer cancel()
+		out, err := sshOutput(cmd)
 		ok := err == nil && strings.TrimSpace(out) == m.user
 		detail := ""
 		if err != nil {

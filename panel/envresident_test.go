@@ -139,3 +139,15 @@ func TestSSHWarningDoesNotBecomeProtocolOutput(t *testing.T) {
 		t.Fatalf("diagnostic entered protocol output: %q %v", output, err)
 	}
 }
+
+func TestPanelCallsAreBoundedSoAStallCannotHangTheComposer(t *testing.T) {
+	m := chatFixture(t)
+	m.cli = []string{"/bin/true"}
+	if cmd := residentCommand(m, []string{"status", "resident", "--json"}, ""); cmd == nil || cmd.Cancel == nil {
+		t.Fatal("a resident CLI call must carry a deadline")
+	}
+	m.user, m.key = "resident", "/nonexistent-key"
+	if cmd := sshCmd(m, "jobs", "true"); cmd.Cancel == nil {
+		t.Fatal("an SSH poll must carry a deadline")
+	}
+}

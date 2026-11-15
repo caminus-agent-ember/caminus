@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -77,9 +78,12 @@ func residentCommand(m envModel, args []string, input string) *exec.Cmd {
 	if len(m.cli) == 0 {
 		return nil // the panel can run without --cli; callers report the missing CLI instead of panicking
 	}
+	// Bounded: a stalled CLI or SSH session must not leave the composer on "Sending…" forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	_ = cancel // the deadline fires on its own; the process is killed when it passes
 	argv := append(append([]string{}, m.cli[1:]...), "env", "agent")
 	argv = append(argv, args...)
-	c := exec.Command(m.cli[0], argv...)
+	c := exec.CommandContext(ctx, m.cli[0], argv...)
 	c.Stdin = strings.NewReader(input)
 	return c
 }
