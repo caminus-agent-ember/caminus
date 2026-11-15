@@ -222,8 +222,9 @@ func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	if kind == "question" {
 		title = "? QUESTION"
 	}
-	keys := envWarn.Render("[a]") + envDim.Render("pprove  ") + envWarn.Render("[e]") + envDim.Render("dit  ") +
-		envWarn.Render("[d]") + envDim.Render("eny  · or type what to do instead")
+	keys := envDim.Render("esc, then ") + envWarn.Render("a") + envDim.Render(" approve  ") + envWarn.Render("e") +
+		envDim.Render(" edit  ") + envWarn.Render("d") + envDim.Render(" deny  ·  ") + envWarn.Render("/deny TEXT") +
+		envDim.Render(" says what to do instead")
 	if !inline {
 		keys = envDim.Render("decide in ") + envWarn.Render("/requests")
 	}

@@ -286,7 +286,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /steer /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -1028,7 +1028,7 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	folded := ansi.Strip(m.chat.content)
-	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "decide in /requests"} {
+	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "a approve", "/deny TEXT"} {
 		if !strings.Contains(folded, want) {
 			t.Fatalf("folded transcript missing %q:\n%s", want, folded)
 		}
@@ -1045,5 +1045,40 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
 	if next.(envModel).chat.expanded {
 		t.Fatal("a second Ctrl+E must fold them again")
+	}
+}
+
+// A waiting root request is decided in the chat through the Requests page's own handler: d writes the denial to the
+// bridge (and the audit), /deny TEXT denies and steers the goal with what to do instead.
+func TestChatDecidesRootRequestsInline(t *testing.T) {
+	for _, viaSlash := range []bool{false, true} {
+		m := chatFixture(t)
+		bridge := t.TempDir()
+		writeReq(t, bridge, "r1", "apt-get install -y libfoo-dev", 1)
+		m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
+		m.refreshLocal()
+		if m.pendingRoot() != 0 {
+			t.Fatal("the waiting request is not found")
+		}
+		var cmd tea.Cmd
+		if viaSlash {
+			var next tea.Model
+			next, cmd = m.chatSlash("/deny use the vendored copy in third_party/ instead")
+			m = next.(envModel)
+			if cmd == nil {
+				t.Fatal("/deny must also send the steer")
+			}
+		} else {
+			m.chat.compose.Blur()
+			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
+			m = next.(envModel)
+		}
+		data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json"))
+		if err != nil || !strings.Contains(string(data), `"denied"`) {
+			t.Fatalf("no denial in the bridge (slash=%v): %s %v", viaSlash, data, err)
+		}
+		if m.pendingRoot() != -1 {
+			t.Fatal("a decided request still shows as waiting")
+		}
 	}
 }

@@ -472,7 +472,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "finished":
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
-		return approvalCardKeys("root", residentText(str("cmd")), residentText(str("reason")), false, w)
+		return approvalCard("root", residentText(str("cmd")), residentText(str("reason")), w)
 	case "question":
 		return turn("?", "question", cYellow, c.renderMarkdown(str("text")))
 	case "compacted":
@@ -790,6 +790,15 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !m.chat.compose.Focused() {
+		// A pending root request is decided right here, through the Requests page's own handler (the same sudo
+		// run, claim, audit entry and answer files): a approves, d denies, e opens it in the Requests editor.
+		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "d" || k == "e") {
+			m.sel = i
+			if k == "e" {
+				m.tab = 0
+			}
+			return m.reqKeys(k)
+		}
 		switch k {
 		case "enter", "t":
 			return m, m.chat.compose.Focus()
@@ -1006,6 +1015,29 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.msg = "theme: " + name
 		m.syncChat()
 		return m, nil
+	case "/deny":
+		// "No, do this instead": deny the newest root request and send the text to its goal as a steer.
+		i := m.pendingRoot()
+		if i < 0 {
+			m.msg = "no root request is waiting"
+			return m, nil
+		}
+		text := strings.TrimSpace(arg)
+		if text == "" {
+			m.msg = "usage: /deny TEXT — denies the root request and tells the agent what to do instead"
+			return m, nil
+		}
+		r := m.reqs[i]
+		m.sel = i
+		next, _ := m.reqKeys("d")
+		m = next.(envModel)
+		clear()
+		goal := r.Goal
+		if goal == "" {
+			goal = m.chat.target
+		}
+		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--steer", "--stdin", "--json"},
+			"Your root request was denied. Instead: "+text)
 	case "/glyphs":
 		// The symbol set (shell.go): nerd needs a Nerd Font; unicode needs none; ascii is for anything else.
 		name := strings.TrimSpace(arg)
@@ -1057,6 +1089,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/stop", "stop this session's loop"},
 	{"/theme", "switch panel colors NAME; /theme lists"},
 	{"/glyphs", "symbols: nerd, unicode or ascii; alone, the next one"},
+	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.
@@ -1368,4 +1401,15 @@ func (m envModel) chatFoot(w int) string {
 		foot += "\n" + clip(strings.Join(status, envDim.Render(" · ")))
 	}
 	return foot
+}
+
+// pendingRoot is the index in m.reqs of the newest root request from this resident still waiting, or -1.
+func (m envModel) pendingRoot() int {
+	for i := len(m.reqs) - 1; i >= 0; i-- {
+		r := m.reqs[i]
+		if r.kind() == "root" && (r.Agent == "" || r.Agent == m.agentName) {
+			return i
+		}
+	}
+	return -1
 }
