@@ -1272,6 +1272,6 @@ func (m envModel) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
-	v.WindowTitle = "caminus env"
+	v.WindowTitle = m.windowTitle()
 	return v
 }

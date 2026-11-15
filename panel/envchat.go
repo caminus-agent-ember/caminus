@@ -55,6 +55,8 @@ type residentChat struct {
 	histIdx                                 int         // Ctrl+R: how far back it is
 	full                                    bool        // Ctrl+O: cards show every line
 	rootSel                                 string      // the root request the decision keys act on (shared card)
+	group                                   toolGroup   // compact view: the tool work since the last drawn block
+	cards                                   bool        // Ctrl+E: every tool card instead of the compact line
 	view                                    textView    // /btw's answer, /diff
 	rewind                                  rewindState // the /rewind step picker
 	recapNow                                float64     // when the recap was taken: saved as seen on dismiss
@@ -227,7 +229,11 @@ func (m *envModel) receiveResident(msg residentMsg) {
 			if len(m.residentEvents) >= maxResidentEvents {
 				// Bounded: a resident that runs for days must not grow the panel without limit. The oldest
 				// events leave memory; the journal on the agent side keeps them.
-				m.residentEvents = append(m.residentEvents[:0:0], m.residentEvents[len(m.residentEvents)-maxResidentEvents/2:]...)
+				drop := len(m.residentEvents) - maxResidentEvents/2
+				m.residentEvents = append(m.residentEvents[:0:0], m.residentEvents[drop:]...)
+				// rendered counts drawn events by position: shift it with them (left as it was, the next draw sliced
+				// past the end and crashed the panel once a busy session crossed the bound). The drawn text stays.
+				m.chat.rendered = max(0, m.chat.rendered-drop)
 			}
 			m.residentEvents = append(m.residentEvents, e)
 			m.chat.seq = e.Seq
@@ -297,18 +303,42 @@ func (m *envModel) syncChat() {
 		m.chat.transcript.SetHeight(height)
 	}
 	if m.chat.renderWidth != w || m.chat.markdown == nil {
-		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(max(10, w-4)))
+		// Prose wraps at a reading width, not the terminal's: a 250-column line is hard to read. Tool lines, the
+		// header and the status line still use the full width.
+		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
 	changed := m.chat.rendered != len(m.residentEvents)
+	if m.chat.rendered == 0 {
+		m.chat.group = toolGroup{} // drawing from the start (a resize, Ctrl+E): the group starts over too
+	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
+		// Compact (the default): tool work folds into one line between the agent's words; Ctrl+E draws every card.
+		if !m.chat.cards && !m.chat.expanded {
+			if e.Kind == "assistant" {
+				// its words first (they close the line above them), then its calls start the next line
+				if block := m.chat.eventBlock(compactAssistant(e)); block != "" {
+					m.chat.flushGroup(w)
+					m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
+				}
+				m.chat.fold(e)
+				continue
+			}
+			if m.chat.fold(e) {
+				continue
+			}
+		}
 		if block := m.chat.eventBlock(e); block != "" {
+			m.chat.flushGroup(w)
 			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
 	if changed || m.chat.transcript.TotalLineCount() == 0 {
 		body := strings.TrimRight(m.chat.content, "\n")
+		if !m.chat.group.empty() {
+			body += "\n\n" + m.chat.group.line(w) // the work in progress, fixed when the next block arrives
+		}
 		if body == "" {
 			body = mascotBeside(0, "", envTitle.Render("CAMINUS")+envDim.Render(" env"),
 				"Your agent's conversation and commands will stay here.",
@@ -323,8 +353,74 @@ func (m *envModel) syncChat() {
 
 // bodyHeight is the space between the header and the footer, without the composer.
 func (m envModel) bodyHeight() int {
-	// the header is two lines (title, rule); the footer one or two (chatFoot)
-	return max(4, max(12, m.height)-2-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(max(20, m.width))))
+	// the header is two lines (title, rule) or more when the goal wraps under it; the footer one or two (chatFoot)
+	w := max(20, m.width)
+	return max(4, max(12, m.height)-lipgloss.Height(m.chatHead(w))-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w)))
+}
+
+// chatHead is the header with the whole goal: beside the agent and its state when it fits, else on its own lines
+// under them (three at most). The goal was cut at 47 characters before.
+func (m envModel) chatHead(w int) string {
+	state := "stopped"
+	if m.resident.DaemonAlive {
+		state = "listening"
+	}
+	steps, goalText := 0, ""
+	if sel := m.selectedResidentGoal(); sel != nil {
+		state, steps = sel.State, sel.Steps
+		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
+	}
+	agent := residentText(m.agentName)
+	head := shellHeader(agent, state, goalText, steps, w)
+	if first := strings.SplitN(head, "\n", 2)[0]; !strings.Contains(ansi.Strip(first), "…") || goalText == "" {
+		return head
+	}
+	head = shellHeader(agent, state, "", steps, w)
+	title, rule, _ := strings.Cut(head, "\n")
+	wrapped := strings.Split(ansi.Wordwrap(goalText, max(10, w-4), " "), "\n")
+	if len(wrapped) > 3 {
+		wrapped = append(wrapped[:2], ansi.Truncate(wrapped[2], max(10, w-5), "")+"…")
+	}
+	goalSt := lipgloss.NewStyle().Foreground(cBlue)
+	for i, ln := range wrapped {
+		wrapped[i] = "  " + goalSt.Render(ln)
+	}
+	return title + "\n" + strings.Join(wrapped, "\n") + "\n" + rule
+}
+
+// windowTitle is the terminal tab's title: the agent's state glyph, its name and what it is doing now, so a glance
+// at the tab bar says it (Claude Code's own tab shows a glyph and the session name the same way).
+func (m envModel) windowTitle() string {
+	state := "stopped"
+	if m.resident.DaemonAlive {
+		state = "idle"
+	}
+	for _, gl := range m.resident.Goals {
+		switch gl.State {
+		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan":
+			state = gl.State
+		}
+		if state != "idle" && state != "stopped" {
+			break
+		}
+	}
+	icon, _ := stateStyle(state)
+	now := strings.ReplaceAll(state, "_", " ")
+	l := m.chat.live
+	switch {
+	case l.active && l.text != "":
+		now = "writing"
+	case l.active:
+		now = "thinking"
+	case m.chat.group.running != "":
+		now = "running"
+		if since := m.chat.group.runningSince; since > 0 {
+			now += " " + (time.Duration(time.Since(time.Unix(int64(since), 0)).Seconds()) * time.Second).String()
+		}
+	case state == "waiting_user" || state == "waiting_root":
+		now = "needs you"
+	}
+	return strings.TrimSpace(icon + " " + residentText(m.agentName) + " · " + now + " — caminus env")
 }
 
 // liveHeight is the live window's content lines (its label included): half the body less the border, so the
@@ -373,44 +469,119 @@ func liveTextWidth(inner int) int {
 
 func (m envModel) liveBlock(w int) string {
 	l := m.chat.live
-	if !l.active {
-		return ""
-	}
 	inner := max(10, w-4)
-	text := liveTextWidth(inner)
-	body := l.body(text)
-	height := m.liveHeight()
-	top := m.liveTop(len(body))
-	spin := g.spinner[m.tickN%len(g.spinner)]
-	who := g.agent + " agent"
-	if l.reasoning != "" && l.text == "" {
-		who = g.agent + " thinking"
+	text := min(liveTextWidth(inner), readingWidth)
+	if !l.active && m.bodyHeight() < 2*(thoughtRows+3) {
+		return "" // a small terminal keeps its rows for the transcript between replies
 	}
-	hint := "  live · Ctrl+T hold · Alt+↑/↓ scroll"
-	if l.hold {
-		hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
+	body := m.thoughts(text)
+	if len(body) == 0 {
+		if m.activeGoal() == nil && !l.active {
+			return "" // between goals with nothing to show: the transcript takes the rows
+		}
+		body = []string{envDim.Render("no thoughts on this goal yet (a model that does not show its reasoning leaves this empty)")}
 	}
-	rows := []string{bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)}
-	shown := body[top:min(top+height-1, len(body))]
-	if text < inner {
-		// Ember beside the reply while it is written: the flame flickers on the panel's half-second tick.
-		art := mascot(m.tickN % 2)
+	// Ember's box stays on screen: while a reply is written it takes about half the page and Ember flickers; idle
+	// it keeps the latest thoughts in a smaller box with Ember still. The thoughts run downward, newest last.
+	// One fixed size, generating or not (a box that grew and shrank was hard to read): only the text moves.
+	height := min(m.liveHeight(), thoughtRows+1)
+	frame := 0
+	if l.active {
+		frame = m.tickN % 2
+	}
+	window := max(1, height-1)
+	top := max(0, len(body)-window)
+	if l.active && l.hold {
+		top = m.liveTop(len(body))
+	}
+	var head string
+	if l.active {
+		spin := g.spinner[m.tickN%len(g.spinner)]
+		who := g.agent + " agent"
+		if l.reasoning != "" && l.text == "" {
+			who = g.agent + " thinking"
+		}
+		hint := "  live · Ctrl+T hold · Alt+↑/↓ scroll"
+		if l.hold {
+			hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+window)))
+		}
+		head = bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)
+	} else {
+		head = bold(cGreen).Render(g.agent+" thoughts") + envDim.Render("  the latest, newest last")
+	}
+	shown := append([]string{}, body[top:min(top+window, len(body))]...)
+	for len(shown) < window {
+		shown = append(shown, "") // filled to its size from the first line, so it never grows as text arrives
+	}
+	if liveTextWidth(inner) < inner {
+		art := mascot(frame)
 		pad := strings.Repeat(" ", lipgloss.Width(art[0]))
-		for len(shown) < min(len(art), height-1) {
+		for len(shown) < min(len(art), window) {
 			shown = append(shown, "")
 		}
-		beside := make([]string, len(shown))
 		for i, line := range shown {
 			col := pad
 			if i < len(art) {
 				col = art[i]
 			}
-			beside[i] = col + "  " + line
+			shown[i] = col + "  " + line
 		}
-		shown = beside
 	}
-	rows = append(rows, shown...)
-	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
+	return envBorder.Width(max(18, w-2)).Render(strings.Join(append([]string{head}, shown...), "\n"))
+}
+
+// activeGoal is the goal the agent is on now (working or waiting on something), nil between goals.
+func (m envModel) activeGoal() *residentGoal {
+	for i := range m.resident.Goals {
+		switch m.resident.Goals[i].State {
+		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan":
+			return &m.resident.Goals[i]
+		}
+	}
+	return nil
+}
+
+// thoughtRows is the number of lines of thoughts Ember's box shows, generating or not.
+const thoughtRows = 8
+
+// thoughts is the stream Ember's box shows: the reasoning of the last few replies, oldest first, then the reply
+// being written (its thinking, tools and text). Each past reply is its tail, so a long one cannot fill the box.
+func (m envModel) thoughts(width int) []string {
+	var past []string
+	gid := ""
+	if g := m.activeGoal(); g != nil {
+		gid = g.ID // while on a goal, its own thoughts only (an older goal's read as current)
+	}
+	for i := len(m.residentEvents) - 1; i >= 0 && len(past) < 6; i-- {
+		e := m.residentEvents[i]
+		if e.Kind != "assistant" || (gid != "" && e.Goal != gid) {
+			continue
+		}
+		r, _ := e.Data["reasoning"].(string)
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		if len(r) > 3000 {
+			r = "…" + r[len(r)-3000:]
+		}
+		past = append([]string{r}, past...)
+	}
+	var out []string
+	for _, r := range past {
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		for _, ln := range strings.Split(ansi.Wordwrap(residentText(strings.TrimSpace(r)), max(8, width), " "), "\n") {
+			out = append(out, envThink.Render(ln))
+		}
+	}
+	if m.chat.live.active {
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, m.chat.live.body(width)...)
+	}
+	return out
 }
 
 // envTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.
@@ -443,6 +614,27 @@ func (c *residentChat) renderMarkdown(text string) string {
 
 // eventCard frames one event: its label, then its body behind a dim left rule, so the conversation reads as a
 // stack of blocks instead of one wall of text. Blank lines stay blank, so a card can breathe.
+// bulletBlock is a reply in the compact view: a bullet, then the text with a hanging indent; no label line, no
+// rule, so the agent's words read as prose (the cards view keeps the labelled card).
+// readingWidth is the column prose wraps at in the transcript, whatever the terminal's width.
+const readingWidth = 100
+
+func bulletBlock(text string) string {
+	lines := strings.Split(strings.Trim(text, "\n"), "\n")
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[0])) == "" {
+		lines = lines[1:]
+	}
+	for i, ln := range lines {
+		ln = strings.TrimPrefix(ln, "  ") // the markdown renderer's own left margin: the bullet's indent replaces it
+		if i == 0 {
+			lines[i] = bold(cGreen).Render("● ") + ln
+		} else {
+			lines[i] = "  " + ln
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func eventCard(block string) string {
 	lines := strings.Split(strings.TrimRight(block, "\n"), "\n")
 	if len(lines) < 2 {
@@ -475,6 +667,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
 	w := max(20, c.renderWidth)
 	turn := func(mark, label string, col color.Color, body string) string {
+		if !c.cards && !c.expanded { // compact: the label, then the text indented, without the rule
+			lines := strings.Split(strings.Trim(body, "\n"), "\n")
+			for i, ln := range lines {
+				if strings.TrimSpace(ansi.Strip(ln)) != "" {
+					lines[i] = "  " + strings.TrimPrefix(ln, "  ")
+				}
+			}
+			return bold(col).Render(mark+" "+label) + "\n" + strings.Join(lines, "\n")
+		}
 		return eventCard(bold(col).Render(mark+" "+label) + "\n" + body)
 	}
 	firstLine := func(s string) string {
@@ -520,7 +721,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			}
 		}
 		if text := str("content"); text != "" {
-			parts = append(parts, turn(g.agent, "agent", cGreen, c.renderMarkdown(text)))
+			if !c.cards && !c.expanded {
+				parts = append(parts, bulletBlock(c.renderMarkdown(text)))
+			} else {
+				parts = append(parts, turn(g.agent, "agent", cGreen, c.renderMarkdown(text)))
+			}
 		}
 		calls, _ := e.Data["tool_calls"].([]any)
 		for _, raw := range calls {
@@ -630,6 +835,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "cancelled":
 		return toolCard("note", "goal "+shortGoal(e.Goal)+" cancelled", "", true, false, nil, w)
 	case "model_unavailable", "model_truncated", "context_refused", "model_refused", "model_gave_up":
+		if rec, _ := e.Data["recovered"].(bool); rec && e.Kind == "model_truncated" {
+			// handled: the agent was told and retries in smaller pieces; only a third cut-off in a row pauses the goal
+			streak, _ := e.Data["streak"].(float64)
+			return toolCard("note", "a reply hit the output limit and was dropped",
+				fmt.Sprintf("the agent retries in smaller pieces (%d of 3 in a row)", int(streak)), true, false, nil, w)
+		}
 		text := residentText(str("error"))
 		body := lines(text, 12)
 		if partial, ok := e.Data["partial"].(map[string]any); ok {
@@ -762,37 +973,112 @@ func (m envModel) chatBottom() string {
 	return m.chatComposer()
 }
 
-// todoPinned is the selected goal's todo list (its newest todo event) as one line above the composer, while the goal
-// is open. bodyHeight measures chatBottom, so the line takes its row from the transcript.
+// todoPinned is the "now" line above the composer: the task the agent is on (its todo list's current item, as
+// "Task 2 of 5" with a dot per item) and what it is doing this moment (thinking, writing, running a command and for
+// how long, calling a tool, waiting for you, idle). It follows the goal the agent is actually on, not the selection.
 func (m envModel) todoPinned() string {
-	sel := m.selectedResidentGoal()
-	if sel == nil || sel.State == "completed" || sel.State == "cancelled" {
-		return ""
+	w := max(20, m.width)
+	if m.chat.question != nil {
+		return "" // the question's own box says the agent waits for you, and the frame needs the rows
 	}
-	for i := len(m.residentEvents) - 1; i >= 0; i-- {
-		e := m.residentEvents[i]
-		if e.Goal != sel.ID || e.Kind != "todo" {
-			continue
+	goal := m.activeGoal()
+	if goal == nil {
+		if sel := m.selectedResidentGoal(); sel != nil && (sel.State == "queued" || sel.State == "paused") {
+			goal = sel
 		}
-		raw, _ := e.Data["items"].([]any)
-		var items []todoItem
-		for _, r := range raw {
-			it, _ := r.(map[string]any)
-			text, _ := it["text"].(string)
-			state := map[string]string{"done": "done", "in_progress": "now"}[fmt.Sprint(it["state"])]
-			if state == "" {
-				state = "next"
-			}
-			if text != "" {
-				items = append(items, todoItem{residentText(text), state})
-			}
-		}
-		if len(items) == 0 {
-			return ""
-		}
-		return todoLine(items, max(20, m.width))
 	}
-	return ""
+	// the task: the current todo item, else the goal itself
+	task, dots := "", ""
+	if goal != nil {
+		task = oneLine(residentText(goal.Prompt))
+		for i := len(m.residentEvents) - 1; i >= 0; i-- {
+			e := m.residentEvents[i]
+			if e.Goal != goal.ID || e.Kind != "todo" {
+				continue
+			}
+			raw, _ := e.Data["items"].([]any)
+			cur, n := 0, 0
+			for _, r := range raw {
+				it, _ := r.(map[string]any)
+				text, _ := it["text"].(string)
+				if text == "" {
+					continue
+				}
+				n++
+				switch fmt.Sprint(it["state"]) {
+				case "done":
+					dots += envCtxOK.Render("●")
+				case "in_progress":
+					dots += envBusy.Render("◐")
+					if cur == 0 {
+						cur, task = n, oneLine(residentText(text))
+					}
+				default:
+					dots += envDim.Render("○")
+				}
+			}
+			if n > 0 {
+				label := fmt.Sprintf("Task %d of %d", max(cur, 1), n)
+				if cur == 0 {
+					label = fmt.Sprintf("Tasks (%d)", n)
+				}
+				dots = bold(cAccent).Render(label) + " " + dots
+			}
+			break
+		}
+	}
+	// now: what is happening this moment
+	now, command := "idle", ""
+	l := m.chat.live
+	switch {
+	case l.active && l.text != "":
+		now = "writing its reply"
+	case l.active && len(l.tools) > 0:
+		now = "calling " + residentText(l.tools[len(l.tools)-1])
+	case l.active:
+		now = "thinking"
+	case m.chat.group.running != "":
+		// the time first; the whole command follows, wrapped under it (three lines at most)
+		now = "running"
+		if since := m.chat.group.runningSince; since > 0 {
+			now += " " + (time.Duration(time.Since(time.Unix(int64(since), 0)).Seconds()) * time.Second).String()
+		}
+		command = m.chat.group.running
+	case goal == nil:
+		now = "idle (free time runs on its own schedule)"
+	default:
+		now = map[string]string{
+			"waiting_user": "waiting for your answer · Ctrl+A", "waiting_root": "waiting for a root approval · Ctrl+A",
+			"waiting_plan": "waiting for your OK on its plan · /plan approve", "waiting_model": "waiting for the model",
+			"paused": "paused · /resume", "queued": "queued, starts next", "working": "between steps",
+		}[goal.State]
+	}
+	if goal == nil && !l.active && command == "" {
+		return "" // nothing running and no goal: no line
+	}
+	// two lines, so neither crowds the other: the task, then what is happening now (a command wrapped under it)
+	var rows []string
+	if goal != nil && dots != "" { // without a todo list the header already shows the whole goal
+		rows = append(rows, ansi.Truncate(" "+dots+"  "+lipgloss.NewStyle().Foreground(cText).Render(task), w, "…"))
+	}
+	nowRow := " " + bold(cBlue).Render("Now") + "   " + envBusy.Render(now)
+	if command != "" {
+		indent := 2 + lipgloss.Width(now) + 5
+		if indent > w/2 {
+			indent = 6
+		}
+		wrapped := strings.Split(ansi.Wordwrap(command, max(10, w-indent-1), " "), "\n")
+		if len(wrapped) > 3 {
+			wrapped = append(wrapped[:2], ansi.Truncate(wrapped[2], max(10, w-indent-2), "")+"…")
+		}
+		cmdSt := lipgloss.NewStyle().Foreground(cText)
+		nowRow += "  " + cmdSt.Render(wrapped[0])
+		for _, ln := range wrapped[1:] {
+			nowRow += "\n" + strings.Repeat(" ", indent) + cmdSt.Render(ln)
+		}
+	}
+	rows = append(rows, nowRow)
+	return strings.Join(rows, "\n")
 }
 
 // contextBarSlots is the fixed width of the usage bar: readable at a glance,
@@ -886,20 +1172,7 @@ func (m envModel) renderChat() string {
 	m.syncChat()
 	w := max(20, m.width)
 	clip := func(s string) string { return ansi.Truncate(s, w, "") }
-	state := "stopped"
-	if m.resident.DaemonAlive {
-		state = "listening"
-	}
-	steps, goalText := 0, ""
-	if sel := m.selectedResidentGoal(); sel != nil {
-		state = sel.State
-		steps = sel.Steps
-		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
-		if lipgloss.Width(goalText) > 48 {
-			goalText = ansi.Truncate(goalText, 47, "…")
-		}
-	}
-	head := shellHeader(residentText(m.agentName), state, goalText, steps, w)
+	head := m.chatHead(w)
 	foot := m.chatFoot(w)
 	if m.chat.help {
 		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /approvals · /remember TEXT · /memory · /context · /audit · /settings") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
@@ -907,33 +1180,33 @@ func (m envModel) renderChat() string {
 	if m.chat.approvals {
 		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
 		// small so a short terminal (with /help's extra lines) still gets a box inside the frame.
-		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.approvalOverlay(w, h) + "\n" + foot
 	}
 	if m.chat.goals {
-		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.goalsOverlay(w, h) + "\n" + foot
 	}
 	if m.chat.models.open {
-		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.modelsOverlay(w, h) + "\n" + foot
 	}
 	if m.chat.studio.open {
-		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.studioOverlay(w, h) + "\n" + foot
 	}
 	if m.chat.view.open {
-		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.textOverlay(w, h) + "\n" + foot
 	}
 	if m.chat.rewind.open {
-		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.rewindOverlay(w, h) + "\n" + foot
 	}
 	if m.chat.page >= 0 {
 		// a typed prompt opened from the page (a new note) sits under the overlay
 		prompt := m.promptBox(max(18, w-2))
-		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)-lipgloss.Height(prompt)+1)
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)-lipgloss.Height(prompt)+1)
 		if prompt != "" {
 			return head + "\n" + m.pageOverlay(w, h) + "\n" + prompt + "\n" + foot
 		}
@@ -1065,10 +1338,20 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.live.hold = false // follow the live tail again too
 		return m, nil
 	case "ctrl+e":
-		// open or fold every card; drawn blocks are final, so the transcript is drawn again once
-		m.chat.expanded = !m.chat.expanded
+		// three views, in turn: compact (tool work folded into one line between the agent's words), every card
+		// folded, every card open. Drawn blocks are final, so the transcript is drawn again once.
+		switch {
+		case !m.chat.cards:
+			m.chat.cards, m.chat.expanded = true, false
+			m.msg = "every tool card, folded · Ctrl+E opens them"
+		case !m.chat.expanded:
+			m.chat.expanded = true
+			m.msg = "every tool card, open · Ctrl+E back to compact"
+		default:
+			m.chat.cards, m.chat.expanded = false, false
+			m.msg = "compact: tool work in one line · Ctrl+E shows every card"
+		}
 		m.chat.content, m.chat.rendered = "", 0
-		m.msg = map[bool]string{true: "cards open · Ctrl+E folds", false: "cards folded · Ctrl+E opens"}[m.chat.expanded]
 		m.syncChat()
 		return m, nil
 	case "ctrl+t":

@@ -28,6 +28,7 @@ func chatFixture(tb testing.TB) envModel {
 	tb.Setenv("XDG_STATE_HOME", tb.TempDir())
 	m := envModel{agentName: "resident", tab: 6, width: 90, height: 28, mode: "normal"}
 	m.initChat()
+	m.chat.cards = true // the card tests predate the compact view; TestCompactTranscript covers it
 	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574, DaemonAlive: true, LastEvent: 1, Goals: []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}}, events: []residentEvent{{Seq: 1, Goal: "original", Kind: "goal_queued", Data: map[string]any{"prompt": "a goal"}}}})
 	return m
 }
@@ -768,20 +769,24 @@ func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
 	}
 }
 
-func TestLiveWindowTakesHalfTheBodyAndLeavesTheRestToTheTranscript(t *testing.T) {
+func TestEmbersBoxKeepsOneSizeGeneratingOrNot(t *testing.T) {
 	m := chatFixture(t)
 	m.height = 40
-	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
-		reasoning: strings.Repeat("thinking about it ", 60), reset: true})
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 800, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "an earlier thought"}})
+	m.syncChat()
+	idle := lipgloss.Height(m.liveBlock(m.width))
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1", reasoning: "short", reset: true})
 	m = next.(envModel)
-	body := m.bodyHeight()
-	live := lipgloss.Height(m.liveBlock(m.width))
-	if live < body/2-2 || live > body/2+2 {
-		t.Fatalf("live window is %d lines of a %d-line body; expected about half", live, body)
+	short := lipgloss.Height(m.liveBlock(m.width))
+	next, _ = m.Update(residentLiveMsg{agent: "resident", turn: "t1", reasoning: strings.Repeat("thinking about it ", 60)})
+	m = next.(envModel)
+	long := lipgloss.Height(m.liveBlock(m.width))
+	if idle != short || short != long || long != thoughtRows+3 {
+		t.Fatalf("one size: idle %d, a short thought %d, a long one %d (want %d)", idle, short, long, thoughtRows+3)
 	}
-	transcript := m.chat.transcript.Height()
-	if transcript < body-live-2 || transcript > body-live+2 {
-		t.Fatalf("transcript is %d lines, expected about %d", transcript, body-live)
+	body, transcript := m.bodyHeight(), m.chat.transcript.Height()
+	if transcript < body-long-2 || transcript > body-long+2 {
+		t.Fatalf("transcript is %d lines, expected about %d", transcript, body-long)
 	}
 }
 
@@ -1216,9 +1221,14 @@ func TestTodoIsPinnedAboveTheComposer(t *testing.T) {
 			map[string]any{"text": "run the gate", "state": "pending"}))
 	m.syncChat()
 	frame := ansi.Strip(m.render())
-	if !strings.Contains(frame, "todo") || !strings.Contains(frame, "fix the bounds") || strings.Contains(frame, "stale") {
-		t.Fatalf("the newest todo list is not pinned:\n%s", frame)
+	if !strings.Contains(frame, "Task 2 of 3 ●◐○  fix the bounds") || strings.Contains(frame, "stale") || !strings.Contains(frame, "Now") {
+		t.Fatalf("the current task and what is happening now are pinned:\n%s", frame)
 	}
+	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Add(-14*time.Second).Unix())
+	if f := ansi.Strip(m.render()); !strings.Contains(f, "Now   running 1") || !strings.Contains(f, "s  make test") {
+		t.Fatalf("a running command is named with how long it has run:\n%s", f)
+	}
+	m.chat.group.running = ""
 	if rows := strings.Split(frame, "\n"); len(rows) > m.height {
 		t.Fatalf("the pinned line pushed the frame past the terminal: %d rows", len(rows))
 	}
@@ -1585,5 +1595,92 @@ func TestGrantTakesTwoPressesAndAGrantedRepeatOne(t *testing.T) {
 	}
 	if grantRecorded(m.auditPath, r, time.Now().Add(13*time.Hour)) {
 		t.Fatal("a grant ends after 12 hours on the owner's side")
+	}
+}
+
+func TestTheBoundedHistoryTrimKeepsTheDrawnPosition(t *testing.T) {
+	m := chatFixture(t)
+	evs := make([]residentEvent, 0, maxResidentEvents)
+	for i := 1; i < maxResidentEvents; i++ { // one short of the bound: all of it is drawn
+		evs = append(evs, residentEvent{Seq: 10000 + i, Kind: "note", Data: map[string]any{}})
+	}
+	m.receiveResident(residentMsg{agent: m.agentName, status: m.resident, events: evs})
+	if m.chat.rendered != len(m.residentEvents) {
+		t.Fatalf("everything drawn: %d of %d", m.chat.rendered, len(m.residentEvents))
+	}
+	// crossing the bound trims the oldest half; drawing must not slice past the end (it panicked)
+	m.receiveResident(residentMsg{agent: m.agentName, status: m.resident, events: []residentEvent{
+		{Seq: 10000 + maxResidentEvents, Kind: "note", Data: map[string]any{}},
+		{Seq: 10000 + maxResidentEvents + 1, Kind: "note", Data: map[string]any{}}}})
+	if m.chat.rendered != len(m.residentEvents) || len(m.residentEvents) > maxResidentEvents {
+		t.Fatalf("after the trim: rendered %d, events %d", m.chat.rendered, len(m.residentEvents))
+	}
+}
+
+func TestCompactTranscriptFoldsToolWorkIntoOneLine(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.cards, m.chat.content, m.chat.rendered = false, "", 0
+	call := func(name, args string) map[string]any {
+		return map[string]any{"id": "c", "type": "function", "function": map[string]any{"name": name, "arguments": args}}
+	}
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 500, Kind: "assistant", Data: map[string]any{"content": "Checking the CVEs now.", "reasoning": "long thoughts",
+			"tool_calls": []any{call("terminal", `{"command":"ls cve/"}`), call("read", `{"path":"a.md"}`)}}},
+		residentEvent{Seq: 501, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"running": false, "output": "x"}}},
+		residentEvent{Seq: 502, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
+		residentEvent{Seq: 503, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("terminal", `{"command":"jq . n.json"}`), call("terminal", `{"session":"abc"}`)}}},
+		residentEvent{Seq: 504, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"error": "boom"}}},
+		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md", "passed": false}},
+	)
+	m.syncChat()
+	v := ansi.Strip(m.chat.transcript.View())
+	if !strings.Contains(v, "● Checking the CVEs now.") || strings.Contains(v, "agent\n") {
+		t.Fatalf("the agent's words stay whole:\n%s", v)
+	}
+	if !strings.Contains(v, "Ran 2 commands, read 1 file · 1 failed · gate fails") {
+		t.Fatalf("the tool work is one line (a poll is not a command):\n%s", v)
+	}
+	for _, clutter := range []string{"PRIVILEGED-STAGE1", "output  terminal", "thinking ·", "jq . n.json"} {
+		if strings.Contains(v, clutter) {
+			t.Fatalf("compact hides %q:\n%s", clutter, v)
+		}
+	}
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"content": "Two CVEs are patched."}})
+	m.syncChat()
+	if v = ansi.Strip(m.chat.transcript.View()); !strings.Contains(v, "Two CVEs are patched.") || !strings.Contains(v, "gate fails") {
+		t.Fatalf("the next reply fixes the line above it:\n%s", v)
+	}
+}
+
+func TestEmberStaysUpWithTheLatestThoughts(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.height = 44 // below about 22 body rows the idle box gives its rows to the transcript
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 600, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "first I check the CVE list"}},
+		residentEvent{Seq: 601, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "then the kernel source for the missing return"}})
+	idle := ansi.Strip(m.liveBlock(110))
+	if !strings.Contains(idle, "▀") || !strings.Contains(idle, "thoughts") || !strings.Contains(idle, "missing return") {
+		t.Fatalf("idle, Ember stays with the latest thoughts:\n%s", idle)
+	}
+	if strings.Index(idle, "first I check") > strings.Index(idle, "missing return") {
+		t.Fatal("the thoughts run downward, newest last")
+	}
+	m.chat.live = residentLive{active: true, turn: "t", reasoning: "now drafting the report"}
+	live := ansi.Strip(m.liveBlock(110))
+	if !strings.Contains(live, "now drafting the report") || strings.Index(live, "missing return") > strings.Index(live, "now drafting") {
+		t.Fatalf("live thoughts append below the past ones:\n%s", live)
+	}
+}
+
+func TestARecoveredCutOffIsANoteNotAnError(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.cards, m.chat.renderWidth = false, 140
+	block := ansi.Strip(m.chat.eventBlock(residentEvent{Seq: 700, Kind: "model_truncated", Data: map[string]any{
+		"error": "model output budget exhausted; increase --max-tokens and resume this goal", "recovered": true, "streak": 1.0}}))
+	if strings.Contains(block, "error") || strings.Contains(block, "--max-tokens") || !strings.Contains(block, "retries in smaller pieces (1 of 3") {
+		t.Fatalf("a handled cut-off is a quiet note:\n%s", block)
 	}
 }
