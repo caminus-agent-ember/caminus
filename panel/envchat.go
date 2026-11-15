@@ -350,7 +350,7 @@ func (m *envModel) scrollLive(delta int) {
 	if !l.active {
 		return
 	}
-	body := len(l.body(max(10, m.width-4)))
+	body := len(l.body(liveTextWidth(max(10, m.width-4))))
 	window := m.liveWindow()
 	top := max(0, min(m.liveTop(body)+delta, max(0, body-window)))
 	l.top = top
@@ -360,13 +360,25 @@ func (m *envModel) scrollLive(delta int) {
 // liveBlock renders the reply being generated in a fixed-height window: its reasoning, the tools it has
 // started and the text so far. Plain text, not glamour: this is redrawn on every snapshot, and the durable
 // block is styled once when the turn lands.
+// liveEmberMin is the box width from which Ember sits beside the live reply; narrower, the text keeps every column.
+const liveEmberMin = 50
+
+// liveTextWidth is the live reply's text column: the box's inner width less Ember's column when it is shown.
+func liveTextWidth(inner int) int {
+	if inner >= liveEmberMin {
+		return inner - lipgloss.Width(mascot(0)[0]) - 2
+	}
+	return inner
+}
+
 func (m envModel) liveBlock(w int) string {
 	l := m.chat.live
 	if !l.active {
 		return ""
 	}
 	inner := max(10, w-4)
-	body := l.body(inner)
+	text := liveTextWidth(inner)
+	body := l.body(text)
 	height := m.liveHeight()
 	top := m.liveTop(len(body))
 	spin := g.spinner[m.tickN%len(g.spinner)]
@@ -379,7 +391,25 @@ func (m envModel) liveBlock(w int) string {
 		hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
 	}
 	rows := []string{bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)}
-	rows = append(rows, body[top:min(top+height-1, len(body))]...)
+	shown := body[top:min(top+height-1, len(body))]
+	if text < inner {
+		// Ember beside the reply while it is written: the flame flickers on the panel's half-second tick.
+		art := mascot(m.tickN % 2)
+		pad := strings.Repeat(" ", lipgloss.Width(art[0]))
+		for len(shown) < min(len(art), height-1) {
+			shown = append(shown, "")
+		}
+		beside := make([]string, len(shown))
+		for i, line := range shown {
+			col := pad
+			if i < len(art) {
+				col = art[i]
+			}
+			beside[i] = col + "  " + line
+		}
+		shown = beside
+	}
+	rows = append(rows, shown...)
 	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
 }
 

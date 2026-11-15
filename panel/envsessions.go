@@ -173,6 +173,9 @@ func loadLastSession() string {
 }
 
 func saveLastSession(name string) {
+	if demoMode { // the demo never replaces the real last session
+		return
+	}
 	path := lastSessionPath()
 	if path == "" {
 		return

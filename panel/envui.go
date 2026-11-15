@@ -154,7 +154,18 @@ func envMain(args []string) {
 	key := fs.String("key", "", "the harness ssh key")
 	cli := fs.String("cli", "", "JSON argv of the caminus CLI (for starting server jobs)")
 	agent := fs.String("agent", "resident", "resident agent name")
+	draft := fs.String("draft", "", "text the composer starts with (a new goal, sent on Enter)")
+	demo := fs.Bool("demo", false, "the demo (tools/env_demo.py): no SSH, and an approved root command is recorded, never run")
 	fs.Parse(args)
+	if *demo {
+		demoMode = true
+		if *user == "" {
+			*user = "demo"
+		}
+		if *key == "" {
+			*key = "none"
+		}
+	}
 	if *user == "" || *bridge == "" || *audit == "" || *key == "" {
 		fmt.Fprintln(os.Stderr, "caminus-panel env: --user --bridge --audit --key are all required")
 		os.Exit(2)
@@ -172,7 +183,16 @@ func envMain(args []string) {
 	m.initChat()
 	// Open directly into the last conversation; the first session list decides
 	// whether that session still exists (residentSessionsMsg below).
-	openLastSession(&m)
+	if demoMode { // straight into the demo agent; the real last session is neither read nor replaced
+		m.openResident(*agent)
+		m.pendingLast = *agent
+	} else {
+		openLastSession(&m)
+	}
+	if *draft != "" {
+		m.chat.compose.SetValue(*draft)
+		m.chat.newGoal = true
+	}
 	if m.pendingLast == "" {
 		m.chat.picker = true // no last conversation: start in the chat with the session picker open
 	}
@@ -202,6 +222,12 @@ func sshCmd(m envModel, what, script string) *exec.Cmd {
 // of the panel, and the caller releases the timer as soon as the call returns.
 func sshCmdTimeout(m envModel, what, script string) (*exec.Cmd, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	if demoMode { // no agent account in the demo: the SSH views answer empty, the probe answers as the agent user
+		if what == "probe" {
+			return exec.CommandContext(ctx, "echo", m.user), cancel
+		}
+		return exec.CommandContext(ctx, "true"), cancel
+	}
 	c := exec.CommandContext(ctx, "ssh", "-i", m.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
 		"-o", "ControlMaster=auto", "-o", "ControlPath="+filepath.Join(os.TempDir(), "caminus-envui-%r@%h:%p"),
 		m.user+"@127.0.0.1", "bash", "-s")
@@ -425,6 +451,9 @@ func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// demoMode is set by `env -demo`: nothing reaches SSH or sudo.
+var demoMode bool
+
 // execRoot builds the command that runs cmd under sudo attached to the terminal, teeing the
 // output to a temp file (the sudo password prompt goes to the tty, not the pipe).
 func execRoot(cmd string) (*exec.Cmd, string, error) {
@@ -435,6 +464,9 @@ func execRoot(cmd string) (*exec.Cmd, string, error) {
 	tmp := f.Name()
 	f.Close()
 	script := "set -o pipefail; sudo sh -c " + shQuote(cmd) + " 2>&1 | tee " + shQuote(tmp)
+	if demoMode { // the demo records the approval and runs nothing as root
+		script = "echo " + shQuote("demo: approved, not run as root: "+cmd) + " | tee " + shQuote(tmp)
+	}
 	return exec.Command("bash", "-c", script), tmp, nil
 }
 

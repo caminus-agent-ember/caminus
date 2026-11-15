@@ -1532,3 +1532,22 @@ func TestSeveralRootRequestsShareOneCard(t *testing.T) {
 		t.Fatal("one request left: no shared card")
 	}
 }
+
+func TestEmberFlickersBesideTheLiveReply(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.chat.live = residentLive{active: true, turn: "t1", text: "writing the report now"}
+	a := m.liveBlock(100)
+	if !strings.Contains(ansi.Strip(a), "▀") || !strings.Contains(ansi.Strip(a), "writing the report now") {
+		t.Fatalf("Ember sits beside the live text:\n%s", ansi.Strip(a))
+	}
+	m.tickN++
+	if b := m.liveBlock(100); b == a {
+		t.Fatal("the next tick draws the other frame (the flame flickers)")
+	}
+	if n := m.liveBlock(40); strings.Contains(ansi.Strip(n), "▀") {
+		t.Fatalf("a narrow box leaves Ember out:\n%s", ansi.Strip(n))
+	}
+}

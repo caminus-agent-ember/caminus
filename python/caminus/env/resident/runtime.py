@@ -29,6 +29,7 @@ from . import judge
 from . import web
 from .mcp import MCP
 from .brain import Brains
+from . import planning
 
 TODO_STATES = ('pending', 'in_progress', 'done')
 # Tools that were replaced but may still be called from an older history: accepted, never advertised.
@@ -41,23 +42,33 @@ GATE_TRIGGERS = ('edit', 'write', 'terminal')   # tools after which the goal's g
 GATE_TURN_TIMEOUT = 120  # a per-turn gate gets two minutes (the finish gate keeps its ten); past it, finish-only
 GATE_SLOW = 30           # a gate slower than this runs per turn at most every GATE_SLOW_EVERY seconds
 GATE_SLOW_EVERY = 600
-READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'less', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf',
-                       'which', 'type', 'ps', 'df', 'du', 'stat', 'file', 'tree', 'date', 'env', 'id', 'whoami',
-                       'uname', 'nvidia-smi', 'rocm-smi', 'amd-smi', 'free', 'uptime', 'sleep', 'true', 'diff'))
-READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'branch', 'remote', 'rev-parse', 'blame', 'ls-files'))
+INTERRUPT_HOLD = 120     # after an Esc, how long a goal waits for the message that steers it
+# Programs that only read, whatever their arguments (anything that can start another program, open a shell or write
+# a file through a flag is left out: env, less, tree -o, xargs, timeout, nice ...).
+READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf', 'which',
+                       'type', 'ps', 'df', 'du', 'stat', 'file', 'date', 'id', 'whoami', 'uname', 'rocm-smi', 'amd-smi',
+                       'free', 'uptime', 'sleep', 'true', 'diff'))
+READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files'))
+# Arguments that make a read-only program act: find's -exec / -execdir / -ok / -okdir / -delete / -fprint* / -fls,
+# git's --output, rg's --pre (it runs a command on each file), and any redirection, substitution or tee.
+CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b|--pre\b')
 
 
 def read_only_command(cmd):
-    """A terminal command that changes nothing the gate could see: every part of a pipeline or && chain is a
-    read-only program, with no output redirection. Anything unclear counts as a change (the gate runs)."""
-    if not isinstance(cmd, str) or not cmd.strip() or re.search(r'>|\$\(|`|\btee\b|-delete\b|-exec\b', cmd):
+    """A terminal command that changes nothing: every part of a pipeline or && / || / ; chain is a read-only program
+    with no changing argument (CHANGING). Anything unclear counts as a change (the per-turn gate runs; plan mode
+    refuses it)."""
+    if not isinstance(cmd, str) or not cmd.strip() or CHANGING.search(cmd):
         return False
-    for part in re.split(r'\|\||&&|[|;\n]', cmd):
+    for part in re.split(r'\|\||&&|[|;&\n]', cmd):
         words = part.split()
         if not words:
             continue
         if words[0] == 'git':
-            if len(words) < 2 or words[1] not in READ_ONLY_GIT:
+            sub = words[1:2]
+            if sub == ['branch'] and all(w in ('-a', '-r', '-v', '-vv', '--list', '--show-current') for w in words[2:]):
+                continue                  # listing branches; with any other argument it creates or deletes one
+            if not sub or sub[0] not in READ_ONLY_GIT:
                 return False
         elif words[0] not in READ_ONLY:
             return False
@@ -70,8 +81,9 @@ PAID_COMPACT = (.38, .38 * .20)
 QUESTION_TIMEOUT = 900   # seconds a question or root request waits before the resident carries on without it
 SUMMARY_TOKENS = 2048    # a compaction summary's output allowance
 TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
-PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
-EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24}
+PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error', 'waiting_plan'}
+EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24,
+        'waiting_plan': 25}
 
 
 def tool(name, description, properties, required=()):
@@ -149,6 +161,10 @@ TOOLS = [
          dict(question={'type':'string'}, context={'type':'string'}), ('question',)),
     tool('finish', 'Report the completed goal and verified results to your human. List any unverified or blocked work honestly.',
          dict(summary={'type':'string'}, open={'type':'string'}), ('summary',)),
+    tool('propose_plan', 'File your plan for the goal and wait for your human\'s decision. Use this in plan mode '
+         '(a plan-first goal): explore read-only first, then file the plan. Nothing in the workspace changes until '
+         'they approve it; a rejection arrives with a revision note in the inbox.',
+         dict(plan={'type':'string'}), ('plan',)),
 ]
 
 
@@ -179,6 +195,7 @@ class Live:
         self.turn = uuid.uuid4().hex[:12]
         self.content, self.reasoning, self.tools = [], [], []
         self.last = 0.0
+        self.interrupted = False
 
     def on_delta(self, kind, value):
         """the model's per-piece callback; False cancels the stream (the goal was cancelled meanwhile)"""
@@ -198,6 +215,15 @@ class Live:
 
     def flush(self):
         if self.store.goal(self.gid)['state'] == 'cancelled':
+            return False
+        # Esc while generating (agent interrupt): the request arrives through the store like /pause, and this
+        # turn is the thing it stops. Returning False makes the model raise Cancelled: nothing is stored or
+        # executed, the goal stays working, and the next message steers it.
+        req = self.store.pending_request(self.gid, 'interrupt')
+        if req is not None:
+            self.store.settle_request(req['id'], 'done')
+            self.store.event('turn_interrupted', {}, self.gid)
+            self.interrupted = True
             return False
         atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
                                     content=''.join(self.content), reasoning=''.join(self.reasoning),
@@ -241,7 +267,8 @@ class Runtime:
         self.plain_replies = {}
         self.truncations = {}    # goal -> replies in a row cut off at the output limit
         self._gate_dirty, self._gate_last = set(), {}   # goals whose files changed this turn; the last gate result
-        self._gate_slow = {}     # goal -> when a slow per-turn gate last ran, or 'off' after a timeout
+        self._gate_slow = {}
+        self._held = {}          # goal -> when an Esc interrupted its turn: it waits for the human's message     # goal -> when a slow per-turn gate last ran, or 'off' after a timeout
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
         self.brains = Brains(self, self.primary)
@@ -339,6 +366,8 @@ class Runtime:
         if not self.store.verified_since_steer(gid):
             lines.append('LOOP: the done check has not been exercised since the last steer. Run it and call '
                          'verify before finish.')
+        if (plan := planning.loop_line(g)):
+            lines.append(plan)
         return '\n'.join(lines)
 
     def _context_budget(self,gid=None):
@@ -674,6 +703,20 @@ class Runtime:
             gid_now = action['goal']
             refused = False
             signature = self._signature(name, args)
+            # Plan mode (planning.py): a plan-first goal with no approved plan only explores; these refusals
+            # count as failures like any other refusal: an agent that keeps trying to change things is paused.
+            plan_mode = self.store.goal(gid_now).get('plan') == 1
+            if name in planning.PLAN_REFUSED and plan_mode:
+                raise ValueError(planning.refused_text(name))
+            if name == 'terminal' and plan_mode and (args.get('stdin') is not None or
+                                                     (args.get('command') and not read_only_command(args['command']))):
+                # The terminal is not only a promise in plan mode: a command runs only when every part of it is a
+                # read-only program (the per-turn gate's classifier: anything unclear counts as a change), and
+                # typing into a running shell is refused (it could run anything).
+                raise ValueError(planning.refused_text('terminal'))
+            if name == 'propose_plan' and not plan_mode:
+                raise ValueError('propose_plan is for a plan-first goal (one sent with --plan); this goal can act '
+                                 'directly, or ask your human with ask_user')
             # Step 8, the runtime half: a call that has already failed twice is not retried. The prompt
             # tells the model to change approach; this is the backstop for when it does not.
             if name not in ('define_done', 'verify', 'finish'):
@@ -734,6 +777,13 @@ class Runtime:
                     result = None         # catalog queries, network calls and waits stay outside the write transaction
                 elif name == 'peers':
                     result = dict(peers=self.mail.peers())
+                elif name == 'propose_plan':
+                    # planning.py: file the plan and park; the parking state is set after the tool result
+                    # is stored, because action_result moves the goal to working when it lands.
+                    plan = str(args['plan'])[:65536]
+                    self.store.update(gid_now, plan_text=plan)
+                    self.store.event('plan_proposed', dict(plan=plan[:2000]), gid_now)
+                    result = planning.propose(gid_now, plan)
                 elif name == 'send_message':
                     result = self.mail.send(sender_goal=action['goal'], message_id=action['id'], **args)
                 elif name in ('ask_user', 'ask_root'):
@@ -825,6 +875,11 @@ class Runtime:
             self.progress[action['goal']] = time.time()
         if action['name'] == 'finish' and 'error' not in result:
             self._finish(action['goal'],result['summary'],result.get('open',''))
+        elif action['name'] == 'propose_plan' and 'error' not in result:
+            # The plan is in: park until the human approves (plan approve) or sends a revision.
+            with self.store.transaction():
+                if self.store.goal(action['goal'])['state'] != 'cancelled':
+                    self.store.update(action['goal'], state='waiting_plan')
         elif action['name'] == 'finish' and result.get('pause'):
             # the judge found it impossible, or refused it too often: a person decides
             with self.store.transaction():
@@ -1271,7 +1326,7 @@ class Runtime:
         self._follow_config()
         g = self.store.goal(gid)
         leases.sweep(self)                    # a lease ends with its goal, wherever the goal stopped
-        if g['state'] in ('completed','cancelled','paused','error'):
+        if g['state'] in ('completed','cancelled','paused','error','waiting_plan'):
             return False
         if g['state']=='waiting_model' and self.retry.get(gid,(0,0))[0]>time.time():
             return False
@@ -1296,6 +1351,13 @@ class Runtime:
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot model-step budget reached')
             return True
+        if gid in self._held:
+            # only the human's message lifts it, not a harness note ([gate], [answer ...]: same rule as unsend)
+            waiting = self.store.db.execute("SELECT 1 FROM inbox WHERE goal=? AND consumed=0 AND substr(text,1,1)!='[' "
+                                            'LIMIT 1', (gid,)).fetchone()
+            if not waiting and time.time() - self._held[gid] < INTERRUPT_HOLD:
+                return False
+            self._held.pop(gid, None)
         self.poll_requests(gid)
         self._gate_check(gid, g)
         try:
@@ -1348,6 +1410,9 @@ class Runtime:
                 self.model.config['timeout'] = max(.1,min(self.base_timeout,g['deadline']-time.time())) if g['deadline'] else self.base_timeout
             # The live snapshot is what a UI shows while this call generates; the durable event below
             # replaces it. clear() runs on every exit path, so a failed or cancelled turn leaves no tail.
+            # An Esc that landed between turns caught nothing: settle it here so it cannot cut the next turn.
+            while (req := self.store.pending_request(gid, 'interrupt')):
+                self.store.settle_request(req['id'], 'done')
             live = Live(self.home, gid, self.store)
             try:
                 request = [self.system(),*messages]
@@ -1384,7 +1449,11 @@ class Runtime:
             self.truncations.pop(gid,None)        # a whole reply arrived: the cut-off streak is over
             return True
         except Cancelled:
-            # Cancelled between two streamed pieces: the model was closed, nothing was stored.
+            # Cancelled between two streamed pieces: the model was closed, nothing was stored. After an Esc the goal
+            # holds for the human's message (it would otherwise start the same turn again at once), at most
+            # INTERRUPT_HOLD seconds.
+            if getattr(live, 'interrupted', False):
+                self._held[gid] = time.time()
             return True
         except ModelError as e:
             self._record_failure(gid, e, who='resident' if self.model is self.primary else 'fallback')

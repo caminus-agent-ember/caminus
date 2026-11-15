@@ -19,6 +19,9 @@ from .mail import Mail
 from . import approval
 from .discovery import TOPICS, discover
 from .prompt import render as render_prompt
+from . import planning
+from . import btw
+from . import export as export_mod
 
 
 def _current(cfg):
@@ -135,7 +138,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','export','diff'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -186,6 +189,11 @@ def parser():
             p.add_argument('--read',help='one file from the journal, the studio or the shelf, as text')
         if op=='pause':
             p.add_argument('goal_id',nargs='?',help='the goal to pause; defaults to the most recent one')
+        if op=='queue':
+            p.add_argument('action',nargs='?',default='list',choices=('list','move','remove'),
+                           help='list the queue, move a queued goal, or remove (cancel) one')
+            p.add_argument('goal',nargs='?',help='the goal to move or remove (id or prefix)')
+            p.add_argument('--to',type=int,help='the new 1-based position for move')
         if op=='update':
             p.add_argument('--program',help='the runtime to install (default: the newest one install uploaded, ~/bin/caminus-agent)')
             p.add_argument('--now',action='store_true',help='at the next turn boundary instead of between goals')
@@ -238,6 +246,15 @@ def parser():
             p.add_argument('--goal')
             p.add_argument('--stdin',action='store_true',help='read goal text from stdin')
             p.add_argument('--goal-id',help='resume an existing goal, or send it a steering message')
+        if op in ('once','send'):
+            p.add_argument('--plan',action='store_true',
+                           help='plan-first: the goal starts in plan mode; the agent explores read-only and '
+                                'files a plan with propose_plan, and waits for your approval (agent plan)')
+
+        if op=='plan':
+            p.add_argument('goal_id')
+            p.add_argument('action',choices=('approve','reject'),help="approve the filed plan, or ask for a revision")
+            p.add_argument('--note',help='a short note: what was approved, or what to change')
         if op=='send':
             p.add_argument('--continue',dest='continue_goal',action='store_true',help='allow an explicit follow-up to a completed goal, preserving its conversation')
             p.add_argument('--steer',action='store_true',
@@ -248,6 +265,19 @@ def parser():
             p.add_argument('--max-seconds',type=float,help='optional test budget, retained in the goal checkpoint')
         if op=='once':
             p.add_argument('--jsonl',action='store_true',help='stream events followed by a result record')
+        if op=='unsend':
+            p.add_argument('goal_id',help='the goal whose newest undelivered message is pulled back')
+        if op=='interrupt':
+            p.add_argument('goal_id',help='the goal whose reply being generated is dropped')
+        if op=='btw':
+            p.add_argument('goal_id',help='the goal the side question is about')
+            p.add_argument('text',nargs='?',help='the question (or --stdin)')
+            p.add_argument('--stdin',action='store_true',help='read the question from stdin')
+        if op=='export':
+            p.add_argument('goal_id',help='the goal to export')
+            p.add_argument('--out',help='write here (default: exports/<goal8>-<date>.md in the agent home)')
+        if op=='diff':
+            p.add_argument('goal_id',nargs='?',help='the goal (default: the most recent one)')
         if op in ('events','mail'):
             p.add_argument('--after',type=int,default=0)
         if op=='stream':
@@ -558,6 +588,64 @@ def main(argv=None,stdin=None):
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0
+        if a.op=='plan':
+            gid=store.resolve(a.goal_id)
+            with store.transaction():
+                g=store.goal(gid)
+                if g.get('plan') == 0:
+                    raise ValueError(f'goal {gid[:8]} is not a plan goal')
+                if g['state'] in ('completed','cancelled'):
+                    raise ValueError(f'goal {gid[:8]} is {g["state"]}')
+                if a.action=='approve':
+                    store.update(gid,plan=2,state='working',error='')
+                    text=planning.approval_text(a.note)
+                    verdict='approved'
+                else:
+                    store.update(gid,state='working',error='')
+                    text=planning.rejection_text(a.note)
+                    verdict='revise'
+                store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,text,'nudge'))
+                store.event('plan_' + ('approved' if a.action=='approve' else 'rejected'),
+                            dict(note=(a.note or '').strip()),gid)
+            emit(dict(goal=gid,plan=verdict,state=store.goal(gid)['state']),a.json)
+            store.close();return 0
+        if a.op=='export':
+            gid=store.resolve(a.goal_id)
+            path,nbytes=export_mod.export(store,gid,a.out)
+            emit(dict(goal=gid,path=str(path),bytes=nbytes),a.json)
+            store.close();return 0
+        if a.op=='diff':
+            from . import diff as diff_mod
+            gid=store.resolve(a.goal_id) if a.goal_id else store.latest_goal()
+            emit(dict(goal=gid,**diff_mod.diff(store,gid)),a.json)
+            store.close();return 0
+        if a.op=='btw':
+            gid=store.resolve(a.goal_id)
+            store.close()
+            question=(stdin or sys.stdin).read() if a.stdin else a.text
+            if not (question or '').strip():raise ValueError('btw needs a question (TEXT or --stdin)')
+            rt=Runtime(home)
+            try:answer=btw.ask(rt,gid,question.strip())
+            finally:rt.mail.close();rt.store.close()
+            emit(dict(goal=gid,answer=answer),a.json);return 0
+        if a.op=='interrupt':
+            gid=store.resolve(a.goal_id)
+            store.request(gid,'interrupt')
+            emit(dict(goal=gid,queued=True),a.json);store.close();return 0
+        if a.op=='unsend':
+            gid,text=store.unsend(a.goal_id)
+            emit(dict(goal=gid,text=text),a.json);store.close();return 0
+        if a.op=='queue':
+            act=a.action
+            if act=='move':
+                if not a.goal or a.to is None:raise ValueError('queue move GOAL --to N')
+                out=dict(queue=store.queue_move(a.goal,a.to))
+            elif act=='remove':
+                if not a.goal:raise ValueError('queue remove GOAL')
+                out=dict(queue=store.queue_remove(a.goal))
+            else:
+                out=dict(queue=store.queue())
+            emit(out,a.json);store.close();return 0
         if a.op=='pause':
             # Like /compact: a live runtime applies it between steps; with no daemon the CLI pauses it here.
             gid=store.resolve(a.goal_id) if a.goal_id else store.latest_goal()
@@ -650,10 +738,12 @@ def main(argv=None,stdin=None):
                     resume_required=state in ('paused','error','waiting_user','waiting_root')
                 emit(dict(id=a.goal_id,queued=True,resume_required=resume_required),a.json);store.close();return 0
             if a.goal_id:
+                if a.plan:raise ValueError('--plan creates a new goal; --goal-id steers an existing one')
                 gid=a.goal_id
                 resume_goal(store,gid,a.max_steps,a.max_seconds)
             else:
-                gid=store.enqueue(text or '',getattr(a,'max_steps',None),getattr(a,'max_seconds',None))
+                gid=store.enqueue(text or '',getattr(a,'max_steps',None),getattr(a,'max_seconds',None),
+                                  plan=1 if a.plan else 0)
             if a.op=='send':
                 emit(dict(id=gid,state='queued'),a.json);store.close();return 0
         elif a.op=='resume':

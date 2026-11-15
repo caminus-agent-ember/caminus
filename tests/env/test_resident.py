@@ -71,14 +71,16 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         if isinstance(value,dict) and '_status' in value:
             self.respond(dict(error='refused by the fixture'),value['_status']);return
         if body.get('stream') and isinstance(value,dict) and '_deltas' in value:
-            self.stream(value['_deltas'],done=not value.get('_cut'));return
+            self.stream(value['_deltas'],done=not value.get('_cut'),slow=value.get('_slow'));return
         msg=dict(value(body) if callable(value) else value);reason=msg.pop('_finish_reason','stop')
         self.respond(dict(choices=[dict(message=msg,finish_reason=reason)],usage=dict(prompt_tokens=30,completion_tokens=10)))
 
-    def stream(self,deltas,done=True):
-        """an SSE reply in the shape the engine emits: delta chunks, then [DONE]; done=False cuts it short"""
+    def stream(self,deltas,done=True,slow=0):
+        """an SSE reply in the shape the engine emits: delta chunks, then [DONE]; done=False cuts it short;
+        slow spaces the chunks out (seconds per chunk) so a mid-stream event can race the reply"""
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
         for d in deltas:
+            if slow:time.sleep(slow)
             self.wfile.write(('data: '+json.dumps(d)+'\n\n').encode())
         if done:self.wfile.write(b'data: [DONE]\n\n')
         self.wfile.flush()
@@ -1506,7 +1508,12 @@ for line in sys.stdin:
         from caminus.env.resident import runtime as R
         for c in ('ls -la','git status && git diff --stat','grep -rn foo src | head','cat a.txt; wc -l a.txt'):
             self.assertTrue(R.read_only_command(c),c)
-        for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b'):
+        for c in ('git branch','git branch -a','find . -name "*.py"'):
+            self.assertTrue(R.read_only_command(c),c)
+        for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b',
+                  'env rm -rf folder','find . -execdir rm {} +','find . -ok rm {} ;','find . -fprint out.txt',
+                  'less notes.txt','tree -o out.txt','git branch -D main','git branch newname','git remote add x y',
+                  'git diff --output=patch.txt','ls & rm -rf x','xargs rm < list','timeout 5 rm x','rg --pre ./evil.sh foo','rg --pre=sh foo'):
             self.assertFalse(R.read_only_command(c),c)
         rt=Runtime(self.home)
         try:
@@ -1567,6 +1574,36 @@ for line in sys.stdin:
                 rt.tick(gid)
             g=rt.store.goal(gid)
             self.assertEqual(g['state'],'paused');self.assertIn('the same call failed 3 times',g['error'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_review_fixes_for_plan_unsend_interrupt_and_btw(self):
+        from caminus.env.resident import btw
+        self.replies(dict(role='assistant',content='It is waiting on sleep.'))
+        rt=Runtime(self.home)
+        try:
+            # plan mode: the terminal runs only read-only commands; propose_plan only in plan mode
+            pg=rt.store.enqueue('Plan it.',plan=1)
+            def run(gid,name,args):
+                rt.store.model_reply(gid,call(name,args))
+                rt._action(rt.store.actions(gid)[0])
+                return [e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result'][-1]
+            self.assertIn('plan mode',run(pg,'terminal',dict(command='rm -f notes.txt',yield_ms=0)).get('error',''))
+            self.assertNotIn('error',run(pg,'terminal',dict(command='ls',yield_ms=200)))
+            wg=rt.store.enqueue('Just do it.')
+            self.assertIn('plan-first goal',run(wg,'propose_plan',dict(plan='x')).get('error',''))
+            # unsend pulls back the human's message, never a harness note
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(wg,'please use tabs','nudge'))
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(wg,'[gate] the gate fails now','nudge'))
+            self.assertEqual(rt.store.unsend(wg),(wg,'please use tabs'))
+            self.assertEqual(rt.store.unsend(wg),(wg,None))
+            # after an Esc the goal holds for the human's message
+            rt._held[wg]=time.time()
+            self.assertFalse(rt._tick(wg),'held: no new turn without a message')
+            # btw sends the recent conversation as text: a call with no result yet breaks no request
+            rt.store.model_reply(wg,call('terminal',dict(command='sleep 1')))
+            self.assertEqual(btw.ask(rt,wg,'what are you doing?'),'It is waiting on sleep.')
+            body=[b for k,b in Endpoint.seen if k==self.key][-1]
+            self.assertFalse([m for m in body['messages'] if m.get('role')=='tool' or m.get('tool_calls')])
         finally:rt.mail.close();rt.store.close()
 
     def test_the_openai_transport_sends_reasoning_effort(self):
@@ -2707,8 +2744,185 @@ for line in sys.stdin:
             self.assertEqual((note['tps'],note['tokens'],note['goal']),(88.0,88,gid))
             self.assertEqual(self.cmd('status')['tok_per_s'],88.0)
         finally:rt.mail.close();rt.store.close()
+    def test_a_plan_first_goal_files_its_plan_and_waits_for_approval(self):
+        plan='1. read the roster\n2. write dist/report.md'
+        g=self.cmd('send',['plan goal','--plan'])
+        gid=g['id']
+        status=self.cmd('status')['goals'][0]
+        self.assertEqual((status['plan'],status['plan_text'] or ''),(1,''))
+        self.replies(call('propose_plan',dict(plan=plan)))
+        out=self.cmd('once',['--goal-id',gid],code=25)
+        self.assertEqual(out['state'],'waiting_plan')
+        self.assertIn('plan_proposed',[e['kind'] for e in self.cmd('events')])
+        r=self.cmd('plan',[gid,'approve','--note','ok, go'])
+        self.assertEqual(r,dict(goal=gid,plan='approved',state='working'))
+        status=self.cmd('status')['goals'][0]
+        self.assertEqual((status['plan'],status['plan_text']),(2,plan))
+        self.replies(call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal-id',gid])
+        self.assertEqual(out['state'],'completed')
+        self.assertIn('Plan approved: ok, go',json.dumps(Endpoint.seen[-1][1]))
 
+    def test_plan_mode_refuses_the_changing_tools_until_approved(self):
+        self.replies(call('write',dict(path='x.txt',content='hi')),
+                     call('ask_root',dict(command='touch x',reason='fixture')),
+                     call('propose_plan',dict(plan='p')))
+        g=self.cmd('once',['--plan','--goal','change the file'],code=25)
+        self.assertEqual(g['state'],'waiting_plan')
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result'
+                 and e['data']['name'] in ('write','ask_root')]
+        self.assertEqual(len(results),2)
+        self.assertTrue(all('plan mode' in (r.get('error') or '') for r in results))
+        self.assertFalse((self.home/'x.txt').exists())
+        # rejected: plan mode stays on, the revision note reaches the next turn
+        r=self.cmd('plan',[g['id'],'reject','--note','too broad'])
+        self.assertEqual(r,dict(goal=g['id'],plan='revise',state='working'))
+        self.assertEqual(self.cmd('status')['goals'][0]['plan'],1)
+        self.replies(call('propose_plan',dict(plan='narrower')))
+        self.cmd('once',['--goal-id',g['id']],code=25)
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('Plan rejected, revise it: too broad',body)
+        self.assertIn('PLAN MODE',body)
+        # a goal without --plan cannot be answered with plan approve/reject; --plan never steers
+        plain=self.cmd('send',['plain goal'])
+        self.cmd('plan',[plain['id'],'approve'],code=1)
+        self.cmd('once',['--plan','--goal-id','missing-goal'],code=1)  # unknown goal: refused before anything else
+        goals={g['id']:g for g in self.cmd('status')['goals']}
+        self.assertEqual(goals[plain['id']]['plan'],0)
+        self.assertEqual(goals[g['id']]['plan'],1)
 
+    def test_interrupt_drops_the_turn_being_generated(self):
+        gid=self.cmd('send',['stream goal'])['id']
+        streamed='INTERRUPT-ME-NOT'
+        self.replies(dict(_slow=.3,_deltas=[
+            dict(choices=[dict(delta=dict(content=streamed))]),
+            dict(choices=[dict(delta=dict(content=' tail'))]),
+            dict(choices=[dict(delta=dict(content=' more'))]),
+            dict(choices=[dict(delta=dict(content='',finish_reason='stop'))]),
+        ]),call('finish',dict(summary='after the interrupt')))
+        p=subprocess.Popen(self.argv('once',['--goal-id',gid]),stdout=subprocess.PIPE,text=True)
+        self.wait(lambda: any('stream goal' in json.dumps(b) for _,b in Endpoint.seen),15)
+        mid=self.cmd('interrupt',[gid])
+        self.assertEqual(mid,dict(goal=gid,queued=True))
+        # the interrupted goal holds for the human's message (it would otherwise rerun the same turn at once)
+        self.wait(lambda: 'turn_interrupted' in [e['kind'] for e in self.cmd('events')],15)
+        self.cmd('send',['--goal-id',gid,'carry on, and finish'])
+        out,_=p.communicate(timeout=25)
+        result=json.loads(out)
+        self.assertEqual(result['state'],'completed',result)
+        self.assertEqual(result['summary'],'after the interrupt')
+        kinds=[e['kind'] for e in self.cmd('events')]
+        self.assertIn('turn_interrupted',kinds)
+        # nothing of the dropped turn was stored or executed
+        self.assertNotIn(streamed,json.dumps(self.cmd('events')))
+        self.assertNotIn(streamed,json.dumps(Endpoint.seen[-1][1]))
+        # an Esc between turns interrupts nothing (and cannot cut the next turn)
+        self.assertEqual(self.cmd('interrupt',[gid]),dict(goal=gid,queued=True))
+        self.assertEqual([r['state'] for r in self.cmd('status')['goals']],['completed'])
+
+    def test_btw_answers_a_side_question_outside_the_goal(self):
+        self.replies(call('define_done',dict(check='the roster is sorted')),
+                     call('todo',dict(items=[dict(text='write it',state='done'),dict(text='check it',state='in_progress')])),
+                     call('finish',dict(summary='Roster sorted.')))
+        g=self.cmd('once',['--goal','Sort the roster.'])
+        gid=g['id']
+        before=len([e for e in self.cmd('events') if e['kind']=='assistant'])
+        self.replies(dict(role='assistant',content='Side answer: two files changed, one test pending.'))
+        out=self.cmd('btw',[gid,'--stdin'],stdin='what changed so far?')
+        self.assertEqual(out,dict(goal=gid,answer='Side answer: two files changed, one test pending.'))
+        body=Endpoint.seen[-1][1]
+        text=json.dumps(body)
+        self.assertIn('Sort the roster.',text)              # the goal's prompt
+        self.assertIn('DONE CHECK: the roster is sorted',text)
+        self.assertIn('[in_progress] check it',text)        # the todo rides along
+        self.assertIn('what changed so far?',text)          # the question itself
+        self.assertFalse(body.get('tools'),'a side question gets no tools')
+        # nothing entered the goal: the same steps, no new assistant event in the transcript
+        events=self.cmd('events')
+        self.assertEqual(len([e for e in events if e['kind']=='assistant']),before)
+        btw=[e for e in events if e['kind']=='btw'][0]['data']
+        self.assertEqual(btw['question'],'what changed so far?')
+        self.assertEqual(btw['answer'],'Side answer: two files changed, one test pending.')
+        self.assertEqual(self.cmd('status')['goals'][0]['steps'],3)
+        self.cmd('btw',[gid],code=1)                        # an empty question is refused
+
+    def test_unsend_pulls_back_undelivered_messages_only(self):
+        gid=self.cmd('send',['goal'])['id']
+        self.cmd('send',['ZZONE one','--goal-id',gid])
+        self.cmd('send',['ZZTWO two','--goal-id',gid])
+        self.assertEqual(self.cmd('unsend',[gid]),dict(goal=gid,text='ZZTWO two'))
+        self.assertIn('message_withdrawn',[e['kind'] for e in self.cmd('events')])
+        # delivered rows stay delivered: a turn that read the inbox cannot be pulled back
+        self.replies(dict(role='assistant',content='noted'))
+        self.cmd('once',['--goal-id',gid])            # drains the older row and finishes (fixture gates off)
+        self.assertEqual(self.cmd('unsend',[gid]),dict(goal=gid,text=None))
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('ZZONE one',body)
+        self.assertNotIn('ZZTWO',body)                # the withdrawn text never reached a turn
+        self.cmd('unsend',['missing-goal'],code=1)
+
+    def test_the_goal_queue_lists_moves_and_removes_queued_goals(self):
+        a=self.cmd('send',['first'])['id']
+        b=self.cmd('send',['second'])['id']
+        c=self.cmd('send',['third'])['id']
+        q=self.cmd('queue')['queue']
+        self.assertEqual([r['id'] for r in q],[a,b,c])
+        self.assertEqual([r['position'] for r in q],[1,2,3])
+        moved=self.cmd('queue',['move',c,'--to','1'])['queue']
+        self.assertEqual([r['id'] for r in moved],[c,a,b])
+        self.assertEqual([r['position'] for r in moved],[1,2,3])
+        from caminus.env.resident.store import Store as QStore
+        store=QStore(self.home)
+        try:self.assertEqual(store.next_goal()[:3],[c,a,b])
+        finally:store.close()
+        removed=self.cmd('queue',['remove',b])['queue']
+        self.assertEqual([r['id'] for r in removed],[c,a])
+        self.assertEqual([r['position'] for r in removed],[1,2])
+        self.assertIn('dequeued',[e['kind'] for e in self.cmd('events')])
+        # only a queued goal moves; out-of-range positions are refused (exit 1)
+        self.cmd('cancel',[a])
+        self.cmd('queue',['move',a,'--to','1'],code=1)
+        self.cmd('queue',['remove',c],code=0)
+        self.cmd('queue',['move',c,'--to','5'],code=1)
+        self.cmd('queue',['remove',c],code=1)
+
+    def test_export_writes_the_goal_transcript_as_markdown(self):
+        from caminus.env.resident import export as export_mod
+        self.replies(call('define_done',dict(check='the roster is sorted')),
+                     call('todo',dict(items=[dict(text='write it',state='done')])),
+                     call('finish',dict(summary='ZRoster sorted.')))
+        goal=self.cmd('once',['--goal','ZEXPORT Sort the roster.'])
+        gid=goal['id']
+        out=self.cmd('export',[gid])
+        self.assertEqual(out['goal'],gid)
+        self.assertTrue(out['path'].startswith(str(self.home/'exports')),out['path'])
+        data=Path(out['path']).read_text()
+        self.assertEqual(out['bytes'],len(Path(out['path']).read_bytes()))
+        self.assertIn('ZEXPORT Sort the roster.',data)          # the prompt opens the file
+        self.assertIn('Done check: the roster is sorted',data)
+        self.assertIn('Finished: ZRoster sorted.',data)
+        self.assertIn('### tool: define_done',data)             # each tool call, as it was made
+        self.assertIn('```json',data)
+        self.assertIn('<result>',data)                          # and each truncated result
+        # a steer reads as the human's words under its own heading
+        g2=self.cmd('send',['ZSTEERED second goal.'])['id']
+        self.cmd('send',['use care here','--goal-id',g2,'--steer'])
+        self.replies(call('finish',dict(summary='done')))
+        self.cmd('once',['--goal-id',g2])
+        data2=Path(self.cmd('export',[g2])['path']).read_text()
+        self.assertIn('## You (steer)',data2)
+        self.assertIn('use care here',data2)
+        # --out writes where the caller asks
+        target=self.home/'custom'/'transcript.md'
+        out3=self.cmd('export',[gid,'--out',str(target)])
+        self.assertEqual(Path(out3['path']),target)
+        self.assertEqual(out3['bytes'],target.stat().st_size)
+        # oversize tool results carry an omission note, not silence
+        long_g=dict(id=gid,prompt='p',done_check='',summary='',state='working',
+                    messages=[dict(role='tool',content='x'*4100)])
+        text=export_mod.render(gid,long_g)
+        self.assertIn('100 characters omitted',text)
+        self.assertNotIn('x'*4001,text)
 
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
