@@ -559,6 +559,14 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if strings.TrimSpace(output) == "" {
 				meta = strings.TrimSuffix(meta, " · 1 lines") + " · no output"
 			}
+			if saved, _ := result["saved"].([]any); len(saved) > 0 {
+				// a big output was moved to a file: the card says where, with the whole size
+				if first, _ := saved[0].(map[string]any); first != nil {
+					path, _ := first["path"].(string)
+					lines, _ := first["lines"].(float64)
+					meta = strings.Split(meta, " · ")[0] + fmt.Sprintf(" · %d lines → %s", int(lines), residentText(path))
+				}
+			}
 			code, _ := result["exit_code"].(float64)
 			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
 		}

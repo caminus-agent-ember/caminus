@@ -18,6 +18,7 @@ from .freetime import FreeTime, KINDS as FREE_KINDS
 from .advisor import Advisor
 from .memory import Memory
 from . import files
+from . import outputs
 from .brain import Brains
 
 TODO_STATES = ('pending', 'in_progress', 'done')
@@ -596,6 +597,8 @@ class Runtime:
                                    dict(call=signature, error=failure[:200]))
             except Exception:
                 pass                          # the ledger is a backstop, never a reason to lose the error
+        # A result past about 8K tokens has its large text moved to ~/outputs: the model gets a preview and the path.
+        result = outputs.spill(self.home, action['name'], action['id'], result)
         self.store.action_result(action, result)
         if 'error' not in result:
             self.progress[action['goal']] = time.time()

@@ -1228,3 +1228,17 @@ func TestTodoIsPinnedAboveTheComposer(t *testing.T) {
 		t.Fatal("a finished goal's list must not stay pinned")
 	}
 }
+
+// A big output moved to a file says so on its card, with the whole size and the path.
+func TestSpilledOutputCardNamesTheFile(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 120
+	m.residentEvents = []residentEvent{{Seq: 1, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{
+		"output": "head\n… [90,000 characters omitted] …\ntail", "exit_code": float64(0),
+		"saved": []any{map[string]any{"field": "output", "path": "outputs/20261115-terminal-abc-output.txt", "lines": float64(6000)}}}}}}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	if v := ansi.Strip(m.chat.content); !strings.Contains(v, "exit 0 · 6000 lines → outputs/20261115-terminal-abc-output.txt") {
+		t.Fatalf("the card does not name the file:\n%s", v)
+	}
+}

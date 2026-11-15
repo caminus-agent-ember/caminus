@@ -329,6 +329,31 @@ class Resident(unittest.TestCase):
             self.assertTrue(any(r.get('name')=='edit' and '+gamma' in r['result'].get('diff','') for r in results),results)
         finally:store.close()
 
+    def test_big_outputs_go_to_a_file_with_a_preview(self):
+        from caminus.env.resident import outputs
+        big='\n'.join(f'line {i} of a long build log' for i in range(6000))
+        out=outputs.spill(self.home,'terminal','a'*32,dict(output=big,exit_code=0))
+        self.assertLess(len(json.dumps(out)),outputs.LIMIT_CHARS+500)
+        self.assertEqual(out['exit_code'],0,'small fields are kept as they are')
+        saved=out['saved'][0];self.assertEqual(saved['field'],'output');self.assertEqual(saved['lines'],6000)
+        self.assertEqual((self.home/saved['path']).read_text(),big,'the whole text is in the file')
+        self.assertIn('line 0 of',out['output']);self.assertIn('line 5999 of',out['output']);self.assertIn(saved['path'],out['output'])
+        small=dict(output='short');self.assertIs(outputs.spill(self.home,'terminal','b'*32,small),small)
+        # many medium fields: the whole result goes to one file
+        wide={f'f{i}':'y'*3000 for i in range(20)}
+        out=outputs.spill(self.home,'discover','c'*32,wide)
+        self.assertIn('preview',out);self.assertTrue((self.home/out['saved'][0]['path']).exists())
+
+    def test_a_big_tool_result_reaches_the_model_shortened(self):
+        big='\n'.join(f'row {i}' for i in range(20000))
+        (self.home/'big.txt').write_text(big)
+        self.replies(call('read',dict(path='big.txt',limit=2000)),call('finish',dict(summary='Read it.')))
+        self.cmd('once',['--goal','Read the big file.'])
+        last=[b for k,b in Endpoint.seen if k==self.key][-1]
+        tool_msgs=[m for m in last['messages'] if m.get('role')=='tool']
+        self.assertTrue(tool_msgs);content=tool_msgs[-1]['content']
+        self.assertLess(len(content),40000);self.assertIn('outputs/',content);self.assertIn('characters omitted',content)
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)
