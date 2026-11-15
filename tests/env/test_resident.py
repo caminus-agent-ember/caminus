@@ -258,6 +258,24 @@ class Resident(unittest.TestCase):
             self.assertEqual(rt.store.checkpoint(cid)['label'],'before edit')
         finally:rt.mail.close();rt.store.close()
 
+    def test_checkpoint_resolves_relative_paths_from_the_agent_home(self):
+        # A relative path means what it means to the terminal (commands start in the agent home), whatever the
+        # daemon's own directory is; the old code removed it relative to the daemon and restored it under /.
+        target=self.home/'work.txt';target.write_text('before\n')
+        elsewhere=S/('cwd-'+uuid.uuid4().hex);elsewhere.mkdir()
+        old=os.getcwd();os.chdir(elsewhere)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Edit then restore work.txt.')
+            cid=rt._checkpoint(gid,['work.txt'],'relative')['id']
+            self.assertEqual(rt.store.checkpoint(cid)['paths'],[str(target)])
+            target.write_text('after\n')
+            rt._rollback(gid,cid)
+            self.assertEqual(target.read_text(),'before\n')
+            self.assertFalse((elsewhere/'work.txt').exists())
+        finally:
+            os.chdir(old);rt.mail.close();rt.store.close()
+
     def test_the_watchdog_pauses_a_goal_over_its_token_budget(self):
         self.gates_on(['--token-budget','1'])
         self.replies()
@@ -637,6 +655,34 @@ class Resident(unittest.TestCase):
             rt.store.update(gid,messages=messages)
             result=rt.run(target=gid)
             self.assertEqual(result['state'],'completed');self.assertGreater(model.summaries,1)
+            self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_compaction_counts_the_trailing_context_message(self):
+        # The probe must measure the request as sent. A large MEMORY.md rides in the trailing context message;
+        # with the history alone under the trigger, the old probe declined to compact and the real request
+        # overflowed the window (the goal paused on a context error, and resuming repeated it).
+        from caminus.env.resident.model import ModelContextError
+        class BoundedModel:
+            def context_size(self):return 16384
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                if self.tokens(messages,tools or [])+256>self.context_size():
+                    raise ModelContextError('request exceeds the model context')
+                if tools:return call('finish',dict(summary='Compacted and continued.'))
+                return dict(role='assistant',content='Prior work verified; continue.')
+        (self.home/'MEMORY.md').write_text('# memory\n'+'remembered fact. '*1700)
+        rt=Runtime(self.home,model=BoundedModel())
+        try:
+            gid=rt.store.enqueue('Continue the long task.')
+            rt.store.event('startup_discovery',dict(topic='skipped in this test'),gid)   # keeps the kept tail small
+            messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*30000)]+[dict(role='assistant',content='observation '*20) for _ in range(10)]
+            rt.store.update(gid,messages=messages)
+            history=rt.model.tokens([rt.system(gid),*messages],TOOLS)
+            # The history alone leaves room for the reply budget too, so only the trailing context overflows.
+            self.assertLess(history+4096,16384,'the history alone fits with the reply budget')
+            result=rt.run(target=gid)
+            self.assertEqual(result['state'],'completed',[(e['kind'],str(e['data'])[:160]) for e in rt.store.events()])
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
@@ -1132,7 +1178,9 @@ class Resident(unittest.TestCase):
         try:
             gid=rt.store.enqueue('Check on the artifacts.')
             messages=rt.store.goal(gid)['messages']
-            measured=rt.model.tokens([rt.system(),*messages],TOOLS)
+            # The bar shows the request as sent, its trailing context message included.
+            tail=[c] if (c:=rt.context_message(gid)) else []
+            measured=rt.model.tokens([rt.system(),*messages,*tail],TOOLS)
             out,compacted=rt._compact(gid,messages)
             self.assertEqual((out,compacted),(messages,False))
             note=json.loads((self.home/'context.json').read_text())

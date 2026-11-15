@@ -322,16 +322,24 @@ class Runtime:
         root.mkdir(parents=True, exist_ok=True)
         out = root / (cid + '.tar')
         missing = []
+        # Relative paths mean what they mean to the terminal, whose commands start in the agent home. The archive
+        # members and the manifest both hold the absolute path, so rollback removes and restores the same files
+        # (a relative name was removed relative to the daemon's directory and restored under /).
+        resolved = [self._abs_path(p) for p in paths]
         with tarfile.open(out, 'w') as tf:
-            for p in paths:
-                path = Path(p).expanduser()
-                if not path.exists():
+            for path in resolved:
+                if not path.exists() and not path.is_symlink():
                     missing.append(str(path))
                     continue
                 tf.add(path, arcname=str(path).lstrip('/'))
-        self.store.add_checkpoint(cid, gid, label or '', [str(Path(p).expanduser()) for p in paths], out.stat().st_size)
+        self.store.add_checkpoint(cid, gid, label or '', [str(p) for p in resolved], out.stat().st_size)
         self.store.event('checkpoint', dict(id=cid, label=label, paths=paths, missing=missing), gid)
         return dict(id=cid, bytes=out.stat().st_size, missing=missing)
+
+    def _abs_path(self, p):
+        """an absolute path without following symlinks: ~ expanded, a relative path taken from the agent home"""
+        path = Path(p).expanduser()
+        return Path(os.path.normpath(path if path.is_absolute() else self.home / path))
 
     def _rollback(self, gid, cid):
         """Put the checkpoint's paths back exactly as they were when it was taken."""
@@ -343,7 +351,7 @@ class Runtime:
         if not archive.is_file():
             raise ValueError('the checkpoint archive is missing: ' + str(archive))
         for p in cp['paths']:                      # the snapshot is the truth: remove what was not there
-            path = Path(p)
+            path = self._abs_path(p)               # (manifests written before paths were resolved)
             if path.exists():
                 if path.is_dir():
                     shutil.rmtree(path)
@@ -549,9 +557,14 @@ class Runtime:
         the point. The caller re-states the goal and every steer after a compaction: a summary is the
         model's own words about the work, never a substitute for what the human asked for."""
         system = self.system(gid)
+        # Every check below measures the request as it is sent: the stable prefix, the history and the trailing
+        # context message (ROBOTS.md, IDENTITY.md, MEMORY.md, the loop state). Leaving the tail out let a full
+        # MEMORY.md push the real request past the window while the probe still saw room, and the goal then
+        # paused on a context error instead of compacting.
+        tail = [c] if (c := self.context_message(gid)) else []
         size = self.model.context_size()
         reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
-        before_tokens = self.model.tokens([system, *messages], TOOLS)
+        before_tokens = self.model.tokens([system, *messages, *tail], TOOLS)
         trigger_tokens = int(size * self.config.get('compact_threshold', .85))
         target_tokens = int(size * self.config.get('compact_target_ratio', .2))
         if not force and before_tokens < trigger_tokens and before_tokens + reserve < size:
@@ -575,7 +588,7 @@ class Runtime:
                 start -= 1
             if start == 1:
                 start = len(messages)
-        pinned_tokens = self.model.tokens([system, messages[0]], TOOLS)
+        pinned_tokens = self.model.tokens([system, messages[0], *tail], TOOLS)
         # The fixed head - the prompt, the tool schemas and the goal - is not negotiable, and every tool the
         # loop grows makes it bigger. On a small window the target can land below it, so compact as far as
         # the head allows rather than refusing to compact at all.
@@ -611,7 +624,7 @@ class Runtime:
             summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
-        after_tokens = self.model.tokens([system,*compacted],TOOLS)
+        after_tokens = self.model.tokens([system,*compacted,*tail],TOOLS)
         if after_tokens + reserve >= size or (not force and after_tokens > target_tokens):
             raise ModelContextError('compacted context exceeds its target; shorten the goal or memory')
         if after_tokens > before_tokens:
@@ -619,7 +632,7 @@ class Runtime:
         # The human's own words go back after the summary: fixed overhead, checked against the window but
         # not against "must be smaller" - on a short goal that overhead is legitimately the larger part.
         compacted = self._restate_goal(gid, compacted)
-        restated_tokens = self.model.tokens([system,*compacted],TOOLS)
+        restated_tokens = self.model.tokens([system,*compacted,*tail],TOOLS)
         if restated_tokens + reserve >= size:
             raise ModelContextError('the goal and its steers do not fit the model window; shorten the goal')
         after_tokens = restated_tokens
