@@ -493,6 +493,19 @@ class Resident(unittest.TestCase):
         try:self.assertEqual([e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged'],['not_yet','met'])
         finally:store.close()
 
+    def test_a_wait_verdict_points_at_the_wait_tool_and_is_not_a_refusal(self):
+        self.gates_on()
+        self.verdicts(dict(verdict='wait',reason='the build started at step 2 has not finished'),
+                      dict(verdict='wait',reason='still building'),
+                      dict(verdict='wait',reason='still building'),
+                      dict(verdict='met',reason='the build log shows success'))
+        self.replies(call('define_done',dict(check='the build succeeds')),
+                     *[c for _ in range(4) for c in (call('verify',dict(evidence='build.log')),call('finish',dict(summary='Done.')))])
+        out=self.cmd('once',['--goal','Build it.'])
+        self.assertEqual(out['state'],'completed','three waits are not three refusals (JUDGE_LIMIT is 3)')
+        bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
+        self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
+
     def test_an_impossible_verdict_pauses_the_goal_for_the_human(self):
         self.gates_on()
         self.verdicts(dict(verdict='impossible',reason='writing /etc needs root and none was approved'))

@@ -6,8 +6,11 @@ When a graded goal calls finish (after define_done and verify), two things run b
    the finish and its output becomes the agent's next prompt.
 2. The judge: a fresh model call with no tools that sees the goal, the done check, the human's steers, the recorded
    evidence and the recent tool results - not the agent's reasoning or its plan. It applies the evidence rules and
-   answers met, not_yet or impossible. not_yet refuses the finish with the reason; impossible pauses the goal and tells
-   the human. After JUDGE_LIMIT refusals the goal pauses instead of looping (agent and judge disagree: a person decides).
+   answers met, not_yet, wait or impossible (the design's done / continue / wait / blocked). not_yet refuses the finish
+   with the reason; wait refuses it because the proof depends on something still running (a build, CI, a service
+   coming up) and points the agent at its wait tool; impossible pauses the goal and tells the human. After JUDGE_LIMIT
+   refusals the goal pauses instead of looping (agent and judge disagree: a person decides); waits have their own,
+   looser limit (WAIT_LIMIT), since waiting for a slow job is not a disagreement.
 
 The judge runs on the agent's own model in a fresh context by default, so it costs nothing on a local brain. With config
 `judge_model: "advisor"` it runs on the advisor's model instead (an independent reviewer, paid from the advisor's daily
@@ -22,6 +25,7 @@ import subprocess
 
 GATE_TIMEOUT = 600
 JUDGE_LIMIT = 3
+WAIT_LIMIT = 6
 EVIDENCE_RESULTS = 12
 
 SYSTEM = '''JUDGE. You check whether an agent's goal is done. You see the goal, the done check the agent wrote, its human's
@@ -32,10 +36,12 @@ Evidence rules:
 - A command's exit code and output, a file's content, a test result: these are evidence.
 - An approval or decision by the human needs a real human message in the steers, not the agent's say-so.
 - The done check and every steer must be satisfied, not most of them.
+- If the work is done but the proof depends on something still running or not yet observable (a build, a test run,
+  CI, a service starting, a scheduled job), say wait, and name what to wait for.
 - If the evidence shows the goal cannot be done as asked (a missing permission, a contradiction), say impossible.
 
 Answer with one JSON object and nothing else:
-{"verdict": "met" | "not_yet" | "impossible", "reason": "one or two sentences naming the evidence or what is missing"}'''
+{"verdict": "met" | "not_yet" | "wait" | "impossible", "reason": "one or two sentences naming the evidence, what is missing, or what to wait for"}'''
 
 
 def run_gate(home, gate):
@@ -77,7 +83,7 @@ def verdict(text):
         v = json.loads(m.group(0))
     except ValueError:
         return None
-    if v.get('verdict') not in ('met', 'not_yet', 'impossible'):
+    if v.get('verdict') not in ('met', 'not_yet', 'wait', 'impossible'):
         return None
     return dict(verdict=v['verdict'], reason=str(v.get('reason', ''))[:1000])
 
@@ -114,7 +120,7 @@ def review(rt, gid, result):
         if v is None:                                    # once more, strictly
             text, who = ask(messages + [dict(role='assistant', content=text[:2000]),
                                         dict(role='user', content='Answer with only the JSON object: '
-                                             '{"verdict": "met" | "not_yet" | "impossible", "reason": "..."}')])
+                                             '{"verdict": "met" | "not_yet" | "wait" | "impossible", "reason": "..."}')])
             v = verdict(text)
     except Exception as e:                               # the brain is down or refused: do not trap the goal
         rt.store.event('judged', dict(verdict='unread', reason=f'the judge call failed: {type(e).__name__}'), gid)
@@ -130,6 +136,15 @@ def review(rt, gid, result):
     if v['verdict'] == 'impossible':
         return dict(error='the judge found the goal cannot be done as asked: ' + v['reason'] +
                     ' The goal is paused for your human.', pause='judge: impossible: ' + v['reason'])
+    if v['verdict'] == 'wait':
+        waits = rt.store.db.execute(
+            "SELECT count(*) FROM events WHERE goal=? AND kind='judged' AND data LIKE '%\"verdict\": \"wait\"%'",
+            (gid,)).fetchone()[0]               # this verdict is already recorded above
+        if waits >= WAIT_LIMIT:
+            return dict(error=f'the judge has said wait {waits} times (latest: {v["reason"]}). The goal is paused for '
+                        'your human.', pause='judge said wait %d times: %s' % (waits, v['reason']))
+        return dict(error='not proven yet, something is still running: ' + v['reason'] + ' Use the wait tool (until '
+                    'process, port, file, session or time) for it instead of polling, then verify and finish again.')
     if refusals + 1 >= JUDGE_LIMIT:
         return dict(error=f'the judge refused this finish {refusals + 1} times (latest: {v["reason"]}). The goal is '
                     'paused for your human to decide.', pause='judge refused the finish %d times: %s'
