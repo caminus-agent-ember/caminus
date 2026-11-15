@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 
-from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices
+from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices, price
 from .store import log_failure, Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
@@ -962,6 +962,30 @@ class Runtime:
             self.store.event('watchdog', dict(reason=reason or 'stopped', **(detail or {})), gid)
         return True
 
+    def _meter(self, gid):
+        """Every priced turn, whichever brain served it, into spend.json (per day and per goal): what the status line
+        shows. The budgets (free time, the fallback, the advisor) keep their own ledgers; this one only reports."""
+        usd = price((getattr(self.model, 'config', None) or {}).get('model') or self.config.get('model'),
+                    getattr(self.model, 'last_usage', None) or {},
+                    (getattr(self.model, 'last_call', None) or {}).get('served'))
+        if not usd:
+            return
+        import datetime
+        path = self.home / 'spend.json'
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        day = state.setdefault('days', {}).setdefault(datetime.date.today().isoformat(), dict(usd=0.0, turns=0))
+        day['usd'] = round(day['usd'] + usd, 6)
+        day['turns'] += 1
+        goals = state.setdefault('goals', {})
+        goals[gid] = round(goals.get(gid, 0.0) + usd, 6)
+        if len(goals) > 500:                  # bounded: the oldest goals' totals go first
+            for k in list(goals)[:len(goals) - 500]:
+                goals.pop(k)
+        atomic_json(path, state)
+
     def compaction_ratios(self):
         """(trigger, target) as fractions of the window. A paid brain resends its whole context every turn, so it
         compacts earlier: by default at 38 % of the window and down to 7.6 % (the owner's Hermes setting: on a 1M
@@ -998,9 +1022,18 @@ class Runtime:
             for gid in rows:
                 self.store.update(gid, state='paused', error='emergency stop: ' + reason)
                 self.store.event('emergency_stop', dict(reason=reason), gid)
+        import signal as _signal
         if not getattr(self, '_stopped', False):
-            self.store.event('emergency_stop', dict(reason=reason, paused=len(rows)))
-            self._stopped = True
+            # Commands already running in the agent's terminals are ended too: TERM now, KILL ten seconds later for any
+            # that ignore it. (A process the agent detached into its own session is outside their process groups.)
+            ended = self.terminal.signal_running(_signal.SIGTERM) if hasattr(self.terminal, 'signal_running') else []
+            self.store.event('emergency_stop', dict(reason=reason, paused=len(rows), terminals_ended=ended))
+            self._stopped, self._stop_at, self._stop_killed = True, time.time(), False
+        elif not self._stop_killed and time.time() - self._stop_at >= 10:
+            self._stop_killed = True
+            left = self.terminal.signal_running(_signal.SIGKILL) if hasattr(self.terminal, 'signal_running') else []
+            if left:
+                self.store.event('emergency_stop', dict(reason=reason, terminals_killed=left))
         return True
 
     def _apply_pauses(self):
@@ -1187,6 +1220,7 @@ class Runtime:
             self._throughput_note(gid,getattr(self.model,'last_speed',None))
             self.free.account(gid)
             self.brains.account(gid)
+            self._meter(gid)
             if self.store.goal(gid)['state']=='cancelled':
                 return True
             self.retry.pop(gid,None)

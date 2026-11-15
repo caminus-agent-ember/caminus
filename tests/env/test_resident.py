@@ -1334,6 +1334,21 @@ for line in sys.stdin:
             self.assertFalse(rt._emergency_stop(),'only the bridge stop counts: a file in the agent home it could delete')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_emergency_stop_ends_running_terminal_commands(self):
+        rt=Runtime(self.home)
+        try:
+            out=rt.terminal.call('a'*32,dict(command='sleep 300',yield_ms=300))
+            self.assertTrue(out['running'])
+            pid=json.loads((self.home/'jobs'/('a'*32)/'state.json').read_text())['pid']
+            self.bridge.mkdir(parents=True,exist_ok=True);(self.bridge/'STOP').write_text('halt\n')
+            self.assertTrue(rt._emergency_stop())
+            end=time.time()+5
+            while time.time()<end and rt.terminal.call('a'*32,dict(yield_ms=100))['running']:pass
+            self.assertFalse(rt.terminal.call('a'*32,dict(yield_ms=100))['running'],'the running command was ended')
+            ev=[e for e in rt.store.events() if e['kind']=='emergency_stop' and 'terminals_ended' in e['data']]
+            self.assertEqual(ev[0]['data']['terminals_ended'],['a'*32])
+        finally:rt.mail.close();rt.store.close()
+
     def test_pause_is_applied_between_steps(self):
         rt=Runtime(self.home)
         try:
@@ -1385,6 +1400,23 @@ for line in sys.stdin:
         finally:rt.mail.close();rt.store.close()
         self.assertIn('Sketched a tide pool',self.cmd('heartbeat',['recap','--since','0'])['recap'])
         self.assertEqual(self.cmd('heartbeat',['recap','--since',str(time.time()+60)])['recap'],'','nothing since then')
+
+    def test_every_priced_turn_is_metered_and_reported(self):
+        from caminus.env.resident.model import remember_prices
+        remember_prices('zai-org/GLM-5.2',dict(input=1.0,output=2.0))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Spend.')
+            rt.model.config=dict(rt.model.config,model='zai-org/GLM-5.2')
+            rt.model.last_usage=dict(prompt_tokens=1_000_000,completion_tokens=500_000)
+            rt._meter(gid);rt._meter(gid)
+            rt.model.config=dict(rt.model.config,model='fixture');rt._meter(gid)   # an unpriced (local) turn adds nothing
+        finally:rt.mail.close();rt.store.close()
+        st=self.cmd('status')
+        self.assertAlmostEqual(st['spend_today'],4.0);self.assertAlmostEqual(st['spend_goals'][gid],4.0)
+        conf=json.loads((self.home/'config.json').read_text());conf['relay']=True;(self.home/'config.json').write_text(json.dumps(conf))
+        st=self.cmd('status')
+        self.assertAlmostEqual(st['compact_threshold'],.38,msg='a paid brain reports the early trigger')
 
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model

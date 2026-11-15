@@ -539,10 +539,21 @@ def main(argv=None,stdin=None):
             measured=json.loads((home/'context.json').read_text()) if (home/'context.json').exists() else {}
             # Measured decode speed of the last streamed reply; absent until a reply reports usage.
             speed=json.loads((home/'throughput.json').read_text()) if (home/'throughput.json').exists() else {}
+            # the thresholds in force: a paid brain (remote, or through the key relay) compacts early
+            from .runtime import PAID_COMPACT
+            from .model import LOOPBACK
+            paid=bool(cfg.get('relay')) or urllib.parse.urlsplit(cfg.get('endpoint') or '').hostname not in LOOPBACK
+            trig,targ=((cfg.get('paid_compact_threshold',PAID_COMPACT[0]),cfg.get('paid_compact_target_ratio',PAID_COMPACT[1]))
+                       if paid else (cfg.get('compact_threshold',.85),cfg.get('compact_target_ratio',.2)))
+            import datetime as _dt
+            try:spend=json.loads((home/'spend.json').read_text())
+            except (OSError,ValueError):spend={}
+            spend_today=((spend.get('days') or {}).get(_dt.date.today().isoformat()) or {}).get('usd',0.0)
             emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       tok_per_s=speed.get('tps') if isinstance(speed,dict) else None,
-                      compact_threshold=cfg.get('compact_threshold',.85),compact_target_ratio=cfg.get('compact_target_ratio',.2),
+                      compact_threshold=trig,compact_target_ratio=targ,
+                      spend_today=spend_today,spend_goals=spend.get('goals') or {},
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,**store.status()),True)
             store.close();return 0
         if a.op=='events':
