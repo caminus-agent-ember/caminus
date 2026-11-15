@@ -2924,6 +2924,103 @@ for line in sys.stdin:
         self.assertIn('100 characters omitted',text)
         self.assertNotIn('x'*4001,text)
 
+    def test_diff_reports_the_repos_a_goal_touched(self):
+        def git(repo,*a,commit=False):
+            args=['git','-C',str(repo)]
+            if commit:args+=['-c','user.name=t','-c','user.email=t@t']
+            return subprocess.run([*args,*a],capture_output=True,text=True,check=True)
+        repo=self.home/'proj';(repo/'src').mkdir(parents=True)
+        git(repo,'init','-q')
+        (repo/'src'/'x.py').write_text('original\n')
+        git(repo,'add','.',commit=True);git(repo,'commit','-qm','base',commit=True)
+        (repo/'src'/'x.py').write_text('original\nadded line\n')
+        # a second repo holding a diff past the 200 KB cap
+        big=self.home/'big';big.mkdir()
+        git(big,'init','-q')
+        (big/'blob.txt').write_text('a'*300000)
+        git(big,'add','.',commit=True);git(big,'commit','-qm','base',commit=True)
+        (big/'blob.txt').write_text('a'*300000+'b'*300000)
+        # a third repo the goal never touched never appears
+        clean=self.home/'clean';clean.mkdir();git(clean,'init','-q')
+        self.replies(call('finish',dict(summary='done')))
+        gid=self.cmd('once',['--goal','ZDIFF goal.'])['id']
+        store=Store(self.home)
+        try:
+            for aid,call_id,name,args in (('da1','dc1','edit',{'path':'proj/src/x.py'}),
+                                          ('da2','dc2','edit',{'path':'proj/src/x.py'}),
+                                          ('da3','dc3','terminal',{'cwd':'proj'}),
+                                          ('da4','dc4','write',{'path':str(big/'blob.txt')})):
+                store.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
+                                 (aid,gid,call_id,name,json.dumps(args),'done'))
+        finally:store.close()
+        out=self.cmd('diff',[gid])
+        self.assertEqual(out['goal'],gid)
+        self.assertEqual(sorted(r['path'] for r in out['repos']),sorted([str(repo),str(big)]))
+        small=[r for r in out['repos'] if r['path']==str(repo)][0]
+        self.assertIn('src/x.py',small['stat'])
+        self.assertIn('+added line',small['diff'])
+        self.assertFalse(small['truncated'])
+        bigr=[r for r in out['repos'] if r['path']==str(big)][0]
+        self.assertTrue(bigr['truncated'])
+        self.assertLessEqual(len(bigr['diff'].encode()),200*1024)
+        self.assertNotIn(str(clean),json.dumps(out['repos']))  # the untouched repo never appears
+
+        self.assertEqual(self.cmd('diff')['goal'],gid)
+        # a goal with no tool actions lists no repos
+        self.replies(call('finish',dict(summary='done')))
+        other=self.cmd('once',['--goal','ZDIFF untouched.'])['id']
+        self.assertEqual(self.cmd('diff',[other]),dict(goal=other,repos=[]))
+
+    def test_rewind_restores_files_and_cuts_the_transcript(self):
+        from caminus.env.resident.runtime import Runtime as RT
+        afile=self.home/'notes'/'a.txt';afile.parent.mkdir(parents=True,exist_ok=True)
+        afile.write_text('OLD ONE\n')                 # a file that was there before the goal touched it
+        self.replies(call('define_done',dict(check='files in place')),
+                     call('write',dict(path='notes/a.txt',content='NEW ONE\n')),
+                     call('write',dict(path='notes/b.txt',content='NEW TWO\n')),
+                     call('finish',dict(summary='ZREWIND done.')))
+        gid=self.cmd('once',['--goal','ZREWIND goal.'])['id']
+        self.assertEqual(self.cmd('rewind',[gid,'--list'])['steps'],
+                         [dict(step=2,label='write notes/a.txt'),dict(step=3,label='write notes/b.txt')])
+        # rewinding to step 2: what step 3 created disappears, what step 2 did stands
+        out=self.cmd('rewind',[gid,'--to','2'])
+        self.assertEqual(out['goal'],gid);self.assertEqual(out['to'],2)
+        self.assertEqual(out['restored'],[])
+        self.assertEqual(out['removed'],[str(self.home/'notes'/'b.txt')])
+        self.assertIn('terminal side effects are not undone',out['note'])
+        self.assertFalse((self.home/'notes'/'b.txt').exists())
+        self.assertEqual(afile.read_text(),'NEW ONE\n')
+        st={g['id']:g for g in self.cmd('status')['goals']}[gid]
+        self.assertEqual((st['state'],st['steps']),('paused',2))
+        self.assertIn('rewound to step 2',st['error'])
+        self.assertIn('rewound',[e['kind'] for e in self.cmd('events')])
+        store=Store(self.home)
+        try:
+            ms=store.goal(gid)['messages']
+            self.assertEqual([m['role'] for m in ms],
+                             ['user','user','assistant','tool','assistant','tool'])  # [1] is the startup discovery
+            self.assertIn('notes/a.txt',json.loads(ms[4]['tool_calls'][0]['function']['arguments'])['path'])
+            # a file over the cap is recorded but not restorable: the rewind names it as skipped
+            bigp=self.home/'big.bin';bigp.write_bytes(b'x'*(RT.SNAPSHOT_CAP+1))
+            rt=RT(self.home)
+            try:rt._snapshot_file(gid,'write','big.bin')
+            finally:rt.mail.close();rt.store.close()
+            # rewinding to 1: a.txt goes back to what was on disk before the goal
+            out2=self.cmd('rewind',[gid,'--to','1'])
+            self.assertEqual(out2['restored'],[str(afile)])
+            self.assertEqual(out2['skipped'],[str(bigp)])
+            self.assertEqual(afile.read_text(),'OLD ONE\n')
+            listed=self.cmd('rewind',[gid,'--list'])['steps']
+            self.assertIn('skipped',listed[-1]['label'])
+            self.assertTrue(bigp.exists())            # not restorable does not mean deleted
+        finally:store.close()
+        # and the goal carries on from the cut point
+        self.cmd('resume',[gid])
+        self.replies(call('finish',dict(summary='finished after rewind.')))
+        self.cmd('once',['--goal-id',gid])
+        st={g['id']:g for g in self.cmd('status')['goals']}[gid]
+        self.assertEqual(st['state'],'completed')
+
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
     def __init__(self,*answers):self.answers=deque(answers);self.requests=[]

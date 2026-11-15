@@ -640,6 +640,72 @@ class Runtime:
         self.store.event('rollback', dict(id=cid, label=cp['label'], paths=cp['paths']), gid)
         return dict(id=cid, restored=cp['paths'])
 
+    SNAPSHOT_CAP = 2 * 1024 * 1024     # bytes of a file kept for /rewind; over this the step is recorded, not restorable
+
+    def _snapshot_file(self, gid, name, path):
+        """Before an edit or write runs, keep the bytes the tool is about to replace (file_snapshots)."""
+        abs_path = self._abs_path(path)
+        existed = abs_path.exists() and abs_path.is_file()
+        try:
+            content = abs_path.read_bytes() if existed else b''
+            skipped = len(content) > self.SNAPSHOT_CAP
+        except OSError:
+            content, skipped = b'', True
+        self.store.add_snapshot(gid, self.store.goal(gid)['steps'], str(abs_path),
+                                f'{name} {path}', existed, b'' if skipped else content, skipped)
+
+    def _rewind(self, gid, to):
+        """Put every file changed after step `to` back, delete the ones that did not exist, and cut the
+        transcript to that step. Terminal side effects are not undone: only edit / write are snapshotted."""
+        if to < 0:
+            raise ValueError('step numbers start at 1')
+        restored, removed, skipped = [], [], []
+        for s in reversed(self.store.file_snapshots(gid)):
+            if s['step'] <= to:
+                continue
+            path = Path(s['path'])
+            if s['skipped']:
+                if str(path) not in skipped:
+                    skipped.append(str(path))
+                continue
+            if s['existed']:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(self.store.file_snapshot_content(s['id']))
+                if str(path) not in restored:
+                    restored.append(str(path))
+            else:
+                if path.exists():
+                    path.unlink()
+                if str(path) not in removed:
+                    removed.append(str(path))
+        with self.store.transaction():
+            g = self.store.goal(gid)
+            cut = len(g['messages'])
+            seen = 0
+            for i, m in enumerate(g['messages']):
+                if m.get('role') == 'assistant':
+                    seen += 1
+                    if seen > to:
+                        cut = i
+                        break
+            self.store.update(gid, messages=g['messages'][:cut], steps=to, state='paused', summary='',
+                              error='rewound to step %d (terminal side effects are not undone)' % to)
+        self.store.event('rewound', dict(to=to, restored=restored, removed=removed, skipped=skipped), gid)
+        return dict(restored=restored, removed=removed, skipped=skipped)
+
+    def _apply_rewinds(self):
+        """/rewind: queued like /pause and applied here, between steps, so a tool is never cut off mid-call."""
+        for gid in self.store.pending_requests('rewind'):
+            req = self.store.pending_request(gid, 'rewind')
+            if req is None:
+                continue
+            try:
+                self._rewind(gid, int(json.loads(req['data'])['to']))
+                self.store.settle_request(req['id'], 'done')
+            except Exception as e:
+                self.store.settle_request(req['id'], 'failed', str(e))
+                self.store.event('rewind_failed', dict(error=str(e)), gid)
+
     def _verify(self, gid, evidence):
         evidence = (evidence or '').strip()
         if not evidence:
@@ -751,8 +817,10 @@ class Runtime:
                 elif name == 'read':
                     result = files.read(self.home, args['path'], args.get('offset'), args.get('limit'))
                 elif name == 'edit':
+                    self._snapshot_file(action['goal'], name, args['path'])
                     result = files.edit(self.home, args['path'], args['old'], args['new'], bool(args.get('replace_all')))
                 elif name == 'write':
+                    self._snapshot_file(action['goal'], name, args['path'])
                     result = files.write(self.home, args['path'], args['content'])
                 elif name == 'lease':
                     result = leases.tool(self, action['goal'], args['action'], args.get('cards'), args.get('ram_gib', 0),
@@ -1565,6 +1633,7 @@ class Runtime:
             if not target and self._maybe_update():
                 return None                   # systemd restarts the daemon on the new runtime
             self._apply_pauses()
+            self._apply_rewinds()
             if self._emergency_stop():
                 if time.time()-last_heartbeat>=5:
                     atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='stopped',runtime=RUNTIME))

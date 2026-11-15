@@ -87,9 +87,17 @@ class Store:
           -- workspace back the way it was, without assuming the paths are one git repository.
           CREATE TABLE IF NOT EXISTS checkpoints(id TEXT PRIMARY KEY, goal TEXT, label TEXT, paths TEXT,
                                                  ts REAL, bytes INTEGER);
+          -- A file snapshot is taken just before an edit / write runs, so /rewind can put the files of a
+          -- later step back (terminal side effects are not undone). content holds the bytes as they were,
+          -- or empty when skipped says the file was over the cap.
+          CREATE TABLE IF NOT EXISTS file_snapshots(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL, step INTEGER NOT NULL,
+            path TEXT NOT NULL, label TEXT NOT NULL, existed INTEGER NOT NULL,
+            content BLOB, skipped INTEGER NOT NULL DEFAULT 0);
           CREATE INDEX IF NOT EXISTS steers_goal ON steers(goal,id);
           CREATE INDEX IF NOT EXISTS checkpoints_goal ON checkpoints(goal,ts);
           CREATE INDEX IF NOT EXISTS failures_goal ON failures(goal,signature);
+          CREATE INDEX IF NOT EXISTS file_snapshots_goal ON file_snapshots(goal,step);
         ''')
         self._migrate()
 
@@ -264,6 +272,30 @@ class Store:
     def checkpoints(self, gid):
         return [dict(r) for r in self.db.execute(
             'SELECT id,label,ts,bytes FROM checkpoints WHERE goal=? ORDER BY ts DESC LIMIT 20', (gid,))]
+
+    def add_snapshot(self, gid, step, path, label, existed, content, skipped=False):
+        self.db.execute('INSERT INTO file_snapshots(goal,step,path,label,existed,content,skipped) '
+                        'VALUES(?,?,?,?,?,?,?)', (gid, step, path, label, 1 if existed else 0,
+                                                  sqlite3.Binary(content or b''), 1 if skipped else 0))
+
+    def file_snapshots(self, gid):
+        """The goal's snapshots in the order they were taken; content is not carried (rewind reads it row by row)."""
+        return [dict(r) for r in self.db.execute(
+            'SELECT id,step,path,label,existed,skipped FROM file_snapshots WHERE goal=? ORDER BY id', (gid,))]
+
+    def file_snapshot_content(self, sid):
+        return self.db.execute('SELECT content FROM file_snapshots WHERE id=?', (sid,)).fetchone()['content']
+
+    def rewind_steps(self, gid):
+        """One entry per step with snapshots, in order: what /rewind --list offers."""
+        out = []
+        for r in self.db.execute('SELECT step,label,skipped FROM file_snapshots WHERE goal=? ORDER BY id', (gid,)):
+            label = ('skipped (over the cap): ' if r['skipped'] else '') + r['label']
+            if out and out[-1]['step'] == r['step']:
+                out[-1]['label'] += '; ' + label
+            else:
+                out.append(dict(step=r['step'], label=label))
+        return out
 
     def next_goal(self):
         # The queue's explicit order (position); COALESCE keeps an older row that predates it in place.
