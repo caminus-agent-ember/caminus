@@ -47,6 +47,12 @@ def parser():
             p.add_argument('--compaction-model',help='optional model alias for summaries on the same endpoint')
             p.add_argument('--api-key-env',default='CAMINUS_AGENT_API_KEY')
             p.add_argument('--bus',help='shared agent-side SQLite mail bus; defaults under ~/.local/share/caminus/agents')
+            p.add_argument('--idle-timeout',type=float,default=0,
+                           help='seconds without progress before the watchdog pauses the goal (0: off)')
+            p.add_argument('--token-budget',type=int,default=0,
+                           help='prompt tokens a goal may reach before the watchdog pauses it (0: off)')
+            p.add_argument('--no-loop-gates',action='store_true',
+                           help='record loop_gates false: a fixture agent that predates the done check and skips it')
         if op=='message':
             p.add_argument('to')
             p.add_argument('--text')
@@ -161,7 +167,8 @@ def main(argv=None,stdin=None):
             cfg=dict(name=a.name,model=a.model,endpoint=a.endpoint.rstrip('/'),bridge=a.bridge,
                      context=a.context,max_tokens=a.max_tokens,api_key_env=a.api_key_env,bus=a.bus,
                      compact_threshold=a.compact_threshold,compact_target_ratio=a.compact_target_ratio,
-                     compaction_model=a.compaction_model)
+                     compaction_model=a.compaction_model,loop_gates=not a.no_loop_gates,
+                     idle_timeout=a.idle_timeout,token_budget=a.token_budget)
             if not cfg['endpoint'].endswith('/v1'):cfg['endpoint']+='/v1'
             from .model import Model
             Model(cfg)                     # validate before persisting

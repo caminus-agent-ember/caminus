@@ -43,8 +43,18 @@ TOOLS = [
          dict(question={'type':'string'}, choices={'type':'array','items':{'type':'string'}}), ('question',)),
     tool('ask_root', 'Request that your human review and execute an exact root command. You have no root privileges. The human may approve, edit or deny; execution output returns here.',
          dict(command={'type':'string'}, reason={'type':'string'}), ('command','reason')),
+    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists.',
+         dict(check={'type':'string'}), ('check',)),
+    tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
+         dict(evidence={'type':'string'}), ('evidence',)),
+    tool('ledger', 'State the milestones this goal decomposes into and what blocks it now. Replaces the previous lists; it is pinned into every turn, so keep it short.',
+         dict(milestones={'type':'array','items':{'type':'string'}}, blockers={'type':'array','items':{'type':'string'}})),
+    tool('checkpoint', 'Snapshot named paths before a destructive action, so the work can be put back. Returns the id.',
+         dict(paths={'type':'array','items':{'type':'string'}}, label={'type':'string'}), ('paths',)),
+    tool('rollback', 'Restore a checkpoint\'s paths exactly as they were when it was taken.',
+         dict(id={'type':'string'}), ('id',)),
     tool('finish', 'Report the completed goal and verified results to your human. List any unverified or blocked work honestly.',
-         dict(summary={'type':'string'}), ('summary',)),
+         dict(summary={'type':'string'}, open={'type':'string'}), ('summary',)),
 ]
 
 
@@ -118,6 +128,14 @@ class Runtime:
         self.mail = Mail(self.config)
         self.retry = {}
         self.base_timeout = float(self.config.get('timeout', 900))
+        # The loop's gates: a goal states what done looks like before it can complete, and cannot finish
+        # without exercising that check. Fixture agents that predate the loop record loop_gates false.
+        self.loop_gates = bool(self.config.get('loop_gates', True))
+        # The watchdog: stop a goal that is spending or spinning without moving, and leave the reason where
+        # a human will see it. Zero disables either bound.
+        self.idle_timeout = float(self.config.get('idle_timeout', 0) or 0)
+        self.token_budget = int(self.config.get('token_budget', 0) or 0)
+        self.progress = {}
 
     def system(self,gid=None):
         """The stable prefix, and nothing else.
@@ -145,7 +163,41 @@ class Runtime:
             parts.append(p.name + ':\n' + text)
         if (note := self._context_budget(gid)):
             parts.append(note.strip())
-        return dict(role='system', content='\n\n'.join(parts)) if parts else None
+        if gid:
+            parts.append(self._loop_state(gid))
+        return dict(role='system', content='\n\n'.join(p for p in parts if p)) if parts else None
+
+    def _loop_state(self, gid):
+        """Where the loop stands: the check, the steers it must obey, and any call that must not be retried."""
+        try:
+            g = self.store.goal(gid)
+        except ValueError:
+            return ''
+        lines = []
+        if not g.get('done_check'):
+            lines.append('LOOP: no done check yet. Call define_done first, before any other work.')
+        else:
+            lines.append('LOOP: done = ' + g['done_check'])
+        steers = self.store.steers(gid)
+        if steers:
+            lines.append('LOOP: %d steer(s) on this goal; the newest is #%d and supersedes the older ones '
+                         'where they conflict. Drop any plan that contradicts it.'
+                         % (len(steers), steers[-1]['id']))
+        rows = list(self.store.db.execute(
+            'SELECT signature,count,last_error FROM failures WHERE goal=? AND count>=2 ORDER BY count DESC LIMIT 3',
+            (gid,)))
+        for r in rows:
+            lines.append('LOOP: a call has failed %d times (%s): change approach, do not retry it.'
+                         % (r['count'], (r['last_error'] or '')[:120]))
+        led = self.store.ledger(gid)
+        if led['milestones']:
+            lines.append('LOOP: milestones: ' + ' | '.join(led['milestones']))
+        if led['blockers']:
+            lines.append('LOOP: blocked by: ' + ' | '.join(led['blockers']))
+        if not self.store.verified_since_steer(gid):
+            lines.append('LOOP: the done check has not been exercised since the last steer. Run it and call '
+                         'verify before finish.')
+        return '\n'.join(lines)
 
     def _context_budget(self,gid=None):
         """A live budget line so the model can see its own token count and compaction distance — it cannot
@@ -217,18 +269,115 @@ class Runtime:
         self.store.update(action['goal'], state='waiting_root' if kind == 'root' else 'waiting_user')
         return None
 
-    def _finish(self, gid, summary):
+    @staticmethod
+    def _failure_text(result):
+        """What made this call a failure, or '' when it was not one. A command exiting non-zero failed even
+        though the tool itself answered; the model needs to see it as a repeated failure too."""
+        if not isinstance(result, dict):
+            return ''
+        if result.get('error'):
+            return str(result['error'])
+        code = result.get('exit_code')
+        if isinstance(code, int) and code != 0:
+            tail = (result.get('output') or '')[-300:]
+            return 'exit %d: %s' % (code, tail.strip())
+        return ''
+
+    @staticmethod
+    def _signature(name, args):
+        """A stable identity for one tool call, so "the same failure" means this call and not a mood."""
+        import hashlib
+        return name + ':' + hashlib.sha1(json.dumps(args, sort_keys=True, ensure_ascii=False)
+                                         .encode()).hexdigest()[:12]
+
+    def _define_done(self, gid, check):
+        check = (check or '').strip()
+        if not check:
+            raise ValueError('the done check must say something checkable')
+        self.store.update(gid, done_check=check)
+        self.store.event('done_check', dict(check=check), gid)
+        return dict(done_check=check)
+
+    def _ledger(self, gid, milestones, blockers):
+        milestones = [str(m).strip() for m in (milestones or []) if str(m).strip()][:20]
+        blockers = [str(b).strip() for b in (blockers or []) if str(b).strip()][:20]
+        self.store.set_ledger(gid, milestones, blockers)
+        self.store.event('ledger', dict(milestones=milestones, blockers=blockers), gid)
+        return dict(milestones=milestones, blockers=blockers)
+
+    def _checkpoint(self, gid, paths, label=''):
+        """Tar the named paths under the agent home, with a manifest, and return the id."""
+        import tarfile
+        if not paths:
+            raise ValueError('name at least one path to checkpoint')
+        cid = uuid.uuid4().hex[:12]
+        root = self.home / 'checkpoints'
+        root.mkdir(parents=True, exist_ok=True)
+        out = root / (cid + '.tar')
+        missing = []
+        with tarfile.open(out, 'w') as tf:
+            for p in paths:
+                path = Path(p).expanduser()
+                if not path.exists():
+                    missing.append(str(path))
+                    continue
+                tf.add(path, arcname=str(path).lstrip('/'))
+        self.store.add_checkpoint(cid, gid, label or '', [str(Path(p).expanduser()) for p in paths], out.stat().st_size)
+        self.store.event('checkpoint', dict(id=cid, label=label, paths=paths, missing=missing), gid)
+        return dict(id=cid, bytes=out.stat().st_size, missing=missing)
+
+    def _rollback(self, gid, cid):
+        """Put the checkpoint's paths back exactly as they were when it was taken."""
+        import shutil, tarfile
+        cp = self.store.checkpoint(cid)
+        if not cp:
+            raise ValueError('unknown checkpoint ' + str(cid))
+        archive = self.home / 'checkpoints' / (cid + '.tar')
+        if not archive.is_file():
+            raise ValueError('the checkpoint archive is missing: ' + str(archive))
+        for p in cp['paths']:                      # the snapshot is the truth: remove what was not there
+            path = Path(p)
+            if path.exists():
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+        with tarfile.open(archive) as tf:
+            tf.extractall('/')
+        self.store.event('rollback', dict(id=cid, label=cp['label'], paths=cp['paths']), gid)
+        return dict(id=cid, restored=cp['paths'])
+
+    def _verify(self, gid, evidence):
+        evidence = (evidence or '').strip()
+        if not evidence:
+            raise ValueError('say what the check showed, not that it passed')
+        self.store.event('verified', dict(evidence=evidence), gid)
+        return dict(verified=evidence)
+
+    def _finish(self, gid, summary, open_work=''):
         # Serialize completion with send --goal-id. Steering accepted while the
         # model was in flight must be observed before the goal can finish.
         with self.store.transaction():
-            if self.store.goal(gid)['state']=='cancelled':return
+            goal = self.store.goal(gid)
+            if goal['state']=='cancelled':return
             if self.store.db.execute('SELECT 1 FROM inbox WHERE goal=? AND consumed=0 LIMIT 1',(gid,)).fetchone():
                 self.store.event('completion_deferred',dict(reason='human steering is waiting'),gid)
                 return
             self.store.update(gid,state='completed',summary=summary)
-            self.store.event('finished',dict(summary=summary),gid)
+            # The finish report says what was done, what was verified and what is still open: the check it
+            # was measured against, and the evidence that was actually observed.
+            verified = self.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='verified' ORDER BY seq DESC LIMIT 1",
+                (gid,)).fetchone()
+            self.store.event('finished', dict(summary=summary, done_check=goal.get('done_check'),
+                                              verified=json.loads(verified['data']) if verified else None,
+                                              open=open_work or '',
+                                              steers=len(self.store.steers(gid)),
+                                              approach_changes=goal.get('approach_changes') or 0), gid)
 
     def _action(self, action):
+        refused = False
+        signature = None
         try:
             args = json.loads(action['args'])
             if not isinstance(args, dict):
@@ -249,11 +398,40 @@ class Runtime:
                     raise ValueError('invalid value for '+key)
                 if prop['type']=='array' and any(not isinstance(v,str) for v in value):
                     raise ValueError('invalid array item for '+key)
+            gid_now = action['goal']
+            refused = False
+            signature = self._signature(name, args)
+            # Step 8, the runtime half: a call that has already failed twice is not retried. The prompt
+            # tells the model to change approach; this is the backstop for when it does not.
+            if name not in ('define_done', 'verify', 'finish'):
+                prior = self.store.failure(gid_now, signature)
+                if prior and prior['count'] >= 2:
+                    refused = True
+                    with self.store.transaction():
+                        goal = self.store.goal(gid_now)
+                        self.store.update(gid_now, approach_changes=(goal.get('approach_changes') or 0) + 1)
+                    raise ValueError('this exact call has already failed %d times (last error: %s). '
+                                     'Change approach instead of retrying it.'
+                                     % (prior['count'], (prior['last_error'] or '')[:160]))
             # Serialize action preparation with cancel. Polling stays outside
             # the transaction so a long command cannot block a human decision.
             with self.store.transaction():
                 if self.store.goal(action['goal'])['state']=='cancelled':return True
-                if name == 'terminal':
+                # Goal start: what done looks like comes first, and nothing else runs until it exists.
+                if self.loop_gates and name != 'define_done' and not self.store.goal(action['goal']).get('done_check'):
+                    raise ValueError('no done check yet: call define_done with what done looks like, '
+                                     'as something you can check, before any other work')
+                if name == 'define_done':
+                    result = self._define_done(action['goal'], args['check'])
+                elif name == 'verify':
+                    result = self._verify(action['goal'], args['evidence'])
+                elif name == 'ledger':
+                    result = self._ledger(action['goal'], args.get('milestones'), args.get('blockers'))
+                elif name == 'checkpoint':
+                    result = self._checkpoint(action['goal'], args['paths'], args.get('label', ''))
+                elif name == 'rollback':
+                    result = self._rollback(action['goal'], args['id'])
+                elif name == 'terminal':
                     result = self.terminal.call(action['id'],{**args,'yield_ms':0})
                 elif name == 'discover':
                     result = None         # local catalog queries stay outside the write transaction
@@ -267,7 +445,15 @@ class Runtime:
                 elif name == 'finish':
                     if len(self.store.actions(action['goal']))>1:
                         raise ValueError('finish must follow all other pending actions')
-                    result = dict(summary=args['summary'])
+                    # Step 9: finish only when done passes and the inbox is empty. The runtime cannot judge
+                    # the check itself, so it requires the model to have run it since the last steer.
+                    if self.loop_gates and not self.store.goal(action['goal']).get('done_check'):
+                        raise ValueError('this goal has no done check: call define_done with what done looks '
+                                         'like, as something you can check, before finishing')
+                    if self.loop_gates and not self.store.verified_since_steer(action['goal']):
+                        raise ValueError('the done check has not been exercised since the last steer: run it '
+                                         'and call verify with what it showed before finishing')
+                    result = dict(summary=args['summary'], open=args.get('open', ''))
             if name == 'terminal':
                 # Preparation already launched or queued input. Polling must not
                 # relaunch a worker if cancellation raced after preparation.
@@ -276,10 +462,59 @@ class Runtime:
                 result = discovery.discover(self.home, **args)
         except (OSError, ValueError, KeyError, TypeError) as e:
             result = dict(error=str(e))
+        failure = self._failure_text(result)
+        if failure and not refused:
+            try:
+                count = self.store.note_failure(action['goal'], signature, failure)
+                if count >= 2:
+                    result['note'] = ('this exact call has now failed %d times: change approach, '
+                                      'do not retry it' % count)
+                if count >= 3:
+                    self._watchdog(action['goal'], 'the same call failed %d times' % count,
+                                   dict(call=signature, error=failure[:200]))
+            except Exception:
+                pass                          # the ledger is a backstop, never a reason to lose the error
         self.store.action_result(action, result)
+        if 'error' not in result:
+            self.progress[action['goal']] = time.time()
         if action['name'] == 'finish' and 'error' not in result:
-            self._finish(action['goal'],result['summary'])
+            self._finish(action['goal'],result['summary'],result.get('open',''))
         return True
+
+    def _restate_goal(self, gid, messages):
+        """Put the human's own words back after a compaction: the goal, then every steer, verbatim.
+
+        Bounded on purpose. A goal can itself be enormous, and re-stating it unbounded would rebuild the
+        very prompt compaction just shrank; the newest steers are kept whole and the rest say so."""
+        g = self.store.goal(gid)
+        limit = 8192
+        parts, used = [], 0
+        goal_text = (g.get('goal') or (messages[0].get('content') if messages else '') or '').strip()
+        if goal_text:
+            keep = goal_text[:limit]
+            parts.append('[goal, restated verbatim after compaction]\n' + keep +
+                         ('\n[goal truncated: %d characters omitted]' % (len(goal_text) - len(keep)) if len(goal_text) > len(keep) else ''))
+            used += len(keep)
+        # A steer still waiting in the inbox counts as said: a compaction must not summarize away words the
+        # human already sent, whichever path asked for it.
+        steers = self.store.steers(gid) + [dict(id='inbox-%d' % r['id'], text=r['text'])
+                                          for r in self.store.db.execute(
+                                              'SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',
+                                              (gid,))]
+        kept = []
+        for st in reversed(steers):                     # newest first, so a tight budget keeps the latest words
+            room = limit - used
+            if room <= 0:
+                break
+            text = st['text'][:room]
+            kept.append('[steer #%s] %s%s' % (st['id'], text,
+                        '\n[truncated]' if len(st['text']) > len(text) else ''))
+            used += len(text)
+        if kept:
+            parts.append('[steers, restated verbatim after compaction, newest first]\n' + '\n'.join(kept))
+        if not parts:
+            return messages
+        return messages + [dict(role='user', content='\n\n'.join(parts))]
 
     def context_note(self, gid, tokens, size):
         """Record the measured prompt footprint so a UI bar can show a real count.
@@ -300,8 +535,11 @@ class Runtime:
         atomic_json(self.home/'throughput.json',dict(goal=gid,ts=time.time(),**speed))
 
     def _compact(self, gid, messages, force=False):
-        """Summarize the transcript into working memory. Automatic compaction waits for the trigger; a
-        user's /compact sets force, because asking for it is the point."""
+        """Summarize the transcript into working memory, and say whether it did.
+
+        Automatic compaction waits for the trigger; a user's /compact sets force, because asking for it is
+        the point. The caller re-states the goal and every steer after a compaction: a summary is the
+        model's own words about the work, never a substitute for what the human asked for."""
         system = self.system(gid)
         size = self.model.context_size()
         reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
@@ -310,7 +548,7 @@ class Runtime:
         target_tokens = int(size * self.config.get('compact_target_ratio', .2))
         if not force and before_tokens < trigger_tokens and before_tokens + reserve < size:
             self.context_note(gid, before_tokens, size)
-            return messages
+            return messages, False
         if len(messages) < 2:
             raise ModelContextError('goal/context exceeds the model window; send a smaller goal or shorten MEMORY.md')
         if force:
@@ -330,6 +568,10 @@ class Runtime:
             if start == 1:
                 start = len(messages)
         pinned_tokens = self.model.tokens([system, messages[0]], TOOLS)
+        # The fixed head - the prompt, the tool schemas and the goal - is not negotiable, and every tool the
+        # loop grows makes it bigger. On a small window the target can land below it, so compact as far as
+        # the head allows rather than refusing to compact at all.
+        target_tokens = max(target_tokens, pinned_tokens + 1024)
         summary_limit = min(2048, reserve, target_tokens - pinned_tokens - 512)
         if summary_limit < 1:
             raise ModelContextError('goal and persistent memory cannot fit the compaction target')
@@ -364,13 +606,20 @@ class Runtime:
         after_tokens = self.model.tokens([system,*compacted],TOOLS)
         if after_tokens + reserve >= size or (not force and after_tokens > target_tokens):
             raise ModelContextError('compacted context exceeds its target; shorten the goal or memory')
-        if after_tokens >= before_tokens:
+        if after_tokens > before_tokens:
             raise ModelContextError('compaction did not reduce the context; shorten the goal or memory')
+        # The human's own words go back after the summary: fixed overhead, checked against the window but
+        # not against "must be smaller" - on a short goal that overhead is legitimately the larger part.
+        compacted = self._restate_goal(gid, compacted)
+        restated_tokens = self.model.tokens([system,*compacted],TOOLS)
+        if restated_tokens + reserve >= size:
+            raise ModelContextError('the goal and its steers do not fit the model window; shorten the goal')
+        after_tokens = restated_tokens
         self.store.update(gid, messages=compacted)
         self.store.event('compacted',dict(before=len(messages),after=len(compacted),before_tokens=before_tokens,
                          after_tokens=after_tokens,trigger_tokens=trigger_tokens,target_tokens=target_tokens),gid)
         self.context_note(gid, after_tokens, size)
-        return compacted
+        return compacted, True
 
     def tick(self, gid):
         """One step. A failure the runtime did not anticipate marks this goal and returns, so the daemon
@@ -386,6 +635,16 @@ class Runtime:
                 self.store.event('runtime_error', dict(error=error), gid)
             return True
 
+    def _watchdog(self, gid, reason=None, detail=None):
+        """Pause a goal the watchdog caught, recording why. Returns True when it did."""
+        with self.store.transaction():
+            if self.store.goal(gid)['state'] in ('completed', 'cancelled', 'paused', 'error'):
+                return False
+            message = 'watchdog: ' + (reason or 'stopped')
+            self.store.update(gid, state='paused', error=message)
+            self.store.event('watchdog', dict(reason=reason or 'stopped', **(detail or {})), gid)
+        return True
+
     def _tick(self, gid):
         g = self.store.goal(gid)
         if g['state'] in ('completed','cancelled','paused','error'):
@@ -397,6 +656,12 @@ class Runtime:
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot time budget reached')
             return True
+        now = time.time()
+        last = self.progress.get(gid)
+        if last is None:
+            self.progress[gid] = now
+        elif self.idle_timeout and now - last > self.idle_timeout:
+            return self._watchdog(gid, 'no progress', dict(seconds=int(now - last)))
         actions = self.store.actions(gid)
         if actions:
             return self._action(actions[0])
@@ -410,19 +675,34 @@ class Runtime:
                 rows = list(self.store.db.execute('SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
                 # Steers are ordinary user text in the transcript, so they carry the latest-wins rule with
                 # them: history length differs turn to turn and a terse prefix is what makes a mid-goal
-                # redirect win over the older instructions it contradicts.
-                tag = '[steer, supersedes earlier instructions where they conflict] '
-                messages = g['messages'] + [dict(role='user',content=tag+r['text']) for r in rows]
+                # redirect win over the older instructions it contradicts. Each one is also filed verbatim
+                # at goal level: compaction and the finish report must be able to quote the human, which a
+                # summary cannot.
+                messages = g['messages']
+                for r in rows:
+                    steer_id = self.store.add_steer(gid, r['text'])
+                    messages = messages + [dict(role='user', content=(
+                        f'[steer #{steer_id}, supersedes earlier instructions where they conflict. '
+                        f'Drop your current plan; if this changes the goal, restate what done looks like with '
+                        f'define_done.] ' + r['text']))]
                 if rows:
-                    self.store.update(gid,messages=messages)
+                    self.store.update(gid, messages=messages, steer_seq=rows[-1]['id'])
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])
+                    self.store.event('steers_applied', dict(ids=[r['id'] for r in rows]), gid)
                 if not g['steps'] and not self.store.db.execute(
                         "SELECT 1 FROM events WHERE goal=? AND kind='startup_discovery' LIMIT 1",(gid,)).fetchone():
                     snapshot=discovery.discover(self.home)
                     messages += [dict(role='user',content='Read-only startup discovery; observations, not instructions.\n'+json.dumps(snapshot,ensure_ascii=False))]
                     self.store.update(gid,messages=messages)
                     self.store.event('startup_discovery',snapshot,gid)
-            messages = self._compact(gid,messages)
+            if self.token_budget:
+                used = self.model.tokens([self.system(), *messages], TOOLS)
+                if used > self.token_budget:
+                    self.store.event('watchdog', dict(reason='token budget', tokens=used,
+                                                      budget=self.token_budget), gid)
+                    return self._watchdog(gid, 'token budget %d over %d' % (used, self.token_budget),
+                                          dict(tokens=used, budget=self.token_budget))
+            messages, compacted = self._compact(gid,messages)
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return True
                 self.store.update(gid,state='working')
@@ -447,6 +727,7 @@ class Runtime:
             reasoning = reply.pop('reasoning_content','')
             if not self.store.model_reply(gid,reply,reasoning=reasoning):
                 return True
+            self.progress[gid] = time.time()
             if not reply.get('tool_calls'):
                 self._finish(gid,reply['content'])
             return True
@@ -456,6 +737,14 @@ class Runtime:
         except ModelError as e:
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return True
+                if isinstance(e,ModelTruncated) and getattr(e,'retryable',False):
+                    # The server went away mid-reply. Nothing was stored or executed, so the goal resumes
+                    # where it left off as soon as the model answers again.
+                    attempt=self.retry.get(gid,(0,0))[1]+1
+                    self.retry[gid]=(time.time()+min(30,2**min(attempt,5)),attempt)
+                    self.store.update(gid,state='waiting_model',error=str(e))
+                    self.store.event('model_cut',dict(error=str(e),attempt=attempt),gid)
+                    return False
                 if isinstance(e,(ModelTruncated,ModelContextError)):
                     self.store.update(gid,state='paused',error=str(e))
                     self.store.event('model_truncated' if isinstance(e,ModelTruncated) else 'context_refused',

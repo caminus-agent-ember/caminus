@@ -58,6 +58,13 @@ class Store:
             id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
             text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS peer_deliveries(id TEXT PRIMARY KEY, goal TEXT, error TEXT);
+          -- Every steer, verbatim and at goal level: compaction and the finish report must be able to
+          -- quote what the human actually said, which a summarised transcript cannot.
+          CREATE TABLE IF NOT EXISTS steers(id INTEGER PRIMARY KEY, goal TEXT, text TEXT, ts REAL);
+          -- Failures by signature, so "the same failure twice" is a fact about this call, not a mood.
+          CREATE TABLE IF NOT EXISTS failures(id INTEGER PRIMARY KEY, goal TEXT, signature TEXT,
+                                              count INTEGER, last_error TEXT, ts REAL,
+                                              UNIQUE(goal,signature));
           -- A request is work the user asked for that only the runtime loop may do: compaction needs the
           -- model and the single writer, so the CLI records the wish and the loop performs it.
           CREATE TABLE IF NOT EXISTS requests(
@@ -71,7 +78,15 @@ class Store:
           CREATE INDEX IF NOT EXISTS actions_goal ON actions(goal,state);
           CREATE INDEX IF NOT EXISTS events_goal ON events(goal,kind);
           CREATE INDEX IF NOT EXISTS requests_open ON requests(kind,state);
+          -- A checkpoint is a tar snapshot of named paths plus its manifest: enough to put the human's
+          -- workspace back the way it was, without assuming the paths are one git repository.
+          CREATE TABLE IF NOT EXISTS checkpoints(id TEXT PRIMARY KEY, goal TEXT, label TEXT, paths TEXT,
+                                                 ts REAL, bytes INTEGER);
+          CREATE INDEX IF NOT EXISTS steers_goal ON steers(goal,id);
+          CREATE INDEX IF NOT EXISTS checkpoints_goal ON checkpoints(goal,ts);
+          CREATE INDEX IF NOT EXISTS failures_goal ON failures(goal,signature);
         ''')
+        self._migrate()
 
     def close(self):
         self.db.close()
@@ -120,8 +135,22 @@ class Store:
         out['messages'] = json.loads(out['messages'])
         return out
 
+    def _migrate(self):
+        """Add columns an older database predates. CREATE TABLE IF NOT EXISTS leaves an existing goals
+        table untouched, so the loop's own state has to be added explicitly."""
+        have = {r['name'] for r in self.db.execute('PRAGMA table_info(goals)')}
+        for name, decl in (('done_check','TEXT'), ('steer_seq','INTEGER NOT NULL DEFAULT 0'),
+                           ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT')):
+            if name not in have:
+                self.db.execute('ALTER TABLE goals ADD COLUMN ' + name + ' ' + decl)
+        have = {r['name'] for r in self.db.execute('PRAGMA table_info(failures)')}
+        if have and 'last_error' not in have:
+            self.db.execute('ALTER TABLE failures ADD COLUMN last_error TEXT')
+        self.db.commit()
+
     def update(self, gid, **fields):
-        allowed = {'state', 'messages', 'summary', 'error', 'steps', 'step_limit', 'deadline'}
+        allowed = {'state', 'messages', 'summary', 'error', 'steps', 'step_limit', 'deadline',
+                   'done_check', 'steer_seq', 'approach_changes', 'ledger'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('invalid goal fields')
         if 'messages' in fields:
@@ -129,6 +158,66 @@ class Store:
         fields['updated'] = time.time()
         sql = ','.join(k + '=?' for k in fields)
         self.db.execute('UPDATE goals SET ' + sql + ' WHERE id=?', [*fields.values(), gid])
+
+    def add_steer(self, gid, text):
+        """Keep the human's words verbatim at goal level, and return the id it was filed under."""
+        cur = self.db.execute('INSERT INTO steers(goal,text,ts) VALUES(?,?,?)', (gid, text, time.time()))
+        return cur.lastrowid
+
+    def steers(self, gid):
+        return [dict(r) for r in self.db.execute('SELECT id,text,ts FROM steers WHERE goal=? ORDER BY id', (gid,))]
+
+    def note_failure(self, gid, signature, error):
+        """Count one more occurrence of a failure signature and return the new count."""
+        self.db.execute('INSERT INTO failures(goal,signature,count,last_error,ts) VALUES(?,?,1,?,?) '
+                        'ON CONFLICT(goal,signature) DO UPDATE SET count=count+1, last_error=excluded.last_error, '
+                        'ts=excluded.ts', (gid, signature, str(error)[:400], time.time()))
+        row = self.db.execute('SELECT count FROM failures WHERE goal=? AND signature=?', (gid, signature)).fetchone()
+        return row['count'] if row else 1
+
+    def failure(self, gid, signature):
+        r = self.db.execute('SELECT count,last_error FROM failures WHERE goal=? AND signature=?',
+                            (gid, signature)).fetchone()
+        return dict(r) if r else None
+
+    def verified_since_steer(self, gid):
+        """Whether the done check has been exercised since the last steer arrived."""
+        return bool(self.db.execute(
+            'SELECT 1 FROM events WHERE goal=? AND kind=? AND seq > COALESCE('
+            '(SELECT MAX(seq) FROM events WHERE goal=? AND kind=?),0) LIMIT 1',
+            (gid, 'verified', gid, 'steers_applied')).fetchone())
+
+    def clear_failures(self, gid):
+        self.db.execute('DELETE FROM failures WHERE goal=?', (gid,))
+
+    def set_ledger(self, gid, milestones, blockers):
+        """Replace the goal's ledger: the milestones it decomposed into, and what blocks it now."""
+        self.db.execute('UPDATE goals SET ledger=?, updated=? WHERE id=?',
+                        (json.dumps(dict(milestones=milestones, blockers=blockers), ensure_ascii=False),
+                         time.time(), gid))
+
+    def ledger(self, gid):
+        raw = self.db.execute('SELECT ledger FROM goals WHERE id=?', (gid,)).fetchone()
+        try:
+            out = json.loads(raw['ledger']) if raw and raw['ledger'] else {}
+        except ValueError:
+            out = {}
+        return dict(milestones=out.get('milestones') or [], blockers=out.get('blockers') or [])
+
+    def add_checkpoint(self, cid, gid, label, paths, size):
+        self.db.execute('INSERT INTO checkpoints(id,goal,label,paths,ts,bytes) VALUES(?,?,?,?,?,?)',
+                        (cid, gid, label, json.dumps(paths), time.time(), size))
+
+    def checkpoint(self, cid):
+        r = self.db.execute('SELECT * FROM checkpoints WHERE id=?', (cid,)).fetchone()
+        if not r:
+            return None
+        out = dict(r); out['paths'] = json.loads(out['paths'])
+        return out
+
+    def checkpoints(self, gid):
+        return [dict(r) for r in self.db.execute(
+            'SELECT id,label,ts,bytes FROM checkpoints WHERE goal=? ORDER BY ts DESC LIMIT 20', (gid,))]
 
     def next_goal(self):
         rows = self.db.execute("SELECT id FROM goals WHERE state IN ('queued','working','waiting_model','waiting_root','waiting_user') ORDER BY created")
@@ -216,7 +305,10 @@ class Store:
         with self.transaction():
             g = self.goal(action['goal'])
             # Only the runtime lock's owner calls this. Completed actions are never replayed.
-            if self.db.execute('SELECT state FROM actions WHERE id=?', (action['id'],)).fetchone()[0] == 'done':
+            row = self.db.execute('SELECT state FROM actions WHERE id=?', (action['id'],)).fetchone()
+            if row is None or row[0] == 'done':
+                # Gone (a superseded or deduplicated call) or already done: recording a result for it would
+                # only fail, and a missing row must never take the goal down.
                 return
             self.db.execute("UPDATE actions SET state='done',result=? WHERE id=?", (json.dumps(result), action['id']))
             msg = dict(role='tool', tool_call_id=action['call_id'], content=json.dumps(result, ensure_ascii=False))

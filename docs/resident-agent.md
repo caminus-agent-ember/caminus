@@ -131,6 +131,33 @@ exact command and approves, edits or denies it through the existing bridge. The
 agent's open-ended shell does not grant root or access to another user's protected
 files. This is a Unix account, not a security sandbox.
 
+## The loop
+
+A goal runs as ticks. The runtime owns the boundaries a model tends to skip
+under pressure, and the model owns the inside of a tick.
+
+The runtime files every steer verbatim in a `steers` table as well as tagging it
+in the transcript, so a compaction and the finish report can quote the human
+rather than a summary of them. After a compaction it restates the goal and every
+steer word for word, bounded at 8 KB with the newest steers kept whole.
+
+`define_done` states what done looks like as something checkable, and `verify`
+records what the check actually showed. `finish` is refused while the goal has
+no check, while a steer is waiting, or when the check has not been exercised
+since the last steer. `ledger` keeps the milestones and blockers, pinned into
+every turn so they survive compaction. `checkpoint` tars named paths before a
+destructive or milestone-crossing action and `rollback` puts them back.
+
+The failure ledger keys a call by tool and arguments: a call that has failed
+twice is refused with the reason and the model is told to change approach, and
+the third failure pauses the goal. The watchdog pauses a goal that spends
+without moving — no progress for `idle_timeout` seconds, a prompt over
+`token_budget`, or the same call failing three times — and records why in the
+goal's error, where the panel shows it.
+
+`--no-loop-gates` records `loop_gates false` for fixture agents that predate the
+loop; real residents get the gates by default.
+
 ## Discover before building
 
 The resident prompt authorizes routine reversible work with the account's shell,

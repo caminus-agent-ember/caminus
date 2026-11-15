@@ -82,7 +82,7 @@ class Resident(unittest.TestCase):
     def tearDownClass(cls):cls.server.shutdown();cls.server.server_close();cls.thread.join()
     def setUp(self):
         self.key=uuid.uuid4().hex;self.home=S/self.key;self.bridge=self.home/'bridge';self.processes=[]
-        self.cmd('init',extra=['--model','fixture','--endpoint',f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1','--bridge',str(self.bridge),'--bus',str(self.home/'mail.sqlite3')])
+        self.cmd('init',extra=['--model','fixture','--endpoint',f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1','--bridge',str(self.bridge),'--bus',str(self.home/'mail.sqlite3'),'--no-loop-gates'])
     def tearDown(self):
         for p in self.processes:
             if p.poll() is None:p.terminate()
@@ -95,6 +95,11 @@ class Resident(unittest.TestCase):
         self.assertEqual(p.returncode,code,p.stdout+'\n'+p.stderr)
         return json.loads(p.stdout)
     def replies(self,*messages):Endpoint.queues[self.key]=deque(messages)
+    def steers(self,gid):
+        import sqlite3
+        db=sqlite3.connect(self.home/'agent.sqlite3');db.row_factory=sqlite3.Row
+        try:return [dict(r) for r in db.execute('SELECT id,text FROM steers WHERE goal=? ORDER BY id',(gid,))]
+        finally:db.close()
     def respond(self,rid,decision,**fields):
         d=self.bridge/'res';d.mkdir(parents=True,exist_ok=True)
         (d/(rid+'.json')).write_text(json.dumps(dict(id=rid,decision=decision,**fields)))
@@ -105,6 +110,108 @@ class Resident(unittest.TestCase):
             if v:return v
             time.sleep(.03)
         self.fail('condition did not become true')
+
+
+    def gates_on(self, extra=()):
+        """Rewrite this fixture's config with the loop gates on (setUp initialises a legacy fixture)."""
+        self.cmd('init', extra=['--model','fixture',
+                                '--endpoint',f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1',
+                                '--bridge',str(self.bridge),'--bus',str(self.home/'mail.sqlite3'),*extra])
+
+    def test_a_goal_cannot_work_before_it_states_what_done_looks_like(self):
+        self.gates_on()
+        self.replies(call('terminal',dict(command='echo hi')),
+                     call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        results=[e['data'] for e in self.cmd('events') if e['kind']=='tool_result']
+        refused=[r for r in results if r['name']=='terminal'][0]['result']
+        self.assertIn('define_done',refused['error'])
+
+    def test_finish_needs_the_check_exercised_since_the_last_steer(self):
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('finish',dict(summary='Done.')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        results=[e['data'] for e in self.cmd('events') if e['kind']=='tool_result']
+        refused=[r for r in results if r['name']=='finish'][0]['result']
+        self.assertIn('verify',refused['error'])
+        self.assertTrue([r for r in results if r['name']=='verify'])
+
+    def test_a_steer_is_filed_verbatim_and_restated_after_compaction(self):
+        self.gates_on()
+        words='skip the unit tests for now, focus the C ABI'
+        self.replies(call('define_done',dict(check='the ABI builds')))
+        goal=self.cmd('once',['--goal','Build the C ABI and run its tests. '*80],code=24)
+        self.cmd('send',[words,'--goal-id',goal['id']])
+        self.replies(dict(role='assistant',content='Summary of earlier work.'))
+        self.cmd('compact',[goal['id']])
+        self.replies(call('verify',dict(evidence='the ABI built')),call('finish',dict(summary='Done.')))
+        self.cmd('once',['--goal-id',goal['id']])
+        self.assertEqual([x['text'] for x in self.steers(goal['id'])],[words])
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn(words,body)
+        self.assertIn('Build the C ABI',body)
+
+    def test_a_steer_that_arrives_on_the_compaction_tick_is_pinned_not_summarized(self):
+        """The inbox is drained before compaction, so the same tick that compacts still pins the new words."""
+        self.gates_on()
+        words='stop at the ABI, do not touch the CLI'
+        self.replies(call('define_done',dict(check='the ABI builds')))
+        goal=self.cmd('once',['--goal','Build everything. '*80],code=24)
+        self.cmd('send',[words,'--goal-id',goal['id']])
+        # Compaction and the steer land on the same tick: the CLI compaction files the steer first.
+        self.replies(dict(role='assistant',content='Summary of earlier work.'))
+        self.cmd('compact',[goal['id']])
+        self.replies(call('verify',dict(evidence='the ABI built')),call('finish',dict(summary='Done.')))
+        self.cmd('once',['--goal-id',goal['id']])
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('[steers, restated verbatim after compaction',body)
+        self.assertIn(words,body)
+
+    def test_the_same_call_failing_twice_is_refused(self):
+        self.gates_on()
+        bad=call('terminal',dict(command='false'))
+        self.replies(call('define_done',dict(check='the command succeeds')),bad,bad,bad)
+        goal=self.cmd('once',['--goal','Make the command succeed.'],code=24)
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result'
+                 and e['data']['name']=='terminal']
+        self.assertTrue(any('change approach' in (r.get('error') or '').lower() for r in results),
+                        [r.get('error') for r in results])
+
+    def test_the_ledger_is_pinned_into_every_turn(self):
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('ledger',dict(milestones=['write it','check it'],blockers=['no editor'])),
+                     call('verify',dict(evidence='the file is there')),
+                     call('finish',dict(summary='Done.')))
+        self.cmd('once',['--goal','Write the file.'])
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('write it | check it',body)
+        self.assertIn('blocked by: no editor',body)
+
+    def test_checkpoint_and_rollback_put_the_paths_back(self):
+        target=self.home/'work.txt';target.write_text('before\n')
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Edit then restore work.txt.')
+            cid=rt._checkpoint(gid,[str(target)],'before edit')['id']
+            target.write_text('after\n')
+            rt._rollback(gid,cid)
+            self.assertEqual(target.read_text(),'before\n')
+            self.assertEqual(rt.store.checkpoint(cid)['label'],'before edit')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_watchdog_pauses_a_goal_over_its_token_budget(self):
+        self.gates_on(['--token-budget','1'])
+        self.replies()
+        goal=self.cmd('once',['--goal','Do something.'],code=22)
+        self.assertIn('watchdog',goal['error'])
 
     def test_discovery_precedes_first_model_turn_and_survives_retry(self):
         self.replies()
@@ -153,7 +260,7 @@ class Resident(unittest.TestCase):
         steers=[m.get('content','') for m in request['messages']
                 if (m.get('content') or '').find('Use an existing utility before building.')>=0]
         self.assertEqual(len(steers),1,'the steer must reach the model exactly once')
-        self.assertTrue(steers[0].startswith('[steer, supersedes earlier instructions where they conflict]'),
+        self.assertTrue(steers[0].startswith('[steer #') and 'supersedes earlier instructions where they conflict' in steers[0],
                         f'a steer must carry the latest-wins rule, got {steers[0]!r}')
         rejected=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Too late.',code=1)
         self.assertIn('goal finished',rejected['error'])
@@ -225,7 +332,7 @@ class Resident(unittest.TestCase):
                         rt.store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(gid,'New human direction.'))
                         summary='Earlier result.'
                     else:
-                        self.observed=any((m.get('content') or '').endswith('New human direction.') and m.get('content','').startswith('[steer,') for m in messages)
+                        self.observed=any((m.get('content') or '').endswith('New human direction.') and m.get('content','').startswith('[steer #') for m in messages)
                         summary='Followed the new direction.'
                     return call('finish',dict(summary=summary)) if finish_tool else dict(role='assistant',content=summary)
             model=Model();rt=Runtime(self.home,model=model)
@@ -383,7 +490,7 @@ class Resident(unittest.TestCase):
 
     def init_peer(self):
         self.peer('init',['--model','fixture','--endpoint',f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1',
-                          '--bridge',str(self.bridge),'--bus',str(self.home/'mail.sqlite3')])
+                          '--bridge',str(self.bridge),'--bus',str(self.home/'mail.sqlite3'),'--no-loop-gates'])
 
     def test_peer_tools_offline_delivery_and_crash_deduplication(self):
         self.init_peer()
@@ -559,7 +666,7 @@ class Resident(unittest.TestCase):
             self.assertLessEqual(max(model.sizes),65536)
             after=rt.store.goal(gid)['messages']
             self.assertLess(len(after),len(msgs))
-            self.assertEqual(after[-1]['content'],msgs[-1]['content'],'the newest messages must survive')
+            self.assertIn(msgs[-1]['content'],[m['content'] for m in after],'the newest messages must survive')
         finally:rt.mail.close();rt.store.close()
 
     def test_compact_command_queues_for_a_live_runtime_and_runs_without_one(self):
@@ -588,12 +695,12 @@ class Resident(unittest.TestCase):
             gid=rt.store.enqueue('Investigate these offline artifacts.')
             original=rt.store.goal(gid)['messages']
             below=original+[dict(role='assistant',content='x'*200000)]
-            self.assertIs(rt._compact(gid,below),below)
+            self.assertEqual(rt._compact(gid,below),(below,False))
             history=list(original)
             for i in range(10):
                 msg=call('terminal',dict(command='inspect artifact'))
                 history += [msg,dict(role='tool',tool_call_id=msg['tool_calls'][0]['id'],content='x'*400000)]
-            compacted=rt._compact(gid,history)
+            compacted,_=rt._compact(gid,history)
             self.assertEqual(compacted[0],original[0])
             self.assertLessEqual(rt.model.tokens([rt.system(),*compacted],[]),int(1048574*.2))
             seen=set()
@@ -646,6 +753,7 @@ class Resident(unittest.TestCase):
         ]))
         result=self.cmd('once',['--goal','Stream until the budget runs out.'],code=22)
         self.assertEqual(result['state'],'paused')
+        self.assertFalse(any(e['kind']=='model_cut' for e in self.cmd('events')))
         event=next(e for e in self.cmd('events') if e['kind']=='model_truncated')
         self.assertEqual(event['data']['partial']['content'],'Half an answer')
         self.assertFalse(any((self.home/'live').glob('*.json')) if (self.home/'live').is_dir() else False)
@@ -728,13 +836,13 @@ class Resident(unittest.TestCase):
             dict(choices=[dict(delta=dict(content='Working on it.'))]),
             partial_call,
         ]))
-        result=self.cmd('once',['--goal','Cut the stream.'],code=22)
-        self.assertEqual(result['state'],'paused')
+        result=self.cmd('once',['--goal','Cut the stream.'],code=24)
+        self.assertEqual(result['state'],'waiting_model')
+        self.assertTrue(any(e['kind']=='model_cut' for e in self.cmd('events')))
         self.assertFalse((self.home/'forbidden').exists(),'a partial tool call must not run')
         self.assertFalse([e for e in self.cmd('events') if e['kind']=='tool_result'],'nothing may execute')
-        event=next(e for e in self.cmd('events') if e['kind']=='model_truncated')
+        event=next(e for e in self.cmd('events') if e['kind']=='model_cut')
         self.assertIn('before it was complete',event['data']['error'])
-        self.assertEqual(event['data']['partial']['content'],'Working on it.')
 
     def test_permanent_model_refusal_stops_the_goal(self):
         self.replies({'_status':401})
@@ -974,8 +1082,8 @@ class Resident(unittest.TestCase):
             gid=rt.store.enqueue('Check on the artifacts.')
             messages=rt.store.goal(gid)['messages']
             measured=rt.model.tokens([rt.system(),*messages],TOOLS)
-            out=rt._compact(gid,messages)
-            self.assertIs(out,messages)
+            out,compacted=rt._compact(gid,messages)
+            self.assertEqual((out,compacted),(messages,False))
             note=json.loads((self.home/'context.json').read_text())
             self.assertEqual(note['tokens'],measured)
             self.assertEqual(note['size'],1048574)

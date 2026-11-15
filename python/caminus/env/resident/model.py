@@ -16,9 +16,13 @@ class ModelContextError(ModelError):
 
 
 class ModelTruncated(ModelError):
-    def __init__(self, partial, reason='model output budget exhausted; increase --max-tokens and resume this goal'):
+    def __init__(self, partial, reason='model output budget exhausted; increase --max-tokens and resume this goal',
+                 retryable=False):
         super().__init__(reason)
         self.partial = partial
+        # A budget truncation needs a human decision; a stream cut is the server going away mid-reply and
+        # the same turn succeeds once it is back, so the runtime retries it instead of pausing the goal.
+        self.retryable = retryable
 
 
 class Cancelled(Exception):
@@ -199,7 +203,8 @@ class Model:
             if finish is None and not done_seen:
                 # The connection closed before the turn ended: a proxy or backend cut the stream. The text
                 # so far is shown with the error, and nothing of this reply is stored or executed.
-                raise ModelTruncated(out, 'the reply ended before it was complete; nothing was executed')
+                raise ModelTruncated(out, 'the reply ended before it was complete; nothing was executed',
+                                     retryable=True)
             if finish == 'length':
                 raise ModelTruncated(out)
             ordered = [calls[i] for i in sorted(calls)]

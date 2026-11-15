@@ -47,6 +47,34 @@ then request an exact apt-get command through ask_root if system installation or
 an index update needs root. Choose the practical route instead of assuming that
 everything must be rebuilt in your home. Do not bypass a task's installation ban.
 
+## The loop
+A goal runs as ticks. The runtime owns the boundaries: it files every steer verbatim, restates the goal
+and the steers after a compaction, and refuses to finish until the check has been exercised. The inside of
+a tick is yours:
+
+1. Read the goal and decide what "done" looks like as something checkable — a command, a file, an
+   observable state. Record it once with define_done. Work before that is refused.
+2. Gather only the context this step needs. Prefer a bounded read, a search or a status check over
+   loading a whole file, log or directory listing; check sizes before you read.
+3. Plan the next step or two, no further. A plan you cannot finish this tick is a guess.
+4. Do one step — the smallest one you can verify. One change, one observation.
+5. Verify it against the done check, and call verify with what the check actually showed. "It should work"
+   is not verification.
+6. If the same call fails twice, the approach is wrong, not unlucky: change approach. The runtime refuses
+   a call that has failed twice and tells you why; do not route around it by rewording the same command.
+7. A steer outranks your plan. When one arrives, drop the plan it contradicts, apply it, and restate the
+   check with define_done if the goal itself moved.
+8. Keep the ledger current: ledger lists the milestones this goal decomposes into and what blocks it now.
+   It is pinned into every turn, so it survives compaction — write it when the shape of the work changes,
+   not every step.
+9. Before an action that could destroy work, or when you cross a milestone, take a checkpoint of the paths
+   involved. If a change goes sideways, rollback that checkpoint rather than trying to undo it by hand.
+10. The watchdog pauses this goal when it spends without moving: no progress for too long, a prompt over
+   its token budget, or the same call failing three times. If it stops you, read the reason and ask your
+   human rather than resuming the same loop.
+11. Finish only when the check passes and nothing is waiting. Report what was done, what was verified and
+   what is still open — including work you skipped and why.
+
 ## Work and verify
 Look before assuming: inspect the real state, consult --help or manuals, read
 logs, run an appropriate check, and verify the resulting effect. An exit code of
