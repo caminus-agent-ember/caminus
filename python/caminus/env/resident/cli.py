@@ -24,7 +24,7 @@ from .prompt import render as render_prompt
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -61,6 +61,14 @@ def parser():
                            help='prompt tokens a goal may reach before the watchdog pauses it (0: off)')
             p.add_argument('--no-loop-gates',action='store_true',
                            help='record loop_gates false: a fixture agent that predates the done check and skips it')
+        if op=='heartbeat':
+            p.add_argument('state',nargs='?',choices=('on','off','status','recap'),default='status',
+                           help='free time: the resident lives in its account when no work is queued')
+            p.add_argument('--rest-minutes',type=float)
+            p.add_argument('--budget-usd',type=float,help='daily free-time allowance on a priced remote model')
+            p.add_argument('--afk-minutes',type=float,help='how long a free-time question waits for an answer')
+            p.add_argument('--messages-per-day',type=int)
+            p.add_argument('--stretch-minutes',type=float)
         if op=='message':
             p.add_argument('to')
             p.add_argument('--text')
@@ -235,6 +243,32 @@ def main(argv=None,stdin=None):
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)
             return 0
         store=Store(home)
+        if a.op=='heartbeat':
+            from .freetime import settings
+            cfg=json.loads((home/'config.json').read_text())
+            ft=dict(cfg.get('free_time') or {}) if not isinstance(cfg.get('free_time'),bool) else dict(enabled=cfg['free_time'])
+            if a.state=='recap':
+                from .freetime import recap
+                st=Store(home)
+                try:emit(dict(recap=recap(st)),a.json)
+                finally:st.close()
+                return 0
+            if a.state in ('on','off'):ft['enabled']=a.state=='on'
+            for flag,key,scale in (('rest_minutes','rest_seconds',60),('afk_minutes','afk_seconds',60),
+                                   ('stretch_minutes','stretch_seconds',60),('budget_usd','budget_usd',1),
+                                   ('messages_per_day','messages_per_day',1)):
+                v=getattr(a,flag)
+                if v is not None:
+                    if v<0:raise ValueError('--'+flag.replace('_','-')+' must be 0 or more')
+                    ft[key]=v*scale
+            if ft!=(cfg.get('free_time') or {}):
+                cfg['free_time']=ft;atomic_json(home/'config.json',cfg)
+            state=json.loads((home/'free_time.json').read_text()) if (home/'free_time.json').exists() else {}
+            import datetime
+            today=state.get('days',{}).get(datetime.date.today().isoformat(),{})
+            emit(dict(free_time=settings(cfg),spent_today_usd=today.get('usd',0.0),messages_today=today.get('messages',0),
+                      last_start=state.get('last_start'),last_end=state.get('last_end'),last_dream=state.get('last_dream')),a.json)
+            return 0
         if a.op=='status':
             heartbeat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
             cfg=json.loads((home/'config.json').read_text())

@@ -32,6 +32,27 @@ class ModelRefused(ModelError):
 
 
 ANTHROPIC_VERSION = '2026-10-21'
+
+# USD per million tokens (input, output, cache read, 5-minute cache write), below and above a prompt-length line.
+# From the Claude API reference as cached 2026-11-03: check live pricing before budgeting on these numbers.
+PRICES = {'claude-haiku-5-5': ((0.10, 0.50, 0.01, 0.125), (0.50, 2.50, 0.05, 0.625), 100_000)}
+
+
+def price(model, usage):
+    """the USD cost of one call's usage on a priced model, or None when the model's price is not known"""
+    row = PRICES.get(model)
+    if row is None:
+        return None
+    low, high, line = row
+    usage = usage or {}
+    read = usage.get('cache_read_input_tokens') or 0
+    wrote = usage.get('cache_creation_input_tokens') or 0
+    out = usage.get('completion_tokens', usage.get('output_tokens')) or 0
+    # last_usage reports prompt_tokens as everything sent; the uncached part is what remains after the cache.
+    total = usage.get('prompt_tokens')
+    fresh = (total - read - wrote) if isinstance(total, int) else (usage.get('input_tokens') or 0)
+    rate = high if fresh + read + wrote > line else low
+    return (max(0, fresh) * rate[0] + out * rate[1] + read * rate[2] + wrote * rate[3]) / 1e6
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
 

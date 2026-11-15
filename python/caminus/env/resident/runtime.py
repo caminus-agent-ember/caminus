@@ -14,6 +14,7 @@ from .terminal import Terminal
 from .mail import Mail
 from . import approval, discovery
 from .prompt import render as render_prompt
+from .freetime import FreeTime, KINDS as FREE_KINDS
 
 PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
@@ -138,6 +139,7 @@ class Runtime:
         self.token_budget = int(self.config.get('token_budget', 0) or 0)
         self.progress = {}
         self.plain_replies = {}  # goal -> consecutive plain-text replies; reset by any reply with tool calls
+        self.free = FreeTime(self)
 
     def system(self,gid=None):
         """The stable prefix, and nothing else.
@@ -176,6 +178,9 @@ class Runtime:
         except ValueError:
             return ''
         lines = []
+        if g.get('kind','work') in FREE_KINDS:
+            # Free time is not graded: no done check, no verify, no steer bookkeeping in the loop state.
+            return 'FREE TIME: this stretch is yours; finish (or reply in plain text) whenever you want to stop.'
         if not g.get('done_check'):
             lines.append('LOOP: no done check yet. Call define_done first, before any other work.')
         else:
@@ -241,6 +246,11 @@ class Runtime:
     def _bridge(self, action, args):
         root = Path(self.config['bridge']).expanduser()
         kind = 'root' if action['name'] == 'ask_root' else 'question'
+        if self.free.is_free(action['goal']):
+            if kind == 'root':
+                raise ValueError('free time has no root requests; note what you wanted in your journal instead')
+            if not action['bridge_id'] and not self.free.ask_allowed(action['goal']):
+                raise ValueError("today's free-time questions are used up; write it in your journal for your human")
         rid = action['bridge_id'] or action['id'][:16]
         if not action['bridge_id']:
             self.store.db.execute("UPDATE actions SET state='waiting',bridge_id=? WHERE id=?", (rid, action['id']))
@@ -273,6 +283,18 @@ class Runtime:
                 with (self.home / 'MEMORY.md').open('a') as f:
                     f.write('\nQ: ' + args['question'] + '\nA: ' + str(result.get('answer', result['decision'])) + '\n')
             return result
+        if kind == 'question' and self.free.is_free(action['goal']):
+            # AFK: free time never blocks on its human. Past the window the resident withdraws its own question
+            # (it never writes an answer on the human's behalf) and carries on; the question stays in the events.
+            asked = json.loads(req.read_text()).get('ts', time.time()) if req.exists() else time.time()
+            if time.time() - asked >= self.free.afk_seconds:
+                try:
+                    req.unlink()
+                except OSError:
+                    pass
+                self.store.event('question_unanswered', dict(id=rid, text=args.get('question', '')), action['goal'])
+                return dict(id=rid, decision='answered',
+                            answer='(no answer: your human is away. Carry on, and note the question in your journal.)')
         self.store.update(action['goal'], state='waiting_root' if kind == 'root' else 'waiting_user')
         return None
 
@@ -379,6 +401,8 @@ class Runtime:
                 self.store.event('completion_deferred',dict(reason='human steering is waiting'),gid)
                 return
             self.store.update(gid,state='completed',summary=summary)
+            if goal.get('kind','work') in FREE_KINDS:
+                self.free.ended(gid, summary)
             # The finish report says what was done, what was verified and what is still open: the check it
             # was measured against, and the evidence that was actually observed.
             verified = self.store.db.execute(
@@ -433,7 +457,8 @@ class Runtime:
             with self.store.transaction():
                 if self.store.goal(action['goal'])['state']=='cancelled':return True
                 # Goal start: what done looks like comes first, and nothing else runs until it exists.
-                if self.loop_gates and name != 'define_done' and not self.store.goal(action['goal']).get('done_check'):
+                if (self.loop_gates and name != 'define_done' and not self.store.goal(action['goal']).get('done_check')
+                        and self.store.goal(action['goal']).get('kind','work') not in FREE_KINDS):
                     raise ValueError('no done check yet: call define_done with what done looks like, '
                                      'as something you can check, before any other work')
                 if name == 'define_done':
@@ -462,10 +487,11 @@ class Runtime:
                         raise ValueError('finish must follow all other pending actions')
                     # Step 9: finish only when done passes and the inbox is empty. The runtime cannot judge
                     # the check itself, so it requires the model to have run it since the last steer.
-                    if self.loop_gates and not self.store.goal(action['goal']).get('done_check'):
+                    graded = self.loop_gates and self.store.goal(action['goal']).get('kind','work') not in FREE_KINDS
+                    if graded and not self.store.goal(action['goal']).get('done_check'):
                         raise ValueError('this goal has no done check: call define_done with what done looks '
                                          'like, as something you can check, before finishing')
-                    if self.loop_gates and not self.store.verified_since_steer(action['goal']):
+                    if graded and not self.store.verified_since_steer(action['goal']):
                         raise ValueError('the done check has not been exercised since the last steer: run it '
                                          'and call verify with what it showed before finishing')
                     result = dict(summary=args['summary'], open=args.get('open', ''))
@@ -562,7 +588,7 @@ class Runtime:
         # MEMORY.md push the real request past the window while the probe still saw room, and the goal then
         # paused on a context error instead of compacting.
         tail = [c] if (c := self.context_message(gid)) else []
-        size = self.model.context_size()
+        size = self.free.window(gid, self.model.context_size())   # free time keeps inside the server's side slot
         reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
         before_tokens = self.model.tokens([system, *messages, *tail], TOOLS)
         trigger_tokens = int(size * self.config.get('compact_threshold', .85))
@@ -770,6 +796,7 @@ class Runtime:
             finally:
                 live.clear()
             self._throughput_note(gid,getattr(self.model,'last_speed',None))
+            self.free.account(gid)
             if self.store.goal(gid)['state']=='cancelled':
                 return True
             self.retry.pop(gid,None)
@@ -780,9 +807,13 @@ class Runtime:
             if not reply.get('tool_calls'):
                 # A goal ends only through the finish tool, which runs the done check. Plain text is not
                 # completion: nudge the agent back to the work, and pause the goal after three in a row.
-                if self.loop_gates:
+                if self.store.goal(gid).get('kind','work') in FREE_KINDS:
+                    # Free time is not graded: a plain reply is the resident choosing to rest.
+                    self._finish(gid,reply['content'])
+                elif self.loop_gates:
                     return self._plain_reply(gid)
-                self._finish(gid,reply['content'])
+                else:
+                    self._finish(gid,reply['content'])
             else:
                 self.plain_replies.pop(gid,None)
             return True
@@ -865,6 +896,8 @@ class Runtime:
             for gid in self.store.pending_requests('compact'):
                 self.compact_request(gid)
             progressed = False
+            if not target:
+                self.free.pulse()
             goals = [target] if target else self.store.next_goal()
             if goals and time.time()-last_heartbeat>=5:
                 # Say we are alive before a turn, not after it: a turn waiting on the model server can hold
