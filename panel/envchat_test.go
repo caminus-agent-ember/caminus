@@ -1587,3 +1587,22 @@ func TestGrantTakesTwoPressesAndAGrantedRepeatOne(t *testing.T) {
 		t.Fatal("a grant ends after 12 hours on the owner's side")
 	}
 }
+
+func TestTheBoundedHistoryTrimKeepsTheDrawnPosition(t *testing.T) {
+	m := chatFixture(t)
+	evs := make([]residentEvent, 0, maxResidentEvents)
+	for i := 1; i < maxResidentEvents; i++ { // one short of the bound: all of it is drawn
+		evs = append(evs, residentEvent{Seq: 10000 + i, Kind: "note", Data: map[string]any{}})
+	}
+	m.receiveResident(residentMsg{agent: m.agentName, status: m.resident, events: evs})
+	if m.chat.rendered != len(m.residentEvents) {
+		t.Fatalf("everything drawn: %d of %d", m.chat.rendered, len(m.residentEvents))
+	}
+	// crossing the bound trims the oldest half; drawing must not slice past the end (it panicked)
+	m.receiveResident(residentMsg{agent: m.agentName, status: m.resident, events: []residentEvent{
+		{Seq: 10000 + maxResidentEvents, Kind: "note", Data: map[string]any{}},
+		{Seq: 10000 + maxResidentEvents + 1, Kind: "note", Data: map[string]any{}}}})
+	if m.chat.rendered != len(m.residentEvents) || len(m.residentEvents) > maxResidentEvents {
+		t.Fatalf("after the trim: rendered %d, events %d", m.chat.rendered, len(m.residentEvents))
+	}
+}

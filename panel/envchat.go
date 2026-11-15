@@ -227,7 +227,11 @@ func (m *envModel) receiveResident(msg residentMsg) {
 			if len(m.residentEvents) >= maxResidentEvents {
 				// Bounded: a resident that runs for days must not grow the panel without limit. The oldest
 				// events leave memory; the journal on the agent side keeps them.
-				m.residentEvents = append(m.residentEvents[:0:0], m.residentEvents[len(m.residentEvents)-maxResidentEvents/2:]...)
+				drop := len(m.residentEvents) - maxResidentEvents/2
+				m.residentEvents = append(m.residentEvents[:0:0], m.residentEvents[drop:]...)
+				// rendered counts drawn events by position: shift it with them (left as it was, the next draw sliced
+				// past the end and crashed the panel once a busy session crossed the bound). The drawn text stays.
+				m.chat.rendered = max(0, m.chat.rendered-drop)
 			}
 			m.residentEvents = append(m.residentEvents, e)
 			m.chat.seq = e.Seq
