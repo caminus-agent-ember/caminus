@@ -191,6 +191,40 @@ class Resident(unittest.TestCase):
         self.assertEqual([(x['text'],x['kind']) for x in self.steers(goal['id'])],[(words,'nudge')])
 
 
+    def test_a_plain_text_reply_does_not_finish_the_goal(self):
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     dict(role='assistant',content='I think it is finished.'),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        kinds=[e['kind'] for e in self.cmd('events')]
+        self.assertIn('plain_text_nudge',kinds)
+        self.assertNotIn('plain_text_pause',kinds)
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('A goal ends only through the finish tool',body)
+        finished=[e for e in self.cmd('events') if e['kind']=='finished']
+        self.assertEqual(len(finished),1)
+        self.assertEqual(finished[0]['data']['summary'],'Done.')
+
+    def test_three_plain_text_replies_pause_the_goal(self):
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     dict(role='assistant',content='Still thinking.'),
+                     dict(role='assistant',content='Still thinking.'),
+                     dict(role='assistant',content='Still thinking.'))
+        goal=self.cmd('once',['--goal','Create the file.'],code=22)
+        self.assertEqual(goal['state'],'paused')
+        self.assertIn('plain text',goal['error'])
+        self.assertIn('finish tool',goal['error'])
+        events=self.cmd('events')
+        pauses=[e for e in events if e['kind']=='plain_text_pause']
+        self.assertEqual(len(pauses),1)
+        self.assertEqual(pauses[0]['data']['replies'],3)
+        self.assertNotIn('finished',[e['kind'] for e in events])
+
+
     def test_the_same_call_failing_twice_is_refused(self):
         self.gates_on()
         bad=call('terminal',dict(command='false'))

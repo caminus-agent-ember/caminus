@@ -15,6 +15,7 @@ from .mail import Mail
 from . import approval, discovery
 from .prompt import render as render_prompt
 
+PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
 EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24}
 
@@ -136,6 +137,7 @@ class Runtime:
         self.idle_timeout = float(self.config.get('idle_timeout', 0) or 0)
         self.token_budget = int(self.config.get('token_budget', 0) or 0)
         self.progress = {}
+        self.plain_replies = {}  # goal -> consecutive plain-text replies; reset by any reply with tool calls
 
     def system(self,gid=None):
         """The stable prefix, and nothing else.
@@ -641,6 +643,26 @@ class Runtime:
                 self.store.event('runtime_error', dict(error=error), gid)
             return True
 
+    def _plain_reply(self, gid):
+        """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal."""
+        count=self.plain_replies.get(gid,0)+1
+        self.plain_replies[gid]=count
+        with self.store.transaction():
+            if self.store.goal(gid)['state']=='cancelled':return True
+            if count>=PLAIN_TEXT_LIMIT:
+                self.plain_replies.pop(gid,None)
+                message=('paused: the model replied with plain text %d times in a row without a tool call. '
+                         'A goal ends only through the finish tool after the done check; resume the goal to continue.'%count)
+                self.store.update(gid,state='paused',error=message)
+                self.store.event('plain_text_pause',dict(replies=count,error=message),gid)
+                return True
+            messages=self.store.goal(gid)['messages']+[dict(role='user',content=(
+                'A goal ends only through the finish tool, after the done check passes. A plain-text reply does not '
+                'end it. Continue the work with a tool call, or call finish if the check has passed.'))]
+            self.store.update(gid,messages=messages)
+            self.store.event('plain_text_nudge',dict(replies=count),gid)
+        return True
+
     def _watchdog(self, gid, reason=None, detail=None):
         """Pause a goal the watchdog caught, recording why. Returns True when it did."""
         with self.store.transaction():
@@ -743,7 +765,13 @@ class Runtime:
                 return True
             self.progress[gid] = time.time()
             if not reply.get('tool_calls'):
+                # A goal ends only through the finish tool, which runs the done check. Plain text is not
+                # completion: nudge the agent back to the work, and pause the goal after three in a row.
+                if self.loop_gates:
+                    return self._plain_reply(gid)
                 self._finish(gid,reply['content'])
+            else:
+                self.plain_replies.pop(gid,None)
             return True
         except Cancelled:
             # Cancelled between two streamed pieces: the model was closed, nothing was stored.
