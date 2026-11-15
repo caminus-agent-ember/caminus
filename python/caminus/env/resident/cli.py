@@ -21,10 +21,87 @@ from .discovery import TOPICS, discover
 from .prompt import render as render_prompt
 
 
+def _current(cfg):
+    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
+    return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
+
+
+def model_ops(a,home):
+    """provider / models / model / effort: the brains this resident can use, found by asking the providers."""
+    import re as _re
+    from . import catalog
+    cfg=json.loads((home/'config.json').read_text())
+    if a.op=='provider':
+        provs=dict(cfg.get('providers') or {})
+        if a.action!='list':
+            if not a.provider or not _re.fullmatch(r'[A-Za-z0-9_-]{1,32}',a.provider):
+                raise ValueError('name the provider: letters, digits, - and _')
+            if a.action=='add':
+                if not a.kind or not a.endpoint:raise ValueError('provider add NAME --kind KIND --endpoint URL')
+                provs[a.provider]=dict(kind=a.kind,endpoint=a.endpoint.rstrip('/'),**(dict(relay=True) if a.relay else {}))
+            elif provs.pop(a.provider,None) is None:
+                raise ValueError('no provider named '+a.provider)
+            if provs:cfg['providers']=provs
+            else:cfg.pop('providers',None)
+            atomic_json(home/'config.json',cfg)
+        emit(dict(providers=provs),a.json);return 0
+    if a.op=='models':
+        cat=catalog.load(home)
+        if a.refresh or not cat.get('models'):
+            cat=catalog.refresh(home,cfg,only=a.provider)
+        rows=[m for m in cat.get('models',[]) if not a.provider or m['provider']==a.provider]
+        emit(dict(models=rows,providers=cat.get('providers'),current=_current(cfg)),a.json);return 0
+    if a.op=='model':
+        if not a.id:
+            emit(dict(current=_current(cfg)),a.json);return 0
+        cat=catalog.load(home)
+        entry=catalog.find(cat,a.id,a.provider)
+        if entry is None:
+            cat=catalog.refresh(home,cfg)
+            entry=catalog.find(cat,a.id,a.provider)
+        if entry is None:
+            raise ValueError(f'no model {a.id} in the catalog: `models --refresh` lists what the providers serve')
+        spec=catalog.providers(cfg).get(entry['provider'])
+        if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
+        cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
+                   api='anthropic' if spec['kind']=='anthropic' else 'openai')
+        for k in ('relay','prices','context','thinking'):
+            cfg.pop(k,None)
+        if spec.get('relay'):cfg['relay']=True
+        if entry.get('prices'):cfg['prices']=entry['prices']
+        if entry.get('context'):cfg['context']=int(entry['context'])
+        if entry.get('max_output'):
+            cfg['max_tokens']=min(int(entry['max_output']),32768)
+        if spec['kind']=='anthropic' and entry.get('thinking')=='adaptive':
+            cfg['thinking']='adaptive'        # current Opus and Sonnet refuse thinking off; the store keeps none anyway
+        levels=entry.get('efforts') or []
+        if cfg.get('effort') not in levels:
+            cfg.pop('effort',None)
+            if 'medium' in levels:cfg['effort']='medium'
+        if cfg.get('api')=='openai':
+            cfg.pop('api',None)               # openai is the default transport
+        atomic_json(home/'config.json',cfg)
+        emit(dict(current=_current(cfg),entry=entry,note='a running resident takes it at its next turn'),a.json);return 0
+    if a.op=='effort':
+        cat=catalog.load(home)
+        try:entry=catalog.find(cat,cfg.get('model',''),cfg.get('provider'))
+        except ValueError:entry=None
+        levels=(entry or {}).get('efforts') or []
+        if a.level:
+            if a.level=='default':
+                cfg.pop('effort',None)
+            elif entry is not None and a.level not in levels:
+                raise ValueError('%s offers %s' % (cfg.get('model'), ', '.join(levels) if levels else 'no effort control'))
+            else:
+                cfg['effort']=a.level
+            atomic_json(home/'config.json',cfg)
+        emit(dict(effort=cfg.get('effort'),levels=levels,model=cfg.get('model')),a.json);return 0
+
+
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -71,6 +148,20 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='provider':
+            p.add_argument('action',nargs='?',default='list',choices=('list','add','remove'))
+            p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, ...')
+            p.add_argument('--kind',choices=('local','anthropic','deepinfra','openai'))
+            p.add_argument('--endpoint',help="its API root; the owner's key relay for a paid one (it adds the key)")
+            p.add_argument('--relay',action='store_true',help='the endpoint is the key relay: billed, retries bounded')
+        if op=='models':
+            p.add_argument('--refresh',action='store_true',help='ask the providers again (otherwise the cached list)')
+            p.add_argument('--provider',help='only this provider')
+        if op=='model':
+            p.add_argument('id',nargs='?',help='a model id from `models` (provider/id when two serve it); none shows the current one')
+            p.add_argument('--provider')
+        if op=='effort':
+            p.add_argument('level',nargs='?',help="a level the current model offers (see `models`), or 'default'")
         if op=='mcp':
             p.add_argument('action',nargs='?',default='list',choices=('list','add','remove','off','on'))
             p.add_argument('server',nargs='?',help='the server name (letters, digits, - and _)')
@@ -295,6 +386,8 @@ def main(argv=None,stdin=None):
             emit(dict(fallback={**FB,**fb} if fb else None,
                       today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,turns=0))),a.json)
             return 0
+        if a.op in ('provider','models','model','effort'):
+            return model_ops(a,home)
         if a.op=='mcp':
             import re as _re
             cfg=json.loads((home/'config.json').read_text())
