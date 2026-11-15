@@ -158,6 +158,18 @@ class Store:
     def settle_request(self, rid, state, error=''):
         self.db.execute('UPDATE requests SET state=?, error=?, updated=? WHERE id=?', (state, error, time.time(), rid))
 
+    def resolve(self, prefix):
+        """A goal by exact id or unambiguous prefix, so a person can type the eight characters a UI shows."""
+        row = self.db.execute('SELECT id FROM goals WHERE id=?', (prefix,)).fetchone()
+        if row:
+            return row['id']
+        rows = [r['id'] for r in self.db.execute('SELECT id FROM goals WHERE id LIKE ? LIMIT 2', (prefix + '%',))]
+        if not rows:
+            raise ValueError('unknown goal ' + prefix)
+        if len(rows) > 1:
+            raise ValueError('ambiguous goal ' + prefix)
+        return rows[0]
+
     def latest_goal(self):
         r = self.db.execute('SELECT id FROM goals ORDER BY created DESC LIMIT 1').fetchone()
         if r is None:

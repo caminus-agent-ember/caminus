@@ -227,7 +227,7 @@ def main(argv=None,stdin=None):
         if a.op=='compact':
             # Compaction needs the model and the single writer, so a live runtime performs it on its next
             # pass; with no daemon the CLI takes the lock and does it here.
-            gid=a.goal_id or store.latest_goal()
+            gid=store.resolve(a.goal_id) if a.goal_id else store.latest_goal()
             beat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
             if alive(beat.get('pid')):
                 rid=store.request(gid,'compact')

@@ -510,7 +510,8 @@ class Resident(unittest.TestCase):
         self.replies(call('finish',dict(summary='done')),dict(role='assistant',content='Summarized earlier turns.'))
         gid=self.cmd('once',extra=['--goal','finish the job','--max-steps','2'])['id']
         (self.home/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),ts=time.time(),state='listening')))
-        queued=self.cmd('compact',extra=[gid])
+        # A person types the eight characters the UI shows, not the whole id.
+        queued=self.cmd('compact',extra=[gid[:8]])
         self.assertTrue(queued['queued'])
         self.assertEqual(queued['goal'],gid)
         (self.home/'heartbeat.json').unlink()
