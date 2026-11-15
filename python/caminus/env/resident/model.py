@@ -390,7 +390,8 @@ class Model:
         if out and out[0]['role'] != 'user':
             out.insert(0, dict(role='user', content=[dict(type='text', text='(conversation resumed)')]))
         if out:
-            out[-1]['content'][-1]['cache_control'] = dict(type='ephemeral')
+            if self.config.get('cache', True):
+                out[-1]['content'][-1]['cache_control'] = dict(type='ephemeral')
         if tail:
             if out and out[-1]['role'] == 'user':
                 out.append(dict(role='system', content=tail))
@@ -401,7 +402,9 @@ class Model:
             add('user', [dict(type='text', text='Continue.')])
         body = dict(model=model or self.config['model'], messages=out)
         if system:
-            body['system'] = [dict(type='text', text='\n\n'.join(system), cache_control=dict(type='ephemeral'))]
+            body['system'] = [dict(type='text', text='\n\n'.join(system))]
+            if self.config.get('cache', True):     # (a one-shot call, like the advisor's, would pay the write premium for nothing)
+                body['system'][0]['cache_control'] = dict(type='ephemeral')
         if tools:
             body['tools'] = [dict(name=t['function']['name'], description=t['function'].get('description', ''),
                                   input_schema=t['function']['parameters']) for t in tools]

@@ -95,7 +95,7 @@ class Advisor:
                            context=int(cfg.get('context', 200000)), max_tokens=int(cfg['max_tokens']),
                            api_key_env=cfg.get('api_key_env', 'CAMINUS_ADVISOR_API_KEY'), effort=cfg['effort'],
                            thinking='adaptive', timeout=float(cfg.get('timeout', 300)),
-                           fallbacks=cfg.get('fallbacks') or None),
+                           fallbacks=cfg.get('fallbacks') or None, cache=False),
                       opener=getattr(self.rt, 'advisor_opener', None) or urllib.request.urlopen)
         model.counter = False                     # the brief is small; no count_tokens round trip per question
         brief = self._brief(gid, context) + '\n\nQUESTION FROM THE AGENT:\n' + question

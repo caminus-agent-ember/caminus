@@ -725,6 +725,37 @@ class Resident(unittest.TestCase):
         self.assertEqual((log[-1]['who'],log[-1]['status'],log[-1]['goal_kind']),('resident',401,'work'))
         self.assertIn('refused by the fixture',log[-1]['error'],'the provider reason is kept')
 
+    def test_free_time_leans_new_tracks_projects_and_rotates(self):
+        from caminus.env.resident.freetime import similarity, first_sentences
+        rt=self.free_runtime()
+        try:
+            first=rt.store.goal(rt.free.pulse())['prompt']
+            self.assertIn('PROJECTS.md',first);self.assertIn('not new',first);self.assertNotIn('earlier stretches',first)
+            for text in ('Built the haiku machine and tested syllable counts in the studio.',
+                         'Tuned the haiku machine syllable counts and tested them in the studio again.',
+                         'Haiku machine: tested syllable counts in the studio, tuned word banks.'):
+                gid=rt.store.next_goal()[0] if rt.store.next_goal() else rt.free.pulse()
+                rt._finish(gid,text)
+            (self.home/'studio'/'PROJECTS.md').write_text('# Projects\n- [active] haiku machine: 5-7-5 generator (last: 2026-11-15)\n'
+                                                       '- [active] tide notes: reading\n- [active] a game: tiny roguelike\n- [active] fourth: x\n- [done] old: y\n')
+            prompt=rt.store.goal(rt.free.pulse())['prompt']
+            self.assertIn('earlier stretches',prompt,'the invitation carries its own index')
+            self.assertIn('look alike',prompt);self.assertIn('last three stretches went to haiku machine',prompt)
+            self.assertIn('4 projects are active',prompt)
+            self.assertGreater(similarity('alpha beta gamma delta','alpha beta gamma epsilon'),0.5)
+            self.assertEqual(first_sentences('One thing. Two things happened here. '+'x'*400,60),'One thing. Two things happened here.')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_advisor_one_shot_call_writes_no_cache(self):
+        self.cmd('advisor',['--model','claude-sonnet-5-5','--endpoint','http://127.0.0.1:8766/v1'])
+        rt=Runtime(self.home)
+        try:
+            rt.advisor_opener=wire=Wire(sse('Advice.'))
+            gid=rt.store.enqueue('Anything.')
+            rt.advisor.ask(gid,'Question?')
+            self.assertNotIn('cache_control',json.dumps(wire.requests[0][2]),'a one-shot call would pay the write premium for nothing')
+        finally:rt.mail.close();rt.store.close()
+
     def test_model_outage_keeps_goal_for_retry(self):
         self.replies()
         result=self.cmd('once',['--goal','Wait for model.'],code=24)
