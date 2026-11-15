@@ -94,6 +94,10 @@ class Resident(unittest.TestCase):
     def setUp(self):
         self.key=uuid.uuid4().hex;self.home=S/self.key;self.bridge=self.home/'bridge';self.processes=[]
         self.cmd('init',extra=['--model','fixture','--endpoint',f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1','--bridge',str(self.bridge),'--bus',str(self.home/'mail.sqlite3'),'--no-loop-gates'])
+        # The bridge-protocol tests below park the goal on a request; the non-blocking mode (the default for real
+        # residents) has its own tests, which turn it back on.
+        conf=json.loads((self.home/'config.json').read_text());conf['nonblocking_approvals']=False
+        (self.home/'config.json').write_text(json.dumps(conf))
     def tearDown(self):
         for p in self.processes:
             if p.poll() is None:p.terminate()
@@ -1349,6 +1353,17 @@ for line in sys.stdin:
             self.assertEqual(ev[0]['data']['terminals_ended'],['a'*32])
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_stop_sweep_reaches_detached_processes_in_the_agent_account_only(self):
+        import signal as _signal
+        from caminus.env.resident import terminal as T
+        self.assertEqual(T.sweep_user(_signal.SIGTERM,account='someone-else'),[],'never outside the agent account')
+        # a detached process (its own session) is found by uid; the runtime and its ancestors are kept
+        p=subprocess.Popen(['sleep','300'],start_new_session=True);self.processes.append(p)
+        found=T.own_processes(keep=T._ancestors(os.getpid()))
+        self.assertIn(p.pid,found)
+        self.assertNotIn(os.getpid(),found);self.assertNotIn(os.getppid(),found)
+        os.kill(p.pid,_signal.SIGTERM);p.wait(timeout=5)
+
     def test_pause_is_applied_between_steps(self):
         rt=Runtime(self.home)
         try:
@@ -1417,6 +1432,62 @@ for line in sys.stdin:
         conf=json.loads((self.home/'config.json').read_text());conf['relay']=True;(self.home/'config.json').write_text(json.dumps(conf))
         st=self.cmd('status')
         self.assertAlmostEqual(st['compact_threshold'],.38,msg='a paid brain reports the early trigger')
+
+    def test_the_gate_runs_after_a_changing_turn_and_speaks_only_on_a_change(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make check.txt say ok.')
+            rt.store.update(gid,gate='grep -q ok check.txt')
+            g=lambda:rt.store.goal(gid)
+            inbox=lambda:[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? ORDER BY id',(gid,))]
+            rt._gate_check(gid,g())
+            self.assertEqual(inbox(),[],'a turn that changed nothing does not run the gate')
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertIn('gate fails now',inbox()[-1])
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertEqual(len(inbox()),1,'the same failure is not repeated')
+            (self.home/'check.txt').write_text('ok')
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertIn('passes again',inbox()[-1])
+            self.assertEqual(sum(1 for e in rt.store.events() if e['kind']=='gate' and e['data'].get('when')=='turn'),3)
+            rt.config['gate_each_turn']=False
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertEqual(len(inbox()),2,'gate_each_turn false turns it off')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_pending_request_parks_only_its_step(self):
+        conf=json.loads((self.home/'config.json').read_text());conf['nonblocking_approvals']=True
+        (self.home/'config.json').write_text(json.dumps(conf))
+        self.replies(call('ask_root',dict(command='apt-get install jq',reason='need jq')),
+                     call('write',dict(path='notes.txt',content='other work')),
+                     call('finish',dict(summary='too early')),
+                     call('wait',dict(until='message',timeout=5)),
+                     call('finish',dict(summary='done with jq')))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Install jq and write notes.')
+            results=lambda name:[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']==name]
+            for _ in range(12):
+                if results('finish'):break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'working','the goal keeps working while the request waits')
+            self.assertEqual((self.home/'notes.txt').read_text(),'other work')
+            first=next(e for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='ask_root')['data']['result']
+            self.assertTrue(first['pending']);rid=first['request']
+            refused=[e for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='finish']
+            self.assertIn('still waiting for your human',json.dumps(refused[-1]['data']['result']),'no finish with an open request')
+            # the human answers while the agent waits for a message: the wait wakes and the answer is in the inbox
+            self.bridge.joinpath('res').mkdir(parents=True,exist_ok=True)
+            (self.bridge/'res'/(rid+'.json')).write_text(json.dumps(dict(id=rid,decision='denied',reason='use the user-level jq')))
+            from caminus.env.resident import housemate
+            woke=housemate.wait(rt,gid,'message',timeout=3)
+            self.assertIn('message arrived',woke['happened'],'an agent waiting for a message wakes on the answer')
+            inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertTrue(any(f'answer to your root request {rid}' in t and 'denied' in t for t in inbox))
+            self.assertEqual(rt.open_requests(gid),[])
+            self.assertIn('request_answered',[e['kind'] for e in rt.store.events()])
+        finally:rt.mail.close();rt.store.close()
 
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model

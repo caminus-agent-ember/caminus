@@ -140,6 +140,59 @@ def worker_env(home):
     return env
 
 
+AGENT_USER_PREFIX = 'caminus-agent'   # the dedicated account(s) the sweep may act in; never anyone else's
+
+
+def _ancestors(pid):
+    """pid and every process above it (the runtime, its service manager, its session): never swept."""
+    seen = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        try:
+            stat = Path(f'/proc/{pid}/stat').read_text()
+            pid = int(stat[stat.rindex(')') + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return seen
+
+
+def own_processes(proc='/proc', uid=None, keep=()):
+    """Every process this user owns but the kept ones (the runtime, its ancestors, the user's service manager)."""
+    uid = os.getuid() if uid is None else uid
+    out = []
+    for d in Path(proc).iterdir():
+        if not d.name.isdigit() or int(d.name) in keep:
+            continue
+        try:
+            if d.stat().st_uid != uid:
+                continue
+            comm = (d / 'comm').read_text().strip()
+        except OSError:
+            continue
+        if comm in ('systemd', '(sd-pam)'):
+            continue                      # the user's service manager: killing it takes the runtime with it
+        out.append(int(d.name))
+    return out
+
+
+def sweep_user(sig, account=None):
+    """The emergency stop's second reach: processes the agent detached from its terminals (setsid, nohup, a daemon,
+    a user service) are outside their process groups. Only in the dedicated agent account; a runtime under any other
+    user (a developer's tests) sweeps nothing. Returns the pids signalled."""
+    import pwd
+    account = account or pwd.getpwuid(os.getuid()).pw_name
+    if not account.startswith(AGENT_USER_PREFIX):
+        return []
+    hit = []
+    for pid in own_processes(keep=_ancestors(os.getpid())):
+        try:
+            os.kill(pid, sig)
+            hit.append(pid)
+        except OSError:
+            pass
+    return hit
+
+
 class Terminal:
     def __init__(self, home, launch=None):
         self.home = Path(home)
