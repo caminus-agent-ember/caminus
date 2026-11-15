@@ -70,7 +70,9 @@ Thinking is stored with the reply and shown above it as its own block; it is not
 sent back to the model or counted in its context budget.
 
 Most controls use slash commands (type `/` in the composer and Tab completes
-the highlighted name):
+the highlighted name). A message that begins with `/` is read as a command; type
+`//` first to send it as text, so a goal about `/tmp` or `/etc` still reaches the
+agent:
 
 | Command | Action |
 |---|---|

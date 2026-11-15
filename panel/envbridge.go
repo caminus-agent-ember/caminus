@@ -52,7 +52,9 @@ func withBridgeLock(bridge, id string, fn func() error) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("bridge lock must be a regular file")
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// The panel writes this on the keypress that runs sudo, inside the update loop: wait long enough for
+	// another writer's short critical section, never long enough to freeze the interface.
+	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
 		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
@@ -62,9 +64,9 @@ func withBridgeLock(bridge, id string, fn func() error) error {
 			return err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("bridge request is busy; try again")
+			return fmt.Errorf("bridge request is busy; press again")
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return fn()

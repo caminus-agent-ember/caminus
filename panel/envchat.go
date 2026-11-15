@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -602,11 +603,16 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m envModel) submitCompose() (tea.Model, tea.Cmd) {
 	text := m.chat.compose.Value()
-	if strings.TrimSpace(text) == "" || m.chat.sending {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || m.chat.sending {
 		return m, nil
 	}
-	if strings.HasPrefix(strings.TrimSpace(text), "/") {
-		return m.chatSlash(strings.TrimSpace(text))
+	// A leading // sends the rest as a message, so a goal about /etc or /tmp is not taken for a command.
+	if strings.HasPrefix(trimmed, "//") {
+		return m.sendCompose(strings.TrimPrefix(trimmed, "/"))
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return m.chatSlash(trimmed)
 	}
 	return m.sendCompose(text)
 }
@@ -717,6 +723,11 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "Use /agent NAME"
 			return m, nil
 		}
+		// A typo here used to clear the transcript and leave an empty conversation behind.
+		if len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, arg) {
+			m.msg = "no such session " + terminalText(arg, true) + " · Ctrl+P lists them"
+			return m, nil
+		}
 		clear()
 		m.openResident(arg)
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
@@ -740,7 +751,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		return m, residentAction(m, []string{"resume", m.agentName, g.ID, "--json"}, "")
 	default:
-		m.msg = "Unknown command. /help lists commands; your draft is retained."
+		m.msg = "Unknown command. /help lists commands; //text sends a message; your draft is retained."
 	}
 	m.syncChat()
 	return m, nil

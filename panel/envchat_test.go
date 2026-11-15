@@ -561,3 +561,46 @@ func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
 		}
 	}
 }
+
+func TestSlashPrefixedMessageSendsVerbatimWithDoubleSlash(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.compose.SetValue("//tmp is full, the build failed")
+	next, _ := m.submitCompose()
+	m = next.(envModel)
+	if m.msg != "" || !m.chat.sending {
+		t.Fatalf("//text must be sent as a message, got msg=%q sending=%v", m.msg, m.chat.sending)
+	}
+	m2 := chatFixture(t)
+	m2.chat.compose.SetValue("/tmp is full")
+	next, _ = m2.submitCompose()
+	m2 = next.(envModel)
+	if !strings.Contains(m2.msg, "Unknown command") || m2.chat.sending {
+		t.Fatalf("an unknown command must be reported, not sent: msg=%q sending=%v", m2.msg, m2.chat.sending)
+	}
+}
+
+func TestSessionCommandRejectsAnUnknownNameWithoutClearingTheTranscript(t *testing.T) {
+	m := chatFixture(t)
+	m.sessionNames = []string{"resident", "research"}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+		events: []residentEvent{{Seq: 2, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "keep me"}}}})
+	before := len(m.residentEvents)
+	m.chat.compose.SetValue("/session rescarch")
+	next, _ := m.submitCompose()
+	m = next.(envModel)
+	if m.agentName != "resident" || len(m.residentEvents) != before {
+		t.Fatalf("a typo switched sessions: agent=%q events=%d/%d", m.agentName, len(m.residentEvents), before)
+	}
+	if !strings.Contains(ansi.Strip(m.chat.content), "keep me") {
+		t.Fatal("a typo cleared the transcript")
+	}
+	if !strings.Contains(m.msg, "no such session") {
+		t.Fatalf("no warning shown: %q", m.msg)
+	}
+	m.chat.compose.SetValue("/session research")
+	next, _ = m.submitCompose()
+	m = next.(envModel)
+	if m.agentName != "research" {
+		t.Fatalf("a known session did not open: %q", m.agentName)
+	}
+}
