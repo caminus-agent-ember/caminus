@@ -264,6 +264,16 @@ class Resident(unittest.TestCase):
                 self.assertIn('written mid-goal',rt.context_message(g2)['content'],'the next goal sees the new index')
             finally:rt.mail.close();rt.store.close()
 
+    def test_context_names_the_model_answering_this_turn(self):
+        with self.hermetic_home():
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('Commit something.')
+                note=rt.context_message(gid)['content']
+                self.assertIn('MODEL: this turn is answered by fixture',note)
+                self.assertNotIn('MODEL:',rt.system()['content'],'the brain can change between turns: it stays out of the cached prefix')
+            finally:rt.mail.close();rt.store.close()
+
     def test_remember_writes_a_note_and_refuses_a_full_index(self):
         rt=Runtime(self.home)
         try:

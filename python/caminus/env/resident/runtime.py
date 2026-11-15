@@ -184,6 +184,11 @@ class Runtime:
                 text = text[:limit] + f'\n[{p.name} truncated: {len(text) - limit} characters omitted from the end]'
             parts.append(p.name + ':\n' + text)
         parts.append(self.memory.index(gid))
+        # Which model is answering this turn (the brains can switch between turns, so this rides in the tail, not
+        # the cached prefix). Without it an agent copied another model's name from its history into a commit trailer.
+        if (name := (getattr(self.model, 'config', None) or {}).get('model') or self.config.get('model')):
+            parts.append(f'MODEL: this turn is answered by {name}. When you say who you are (a commit\'s '
+                         f'Assisted-by trailer, a report), name this model, not one you see in your history.')
         if (note := self._context_budget(gid)):
             parts.append(note.strip())
         if (line := self.advisor.status_line(gid)):
