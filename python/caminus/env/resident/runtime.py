@@ -446,6 +446,11 @@ class Runtime:
                          ts=time.time(), agent=self.config['name'], goal=action['goal'])
             if kind == 'root':
                 value.update(cmd=args['command'], reason=args['reason'])
+                # A grant approves this exact command text for this goal (answer --grant recorded it): the req
+                # carries it, so the owner's watch answers without asking again. It never lets the agent run root;
+                # an owner process claiming and executing is still required, as for any root request.
+                if self.store.has_grant(action['goal'], args['command']):
+                    value['granted'] = True
             else:
                 value.update(text=args['question'], choices=args.get('choices', []))
             parent = req.parent
@@ -460,11 +465,21 @@ class Runtime:
                 return None
             if result.get('id')==rid and result.get('decision')=='withdrawn':
                 self.store.update(action['goal'],state='cancelled')
+                self.store.end_grants(action['goal'])
                 return result
             if result.get('id') != rid or result.get('decision') not in ('approved','edited','denied','answered'):
                 raise ValueError('invalid human response')
             if kind == 'root' and result['decision'] == 'answered':
                 raise ValueError('root requests require a root decision')
+            # A grant rides in the answer the owner wrote (`answer ID approved --grant`): record this exact
+            # command as granted for the goal. A later byte-identical ask_root then needs no re-approval.
+            if kind == 'root' and result['decision'] == 'approved' and result.get('grant'):
+                self.store.add_grant(action['goal'], args['command'])
+            # A granted command still went through the owner's side (watch); mark the result for the agent
+            # and audit the use.
+            if kind == 'root' and result.get('approved_by') == 'grant':
+                result = dict(result, by='grant')
+                self.store.event('grant_used', dict(id=rid, command=args['command']), action['goal'])
             # The answer stays in the goal's transcript; the agent decides what to remember (nothing is written to
             # its memory automatically).
             instead = (result.get('answer') or '').strip() if result['decision'] == 'denied' else ''
@@ -738,6 +753,7 @@ class Runtime:
                 self.store.event('completion_deferred',dict(reason='human steering is waiting'),gid)
                 return
             self.store.update(gid,state='completed',summary=summary)
+            self.store.end_grants(gid)      # grants end with the goal
             if goal.get('kind','work') in FREE_KINDS:
                 self.free.ended(gid, summary)
             # The finish report says what was done, what was verified and what is still open: the check it

@@ -89,11 +89,14 @@ def pending(bridge):
     return out
 
 
-def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err='', answer_text='',request=None):
-    """harness side: write the answer file; decision is 'approved', 'edited', 'denied' or 'answered'"""
+def answer(bridge, rid, decision, actor, cmd=None, rc=None, out='', err='', answer_text='',request=None,
+           grant=False):
+    """harness side: write the answer file; decision is 'approved', 'edited', 'denied' or 'answered'.
+    grant=True marks the command approved for this goal: the resident records it and the same exact
+    command is then approved without asking again (execution still goes through the owner's side)."""
     check_id(rid)
     return approval.answer(bridge,request or approval.snapshot(bridge,rid),decision,actor,
-                           cmd=cmd,rc=rc,out=out,err=err,answer=answer_text)
+                           cmd=cmd,rc=rc,out=out,err=err,answer=answer_text,**({'grant':True} if grant else {}))
 
 
 claim=approval.claim

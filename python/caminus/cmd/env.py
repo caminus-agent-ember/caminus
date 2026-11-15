@@ -97,6 +97,9 @@ def _parser():
     p = sub.add_parser('answer', help='answer one request: approved | edited TEXT | denied [WHAT TO DO INSTEAD] | answered TEXT')
     p.add_argument('--json', action='store_true')
     p.add_argument('--digest',help='the reviewed _digest from env reqs --json; required for approved/edited root decisions')
+    p.add_argument('--grant', action='store_true',
+                   help='with approved: also grant this exact command for the goal; the same byte-identical '
+                        'command is then approved without asking again (every use audited; grants end with the goal)')
     p.add_argument('id')
     p.add_argument('decision', choices=['approved', 'edited', 'denied', 'answered'])
     p.add_argument('text', nargs='?')
@@ -458,9 +461,26 @@ def _ask(a):
     return 0
 
 
-def _root_result(req,decision,cmd,actor,tr):
-    token=bridge.claim(settings.bridge_dir(),req,decision,actor,cmd)
-    audit.log(settings.audit_path(),dict(event='root_claim',id=req['id'],decision=decision,by=actor,cmd=cmd))
+def _grant_recorded(ap,req):
+    """The owner's audit shows an approved, granted execution of exactly this command in exactly this goal.
+    The agent's `granted` flag on the request is not trusted on its own."""
+    try:
+        with open(ap) as f:
+            for line in f:
+                try:e=json.loads(line)
+                except ValueError:continue
+                if (e.get('event')=='root_result' and e.get('decision')=='approved' and e.get('granted')
+                        and e.get('cmd')==req.get('cmd') and e.get('goal')==req.get('goal')):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _root_result(req,decision,cmd,actor,tr,grant=False):
+    token=bridge.claim(settings.bridge_dir(),req,decision,actor,cmd,grant=grant)
+    audit.log(settings.audit_path(),dict(event='root_claim',id=req['id'],decision=decision,by=actor,cmd=cmd,
+                                         **({'granted': True} if grant else {})))
     try:r=bridge.execute_root(cmd,runner=tr)
     except (OSError,ValueError) as e:r=subprocess.CompletedProcess(['sudo','sh','-c',cmd],127,'',str(e))
     bridge.finish(settings.bridge_dir(),req['id'],token,r.returncode,r.stdout or '',r.stderr or '')
@@ -498,6 +518,23 @@ def _watch(a, tr):
                 print('  '+terminal_text(req['cmd']))
                 if req.get('reason'):
                     print('  reason: '+terminal_text(req['reason']))
+                if req.get('granted') and _grant_recorded(ap,req):
+                    # The resident marks a request as carrying the goal's grant (`answer ID approved --grant`
+                    # was used for this exact command in this goal) and the owner's own audit confirms it; the
+                    # agent's flag alone is never trusted. Approve and execute without asking again. The
+                    # resident never runs root; claim, sudo and the audit stay exactly as usual.
+                    print('  granted for this goal; executing without asking again (use audited)')
+                    try:r = _root_result(req,'approved',req['cmd'],'grant',tr)
+                    except (OSError,ValueError) as e:
+                        print('request not executed: '+str(e),file=sys.stderr)
+                        continue
+                    audit.log(ap, {'event': 'grant_used', 'id': req['id'], 'decision': 'approved',
+                                   'by': me, 'cmd': req['cmd'], 'rc': r.returncode, 'goal': req.get('goal')})
+                    sys.stdout.write(r.stdout or '')
+                    sys.stderr.write(r.stderr or '')
+                    continue
+                if req.get('granted'):
+                    print('  the agent marked this granted, but no matching owner approval is in the audit log; asking')
                 choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
                 if choice not in ('a','e','d'):
                     continue
@@ -541,6 +578,9 @@ def _answer_pending(a, tr):
         print(f'caminus env answer: no pending request {a.id} (caminus env reqs)', file=sys.stderr)
         return 2
     req = reqs[a.id]
+    if a.grant and a.decision != 'approved':
+        print('caminus env answer: --grant goes with approved (the exact command as reviewed)', file=sys.stderr)
+        return 2
     if a.decision in ('approved','edited') and not a.digest:
         print('caminus env answer: root approval requires --digest from the request you reviewed (env reqs --json)',file=sys.stderr)
         return 2
@@ -569,12 +609,14 @@ def _answer_pending(a, tr):
         if not cmd:
             print('caminus env answer: no command to run', file=sys.stderr)
             return 2
-        r = _root_result(req,a.decision,cmd,me,tr)
+        r = _root_result(req,a.decision,cmd,me,tr,grant=a.grant)
         audit.log(ap, {'event': 'root_result', 'id': a.id, 'decision': a.decision, 'by': me,
-                       'cmd': cmd, 'rc': r.returncode})
+                       'cmd': cmd, 'rc': r.returncode, 'goal': req.get('goal'),
+                       **({'granted': True} if a.grant else {})})
         sys.stdout.write(r.stdout or '')
         sys.stderr.write(r.stderr or '')
-        res = {'id': a.id, 'decision': a.decision, 'cmd': cmd, 'rc': r.returncode}
+        res = {'id': a.id, 'decision': a.decision, 'cmd': cmd, 'rc': r.returncode,
+               **({'grant': True} if a.grant else {})}
     if a.json:
         print(json.dumps(res))
     return 0
