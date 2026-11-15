@@ -122,12 +122,23 @@ func stateStyle(state string) (string, lipgloss.Style) {
 // shellHeader: the agent, its state, what it is doing, and on the right the step count.
 func shellHeader(agent, state, goal string, steps, w int) string {
 	icon, st := stateStyle(state)
-	left := envTitle.Render("CAMINUS") + envDim.Render(" · ") + lipgloss.NewStyle().Foreground(cText).Render(agent) + " " +
-		st.Render(icon+" "+strings.ReplaceAll(state, "_", " "))
+	detail := ""
 	if goal != "" {
-		left += envDim.Render(" · ") + lipgloss.NewStyle().Foreground(cBlue).Render(goal)
+		detail = lipgloss.NewStyle().Foreground(cBlue).Render(goal)
 	}
-	right := envDim.Render(fmt.Sprintf("%d steps", steps))
+	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, envDim.Render(fmt.Sprintf("%d steps", steps)), w)
+}
+
+// screenHeader is every screen's first two lines (the env chat, caminus panel, caminus top): CAMINUS · what · its
+// state in its one colour · dim details, something on the right, and a chrome rule under it.
+func screenHeader(what, state string, st lipgloss.Style, detail, right string, w int) string {
+	left := envTitle.Render("CAMINUS") + envDim.Render(" · ") + lipgloss.NewStyle().Foreground(cText).Render(what)
+	if state != "" {
+		left += " " + st.Render(state)
+	}
+	if detail != "" {
+		left += envDim.Render(" · ") + detail
+	}
 	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		left = ansi.Truncate(left, max(1, w-lipgloss.Width(right)-2), "…")

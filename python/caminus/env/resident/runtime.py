@@ -1,5 +1,6 @@
 """The resident agent: receive goals, reason, use the OS, ask, and wait durably."""
 from contextlib import contextmanager
+import re
 import fcntl
 import getpass
 import json
@@ -38,6 +39,30 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
 GATE_TRIGGERS = ('edit', 'write', 'terminal')   # tools after which the goal's gate runs again
+GATE_TURN_TIMEOUT = 120  # a per-turn gate gets two minutes (the finish gate keeps its ten); past it, finish-only
+GATE_SLOW = 30           # a gate slower than this runs per turn at most every GATE_SLOW_EVERY seconds
+GATE_SLOW_EVERY = 600
+READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'less', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf',
+                       'which', 'type', 'ps', 'df', 'du', 'stat', 'file', 'tree', 'date', 'env', 'id', 'whoami',
+                       'uname', 'nvidia-smi', 'rocm-smi', 'amd-smi', 'free', 'uptime', 'sleep', 'true', 'diff'))
+READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'branch', 'remote', 'rev-parse', 'blame', 'ls-files'))
+
+
+def read_only_command(cmd):
+    """A terminal command that changes nothing the gate could see: every part of a pipeline or && chain is a
+    read-only program, with no output redirection. Anything unclear counts as a change (the gate runs)."""
+    if not isinstance(cmd, str) or not cmd.strip() or re.search(r'>|\$\(|`|\btee\b|-delete\b|-exec\b', cmd):
+        return False
+    for part in re.split(r'\|\||&&|[|;\n]', cmd):
+        words = part.split()
+        if not words:
+            continue
+        if words[0] == 'git':
+            if len(words) < 2 or words[1] not in READ_ONLY_GIT:
+                return False
+        elif words[0] not in READ_ONLY:
+            return False
+    return True
 COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
 RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
@@ -222,6 +247,7 @@ class Runtime:
         self.plain_replies = {}
         self.truncations = {}    # goal -> replies in a row cut off at the output limit
         self._gate_dirty, self._gate_last = set(), {}   # goals whose files changed this turn; the last gate result
+        self._gate_slow = {}     # goal -> when a slow per-turn gate last ran, or 'off' after a timeout
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
         self.brains = Brains(self, self.primary)
@@ -623,7 +649,7 @@ class Runtime:
             if not isinstance(args, dict):
                 raise ValueError('tool arguments must be an object')
             name = action['name']
-            if name in GATE_TRIGGERS:
+            if name in GATE_TRIGGERS and not (name == 'terminal' and read_only_command(args.get('command'))):
                 self._gate_dirty.add(action['goal'])
             schemas = {t['function']['name']:t['function']['parameters'] for t in TOOLS} | LEGACY_TOOLS
             schema = schemas.get(name)
@@ -1067,8 +1093,26 @@ class Runtime:
         gate = g.get('gate')
         if not gate or not self.config.get('gate_each_turn', True) or g.get('kind', 'work') in FREE_KINDS:
             return
+        slow = self._gate_slow.get(gid)
+        if slow == 'off':
+            return
+        if slow and time.time() - slow < GATE_SLOW_EVERY:
+            self._gate_dirty.add(gid)        # still owed: it runs once the interval is up
+            return
         from .judge import run_gate
-        ok, out = run_gate(self.home, gate)
+        t0 = time.time()
+        ok, out = run_gate(self.home, gate, timeout=GATE_TURN_TIMEOUT)
+        took = time.time() - t0
+        if not ok and out.startswith('the gate did not finish'):
+            self._gate_slow[gid] = 'off'
+            self.store.event('gate', dict(command=gate, passed=False, output=out, when='turn', disabled=True), gid)
+            self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid,
+                f'[gate] the gate took over {GATE_TURN_TIMEOUT} s, so it no longer runs after each step; it still runs '
+                'when you finish. A quicker check (one test file, not the whole suite) would give you earlier feedback.',
+                'nudge'))
+            return
+        if took > GATE_SLOW:
+            self._gate_slow[gid] = time.time()
         last = self._gate_last.get(gid)
         self._gate_last[gid] = (ok, out if not ok else '')
         self.store.event('gate', dict(command=gate, passed=ok, output=out[-2000:], when='turn'), gid)

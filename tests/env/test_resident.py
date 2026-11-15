@@ -493,6 +493,19 @@ class Resident(unittest.TestCase):
         try:self.assertEqual([e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged'],['not_yet','met'])
         finally:store.close()
 
+    def test_a_wait_verdict_points_at_the_wait_tool_and_is_not_a_refusal(self):
+        self.gates_on()
+        self.verdicts(dict(verdict='wait',reason='the build started at step 2 has not finished'),
+                      dict(verdict='wait',reason='still building'),
+                      dict(verdict='wait',reason='still building'),
+                      dict(verdict='met',reason='the build log shows success'))
+        self.replies(call('define_done',dict(check='the build succeeds')),
+                     *[c for _ in range(4) for c in (call('verify',dict(evidence='build.log')),call('finish',dict(summary='Done.')))])
+        out=self.cmd('once',['--goal','Build it.'])
+        self.assertEqual(out['state'],'completed','three waits are not three refusals (JUDGE_LIMIT is 3)')
+        bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
+        self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
+
     def test_an_impossible_verdict_pauses_the_goal_for_the_human(self):
         self.gates_on()
         self.verdicts(dict(verdict='impossible',reason='writing /etc needs root and none was approved'))
@@ -1487,6 +1500,26 @@ for line in sys.stdin:
             self.assertTrue(any(f'answer to your root request {rid}' in t and 'denied' in t for t in inbox))
             self.assertEqual(rt.open_requests(gid),[])
             self.assertIn('request_answered',[e['kind'] for e in rt.store.events()])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_per_turn_gate_skips_read_only_commands_and_backs_off_a_slow_gate(self):
+        from caminus.env.resident import runtime as R
+        for c in ('ls -la','git status && git diff --stat','grep -rn foo src | head','cat a.txt; wc -l a.txt'):
+            self.assertTrue(R.read_only_command(c),c)
+        for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b'):
+            self.assertFalse(R.read_only_command(c),c)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Slow gate.')
+            rt.store.update(gid,gate='sleep 3; false')
+            old=R.GATE_TURN_TIMEOUT;R.GATE_TURN_TIMEOUT=1
+            try:
+                rt._gate_dirty.add(gid);rt._gate_check(gid,rt.store.goal(gid))
+            finally:R.GATE_TURN_TIMEOUT=old
+            inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertIn('no longer runs after each step',inbox[-1])
+            n=len(inbox);rt._gate_dirty.add(gid);rt._gate_check(gid,rt.store.goal(gid))
+            self.assertEqual(len(list(rt.store.db.execute('SELECT 1 FROM inbox WHERE goal=?',(gid,)))),n,'off for this goal')
         finally:rt.mail.close();rt.store.close()
 
     def test_the_openai_transport_sends_reasoning_effort(self):

@@ -530,7 +530,12 @@ func oneLine(s string) string {
 }
 
 func panel(title string, accent color.Color, w int, body []string) string {
-	b := fg(cDim)
+	// The env chat's box colours: chrome grey, and the accent on the one box that has the focus (the only one
+	// titled in the accent colour).
+	b := fg(cGray)
+	if accent == cAccent {
+		b = fg(cAccent)
+	}
 	inner := w - 4
 	t := " " + ansi.Truncate(lipgloss.NewStyle().Foreground(accent).Bold(true).Render(title), max(0, w-5), "…") + " "
 	top := b.Render("╭─") + t + b.Render(strings.Repeat("─", max(0, w-3-lipgloss.Width(t)))+"╮")
@@ -1046,8 +1051,9 @@ func (m model) render() string {
 
 	// ----- header -----
 	var pill string
-	pillStyle := func(bg color.Color) lipgloss.Style {
-		return lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color("#1b1f27")).Bold(true).Padding(0, 1)
+	// The state is one coloured word, as the env chat shows its agent's (screenHeader); it was a filled pill.
+	pillStyle := func(c color.Color) lipgloss.Style {
+		return lipgloss.NewStyle().Foreground(c).Transform(strings.ToLower)
 	}
 	sp := spin[m.frame%len(spin)]
 	off := srv.offline() // why nothing is live, "" while a model is up
@@ -1126,11 +1132,9 @@ func (m model) render() string {
 	if srv.NSlots > 1 {
 		slots = fmt.Sprintf(" · slot id %d · %d slots, %d busy", sl.ID, srv.NSlots, srv.Busy)
 	}
-	title := lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("◆ caminus top") + fg(cMuted).Render(fmt.Sprintf(" %s  %s · %s · %s%s", version, alias, mdl, host, slots))
-	clock := fg(cMuted).Render(time.Now().Format("15:04:05"))
-	room := W - lipgloss.Width(pill) - lipgloss.Width(clock) - 3
-	title = ansi.Truncate(title, max(0, room), "…")
-	header := title + strings.Repeat(" ", max(1, room+1-lipgloss.Width(title))) + pill + " " + clock
+	clock := fg(cMuted).Render(version + "  " + time.Now().Format("15:04:05"))
+	header := screenHeader("top", pill, lipgloss.NewStyle(), fg(cMuted).Render(fmt.Sprintf("%s · %s · %s%s", alias, mdl, host, slots)), clock, W)
+	header, _, _ = strings.Cut(header, "\n") // no rule: the status line under it does that job on the densest screen
 	statusLine := " " + fit(status, W-2)
 
 	// ----- column widths -----
@@ -1429,7 +1433,7 @@ func (m model) render() string {
 	if H <= 0 {
 		H = 50
 	}
-	room = H - 5 - 3
+	room := H - 5 - 3
 	var body string
 	if twoCol {
 		cBox := camBox(srv, lw) // Caminus: under CONTEXT; each keeps its first rows longest
