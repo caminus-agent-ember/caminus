@@ -1260,6 +1260,23 @@ for line in sys.stdin:
             self.assertAlmostEqual(price('zai-org/GLM-5.2',dict(prompt_tokens=1_000_000,completion_tokens=1_000_000)),2.8)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_paid_brain_compacts_early_by_the_owners_setting(self):
+        rt=Runtime(self.home)
+        try:
+            self.assertEqual(rt.compaction_ratios(),(.85,.2),'a local brain keeps the late trigger')
+            rt.model.remote=True
+            trig,target=rt.compaction_ratios()
+            self.assertAlmostEqual(trig,.38);self.assertAlmostEqual(target,.076)
+            self.assertEqual(int(1048576*trig)//1000,398,'~400K on a 1M window, as in Hermes');self.assertEqual(int(1048576*target)//1000,79)
+            rt.config.update(paid_compact_threshold=.5,paid_compact_target_ratio=.1)
+            self.assertEqual(rt.compaction_ratios(),(.5,.1),'the owner can change it')
+            rt.config['context']=100000
+            gid=rt.store.enqueue('Fill the window.')
+            note=json.dumps(dict(goal=gid,tokens=40000,size=100000))
+            (self.home/'context.json').write_text(note)
+            self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
