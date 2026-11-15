@@ -656,6 +656,7 @@ for line in sys.stdin:
                 gid=rt.store.enqueue('Commit something.')
                 note=rt.context_message(gid)['content']
                 self.assertIn('MODEL: this turn is answered by fixture',note)
+                self.assertIn('REPLY LIMIT: each reply, text and tool calls together, is at most',note)
                 self.assertNotIn('MODEL:',rt.system()['content'],'the brain can change between turns: it stays out of the cached prefix')
             finally:rt.mail.close();rt.store.close()
 
@@ -1653,12 +1654,13 @@ for line in sys.stdin:
         self.replies(dict(_deltas=[
             dict(choices=[dict(delta=dict(content='Half an ans'))]),
             dict(choices=[dict(delta=dict(content='wer'),finish_reason='length')]),
-        ]))
-        result=self.cmd('once',['--goal','Stream until the budget runs out.'],code=22)
-        self.assertEqual(result['state'],'paused')
+        ]),call('finish',dict(summary='Done in a shorter reply.')))
+        result=self.cmd('once',['--goal','Stream until the budget runs out.'])
+        self.assertEqual(result['state'],'completed','one cut-off reply is recovered, not a pause')
         self.assertFalse(any(e['kind']=='model_cut' for e in self.cmd('events')))
         event=next(e for e in self.cmd('events') if e['kind']=='model_truncated')
         self.assertEqual(event['data']['partial']['content'],'Half an answer')
+        self.assertTrue(event['data']['recovered'])
         self.assertFalse(any((self.home/'live').glob('*.json')) if (self.home/'live').is_dir() else False)
 
     def test_live_snapshot_coalesces_and_disappears_when_the_turn_ends(self):
@@ -1696,10 +1698,18 @@ for line in sys.stdin:
         partial=call('terminal',dict(command='touch forbidden'))
         partial['_finish_reason']='length'
         self.replies(partial,call('finish',dict(summary='Resumed with a complete answer.')))
-        first=self.cmd('once',['--goal','Complete this task.'],code=22)
-        self.assertEqual(first['state'],'paused');self.assertFalse((self.home/'forbidden').exists())
+        first=self.cmd('once',['--goal','Complete this task.'])
+        self.assertEqual(first['state'],'completed');self.assertFalse((self.home/'forbidden').exists(),'a cut-off call never runs')
         self.assertEqual(first['pending'],[])
-        self.cmd('once',['--goal-id',first['id']])
+        retry=[b for k,b in Endpoint.seen if k==self.key][-1]
+        self.assertIn('hit the output limit',json.dumps(retry),'the agent is told why and how to recover')
+
+    def test_three_cut_off_replies_in_a_row_pause_the_goal(self):
+        cut=lambda:dict(call('write',dict(path='big.txt',content='x')),_finish_reason='length')
+        self.replies(cut(),cut(),cut(),call('finish',dict(summary='never reached')))
+        out=self.cmd('once',['--goal','Write a huge file.'],code=22)
+        self.assertEqual(out['state'],'paused');self.assertIn('output budget',out['error'])
+        self.assertFalse((self.home/'big.txt').exists())
 
     def test_repeated_tool_call_ids_do_not_stop_the_runtime(self):
         # llama.cpp-style backends number calls from zero on every request
