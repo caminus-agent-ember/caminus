@@ -35,86 +35,78 @@ setgid 2770) the `lease` tool and the human's GPU windows write. Stopping the
 resident does not stop its inference server. Terminal workers
 survive a resident restart, so long commands can be inspected rather than repeated.
 
-The panel reopens your last conversation directly; the Sessions page is one
-Tab away. Select a named resident and press Enter for its
-conversation; `n` creates a fresh named session with the same model settings,
-separate memory/history, and its own persistent runtime. Existing sessions are
-never overwritten. The five main pages are Sessions, Audit, Settings, Notes &
-Memory, and Context. Tab/Shift-Tab or 1–5 navigates between them. Settings displays
-current model/context/compaction settings; it is read-only.
+### The panel: one chat, with overlays
 
-Inside a conversation, a fixed multiline textbox stays below a scrollable
-transcript. Ordinary typing goes into that textbox. Enter sends; Alt+Enter or
-Shift+Enter inserts a newline; bracketed paste preserves Unicode and multiple
-lines. Text steers the selected working goal. After completion, the next message
-explicitly continues that same conversation with its previous context. A cancelled
-goal starts fresh; `/new [goal]` explicitly starts another goal.
-A refresh never redirects a draft. Failed delivery retains its text.
+`caminus env ui` opens the conversation; there are no pages to switch between.
+Everything else opens over it in the same bordered box (↑↓ move, Enter acts, Esc
+closes; `q` never quits inside an overlay). The header names the agent, its
+state and the goal; the footer shows the brain, the context in use against the
+window (a bar that warms toward the compaction point), this goal's spend and
+today's on a paid brain, the last reply's speed and anything waiting for you.
 
-The transcript retains earlier goals, messages, commands and results. It loads
-paged durable history rather than dropping all but a few recent entries, and
-context compaction does not remove UI history. Markdown and fenced code render
-with syntax highlighting; terminal commands and outputs have separate labels.
-Page Up/Down and the mouse wheel scroll; incoming activity preserves the reading
-position. Ctrl+L follows the latest activity. Escape switches to browsing without
-deleting a draft; Enter returns to typing. Ctrl+P opens a session switcher that
-filters by name without leaving the conversation. When the draft is a `/` token,
-matching commands appear next to the composer and Tab cycles through them. The
-footer shows the configured model,
-context capacity, selected goal state/steps and pending request count. Context
-capacity is not presented as a measured current token count.
+The composer sits below the transcript. Enter sends, Alt+Enter or Shift+Enter
+adds a line, paste keeps Unicode and newlines. A plain message is delivered at
+the agent's next step as a **nudge**; `/steer TEXT` redirects (see "The loop").
+A message that starts with `/` is a command; `//` sends it as text instead.
 
-While a reply generates, a bounded tail below the transcript shows its thinking,
-each tool it starts and the text so far, redrawn a few times a second from the
-runtime's live snapshot. The durable blocks replace it when the turn lands, so a
-reply is never shown twice and the transcript is never rewritten mid-reply.
-The live window takes about half the page while a reply is being written (the
-transcript keeps the rest): Alt+Up/Down and the mouse wheel scroll it three lines at
-a time, Page Up/Down by a screen, and Ctrl+T holds it where it is while text keeps
-arriving; scrolling back to the bottom, or Ctrl+L, resumes following. Completed
-thinking is stored with the reply and shown above it as its own block, scrollable
-with the transcript; it is not sent back to the model or counted in its context budget.
+| Key | Action |
+|---|---|
+| Esc | browse the transcript (the draft stays); while a reply is being written, interrupt that turn instead (nothing of it is kept; the goal waits up to two minutes for your message) |
+| ↑ on an empty composer | pull back your newest message the agent has not read yet |
+| Ctrl+R | earlier prompts containing the draft, newest first |
+| Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
+| Ctrl+E | open or fold every tool card; Ctrl+O shows every line of an open card (40 otherwise) |
+| Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
+| Ctrl+G, Ctrl+A, Ctrl+P | the goals, approvals and sessions overlays |
+| `!cmd` | run `cmd` in the agent's account; the command and its output land in the draft |
+| `@path` | in a message, attach that file from the agent's account (64 KB) |
 
-Most controls use slash commands (type `/` in the composer and Tab completes
-the highlighted name). A message that begins with `/` is read as a command; type
-`//` first to send it as text, so a goal about `/tmp` or `/etc` still reaches the
-agent:
+While a reply is written, a bounded live box shows its thinking, the tools it
+starts and the text so far, with Ember, the Caminus mascot, flickering beside
+it; the durable blocks replace it when the turn lands.
 
 | Command | Action |
 |---|---|
-| `/new [goal]` | Start or prepare a new goal |
-| `/goals`, `/goal ID` | List goals or select an unambiguous ID/prefix to steer |
-| `/newsession NAME`, `/session NAME`, `/sessions` | Create/open a named resident, or return home |
-| `/cancel`, `/resume` | Cancel or resume the selected goal |
-| `/compact` | Summarize the selected goal's history into working memory now, even below the automatic threshold |
-| `/start`, `/stop` | Control this session's resident loop; inference stays separate |
-| `/requests` | Open human questions and root approvals |
-| `/remember TEXT` | Append to the selected session's durable MEMORY.md |
-| `/help`, `/quit` | Toggle help, or close the UI while the agent keeps running |
+| `/new [goal]`, `/goal ID`, `/goals` | start a goal, select one, or open the goals overlay (Shift+↑/↓ there reorders the queue) |
+| `/goal --plan TEXT`, `/plan approve`, `/plan revise NOTE` | a plan-first goal: it explores read-only, proposes a plan and waits; the plan shows as a card above the composer |
+| `/steer TEXT`, `/pause`, `/resume`, `/cancel` | steer, pause at the next step, resume, cancel |
+| `/btw QUESTION` | a side question with no tools; nothing enters the goal |
+| `/diff`, `/export` | the goal's changes in its git repositories (new files included); the goal as markdown in the agent's `~/exports` |
+| `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
+| `/approvals`, `/requests`, `/deny TEXT` | waiting questions and root requests; deny with what to do instead (it reaches the agent as a steer) |
+| `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
+| `/context`, `/memory`, `/audit`, `/settings` | what the agent's context holds and where compaction starts; memory; the audit log; settings |
+| `/jobs`, `/servers`, `/agents` | the agent's jobs and processes; the model servers; every resident (advanced) |
+| `/recap`, `/studio` | while you were away; what free time made (the shelf, the journal, the studio) |
+| `/compact`, `/remember TEXT` | compact now; add to memory |
+| `/update`, `/halt` | install this caminus's runtime between goals; the emergency stop (`/halt clear` lifts it) |
+| `/glyphs`, `/theme` | symbol set (nerd, unicode, ascii) and colours |
+| `/session NAME`, `/sessions`, `/start`, `/stop`, `/quit` | sessions, the resident's loop, close the UI (the agent keeps running) |
 
-Requests retain their review controls: `a` answers/approves, `e` edits a root
-command, `d` denies. Root execution hands the actual terminal to the human for
-sudo. Steering does not approve root, answer a pending question or resume a
-paused goal. Accepted in-flight steering is observed before completion; ordinary CLI steering to a
-finished/cancelled goal is rejected, and steering a paused goal reports
-`resume_required` so a queued message is not mistaken for delivered work.
-The conversation UI explicitly uses
-`send --goal-id ID --continue` for completed-goal follow-ups; cancelled goals
-cannot be reopened this way. `env run`, jobs,
-sessions and all previous scriptable CLI flows remain available.
+Custom commands: a markdown file `~/.config/caminus/commands/NAME.md` becomes
+`/NAME ARGS` (front matter is dropped; `$ARGUMENTS` is replaced, else the
+arguments are appended) and is sent as a message.
 
-When the selected goal calls `ask_user`, its question appears inline in place of
-the steering textbox. Use Up/Down to select a choice, then Enter to answer;
-number keys highlight a choice without submitting it. Select "Write your own
-answer" or press `e` for a Unicode multiline answer. Questions without choices
-open that text field directly. Escape returns from custom editing to the choices,
-or defers the question and restores the untouched steering draft. A question
-arriving over a draft keeps the textbox active and requires **F2** to take over
-the question. Ordinary letters, numbers, paste, cursor movement and Enter cannot
-become an answer in that state. Deferred questions remain available in `/requests`.
-Refreshing never redirects a selected answer to another request; changed,
-withdrawn or already-answered requests require another review. Root requests
-always retain their explicit approval flow in `/requests`.
+### Root requests and questions
+
+A root request is an inline card. Esc, then `a a` approves (two presses: the
+first only names the command), `g g` approves and grants that exact command for
+the rest of its goal, `e` edits, `d` denies, `/deny TEXT` denies with what to do
+instead. When several wait, one card lists them all and `[` `]` pick. A granted
+repeat (the same command in the same goal, within 12 hours of your approval, as
+your own audit log records it) runs with one `a`, still under your sudo; the
+resident never runs root, and `caminus env watch` honours grants the same way.
+`caminus env answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant`
+do the same from the command line.
+
+Nothing waits on you. A pending request parks only the step that needs it: the
+agent is told it is pending, works on what does not need the answer, and gets
+the answer as a message (`wait` with `until message` sleeps until it arrives);
+it cannot finish while a request is open. A question unanswered after 15 minutes
+(`question_timeout`) takes the agent's recommended option (or the advisor's
+pick); a permission question times out as no, and an unanswered root request is
+never run. Desktop notifications announce what needs you (`CAMINUS_PANEL_NOTIFY=0`
+turns them off).
 
 Question tool arguments are rendered as the interactive question rather than raw
 JSON. The chosen human answer remains in conversation history. Normal PTY CRLF
@@ -153,12 +145,48 @@ since the last steer. `ledger` keeps the milestones and blockers, pinned into
 every turn so they survive compaction. `checkpoint` tars named paths before a
 destructive or milestone-crossing action and `rollback` puts them back.
 
+The goal's gate (the shell check `define_done` names) also runs after every turn
+that changed something (an edit, a write, a terminal command that is not
+read-only), before the next model call; the agent hears only a change (the gate
+starting to fail, with its output, or passing again). A per-turn run gets two
+minutes: a gate that takes longer is off per turn for that goal (it still runs at
+finish), and one slower than 30 s runs per turn at most every ten minutes.
+`gate_each_turn false` turns it off.
+
+At `finish` the gate runs, then the judge: a fresh call that sees the goal, the
+done check, your steers and the recorded evidence, not the agent's reasoning. It
+answers met, not_yet (the finish is refused with what is missing), wait (the work
+is done but its proof is still running: the agent is pointed at its `wait` tool)
+or impossible (the goal pauses for you). Three not_yet in a row, or six waits,
+pause the goal.
+
 The failure ledger keys a call by tool and arguments: a call that has failed
-twice is refused with the reason and the model is told to change approach, and
-the third failure pauses the goal. The watchdog pauses a goal that spends
+twice is refused before it runs and the model is told to change approach, and two
+refused repeats of it pause the goal. The watchdog pauses a goal that spends
 without moving — no progress for `idle_timeout` seconds, a prompt over
-`token_budget`, or the same call failing three times — and records why in the
-goal's error, where the panel shows it.
+`token_budget`, the same call failing three times, or three replies in a row cut
+off at the output limit — and records why in the goal's error, where the panel
+shows it.
+
+Compaction has two tiers. When the context passes the threshold, old tool
+outputs (outside the newest eight messages) are first replaced by a one-line stub
+and the path of a file holding them, with no model call; a summary runs only if
+that is not enough. A paid brain (remote, or through a key relay) compacts early,
+at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
+`paid_compact_target_ratio`); a local one at 85 % down to 20 %.
+
+A plan-first goal (`send --plan`, `/goal --plan`) explores before it changes
+anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
+and a terminal command runs only when every part of it is a read-only program
+(`ls`, `grep`, `git status`, ...; anything unclear counts as a change). The agent
+files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
+`agent plan NAME GOAL approve|reject [--note TEXT]`.
+
+The emergency stop: `caminus env stop-all [--reason TEXT]` (`/halt`) writes a
+STOP file in the bridge folder that only you can remove (`stop-all --clear`).
+Every resident pauses its working goals after the current step, starts nothing
+new, and ends the commands running in its terminals and any process its account
+detached (TERM, then KILL ten seconds later); lifting the stop resumes nothing.
 
 `--no-loop-gates` records `loop_gates false` for fixture agents that predate the
 loop; real residents get the gates by default.
@@ -346,3 +374,29 @@ the before/after token counts and targets. Every generation also reserves output
 room against the model window.
 `--compaction-model` selects a summary alias on the same endpoint; a no-thinking
 alias can summarize without using the summary budget for hidden reasoning.
+
+## Paid brains, relays and updates
+
+`agent provider add NAME --kind deepinfra|anthropic|openai|local --endpoint URL
+[--relay]` registers a provider; `agent models --refresh` reads every provider's
+models (window, output limit, reasoning levels, prices) into the agent's
+catalog; `agent model ID` and `agent effort LEVEL` switch the brain (a running
+resident takes it at its next turn). A paid provider goes through a key relay
+the owner runs, so the agent never sees the key:
+
+```sh
+caminus env relay install --provider deepinfra --cap-usd 3   # a systemd user service, no expiry
+caminus env relay status
+```
+
+The relay refuses models it cannot price and stops at its daily cap (HTTP 402);
+the agent then waits for the next day or another brain. Every priced turn is
+metered per goal and per day (`agent status` reports `spend_today` and
+`spend_goals`).
+
+`caminus env agent update NAME` (`/update`) installs this caminus's runtime: the
+resident applies it between goals (`--now`: at the next step), restarts its own
+service and reports the new version in its heartbeat (`--wait SECS` waits for it).
+
+`tools/env_demo.py` runs all of this on a scripted model in a scratch home (no
+agent account, GPU, server or key): the quickest way to see the chat.
