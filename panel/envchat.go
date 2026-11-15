@@ -492,7 +492,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				continue
 			}
 			summary := ""
-			for _, key := range []string{"path", "question", "summary", "check", "evidence", "label", "id", "topic", "to"} {
+			for _, key := range []string{"path", "question", "summary", "check", "evidence", "label", "id", "topic", "to", "until"} {
 				if v, ok := args[key].(string); ok && v != "" {
 					summary = firstLine(v)
 					break

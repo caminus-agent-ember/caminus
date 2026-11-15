@@ -354,6 +354,45 @@ class Resident(unittest.TestCase):
         self.assertTrue(tool_msgs);content=tool_msgs[-1]['content']
         self.assertLess(len(content),40000);self.assertIn('outputs/',content);self.assertIn('characters omitted',content)
 
+    def test_wait_returns_when_its_condition_or_an_interruption_happens(self):
+        import sqlite3,socket
+        from caminus.env.resident import housemate
+        housemate.POLL=0.05
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Wait for things.')
+            self.assertIn('the time came',housemate.wait(rt,gid,'time','0.2')['happened'])
+            target=self.home/'ready.flag'
+            threading.Timer(0.3,lambda:target.write_text('ok')).start()
+            self.assertIn('appeared',housemate.wait(rt,gid,'file','ready.flag',timeout=10)['happened'])
+            srv=socket.socket();srv.bind(('127.0.0.1',0));port=srv.getsockname()[1]
+            threading.Timer(0.3,srv.listen).start()
+            try:self.assertIn('accepting connections',housemate.wait(rt,gid,'port',str(port),timeout=10)['happened'])
+            finally:srv.close()
+            sleeper=subprocess.Popen([sys.executable,'-c','import time;time.sleep(0.3)'])
+            self.assertIn('has exited',housemate.wait(rt,gid,'process',str(sleeper.pid),timeout=10)['happened']);sleeper.wait()
+            def steer():
+                db=sqlite3.connect(self.home/'agent.sqlite3');db.execute("INSERT INTO inbox(goal,text) VALUES(?,?)",(gid,'stop waiting'));db.commit();db.close()
+            threading.Timer(0.3,steer).start()
+            self.assertEqual(housemate.wait(rt,gid,'message',timeout=10)['happened'],'a message arrived for this goal')
+            self.assertEqual(housemate.wait(rt,gid,'file','never.flag',timeout=1)['happened'],'timeout')
+            with self.assertRaises(ValueError):housemate.wait(rt,gid,'session','0'*32)
+            sid=uuid.uuid4().hex
+            rt.terminal.call(sid,dict(command='sleep 0.4; echo done',yield_ms=0))
+            self.assertIn('ended (exit 0)',housemate.wait(rt,gid,'session',sid,timeout=20)['happened'])
+        finally:housemate.POLL=1.0;rt.mail.close();rt.store.close()
+
+    def test_machine_snapshot_through_the_loop(self):
+        self.replies(call('machine',{}),call('finish',dict(summary='Looked.')))
+        out=self.cmd('once',['--goal','Look at the machine.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            snap=[e['data']['result'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='machine'][0]
+            for key in ('gpus','memory','disk','servers','my_running_sessions','peers'):self.assertIn(key,snap)
+            self.assertGreater(snap['memory']['total_mib'] or 0,0)
+        finally:store.close()
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)
@@ -1177,9 +1216,11 @@ class Resident(unittest.TestCase):
         try:
             gid=rt.store.enqueue('Continue the long task.')
             rt.store.event('startup_discovery',dict(topic='skipped in this test'),gid)   # keeps the kept tail small
-            # (28,000 filler characters: the tool definitions grow as tools are added, and the precondition below
-            # needs the history alone to stay under the window with the reply budget)
-            messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*28000)]+[dict(role='assistant',content='observation '*20) for _ in range(10)]
+            # The filler is sized from the measured request without it, so the precondition below (the history
+            # alone fits with the reply budget, only the trailing context overflows) holds as tools are added.
+            base=rt.store.goal(gid)['messages']+[dict(role='assistant',content='observation '*20) for _ in range(10)]
+            room=16384-4096-rt.model.tokens([rt.system(gid),*base],TOOLS)-600
+            messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*(room*4))]+base[len(rt.store.goal(gid)['messages']):]
             rt.store.update(gid,messages=messages)
             history=rt.model.tokens([rt.system(gid),*messages],TOOLS)
             # The history alone leaves room for the reply budget too, so only the trailing context overflows.

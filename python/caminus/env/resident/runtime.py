@@ -19,6 +19,7 @@ from .advisor import Advisor
 from .memory import Memory
 from . import files
 from . import outputs
+from . import housemate
 from .brain import Brains
 
 TODO_STATES = ('pending', 'in_progress', 'done')
@@ -65,6 +66,9 @@ TOOLS = [
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
     tool('write', 'Create a file, or replace a whole file, with content. Returns the diff against what was there.',
          dict(path={'type':'string'}, content={'type':'string'}), ('path','content')),
+    tool('wait', 'Block without spending tokens until something happens: until=time (target: seconds, or a Unix time), file (a path appears or changes), port (host:port or a port number opens), process (a pid exits), session (one of your terminal sessions ends), or message. A message for this goal, cancellation or newly queued work always ends the wait early. timeout in seconds (default 300, at most 1800).',
+         dict(until={'type':'string','enum':['time','file','port','process','session','message']}, target={'type':'string'}, timeout={'type':'integer'}), ('until',)),
+    tool('machine', 'A snapshot of this shared machine, readable without root: GPUs (busy %, VRAM), memory, disk, load, the model servers on their ports, your running terminal sessions and the other agents. Read it before heavy work.', {}),
     tool('remember', 'Save one lasting fact as a note (notes/NAME.md) with a one-line entry in MEMORY.md, your notes index. The index is capped at 4 KB and loads into every goal; a note is read on demand. Refused when the index is full: merge or drop lines first. The new line shows from your next goal.',
          dict(name={'type':'string'}, text={'type':'string'}, summary={'type':'string'}), ('name','text','summary')),
     tool('history_search', 'Full-text search over your own past: earlier goals, your replies, tool results, finish summaries, your journal and notes. No model call; returns short snippets with where they came from.',
@@ -549,8 +553,8 @@ class Runtime:
                     result = self._rollback(action['goal'], args['id'])
                 elif name == 'terminal':
                     result = self.terminal.call(action['id'],{**args,'yield_ms':0})
-                elif name in ('discover', 'advisor'):
-                    result = None         # catalog queries and the advisor's network call stay outside the write transaction
+                elif name in ('discover', 'advisor', 'wait', 'machine'):
+                    result = None         # catalog queries, network calls and waits stay outside the write transaction
                 elif name == 'peers':
                     result = dict(peers=self.mail.peers())
                 elif name == 'send_message':
@@ -583,6 +587,10 @@ class Runtime:
                 result = discovery.discover(self.home, **args)
             elif name == 'advisor':
                 result = self.advisor.ask(action['goal'], args.get('question'), args.get('context', ''))
+            elif name == 'wait':
+                result = housemate.wait(self, action['goal'], args['until'], args.get('target', ''), args.get('timeout', 300))
+            elif name == 'machine':
+                result = housemate.machine(self)
         except (OSError, ValueError, KeyError, TypeError) as e:
             result = dict(error=str(e))
         failure = self._failure_text(result)
