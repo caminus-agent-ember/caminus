@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import unittest.mock
 import sys
 import threading
 import time
@@ -638,7 +639,17 @@ class Resident(unittest.TestCase):
             self.assertEqual(store.actions(first['id']),[])
         finally:store.close()
 
+    def hermetic_home(self):
+        """Runtime.context_message reads ~/ROBOTS.md of the account running the test; the host's file must not
+        change the measured token budget, so HOME points at an empty scratch directory for the test."""
+        empty=S/('home-'+uuid.uuid4().hex);empty.mkdir(parents=True)
+        return unittest.mock.patch.dict(os.environ,HOME=str(empty))
+
     def test_compaction_requests_fit_the_same_model_window(self):
+        with self.hermetic_home():
+            self._test_compaction_requests_fit_the_same_model_window()
+
+    def _test_compaction_requests_fit_the_same_model_window(self):
         class BoundedModel:
             def __init__(self):self.summaries=0
             def context_size(self):return 16384
@@ -659,6 +670,10 @@ class Resident(unittest.TestCase):
         finally:rt.mail.close();rt.store.close()
 
     def test_compaction_counts_the_trailing_context_message(self):
+        with self.hermetic_home():
+            self._test_compaction_counts_the_trailing_context_message()
+
+    def _test_compaction_counts_the_trailing_context_message(self):
         # The probe must measure the request as sent. A large MEMORY.md rides in the trailing context message;
         # with the history alone under the trigger, the old probe declined to compact and the real request
         # overflowed the window (the goal paused on a context error, and resuming repeated it).
