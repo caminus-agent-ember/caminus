@@ -1234,6 +1234,18 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	case "/effort":
 		clear()
 		return m, setEffort(m, strings.TrimSpace(arg))
+	case "/pause":
+		g := m.selectedResidentGoal()
+		if g == nil {
+			m.msg = "No selected goal to pause"
+			return m, nil
+		}
+		clear()
+		return m, residentAction(m, []string{"pause", m.agentName, g.ID, "--json"}, "")
+	case "/halt":
+		clear()
+		m.msg = "emergency stop…"
+		return m, emergencyStop(m, strings.TrimSpace(arg))
 	case "/update":
 		clear()
 		m.msg = "uploading the runtime…"
@@ -1337,6 +1349,8 @@ var slashCommands = []struct{ name, hint string }{
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
 	{"/model", "pick the brain: the models overlay; or /model ID"},
+	{"/pause", "pause the selected goal at its next step; /resume continues it"},
+	{"/halt", "emergency stop: every resident pauses after its step (/halt clear lifts it)"},
 	{"/update", "install this caminus's runtime between goals (now: at the next turn)"},
 	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "the goals overlay (Ctrl+G)"},

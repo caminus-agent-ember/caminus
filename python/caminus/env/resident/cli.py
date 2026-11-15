@@ -101,7 +101,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -148,6 +148,8 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='pause':
+            p.add_argument('goal_id',nargs='?',help='the goal to pause; defaults to the most recent one')
         if op=='update':
             p.add_argument('--program',help='the runtime to install (default: the newest one install uploaded, ~/bin/caminus-agent)')
             p.add_argument('--now',action='store_true',help='at the next turn boundary instead of between goals')
@@ -506,6 +508,20 @@ def main(argv=None,stdin=None):
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0
+        if a.op=='pause':
+            # Like /compact: a live runtime applies it between steps; with no daemon the CLI pauses it here.
+            gid=store.resolve(a.goal_id) if a.goal_id else store.latest_goal()
+            beat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
+            if alive(beat.get('pid')):
+                rid=store.request(gid,'pause')
+                emit(dict(goal=gid,queued=True,request=rid,note='paused at its next step; /resume continues it'),a.json)
+            else:
+                with store.transaction():
+                    if store.goal(gid)['state'] in ('queued','working','waiting_model','waiting_user','waiting_root'):
+                        store.update(gid,state='paused',error='paused by your human')
+                        store.event('paused',dict(by='owner'),gid)
+                emit(dict(goal=gid,state=store.goal(gid)['state']),a.json)
+            store.close();return 0
         if a.op=='compact':
             # Compaction needs the model and the single writer, so a live runtime performs it on its next
             # pass; with no daemon the CLI takes the lock and does it here.

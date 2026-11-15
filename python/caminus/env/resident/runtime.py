@@ -957,6 +957,51 @@ class Runtime:
                     float(self.config.get('paid_compact_target_ratio', PAID_COMPACT[1])))
         return float(self.config.get('compact_threshold', .85)), float(self.config.get('compact_target_ratio', .2))
 
+    def stop_reason(self):
+        """The emergency stop: a STOP file in the shared bridge folder (caminus env stop-all), for every resident. The
+        folder is sticky and the file the owner's, mode 640: an agent can read it but cannot delete, rename or rewrite
+        it, so only the owner lifts it. Its text, if any, is the reason."""
+        for f in (Path(self.config.get('bridge') or '/nonexistent').expanduser() / 'STOP',):
+            try:
+                if f.exists():
+                    return (f.read_text()[:300].strip() or 'emergency stop') + f' ({f})'
+            except OSError:
+                return f'emergency stop ({f})'
+        return ''
+
+    def _emergency_stop(self):
+        """While the stop is on, every active goal is paused after its current step and nothing new starts. Lifting it
+        resumes nothing on its own: a paused goal waits for /resume."""
+        reason = self.stop_reason()
+        if not reason:
+            self._stopped = False
+            return False
+        rows = [r['id'] for r in self.store.db.execute(
+            "SELECT id FROM goals WHERE state IN ('queued','working','waiting_model')")]
+        with self.store.transaction():
+            for gid in rows:
+                self.store.update(gid, state='paused', error='emergency stop: ' + reason)
+                self.store.event('emergency_stop', dict(reason=reason), gid)
+        if not getattr(self, '_stopped', False):
+            self.store.event('emergency_stop', dict(reason=reason, paused=len(rows)))
+            self._stopped = True
+        return True
+
+    def _apply_pauses(self):
+        """/pause: queued like /compact and applied here, between steps, so a tool is never cut off mid-call."""
+        for gid in self.store.pending_requests('pause'):
+            req = self.store.pending_request(gid, 'pause')
+            if req is None:
+                continue
+            with self.store.transaction():
+                g = self.store.goal(gid)
+                if g['state'] in ('queued', 'working', 'waiting_model', 'waiting_user', 'waiting_root'):
+                    self.store.update(gid, state='paused', error='paused by your human')
+                    self.store.event('paused', dict(by='owner'), gid)
+                    self.store.settle_request(req['id'], 'done')
+                else:
+                    self.store.settle_request(req['id'], 'done', 'the goal was not running')
+
     def _maybe_update(self):
         """/update: a new runtime is installed between goals (or at the next turn boundary with now). The daemon
         rewrites its own unit to the new program and asks systemd to restart it; the new daemon's heartbeat names
@@ -1259,6 +1304,15 @@ class Runtime:
         while stop is None or not stop():
             if not target and self._maybe_update():
                 return None                   # systemd restarts the daemon on the new runtime
+            self._apply_pauses()
+            if self._emergency_stop():
+                if time.time()-last_heartbeat>=5:
+                    atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='stopped',runtime=RUNTIME))
+                    last_heartbeat=time.time()
+                if target:
+                    return self.store.goal(target)
+                time.sleep(max(.2,poll))
+                continue
             self.mail.receive(self.store)
             for gid in self.store.pending_requests('compact'):
                 self.compact_request(gid)

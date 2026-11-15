@@ -1313,6 +1313,56 @@ for line in sys.stdin:
             if old is None:os.environ.pop('XDG_CONFIG_HOME',None)
             else:os.environ['XDG_CONFIG_HOME']=old
 
+    def test_the_emergency_stop_pauses_everything_after_the_step_and_resumes_nothing(self):
+        self.replies(call('finish',dict(summary='never')))
+        rt=Runtime(self.home)
+        try:
+            a=rt.store.enqueue('One.');b=rt.store.enqueue('Two.');rt.store.update(a,state='working')
+            self.bridge.mkdir(parents=True,exist_ok=True)
+            (self.bridge/'STOP').write_text('the owner is debugging the GPUs\n')
+            ran=[]
+            rt.tick=lambda gid:ran.append(gid)
+            out=rt.run(target=a)
+            self.assertEqual(ran,[],'nothing runs while the stop is on')
+            self.assertEqual(out['state'],'paused');self.assertIn('the owner is debugging the GPUs',out['error'])
+            self.assertEqual(rt.store.goal(b)['state'],'paused')
+            self.assertIn('emergency_stop',[e['kind'] for e in rt.store.events()])
+            (self.bridge/'STOP').unlink()
+            self.assertFalse(rt._emergency_stop())
+            self.assertEqual(rt.store.goal(a)['state'],'paused','lifting the stop resumes nothing on its own')
+            (self.home/'STOP').write_text('')
+            self.assertFalse(rt._emergency_stop(),'only the bridge stop counts: a file in the agent home it could delete')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_pause_is_applied_between_steps(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Work.');rt.store.update(gid,state='working')
+            rt.store.request(gid,'pause')
+            rt._apply_pauses()
+            g=rt.store.goal(gid)
+            self.assertEqual((g['state'],g['error']),('paused','paused by your human'))
+            self.assertIn('paused',[e['kind'] for e in rt.store.events()])
+        finally:rt.mail.close();rt.store.close()
+        done=self.cmd('pause',[gid])
+        self.assertEqual(done['state'],'paused','with no daemon the CLI pauses it at once')
+
+    def test_stop_all_writes_and_lifts_the_shared_stop(self):
+        from caminus.cmd import env as envcmd
+        import contextlib, io as _io
+        self.bridge.mkdir(parents=True,exist_ok=True)
+        old=os.environ.get('CAMINUS_ENV_BRIDGE');os.environ['CAMINUS_ENV_BRIDGE']=str(self.bridge)
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--reason','GPU fault'])
+            stop=self.bridge/'STOP'
+            self.assertEqual(stop.read_text(),'GPU fault\n')
+            self.assertEqual(stop.stat().st_mode&0o777,0o640,'group-readable, not group-writable: the agent cannot rewrite it')
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--clear'])
+            self.assertFalse(stop.exists())
+        finally:
+            if old is None:os.environ.pop('CAMINUS_ENV_BRIDGE',None)
+            else:os.environ['CAMINUS_ENV_BRIDGE']=old
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

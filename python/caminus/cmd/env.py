@@ -27,6 +27,7 @@ work runs as the second user over SSH; root waits for your approval.
   caminus env ask-root CMD...        agent side: file a root request and wait for your answer
   caminus env watch [--once]         answer the queued root requests (approve / edit / deny)
   caminus env audit [--tail N]       the audit log
+  caminus env stop-all [--clear]     emergency stop: every resident pauses after its current step
 """
 import argparse
 import base64
@@ -34,6 +35,7 @@ import getpass
 import json
 import os
 import pwd
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -63,6 +65,10 @@ def _parser():
 
     p = sub.add_parser('agent', add_help=False, help='resident agent: install/init/start/send/once/status/events/resume/cancel')
     p.add_argument('args', nargs=argparse.REMAINDER)
+
+    p = sub.add_parser('stop-all', help='emergency stop: every resident pauses its goals after the current step')
+    p.add_argument('--clear', action='store_true', help='lift the stop (paused goals still wait for /resume)')
+    p.add_argument('--reason', default='', help='shown to the agents and in their events')
 
     p = sub.add_parser('relay', add_help=False,
                        help="a spend-capped key relay for a paid provider (anthropic, deepinfra), run as the owner")
@@ -136,10 +142,41 @@ def _parser():
     return ap
 
 
+def stop_all(argv):
+    """The emergency stop: a STOP file in the bridge folder both users share. Every resident reads it before each
+    step, pauses its goals and starts nothing until it is gone."""
+    ap = argparse.ArgumentParser(prog='caminus env stop-all')
+    ap.add_argument('--clear', action='store_true')
+    ap.add_argument('--reason', default='')
+    a = ap.parse_args(argv)
+    stop = Path(settings.bridge_dir()) / 'STOP'
+    if a.clear:
+        try:
+            stop.unlink()
+            print('stop lifted: paused goals wait for /resume')
+        except FileNotFoundError:
+            print('no stop was on')
+        return 0
+    text = (a.reason.strip() or 'emergency stop by the owner') + '\n'
+    # The folder is sticky (1770, root:<bridge group>): only the file's owner or root can delete or rename it, and the
+    # file is group-readable but not group-writable, so an agent can see the stop and cannot lift or rewrite it.
+    fd = os.open(stop, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    os.fchmod(fd, 0o640)
+    with os.fdopen(fd, 'w') as f:
+        f.write(text)
+    folder = os.stat(stop.parent).st_mode
+    if not folder & 0o1000:
+        print(f'warning: {stop.parent} is not sticky (chmod +t it): an agent in its group could delete the stop')
+    print(f'stop on ({stop}): every resident pauses after its current step. caminus env stop-all --clear lifts it')
+    return 0
+
+
 def main(rest, transport=None):
     if rest[:1] == ['agent']:
         from ..env import agent_host
         return agent_host.main(rest[1:], transport or subprocess.run)
+    if rest[:1] == ['stop-all']:
+        return stop_all(rest[1:])
     if rest[:1] == ['relay']:
         from ..env import relay
         return relay.main(rest[1:]) or 0
