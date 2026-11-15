@@ -264,30 +264,14 @@ func TestQuestionFlow(t *testing.T) {
 	}
 }
 
-func TestParseJobsNotesServers(t *testing.T) {
+func TestParseJobsServers(t *testing.T) {
 	js := parseJobs("build|123|alive|~/env-logs/build.log\nold|99|dead|~/env-logs/old.log\n")
 	if len(js) != 2 || js[0].Name != "build" || js[0].State != "alive" || js[1].State != "dead" {
 		t.Fatalf("parseJobs: %+v", js)
 	}
-	ns := parseNotes(`{"id":"n1","from":"human","text":"focus on TP"}` + "\n" + `{"id":"n2","from":"human","text":"x"}` + "\n")
-	if len(ns) != 2 || ns[0].Text != "focus on TP" {
-		t.Fatalf("parseNotes: %+v", ns)
-	}
 	ss := parseServers("PORT 8092\n" + `{"model_alias":"coder","n_ctx":262144}` + "\nPORT 8093\n" + `{"model":"x"}` + "\n")
 	if len(ss) != 2 || ss[0].Port != 8092 || ss[0].Model != "coder" || ss[0].Nctx != "262144" || ss[1].Nctx != "<nil>" {
 		t.Fatalf("parseServers: %+v", ss)
-	}
-}
-
-func TestWriteNote(t *testing.T) {
-	bridge := t.TempDir()
-	id, err := writeNote(bridge, "human", "remember this")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := parseNotes(mustRead(t, filepath.Join(bridge, "notes", id+".json")) + "\n")
-	if len(ns) != 1 || ns[0].From != "human" || ns[0].Text != "remember this" {
-		t.Fatalf("writeNote roundtrip: %+v", ns)
 	}
 }
 

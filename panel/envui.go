@@ -13,7 +13,6 @@
 //	            e edit, d deny, s skip) and ASK (a answer; a number picks a choice)
 //	2 jobs      detached processes in the agent user (k kill, l tail the log, n new job)
 //	3 procs     the agent user's busiest processes (ps over ssh)
-//	4 notes     steering inbox for the agent (n new note, d delete); the agent drains it with env-note
 //	5 ctx       running Caminus servers and the context window each reports in /props
 //	6 audit     the tail of the audit log
 //
@@ -24,7 +23,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -70,10 +68,6 @@ type job struct {
 	Name, Pid, State, Log string
 }
 
-type note struct {
-	ID, From, Text string
-}
-
 type server struct {
 	Port  int
 	Model string
@@ -110,14 +104,12 @@ type envModel struct {
 	jobs    []job
 	jobSel  int
 	procs   []string
-	notes   []note
-	noteSel int
 	servers []server
 	events  []string
 	logName string
 	logView string
 
-	mode        string // "normal", "edit", "answer", "note", "newjob1", "newjob2"
+	mode        string // "normal", "edit", "answer", "sessionnew", "newjob1", "newjob2"
 	edit        string
 	editRequest *envReq
 	newJob      string
@@ -138,7 +130,6 @@ type probeMsg struct {
 }
 type jobsMsg []job
 type procsMsg []string
-type notesMsg []note
 type serversMsg []server
 type execDoneMsg struct {
 	claim    string
@@ -261,10 +252,6 @@ func procsScript(user string) string {
 	return fmt.Sprintf("ps -u %s -o pid=,etimes=,pcpu=,pmem=,args= --sort=-pcpu | head -12", shQuote(user))
 }
 
-func notesScript(bridge string) string {
-	return fmt.Sprintf(`for f in %s/notes/*.json; do [ -e "$f" ] && cat "$f" && echo; done`, shQuote(bridge))
-}
-
 func serversScript() string {
 	return `for p in $(seq 8092 8101); do printf 'PORT %d\n' "$p"; curl -s --max-time 1 "http://127.0.0.1:$p/props"; echo; done`
 }
@@ -277,8 +264,6 @@ func sshRefresh(m envModel) []tea.Cmd {
 		return []tea.Cmd{sshRun(m, "jobs", jobsScript())}
 	case 2:
 		return []tea.Cmd{sshRun(m, "procs", procsScript(m.user))}
-	case 3:
-		return []tea.Cmd{sshRun(m, "notes", notesScript(m.bridge))}
 	case 4:
 		return []tea.Cmd{sshRun(m, "servers", serversScript())}
 	}
@@ -386,19 +371,6 @@ func writeBridgeJSON(path string, data []byte) error {
 	return os.Rename(f.Name(), path)
 }
 
-func writeNote(bridge, actor, text string) (string, error) {
-	id := fmt.Sprintf("%d", time.Now().UnixNano())[:16]
-	data, _ := json.Marshal(map[string]any{"id": id, "from": actor, "text": text, "ts": float64(time.Now().UnixMilli()) / 1000})
-	dir := filepath.Join(bridge, "notes")
-	if err := os.MkdirAll(dir, 0o770); err != nil {
-		return "", err
-	}
-	if err := writeBridgeJSON(filepath.Join(dir, id+".json"), data); err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
 func appendAudit(path string, event map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -473,25 +445,6 @@ func parseJobs(out string) []job {
 		js = append(js, job{Name: parts[0], Pid: parts[1], State: parts[2], Log: parts[3]})
 	}
 	return js
-}
-
-func parseNotes(out string) []note {
-	var ns []note
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var n struct {
-			ID   string `json:"id"`
-			From string `json:"from"`
-			Text string `json:"text"`
-		}
-		if json.Unmarshal([]byte(line), &n) == nil {
-			ns = append(ns, note{ID: n.ID, From: n.From, Text: n.Text})
-		}
-	}
-	return ns
 }
 
 func parseServers(out string) []server {
@@ -574,9 +527,6 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case procsMsg:
 		m.procs = msg
-		return m, nil
-	case notesMsg:
-		m.notes = msg
 		return m, nil
 	case serversMsg:
 		m.servers = msg
@@ -670,8 +620,6 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jobs = parseJobs(msg.out)
 		case "procs":
 			m.procs = strings.Split(strings.TrimSpace(msg.out), "\n")
-		case "notes":
-			m.notes = parseNotes(msg.out)
 		case "servers":
 			m.servers = parseServers(msg.out)
 		case "kill":
@@ -797,8 +745,6 @@ func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
 		return m.reqKeys(k)
 	case 1:
 		return m.jobKeys(k)
-	case 3:
-		return m.noteKeys(k)
 	case 7:
 		return m.sessionKeys(k)
 	}
@@ -838,8 +784,9 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		m.seen[r.ID] = true
 		m.msg = "answered " + r.ID
 		m.refreshLocal()
-		payload := base64.StdEncoding.EncodeToString([]byte("Q: " + r.Text + "\nA: " + ans + "\n---\n"))
-		return m, sshRun(m, "mem", "printf %s "+payload+" | base64 -d >> ~/MEMORY.md")
+		// The answer reaches the agent through the bridge and stays in the goal's transcript; nothing is written to
+		// its memory automatically (the agent decides what to remember).
+		return m, nil
 	case "edit":
 		cmd := m.edit
 		m.mode, m.edit = "normal", ""
@@ -862,20 +809,6 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		}
 		m.msg = "running under sudo (approve with your password)..."
 		return m, tea.ExecProcess(c, execCallback(r.ID, "edited", cmd, tmp, token))
-	case "note":
-		text := m.edit
-		m.mode, m.edit = "normal", ""
-		if text == "" {
-			return m, nil
-		}
-		id, err := writeNote(m.bridge, currentUser(), text)
-		if err != nil {
-			m.msg = err.Error()
-		} else {
-			m.msg = "note " + id + " left for " + m.user
-			_ = appendAudit(m.auditPath, map[string]any{"event": "note", "id": id, "text": text})
-		}
-		return m, sshRun(m, "notes", notesScript(m.bridge))
 	case "newjob1":
 		name := strings.TrimSpace(m.edit)
 		m.mode, m.edit = "newjob2", ""
@@ -1025,28 +958,6 @@ func (m envModel) jobKeys(k string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m envModel) noteKeys(k string) (tea.Model, tea.Cmd) {
-	switch k {
-	case "up", "k":
-		if m.noteSel > 0 {
-			m.noteSel--
-		}
-	case "down", "j":
-		if m.noteSel < len(m.notes)-1 {
-			m.noteSel++
-		}
-	case "n":
-		m.mode, m.edit = "note", ""
-	case "d":
-		if m.noteSel < len(m.notes) {
-			n := m.notes[m.noteSel]
-			os.Remove(filepath.Join(m.bridge, "notes", n.ID+".json"))
-			return m, sshRun(m, "notes", notesScript(m.bridge))
-		}
-	}
-	return m, nil
-}
-
 // msgRunes returns the text of a key press (single runes), empty for special keys.
 func msgRunes(k string) []rune {
 	if len(k) == 1 {
@@ -1127,7 +1038,8 @@ func (m envModel) pane() string {
 	case 2:
 		return strings.Join(m.procs, "\n")
 	case 3:
-		return m.notesPane() + "\n\n" + envHead.Render("SESSION MEMORY · "+residentText(m.agentName)) + "\n" + residentText(m.sessionMemory)
+		// Read-only: steering goes through /steer, so the old bridge notes are not shown or written from here.
+		return envHead.Render("SESSION MEMORY · "+residentText(m.agentName)) + "\n" + residentText(m.sessionMemory)
 	case 4:
 		return m.ctxPane()
 	case 7:
@@ -1178,21 +1090,6 @@ func (m envModel) jobsPane() string {
 	}
 	if m.logName != "" {
 		lines = append(lines, "", envHead.Render("log tail: "+m.logName), envDim.Render(m.logView))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m envModel) notesPane() string {
-	lines := []string{envHead.Render("STEERING NOTES for the agent (n new, d delete; its env-note drains them)")}
-	if len(m.notes) == 0 {
-		lines = append(lines, envDim.Render("  inbox empty"))
-	}
-	for i, n := range m.notes {
-		line := fmt.Sprintf("  [%s] %s", n.From, n.Text)
-		if i == m.noteSel {
-			line = envSel.Render(line)
-		}
-		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }

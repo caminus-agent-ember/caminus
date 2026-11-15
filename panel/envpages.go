@@ -4,7 +4,7 @@
 package main
 
 // envpages.go: the old tabbed screens' content as overlays over the chat. The chat is the only screen: memory and
-// notes, context, audit and settings open in the shared overlay box (shell.go) with its keys (↑↓ move or scroll,
+// context, audit and settings open in the shared overlay box (shell.go) with its keys (↑↓ move or scroll,
 // PgUp/PgDn, Esc closes, q never quits), and a typed prompt (edit a root command, answer a question, leave a note,
 // name a session) sits in the composer's slot. Nothing draws the old tab bar any more.
 
@@ -64,9 +64,6 @@ func (m envModel) pageOverlay(w, h int) string {
 	top := max(0, min(m.chat.pageTop, len(lines)-room))
 	body := strings.Join(lines[top:min(top+room, len(lines))], "\n")
 	keys := "↑↓ PgUp PgDn scroll"
-	if m.chat.page == 3 {
-		keys = "↑↓ pick a note  ·  n new note  ·  d delete it"
-	}
 	return overlayBox(pageTitle(m.chat.page), body, keys, w, h)
 }
 
@@ -85,19 +82,6 @@ func (m envModel) pageKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.pageTop += max(1, m.height-10)
 		return m, nil
 	}
-	if m.chat.page == 3 {
-		// the notes page's own keys: pick, add (a typed prompt), delete
-		switch k {
-		case "up", "k", "down", "j", "n", "d":
-			saved := m.tab
-			m.tab = 3
-			next, cmd := m.noteKeys(k)
-			nm := next.(envModel)
-			nm.tab = saved
-			return nm, cmd
-		}
-		return m, nil
-	}
 	switch k {
 	case "up", "k":
 		m.chat.pageTop = max(0, m.chat.pageTop-1)
@@ -111,7 +95,6 @@ func (m envModel) pageKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 var promptTitles = map[string]string{
 	"edit":       "edit the root command · Enter runs it under sudo · Esc cancels",
 	"answer":     "answer the question · Enter sends · a number picks a choice · Esc cancels",
-	"note":       "note for the agent · Enter leaves it · Esc cancels",
 	"sessionnew": "new session name · Enter creates it · Esc cancels",
 }
 
