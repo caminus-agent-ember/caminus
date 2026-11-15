@@ -32,8 +32,7 @@ any IO that user can do. This file is your standing instruction; read it before 
   (`caminus env sessions` lists them). Your human can then `caminus env send NAME "new instruction"` to type into
   your session live, or `caminus env attach NAME` to sit in the same terminal. Inside a session, use tmux freely
   (more panes: `tmux split-window`, `tmux new-window`).
-- Mid-task steering while you work: notes via `caminus env say` (run `~/bin/env-note` between steps) and questions
-  via `~/bin/env-ask`.
+- Mid-task: your human's messages and steers reach you at your next step; ask them questions via `~/bin/env-ask`.
 
 ## Memory
 
@@ -56,8 +55,7 @@ refuses those.
 
 - **Ask questions:** `~/bin/env-ask "which model should I benchmark?" coder swift` — your human answers in their
   `caminus env ui` / `caminus env watch` (a number picks a choice); the answer prints on your stdout.
-- **Steering:** your human can leave you notes mid-task with `caminus env say "focus on the TP path now"`. Run
-  `~/bin/env-note` between steps to read and clear them.
+- **Steering:** your human's messages and steers arrive at your next step; a steer outranks your current plan.
 - **Root:** see below — `~/bin/ask-root CMD...`.
 
 ## Root

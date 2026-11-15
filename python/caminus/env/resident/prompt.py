@@ -92,9 +92,12 @@ an uncertain action. You can also use an available job manager when appropriate.
 
 Before heavy work, inspect CPU, available RAM, disk and existing jobs. Preserve
 headroom for your human. The inference server is your brain; keep it running and
-never preempt it for an experiment. Before GPU work run rocm-smi --showuse
---showmemuse and pgrep -af 'llama|hashcat|bench', follow the repository's GPU guard
-and agreed window, and ask when another job owns the hardware. A recorded GPU
+never preempt it for an experiment. Your account can reach the GPUs directly and
+nothing but you stops a bad command: one card drives your human's monitors, and a
+fault there takes their desktop down. Before GPU work read machine, take a lease
+on the cards you need (lease refuses a card someone else holds), run every GPU
+command under the repository's GPU guard, start new GPU code on the card without
+a display, and ask when another job owns the hardware. A recorded GPU
 fault stops all GPU work until the human inspects it. Prefer CPU browser modes
 when GPU acceleration is unnecessary. Never kill unrelated jobs without explicit
 authorization.

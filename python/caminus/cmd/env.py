@@ -14,8 +14,6 @@ work runs as the second user over SSH; root waits for your approval.
   caminus env ask TEXT [CHOICE...]   agent side: ask you a question and wait for the answer
   caminus env reqs [--json]          the pending bridge requests (scriptable)
   caminus env answer ID DECISION [TEXT] [--json]   answer one: approved | edited TEXT | denied | answered TEXT
-  caminus env say TEXT               leave a steering note for the agent (its env-note drains them)
-  caminus env notes [--json]         the undrained notes
   caminus env ctx [--json]           the running servers and the context window each reports
   caminus env memory                 the agent's ~/MEMORY.md (its persistent memory)
   caminus env remember TEXT          append a line to the agent's ~/MEMORY.md
@@ -79,12 +77,6 @@ def _parser():
     p = sub.add_parser('ask', help='agent side: ask a question and wait for the answer')
     p.add_argument('--timeout', type=float, default=3600.0)
     p.add_argument('args', nargs=argparse.REMAINDER)
-
-    p = sub.add_parser('say', help='leave a steering note for the agent')
-    p.add_argument('text')
-
-    p = sub.add_parser('notes', help='list the undrained steering notes')
-    p.add_argument('--json', action='store_true')
 
     p = sub.add_parser('ctx', help='the running servers and their context windows')
     p.add_argument('--json', action='store_true')
@@ -193,19 +185,6 @@ def main(rest, transport=None):
         return 0
     if a.sub == 'ask':
         return _ask(a)
-    if a.sub == 'say':
-        nid = bridge.say(settings.bridge_dir(), a.text, getpass.getuser())
-        audit.log(settings.audit_path(), {'event': 'note', 'id': nid, 'text': a.text})
-        print(f'note {nid} left for {settings.user()}')
-        return 0
-    if a.sub == 'notes':
-        ns = bridge.notes(settings.bridge_dir())
-        if a.json:
-            print(json.dumps(ns))
-        else:
-            for n in ns:
-                print(f"[{n.get('from', '?')}] {n.get('text', '')}")
-        return 0
     if a.sub == 'reqs':
         reqs = bridge.pending(settings.bridge_dir())
         if a.json:
@@ -304,7 +283,7 @@ sudo loginctl enable-linger {user}                   # its long-running servers 
 ssh-keygen -t ed25519 -f {key} -N '' -C caminus-env   # if {key} does not exist yet
 # then add this line to {user_home}/.ssh/authorized_keys (dir 700, file 600, owned by {user}):
 from="127.0.0.1,::1",no-agent-forwarding,no-X11-forwarding,no-port-forwarding {pubkey}
-# finally: caminus env setup --agent-side   (installs ~/bin/ask-root + env-ask + env-note, ~/ROBOTS.md, ~/MEMORY.md)
+# finally: caminus env setup --agent-side   (installs ~/bin/ask-root + env-ask, ~/ROBOTS.md, ~/MEMORY.md)
 """
 
 

@@ -166,7 +166,8 @@ def main():
     check('base64 -d' in cmd and settings.agent_bin() in cmd and settings.robots_path() in cmd
           and settings.memory_path() in cmd,
           'agent_side: install command carries ask-root, ROBOTS.md and MEMORY.md base64')
-    for name, src in (('env-ask', agent_side.ENV_ASK_SOURCE), ('env-note', agent_side.ENV_NOTE_SOURCE)):
+    check('rm -f' in cmd and '/env-note' in cmd, 'agent_side: install removes an older env-note')
+    for name, src in (('env-ask', agent_side.ENV_ASK_SOURCE),):
         baked = src.replace('{bridge!r}', repr(bridge_dir))
         compile(baked, name, 'exec')
         check(f'/{name}' in cmd, f'agent_side: install command carries {name}')
@@ -217,11 +218,6 @@ def main():
     t.join(5)
     check(got2.get('res', {}).get('answer') == 'swift' and got2['res']['decision'] == 'answered',
           'bridge: the answer reaches the asker')
-    nid = bridge.say(bridge_dir, 'focus on TP', 'human')
-    check([n['text'] for n in bridge.notes(bridge_dir)] == ['focus on TP'], 'bridge: say leaves a note')
-    drained = bridge.drain_notes(bridge_dir)
-    check(len(drained) == 1 and drained[0]['id'] == nid and bridge.notes(bridge_dir) == [],
-          'bridge: drain_notes reads and clears the inbox')
 
     # ctx: parses /props with a fake opener
     from caminus.env import ctx
@@ -237,7 +233,7 @@ def main():
     rows = ctx.servers(opener=fake_opener)
     check(rows == [{'port': 8092, 'model': 'coder', 'n_ctx': 262144}], 'ctx: reads model and n_ctx from /props')
 
-    for sub in (['ask', 'q?'], ['say', 'note'], ['notes'], ['ctx'], ['reqs'], ['answer', 'x', 'denied'], ['memory'], ['remember', 'm'], ['new', 's', '--', 'bash'], ['sessions'], ['send', 's', 'hi'], ['attach', 's'], ['serve', 'x', 'coder', '--dry-run']):
+    for sub in (['ask', 'q?'], ['ctx'], ['reqs'], ['answer', 'x', 'denied'], ['memory'], ['remember', 'm'], ['new', 's', '--', 'bash'], ['sessions'], ['send', 's', 'hi'], ['attach', 's'], ['serve', 'x', 'coder', '--dry-run']):
         check(cmd_env._parser().parse_args(sub).sub == sub[0], f'cli: env {sub[0]} is a subcommand')
 
     # jobs: detached-process script builders

@@ -100,39 +100,6 @@ claim=approval.claim
 finish=approval.finish
 
 
-def say(bridge, text, actor):
-    """harness side: leave a steering note for the agent (notes/<id>.json; the agent's env-note drains them)"""
-    nid = uuid.uuid4().hex[:16]
-    _write_atomic(os.path.join(bridge, 'notes', nid + '.json'),
-                  {'id': nid, 'from': actor, 'text': text, 'ts': time.time()})
-    return nid
-
-
-def notes(bridge):
-    """the undrained steering notes, oldest first"""
-    nd = os.path.join(bridge, 'notes')
-    out = []
-    if not os.path.isdir(nd):
-        return out
-    for name in sorted(os.listdir(nd)):
-        if name.endswith('.json'):
-            with open(os.path.join(nd, name)) as f:
-                out.append(json.load(f))
-    return out
-
-
-def drain_notes(bridge):
-    """agent side: read and remove all pending notes; returns them oldest first"""
-    nd = os.path.join(bridge, 'notes')
-    out = notes(bridge)
-    for n in out:
-        try:
-            os.remove(os.path.join(nd, n['id'] + '.json'))
-        except OSError:
-            pass
-    return out
-
-
 def execute_root(cmd, runner=subprocess.run):
     """harness side: run exactly the string the human approved, as the invoking user under sudo (sudo asks for the
     human's password on the controlling terminal); returns the CompletedProcess"""
