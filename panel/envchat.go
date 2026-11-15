@@ -188,7 +188,11 @@ func (m *envModel) syncChat() {
 		m.chat.questionInput.SetHeight(min(3, max(1, h-12)))
 	}
 	oldBottom := m.chat.transcript.AtBottom()
-	m.chat.transcript.SetWidth(w)
+	// A viewport re-wraps its whole content on a size change, and this runs on every live snapshot, so a
+	// 1 MB history would be re-read ten times a second while a reply streams. Only resize when it moved.
+	if m.chat.transcript.Width() != w {
+		m.chat.transcript.SetWidth(w)
+	}
 	// One header line and one footer line surround the transcript; the live tail sits between it and the
 	// composer, so a generating reply never rewrites the durable content.
 	// Half the body is the live window while a reply is written; the transcript keeps the other half.
@@ -196,9 +200,12 @@ func (m *envModel) syncChat() {
 	if live := m.liveBlock(w); live != "" {
 		tail = lipgloss.Height(live)
 	}
-	m.chat.transcript.SetHeight(max(1, m.bodyHeight()-tail))
+	height := max(1, m.bodyHeight()-tail)
 	if m.chat.help {
-		m.chat.transcript.SetHeight(max(1, m.chat.transcript.Height()-3))
+		height = max(1, height-3)
+	}
+	if m.chat.transcript.Height() != height {
+		m.chat.transcript.SetHeight(height)
 	}
 	if m.chat.renderWidth != w || m.chat.markdown == nil {
 		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(max(10, w-4)))
