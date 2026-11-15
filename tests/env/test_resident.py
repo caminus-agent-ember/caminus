@@ -131,7 +131,8 @@ class Resident(unittest.TestCase):
         self.cmd('once',['--goal-id',first['id']])
         request=[v for k,v in Endpoint.seen if k==self.key][-1]
         self.assertEqual(sum(m.get('content')=='Use an existing utility before building.' for m in request['messages']),1)
-        self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Too late.',code=2)
+        rejected=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Too late.',code=1)
+        self.assertIn('goal finished',rejected['error'])
 
     def test_inflight_steering_is_observed_before_either_completion_path(self):
         for finish_tool in (False,True):
