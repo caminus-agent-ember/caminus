@@ -48,7 +48,8 @@ class Store:
             id TEXT PRIMARY KEY, prompt TEXT NOT NULL, state TEXT NOT NULL,
             messages TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '',
             error TEXT NOT NULL DEFAULT '', steps INTEGER NOT NULL DEFAULT 0,
-            step_limit INTEGER, deadline REAL, created REAL NOT NULL, updated REAL NOT NULL);
+            step_limit INTEGER, deadline REAL, created REAL NOT NULL, updated REAL NOT NULL,
+            position REAL, plan INTEGER NOT NULL DEFAULT 0, plan_text TEXT);
           CREATE TABLE IF NOT EXISTS actions(
             id TEXT PRIMARY KEY, goal TEXT NOT NULL, call_id TEXT NOT NULL,
             name TEXT NOT NULL, args TEXT NOT NULL, state TEXT NOT NULL,
@@ -117,22 +118,26 @@ class Store:
         return [dict(seq=r['seq'], ts=r['ts'], goal=r['goal'], kind=r['kind'], data=json.loads(r['data']))
                 for r in self.db.execute('SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT ?', (after, limit))]
 
-    def enqueue(self, prompt, max_steps=None, max_seconds=None, kind='work'):
+    def enqueue(self, prompt, max_steps=None, max_seconds=None, kind='work', plan=0):
         if not prompt.strip():
             raise ValueError('goal must not be empty')
         if max_steps is not None and max_steps < 1 or max_seconds is not None and max_seconds <= 0:
             raise ValueError('test budgets must be positive')
         with self.transaction():
-            gid = self._enqueue(prompt, max_steps, max_seconds, kind)
+            gid = self._enqueue(prompt, max_steps, max_seconds, kind, plan)
         return gid
 
-    def _enqueue(self, prompt, max_steps=None, max_seconds=None, kind='work'):
+    def _enqueue(self, prompt, max_steps=None, max_seconds=None, kind='work', plan=0):
         """Caller owns the transaction, including any delivery checkpoint."""
         gid, now = uuid.uuid4().hex, time.time()
-        # kind: 'work' is a goal from the human; 'free' and 'dream' are the resident's own time (freetime.py).
-        self.db.execute('INSERT INTO goals(id,prompt,state,messages,step_limit,deadline,created,updated,kind) VALUES(?,?,?,?,?,?,?,?,?)',
+        # The queue's explicit order: newest last. next_goal runs the queued goals by it.
+        row = self.db.execute('SELECT MAX(position) FROM goals').fetchone()
+        position = (row[0] or 0) + 1
+        # plan: 0 no, 1 unapproved plan mode, 2 plan approved (planning.py).
+        self.db.execute('INSERT INTO goals(id,prompt,state,messages,step_limit,deadline,created,updated,kind,position,plan) '
+                        'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
             (gid, prompt, 'queued', json.dumps([dict(role='user', content=prompt)]), max_steps,
-             now + max_seconds if max_seconds else None, now, now, kind))
+             now + max_seconds if max_seconds else None, now, now, kind, position, plan))
         self.event('goal_queued', dict(prompt=prompt, kind=kind) if kind != 'work' else dict(prompt=prompt), gid)
         return gid
 
@@ -150,9 +155,14 @@ class Store:
         have = {r['name'] for r in self.db.execute('PRAGMA table_info(goals)')}
         for name, decl in (('done_check','TEXT'), ('steer_seq','INTEGER NOT NULL DEFAULT 0'),
                            ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT'),
-                           ('kind',"TEXT NOT NULL DEFAULT 'work'"), ('wake_at','REAL'), ('wake_note','TEXT'), ('gate','TEXT')):
+                           ('kind',"TEXT NOT NULL DEFAULT 'work'"), ('wake_at','REAL'), ('wake_note','TEXT'), ('gate','TEXT'),
+                           ('plan','INTEGER NOT NULL DEFAULT 0'), ('plan_text','TEXT')):
             if name not in have:
                 self.db.execute('ALTER TABLE goals ADD COLUMN ' + name + ' ' + decl)
+        if 'position' not in have:
+            # The queue's explicit order; an older database keeps its FIFO order by filing create time as position.
+            self.db.execute('ALTER TABLE goals ADD COLUMN position REAL')
+            self.db.execute('UPDATE goals SET position=created WHERE position IS NULL')
         for table, name, decl in (('inbox','kind',"TEXT NOT NULL DEFAULT 'nudge'"),
                                   ('steers','kind',"TEXT NOT NULL DEFAULT 'steer'")):
             have = {r['name'] for r in self.db.execute('PRAGMA table_info(' + table + ')')}
@@ -179,7 +189,8 @@ class Store:
 
     def update(self, gid, **fields):
         allowed = {'state', 'messages', 'summary', 'error', 'steps', 'step_limit', 'deadline',
-                   'done_check', 'steer_seq', 'approach_changes', 'ledger', 'wake_at', 'wake_note', 'gate'}
+                   'done_check', 'steer_seq', 'approach_changes', 'ledger', 'wake_at', 'wake_note', 'gate',
+                   'position', 'plan', 'plan_text'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('invalid goal fields')
         if 'messages' in fields:
@@ -255,8 +266,45 @@ class Store:
             'SELECT id,label,ts,bytes FROM checkpoints WHERE goal=? ORDER BY ts DESC LIMIT 20', (gid,))]
 
     def next_goal(self):
-        rows = self.db.execute("SELECT id FROM goals WHERE state IN ('queued','working','waiting_model','waiting_root','waiting_user') ORDER BY created")
+        # The queue's explicit order (position); COALESCE keeps an older row that predates it in place.
+        rows = self.db.execute("SELECT id FROM goals WHERE state IN ('queued','working','waiting_model','waiting_root','waiting_user') "
+                               'ORDER BY COALESCE(position,created)')
         return [r['id'] for r in rows]
+
+    def queue(self):
+        """The queued goals in run order, positions numbered 1..n (what the CLI contract shows)."""
+        rows = [dict(id=r['id'], prompt=r['prompt']) for r in
+                self.db.execute("SELECT id,prompt FROM goals WHERE state='queued' ORDER BY position")]
+        for i, row in enumerate(rows, 1):
+            row['position'] = i
+        return rows
+
+    def _queued_goal(self, prefix):
+        gid = self.resolve(prefix)
+        state = self.db.execute('SELECT state FROM goals WHERE id=?', (gid,)).fetchone()[0]
+        if state != 'queued':
+            raise ValueError(f'goal {gid[:8]} is not queued (state {state}); only a queued goal can be moved or removed')
+        return gid
+
+    def queue_move(self, prefix, to):
+        with self.transaction():
+            gid = self._queued_goal(prefix)
+            rows = [r['id'] for r in self.db.execute("SELECT id FROM goals WHERE state='queued' ORDER BY position")]
+            if not 1 <= to <= len(rows):
+                raise ValueError(f'--to is 1 to {len(rows)}, not {to}')
+            rows.remove(gid)
+            rows.insert(to - 1, gid)
+            now = time.time()
+            for i, g in enumerate(rows, 1):
+                self.db.execute('UPDATE goals SET position=?,updated=? WHERE id=?', (i, now, g))
+        return self.queue()
+
+    def queue_remove(self, prefix):
+        with self.transaction():
+            gid = self._queued_goal(prefix)
+            self.db.execute("UPDATE goals SET state='cancelled',updated=? WHERE id=?", (time.time(), gid))
+            self.event('dequeued', {}, gid)
+        return self.queue()
 
     def actions(self, gid):
         return [dict(r) for r in self.db.execute("SELECT * FROM actions WHERE goal=? AND state!='done' ORDER BY rowid", (gid,))]
@@ -281,6 +329,19 @@ class Store:
 
     def settle_request(self, rid, state, error=''):
         self.db.execute('UPDATE requests SET state=?, error=?, updated=? WHERE id=?', (state, error, time.time(), rid))
+
+    def unsend(self, prefix):
+        """Pull back the newest inbox row the goal has not read yet (the up-arrow on an empty composer):
+        remove it and return its text, or None when there is nothing to withdraw."""
+        with self.transaction():
+            gid = self.resolve(prefix)
+            row = self.db.execute('SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id DESC LIMIT 1',
+                                  (gid,)).fetchone()
+            if row is None:
+                return gid, None
+            self.db.execute('DELETE FROM inbox WHERE id=?', (row['id'],))
+            self.event('message_withdrawn', dict(text=row['text']), gid)
+            return gid, row['text']
 
     def resolve(self, prefix):
         """A goal by exact id or unambiguous prefix, so a person can type the eight characters a UI shows."""
@@ -354,7 +415,8 @@ class Store:
             self.event('tool_result', dict(name=action['name'], call_id=action['call_id'], result=result), g['id'])
 
     def status(self):
-        goals = [dict(r) for r in self.db.execute('SELECT id,prompt,state,summary,error,steps,created,updated FROM goals ORDER BY created DESC LIMIT 50')]
+        goals = [dict(r) for r in self.db.execute('SELECT id,prompt,state,summary,error,steps,created,updated,'
+                                                  'plan,plan_text FROM goals ORDER BY created DESC LIMIT 50')]
         waiting = [dict(r) for r in self.db.execute("SELECT goal,name,bridge_id FROM actions WHERE state='waiting'")]
         return dict(goals=goals, waiting=waiting, last_event=self.db.execute('SELECT coalesce(max(seq),0) FROM events').fetchone()[0])
 

@@ -29,6 +29,7 @@ from . import judge
 from . import web
 from .mcp import MCP
 from .brain import Brains
+from . import planning
 
 TODO_STATES = ('pending', 'in_progress', 'done')
 # Tools that were replaced but may still be called from an older history: accepted, never advertised.
@@ -70,8 +71,9 @@ PAID_COMPACT = (.38, .38 * .20)
 QUESTION_TIMEOUT = 900   # seconds a question or root request waits before the resident carries on without it
 SUMMARY_TOKENS = 2048    # a compaction summary's output allowance
 TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
-PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
-EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24}
+PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error', 'waiting_plan'}
+EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24,
+        'waiting_plan': 25}
 
 
 def tool(name, description, properties, required=()):
@@ -149,6 +151,10 @@ TOOLS = [
          dict(question={'type':'string'}, context={'type':'string'}), ('question',)),
     tool('finish', 'Report the completed goal and verified results to your human. List any unverified or blocked work honestly.',
          dict(summary={'type':'string'}, open={'type':'string'}), ('summary',)),
+    tool('propose_plan', 'File your plan for the goal and wait for your human\'s decision. Use this in plan mode '
+         '(a plan-first goal): explore read-only first, then file the plan. Nothing in the workspace changes until '
+         'they approve it; a rejection arrives with a revision note in the inbox.',
+         dict(plan={'type':'string'}), ('plan',)),
 ]
 
 
@@ -198,6 +204,14 @@ class Live:
 
     def flush(self):
         if self.store.goal(self.gid)['state'] == 'cancelled':
+            return False
+        # Esc while generating (agent interrupt): the request arrives through the store like /pause, and this
+        # turn is the thing it stops. Returning False makes the model raise Cancelled: nothing is stored or
+        # executed, the goal stays working, and the next message steers it.
+        req = self.store.pending_request(self.gid, 'interrupt')
+        if req is not None:
+            self.store.settle_request(req['id'], 'done')
+            self.store.event('turn_interrupted', {}, self.gid)
             return False
         atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
                                     content=''.join(self.content), reasoning=''.join(self.reasoning),
@@ -339,6 +353,8 @@ class Runtime:
         if not self.store.verified_since_steer(gid):
             lines.append('LOOP: the done check has not been exercised since the last steer. Run it and call '
                          'verify before finish.')
+        if (plan := planning.loop_line(g)):
+            lines.append(plan)
         return '\n'.join(lines)
 
     def _context_budget(self,gid=None):
@@ -674,6 +690,10 @@ class Runtime:
             gid_now = action['goal']
             refused = False
             signature = self._signature(name, args)
+            # Plan mode (planning.py): a plan-first goal with no approved plan only explores; these refusals
+            # do not feed the failure ledger (refused stays True).
+            if name in planning.PLAN_REFUSED and self.store.goal(gid_now).get('plan') == 1:
+                raise ValueError(planning.refused_text(name))
             # Step 8, the runtime half: a call that has already failed twice is not retried. The prompt
             # tells the model to change approach; this is the backstop for when it does not.
             if name not in ('define_done', 'verify', 'finish'):
@@ -734,6 +754,13 @@ class Runtime:
                     result = None         # catalog queries, network calls and waits stay outside the write transaction
                 elif name == 'peers':
                     result = dict(peers=self.mail.peers())
+                elif name == 'propose_plan':
+                    # planning.py: file the plan and park; the parking state is set after the tool result
+                    # is stored, because action_result moves the goal to working when it lands.
+                    plan = str(args['plan'])[:65536]
+                    self.store.update(gid_now, plan_text=plan)
+                    self.store.event('plan_proposed', dict(plan=plan[:2000]), gid_now)
+                    result = planning.propose(gid_now, plan)
                 elif name == 'send_message':
                     result = self.mail.send(sender_goal=action['goal'], message_id=action['id'], **args)
                 elif name in ('ask_user', 'ask_root'):
@@ -825,6 +852,11 @@ class Runtime:
             self.progress[action['goal']] = time.time()
         if action['name'] == 'finish' and 'error' not in result:
             self._finish(action['goal'],result['summary'],result.get('open',''))
+        elif action['name'] == 'propose_plan' and 'error' not in result:
+            # The plan is in: park until the human approves (plan approve) or sends a revision.
+            with self.store.transaction():
+                if self.store.goal(action['goal'])['state'] != 'cancelled':
+                    self.store.update(action['goal'], state='waiting_plan')
         elif action['name'] == 'finish' and result.get('pause'):
             # the judge found it impossible, or refused it too often: a person decides
             with self.store.transaction():
@@ -1271,7 +1303,7 @@ class Runtime:
         self._follow_config()
         g = self.store.goal(gid)
         leases.sweep(self)                    # a lease ends with its goal, wherever the goal stopped
-        if g['state'] in ('completed','cancelled','paused','error'):
+        if g['state'] in ('completed','cancelled','paused','error','waiting_plan'):
             return False
         if g['state']=='waiting_model' and self.retry.get(gid,(0,0))[0]>time.time():
             return False
@@ -1348,6 +1380,9 @@ class Runtime:
                 self.model.config['timeout'] = max(.1,min(self.base_timeout,g['deadline']-time.time())) if g['deadline'] else self.base_timeout
             # The live snapshot is what a UI shows while this call generates; the durable event below
             # replaces it. clear() runs on every exit path, so a failed or cancelled turn leaves no tail.
+            # An Esc that landed between turns caught nothing: settle it here so it cannot cut the next turn.
+            while (req := self.store.pending_request(gid, 'interrupt')):
+                self.store.settle_request(req['id'], 'done')
             live = Live(self.home, gid, self.store)
             try:
                 request = [self.system(),*messages]
