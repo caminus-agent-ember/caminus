@@ -152,11 +152,15 @@ class Runtime:
         trigger_tokens = int(size * trigger)
         reserve = min(int(self.config.get('max_tokens',4096)),size // 4)
         limit = min(trigger_tokens,size - reserve)
-        if not same or tokens > limit:
+        if not same:
             return (f'\n\nContext budget: no measured count for this goal yet; the window is {size:,} tokens and '
                     f'auto-compaction fires at {trigger_tokens:,} ({trigger:.0%}). The measured count appears '
                     f'after the first turn of this goal.')
         window_left,until_compact = size - tokens,max(0,limit - tokens)
+        if tokens > limit:
+            return (f'\n\nContext budget: the last measured prompt was {tokens:,} of {size:,} window tokens '
+                    f'({tokens/size:.0%}) and is past the auto-compaction trigger ({trigger_tokens:,}, '
+                    f'{trigger:.0%}); compaction is due.')
         return (f'\n\nContext budget: the last measured prompt was {tokens:,} of {size:,} window tokens '
                 f'({tokens/size:.0%}); {window_left:,} tokens remain, of which {until_compact:,} before '
                 f'auto-compaction summarizes the transcript (trigger {trigger_tokens:,} tokens, {trigger:.0%}). '
