@@ -580,6 +580,75 @@ class Resident(unittest.TestCase):
             with self.assertRaises(ValueError):web.fetch(rt,'file:///etc/passwd')
         finally:rt.mail.close();rt.store.close()
 
+    MCP_SERVER = r"""
+import json, sys
+modern = sys.argv[1] == 'modern'; ready = False
+def out(m): sys.stdout.write(json.dumps(m) + '\n'); sys.stdout.flush()
+for line in sys.stdin:
+    m = json.loads(line); mid = m.get('id'); meth = m.get('method'); params = m.get('params') or {}
+    if mid is None:
+        if meth == 'notifications/initialized': ready = True
+        continue
+    meta = params.get('_meta') or {}
+    if modern:
+        if meta.get('io.modelcontextprotocol/protocolVersion') != '2026-07-28' or 'io.modelcontextprotocol/clientCapabilities' not in meta:
+            out(dict(jsonrpc='2.0', id=mid, error=dict(code=-32602, message='missing _meta'))); continue
+        if meth == 'server/discover':
+            out(dict(jsonrpc='2.0', id=mid, result=dict(resultType='complete', supportedVersions=['2026-07-28']))); continue
+    else:
+        if meth == 'initialize':
+            out(dict(jsonrpc='2.0', id=mid, result=dict(protocolVersion='2025-11-25', capabilities=dict(tools={}), serverInfo=dict(name='legacy')))); continue
+        if not ready:
+            out(dict(jsonrpc='2.0', id=mid, error=dict(code=-32601, message='not initialized'))); continue
+    if meth == 'tools/list':
+        out(dict(jsonrpc='2.0', id=mid, result=dict(tools=[dict(name='shout', description='upper-case a word',
+            inputSchema=dict(type='object', properties=dict(word=dict(type='string')), required=['word']))])))
+    elif meth == 'tools/call':
+        w = params['arguments'].get('word', '')
+        if w == 'boom':
+            out(dict(jsonrpc='2.0', id=mid, result=dict(content=[dict(type='text', text='it broke')], isError=True)))
+        elif w == 'die':
+            sys.exit(3)
+        else:
+            out(dict(jsonrpc='2.0', id=mid, result=dict(content=[dict(type='text', text=w.upper())])))
+"""
+
+    def test_mcp_client_talks_to_modern_and_legacy_servers(self):
+        from caminus.env.resident import mcp as mcpmod
+        script=self.home/'fake_mcp.py';script.write_text(self.MCP_SERVER)
+        rt=Runtime(self.home)
+        try:
+            rt.config['mcp']={'new':dict(command=sys.executable,args=['-I',str(script),'modern']),
+                              'old':dict(command=sys.executable,args=['-I',str(script),'legacy'])}
+            m=mcpmod.MCP(rt)
+            names=[t['function']['name'] for t in m.tools()]
+            self.assertEqual(sorted(names),['mcp__new__shout','mcp__old__shout'])
+            self.assertEqual((m.servers['new'].era,m.servers['old'].era),('modern','legacy'))
+            self.assertEqual(m.call('mcp__new__shout',dict(word='hi'))['output'],'HI')
+            self.assertEqual(m.call('mcp__old__shout',dict(word='yo'))['output'],'YO')
+            self.assertIn('reported an error: it broke',m.call('mcp__new__shout',dict(word='boom'))['error'])
+            with self.assertRaises(Exception):m.call('mcp__old__shout',dict(word='die'))
+            self.assertEqual(m.call('mcp__old__shout',dict(word='back'))['output'],'BACK','a dead server is restarted')
+            m.stop()
+        finally:rt.mail.close();rt.store.close()
+
+    def test_mcp_tools_reach_the_model_and_run_through_the_loop(self):
+        script=self.home/'fake_mcp.py';script.write_text(self.MCP_SERVER)
+        self.cmd('mcp',['add','echo','--env','TOKEN=secret','--',sys.executable,'-I',str(script),'legacy'])
+        listed=self.cmd('mcp')['mcp']['echo']
+        self.assertEqual(listed['env'],['TOKEN'],'env values (secrets) are never printed')
+        self.assertEqual(listed['args'],['-I',str(script),'legacy'],'arguments that start with - are kept')
+        self.replies(call('mcp__echo__shout',dict(word='hello')),call('finish',dict(summary='Shouted.')))
+        out=self.cmd('once',['--goal','Use the echo server.'])
+        self.assertEqual(out['state'],'completed')
+        first=[b for k,b in Endpoint.seen if k==self.key][0]
+        self.assertIn('mcp__echo__shout',[t['function']['name'] for t in first['tools']])
+        store=Store(self.home)
+        try:self.assertTrue(any(e['kind']=='tool_result' and e['data']['result'].get('output')=='HELLO' for e in store.events(limit=500)))
+        finally:store.close()
+        self.cmd('mcp',['remove','echo'])
+        self.assertEqual(self.cmd('mcp')['mcp'],{})
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)

@@ -24,10 +24,12 @@ from . import leases
 from . import agenda
 from . import judge
 from . import web
+from .mcp import MCP
 from .brain import Brains
 
 TODO_STATES = ('pending', 'in_progress', 'done')
 # Tools that were replaced but may still be called from an older history: accepted, never advertised.
+MCP_SCHEMA = dict(type='object', properties={}, required=[])   # marker: an MCP tool, validated by its server
 LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type':'array','items':{'type':'string'}},
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
@@ -193,6 +195,16 @@ class Runtime:
         self.advisor = Advisor(self)
         self.brains = Brains(self, self.primary)
         self.memory = Memory(self)
+        self.mcp = MCP(self)          # per-agent MCP servers; their tools join the list on first use
+
+    @property
+    def tools(self):
+        """The tools the model sees: the harness's own, then any configured MCP servers' (listed once)."""
+        if not self.mcp.servers:
+            return TOOLS
+        if getattr(self, '_tools', None) is None:
+            self._tools = TOOLS + self.mcp.tools()
+        return self._tools
 
     def system(self,gid=None):
         """The stable prefix, and nothing else.
@@ -504,12 +516,14 @@ class Runtime:
             name = action['name']
             schemas = {t['function']['name']:t['function']['parameters'] for t in TOOLS} | LEGACY_TOOLS
             schema = schemas.get(name)
+            if schema is None and name.startswith('mcp__') and self.mcp.route(name):
+                schema = MCP_SCHEMA         # the MCP server validates its own arguments
             if schema is None:
                 raise ValueError('unknown tool '+name)
-            if set(schema['required'])-set(args) or set(args)-set(schema['properties']):
+            if schema is not MCP_SCHEMA and (set(schema['required'])-set(args) or set(args)-set(schema['properties'])):
                 raise ValueError('missing required or unknown tool arguments')
             types = dict(string=str,integer=int,array=list,boolean=bool,object=dict)
-            for key,value in args.items():
+            for key,value in (args.items() if schema is not MCP_SCHEMA else ()):
                 prop = schema['properties'][key]
                 # bool is a subclass of int: only a boolean property takes True / False
                 if not isinstance(value,types[prop['type']]) or (isinstance(value,bool) and prop['type']!='boolean'):
@@ -579,7 +593,7 @@ class Runtime:
                     result = self._rollback(action['goal'], args['id'])
                 elif name == 'terminal':
                     result = self.terminal.call(action['id'],{**args,'yield_ms':0})
-                elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch'):
+                elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch') or name.startswith('mcp__'):
                     result = None         # catalog queries, network calls and waits stay outside the write transaction
                 elif name == 'peers':
                     result = dict(peers=self.mail.peers())
@@ -621,6 +635,8 @@ class Runtime:
                 result = web.search(self, args['query'], args.get('max_results', 8), args.get('timelimit'))
             elif name == 'web_fetch':
                 result = web.fetch(self, args['url'], args.get('max_chars', 40_000))
+            elif name.startswith('mcp__'):
+                result = self.mcp.call(name, args)
             elif (name == 'finish' and 'error' not in result and self.loop_gates and self.judge
                   and self.store.goal(action['goal']).get('kind', 'work') not in FREE_KINDS):
                 # the gate and the judge: slow, so outside the write transaction, before the goal completes
@@ -722,7 +738,7 @@ class Runtime:
         tail = [c] if (c := self.context_message(gid)) else []
         size = self.free.window(gid, self.model.context_size())   # free time keeps inside the server's side slot
         reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
-        before_tokens = self.model.tokens([system, *messages, *tail], TOOLS)
+        before_tokens = self.model.tokens([system, *messages, *tail], self.tools)
         trigger_tokens = int(size * self.config.get('compact_threshold', .85))
         target_tokens = int(size * self.config.get('compact_target_ratio', .2))
         if not force and before_tokens < trigger_tokens and before_tokens + reserve < size:
@@ -746,7 +762,7 @@ class Runtime:
                 start -= 1
             if start == 1:
                 start = len(messages)
-        pinned_tokens = self.model.tokens([system, messages[0], *tail], TOOLS)
+        pinned_tokens = self.model.tokens([system, messages[0], *tail], self.tools)
         # The fixed head - the prompt, the tool schemas and the goal - is not negotiable, and every tool the
         # loop grows makes it bigger. On a small window the target can land below it, so compact as far as
         # the head allows rather than refusing to compact at all.
@@ -757,7 +773,7 @@ class Runtime:
         # Retain complete assistant/tool groups only while they leave room for
         # the summary under the requested target. Large recent tool results
         # belong in the summary too, rather than overflowing the next request.
-        while not force and self.model.tokens([system, messages[0], *messages[start:]], TOOLS) + summary_limit + 256 > target_tokens:
+        while not force and self.model.tokens([system, messages[0], *messages[start:]], self.tools) + summary_limit + 256 > target_tokens:
             if start == len(messages):
                 raise ModelContextError('goal and persistent memory cannot fit the compaction target')
             start += 1
@@ -782,7 +798,7 @@ class Runtime:
             summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
-        after_tokens = self.model.tokens([system,*compacted,*tail],TOOLS)
+        after_tokens = self.model.tokens([system,*compacted,*tail],self.tools)
         if after_tokens + reserve >= size or (not force and after_tokens > target_tokens):
             raise ModelContextError('compacted context exceeds its target; shorten the goal or memory')
         if after_tokens > before_tokens:
@@ -790,7 +806,7 @@ class Runtime:
         # The human's own words go back after the summary: fixed overhead, checked against the window but
         # not against "must be smaller" - on a short goal that overhead is legitimately the larger part.
         compacted = self._restate_goal(gid, compacted)
-        restated_tokens = self.model.tokens([system,*compacted,*tail],TOOLS)
+        restated_tokens = self.model.tokens([system,*compacted,*tail],self.tools)
         if restated_tokens + reserve >= size:
             raise ModelContextError('the goal and its steers do not fit the model window; shorten the goal')
         after_tokens = restated_tokens
@@ -906,7 +922,7 @@ class Runtime:
                     self.store.update(gid,messages=messages)
                     self.store.event('startup_discovery',snapshot,gid)
             if self.token_budget:
-                used = self.model.tokens([self.system(), *messages], TOOLS)
+                used = self.model.tokens([self.system(), *messages], self.tools)
                 if used > self.token_budget:
                     self.store.event('watchdog', dict(reason='token budget', tokens=used,
                                                       budget=self.token_budget), gid)
@@ -927,7 +943,7 @@ class Runtime:
                 request = [self.system(),*messages]
                 if (budget := self.context_message(gid)):
                     request.append(budget)
-                reply = self.model.complete(request,TOOLS,
+                reply = self.model.complete(request,self.tools,
                                             max_tokens=min(int(self.config.get('max_tokens',4096)),self.model.context_size()//4),
                                             on_delta=live.on_delta)
             finally:
