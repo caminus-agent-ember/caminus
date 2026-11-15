@@ -1274,6 +1274,86 @@ for line in sys.stdin:
         chat=[b for b in sent if b and 'max_tokens' in b]
         self.assertNotIn('reasoning_effort',chat[1],'no effort set: nothing sent (the local server)')
 
+    def _relay(self, provider, upstream, cap=1.0, models=None):
+        """A relay on an ephemeral port in front of a fake upstream; returns (base url, calls, ledger, log, stop)."""
+        import http.server, threading
+        from caminus.env import relay
+        calls, lines = [], []
+        class Resp:
+            def __init__(s, status, body, ctype):s.status,s._body,s._ctype=status,body,ctype;s._lines=body.splitlines(keepends=True)
+            def getheader(s,name):return s._ctype if name=='Content-Type' else None
+            def read(s):return s._body
+            def readline(s):return s._lines.pop(0) if s._lines else b''
+        class Conn:
+            def request(s,method,path,body=None,headers=None):calls.append(dict(method=method,path=path,body=json.loads(body) if body else None,headers=headers))
+            def getresponse(s):return Resp(*upstream(calls[-1]))
+            def close(s):pass
+        ledger=relay.Ledger(self.home/'ledger.json',cap)
+        prices=relay.DeepInfraPrices('KEY',lines.append,fetch=lambda:dict(data=[
+            dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2,cache_read_tokens=0.11)))]))
+        handler=relay.make_handler(provider,'SECRET-KEY',ledger,models or {'claude-haiku-5-5'},4096,lines.append,prices,Conn)
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        return 'http://127.0.0.1:%d' % srv.server_address[1], calls, ledger, lines, srv.shutdown
+
+    def _post(self, url, body, stream=False):
+        import urllib.request, urllib.error
+        req=urllib.request.Request(url,json.dumps(body).encode(),{'Content-Type':'application/json'})
+        try:
+            with urllib.request.urlopen(req,timeout=10) as r:return r.status,r.read()
+        except urllib.error.HTTPError as e:
+            with e:return e.code,e.read()
+
+    def test_the_deepinfra_relay_adds_the_key_meters_and_caps(self):
+        import urllib.request
+        ok=json.dumps(dict(choices=[dict(message=dict(content='hi'),finish_reason='stop')],
+                           usage=dict(prompt_tokens=1_000_000,completion_tokens=1_000_000,
+                                      prompt_tokens_details=dict(cached_tokens=500_000)))).encode()
+        sse=(b'data: '+json.dumps(dict(choices=[dict(delta=dict(content='a'))])).encode()+b'\n\n'
+             +b'data: '+json.dumps(dict(choices=[],usage=dict(prompt_tokens=100,completion_tokens=10))).encode()+b'\n\ndata: [DONE]\n\n')
+        cut=b'data: '+json.dumps(dict(choices=[dict(delta=dict(content='a'))])).encode()+b'\n\n'
+        replies={'/v1/openai/chat/completions':[(200,ok,'application/json'),(200,sse,'text/event-stream'),(200,cut,'text/event-stream')],
+                 '/v1/openai/models':[(200,b'{"data":[]}','application/json')]}
+        base,calls,ledger,log,stop=self._relay('deepinfra',lambda c:replies[c['path'].split('?')[0]].pop(0),cap=5.0)
+        try:
+            code,body=self._post(base+'/v1/openai/chat/completions',dict(model='some/unpriced-model',messages=[]))
+            self.assertEqual(code,403);self.assertIn(b'cannot be metered',body);self.assertEqual(calls,[],'refused before anything goes upstream')
+            code,body=self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[],max_tokens=10**6,service_tier='priority'))
+            self.assertEqual(code,200);self.assertNotIn(b'SECRET-KEY',body)
+            sent=calls[-1]
+            self.assertEqual(sent['headers']['Authorization'],'Bearer SECRET-KEY');self.assertEqual(sent['body']['max_tokens'],4096)
+            self.assertNotIn('service_tier',sent['body'])
+            self.assertAlmostEqual(ledger.spent(),(500_000*0.6+500_000*0.11+1_000_000*2.2)/1e6,places=6)
+            before=ledger.spent()
+            code,body=self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[],stream=True))
+            self.assertEqual(calls[-1]['body']['stream_options'],dict(include_usage=True),'a stream is made to report usage')
+            self.assertAlmostEqual(ledger.spent()-before,(100*0.6+10*2.2)/1e6,places=9)
+            before=ledger.spent()
+            self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[],stream=True))
+            self.assertGreaterEqual(ledger.spent()-before,4096*2.2/1e6,'no usage reported: charged its whole output budget')
+            self.assertTrue(any('NO-USAGE' in l for l in log))
+            with urllib.request.urlopen(base+'/v1/openai/models',timeout=10) as r:self.assertEqual(json.loads(r.read()),dict(data=[]))
+            code,_=self._post(base+'/v1/openai/embeddings',dict(model='x'))
+            self.assertEqual(code,404)
+            self.assertFalse(any('SECRET-KEY' in l for l in log),'the key is never logged')
+        finally:stop()
+        base,calls,ledger,log,stop=self._relay('deepinfra',lambda c:(200,ok,'application/json'),cap=0.0)
+        try:
+            code,body=self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[]))
+            self.assertEqual(code,402);self.assertEqual(calls,[])
+        finally:stop()
+
+    def test_the_anthropic_relay_serves_the_model_list_with_the_key(self):
+        import urllib.request
+        base,calls,ledger,log,stop=self._relay('anthropic',lambda c:(200,b'{"data":[]}','application/json'))
+        try:
+            with urllib.request.urlopen(base+'/v1/models?limit=1000',timeout=10) as r:self.assertEqual(r.status,200)
+            self.assertEqual((calls[-1]['method'],calls[-1]['path'],calls[-1]['headers']['x-api-key']),('GET','/v1/models?limit=1000','SECRET-KEY'))
+            code,_=self._post(base+'/v1/messages',dict(model='claude-opus-5-5',messages=[]))
+            self.assertEqual(code,403,'anthropic keeps its model allowlist')
+            self.assertEqual(ledger.spent(),0)
+        finally:stop()
+
     def test_an_unanswered_question_goes_to_the_advisor_when_there_is_one(self):
         rt=Runtime(self.home)
         try:

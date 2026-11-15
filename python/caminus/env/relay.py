@@ -1,0 +1,378 @@
+"""caminus env relay: a local, spend-capped relay that adds the owner's API key for the agent.
+
+The owner runs one relay per provider, as their own user. The agent sends requests to http://127.0.0.1:PORT with no
+key; the relay adds the key from a file only the owner can read and forwards the request upstream. The key never
+leaves this process and is never logged.
+
+Hiding the key does not protect the money: anything on this machine that can reach the port can spend through it. So
+the relay enforces its own limits, whatever the client asks for:
+  - a daily dollar cap (a ledger file, priced from each reply's usage); once spent, requests get HTTP 402
+  - a path allowlist, and for Anthropic a model allowlist (--model; default claude-haiku-5-5)
+  - max_tokens clamped to --max-tokens
+  - it listens on 127.0.0.1 only and exits after --ttl seconds
+
+Providers:
+  anthropic  api.anthropic.com: POST /v1/messages, /v1/messages/count_tokens; GET /v1/models (the catalog). Priced from
+             the transport's table (caminus.env.resident.model.PRICES); a model without a price cannot be allowed.
+  deepinfra  api.deepinfra.com: POST /v1/openai/chat/completions; GET /v1/openai/models (the catalog). Any chat model
+             DeepInfra publishes a price for is allowed (the cap is the guard): prices are read from its model list at
+             start and every hour. A reply that reports no usage is charged a high estimate (its whole output budget).
+
+Run a separate relay (own port, key file, cap, ledger and log) for each provider and for an advisor.
+"""
+import argparse
+import datetime
+import http.client
+import http.server
+import json
+import os
+from pathlib import Path
+import ssl
+import sys
+import threading
+import time
+
+from .resident.model import FALLBACK_BETA, FALLBACK_MODELS, PRICES
+
+PROVIDERS = {
+    'anthropic': dict(host='api.anthropic.com', post=('/v1/messages', '/v1/messages/count_tokens'),
+                      get=('/v1/models',), port=8765, key_file='~/.config/anthropic/api_key'),
+    'deepinfra': dict(host='api.deepinfra.com', post=('/v1/openai/chat/completions',),
+                      get=('/v1/openai/models',), port=8766, key_file='~/.config/caminus/deepinfra-key'),
+}
+PRICE_REFRESH = 3600
+
+
+def anthropic_cost(model, usage, served=None):
+    row = PRICES[model]
+    if served and served != model:
+        row = PRICES.get(served) or max(PRICES.values(), key=lambda r: r[0][1])
+    low, high, line = row
+    inp = usage.get('input_tokens') or 0
+    read = usage.get('cache_read_input_tokens') or 0
+    wrote = usage.get('cache_creation_input_tokens') or 0
+    out = usage.get('output_tokens') or 0
+    p = high if inp + read + wrote > line else low
+    return (inp * p[0] + out * p[1] + read * p[2] + wrote * p[3]) / 1e6
+
+
+def openai_cost(prices, usage):
+    """prices: (input, output, cache_read) USD per million; usage: OpenAI-style prompt / completion tokens."""
+    inp, out, read_rate = prices
+    total = usage.get('prompt_tokens') or 0
+    cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0
+    return (max(0, total - cached) * inp + cached * read_rate + (usage.get('completion_tokens') or 0) * out) / 1e6
+
+
+class Ledger:
+    def __init__(self, path, cap):
+        self.path, self.cap, self.lock = Path(path), cap, threading.Lock()
+
+    def _load(self):
+        try:
+            return json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def today(self):
+        return datetime.date.today().isoformat()
+
+    def spent(self):
+        with self.lock:
+            return self._load().get(self.today(), {}).get('usd', 0.0)
+
+    def add(self, usd, inp=0, out=0, read=0, wrote=0):
+        with self.lock:
+            data = self._load()
+            day = data.setdefault(self.today(), dict(usd=0.0, requests=0, input=0, output=0, cache_read=0, cache_write=0))
+            day['usd'] = round(day['usd'] + usd, 6)
+            day['requests'] += 1
+            day['input'] += inp
+            day['output'] += out
+            day['cache_read'] += read
+            day['cache_write'] += wrote
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(data, indent=1))
+            os.replace(tmp, self.path)
+            return day['usd']
+
+
+class DeepInfraPrices:
+    """Per-model prices from DeepInfra's own model list, refreshed hourly; a model it publishes no price for is refused."""
+
+    def __init__(self, key, log, fetch=None):
+        self.key, self.log, self.table, self.at, self.lock = key, log, {}, 0.0, threading.Lock()
+        self.fetch = fetch or self._fetch
+
+    def _fetch(self):
+        conn = http.client.HTTPSConnection(PROVIDERS['deepinfra']['host'], timeout=60,
+                                           context=ssl.create_default_context())
+        try:
+            conn.request('GET', '/v1/openai/models', headers={'Authorization': 'Bearer ' + self.key})
+            up = conn.getresponse()
+            if up.status != 200:
+                raise OSError('model list status %d' % up.status)
+            return json.loads(up.read())
+        finally:
+            conn.close()
+
+    def get(self, model):
+        with self.lock:
+            if time.time() - self.at > PRICE_REFRESH or (model not in self.table and time.time() - self.at > 60):
+                try:
+                    table = {}
+                    for m in self.fetch().get('data') or []:
+                        p = (m.get('metadata') or {}).get('pricing') or {}
+                        if 'input_tokens' in p and 'output_tokens' in p:
+                            table[m['id']] = (float(p['input_tokens']), float(p['output_tokens']),
+                                              float(p.get('cache_read_tokens', p['input_tokens'])))
+                    self.table, self.at = table, time.time()
+                    self.log('prices: %d priced models' % len(table))
+                except (OSError, ValueError) as e:
+                    self.log('price list unavailable: %s' % type(e).__name__)
+            return self.table.get(model)
+
+
+def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, connect=None):
+    spec = PROVIDERS[provider]
+    connect = connect or (lambda: http.client.HTTPSConnection(spec['host'], timeout=900,
+                                                              context=ssl.create_default_context()))
+
+    class Relay(http.server.BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def log_message(self, *a):
+            pass
+
+        def refuse(self, status, kind, message):
+            err = dict(type='error', error=dict(type=kind, message='relay: ' + message)) if provider == 'anthropic' \
+                else dict(error=dict(message='relay: ' + message, type=kind, code=status))
+            raw = json.dumps(err).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            log('refused %d %s' % (status, message))
+
+        def auth(self):
+            return {'x-api-key': key} if provider == 'anthropic' else {'Authorization': 'Bearer ' + key}
+
+        def do_GET(self):
+            # the catalog's model list: no cost, no body; the reply is passed through as is
+            path = self.path.split('?')[0]
+            if path not in spec['get']:
+                return self.refuse(404, 'not_found_error', 'path not allowed: GET ' + path)
+            conn = connect()
+            try:
+                headers = dict(self.auth(), accept='application/json')
+                if provider == 'anthropic':
+                    headers['anthropic-version'] = self.headers.get('anthropic-version') or '2026-10-21'
+                conn.request('GET', self.path, None, headers)
+                up = conn.getresponse()
+                data = up.read()
+                self.send_response(up.status)
+                self.send_header('Content-Type', up.getheader('Content-Type') or 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(data)
+                self.close_connection = True
+            except OSError as e:
+                log('upstream error: %s' % type(e).__name__)
+                self.refuse(502, 'api_error', 'upstream unreachable')
+            finally:
+                conn.close()
+
+        def do_POST(self):
+            path = self.path.split('?')[0]
+            if path not in spec['post']:
+                return self.refuse(404, 'not_found_error', 'path not allowed: ' + path)
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)))
+            except (ValueError, TypeError):
+                return self.refuse(400, 'invalid_request_error', 'body is not JSON')
+            model = body.get('model')
+            if provider == 'anthropic':
+                if model not in models:
+                    return self.refuse(403, 'permission_error', 'model not allowed: %r' % model)
+                rates = None
+            else:
+                rates = prices.get(model) if isinstance(model, str) else None
+                if rates is None:
+                    return self.refuse(403, 'permission_error', 'no published price for %r: it cannot be metered' % model)
+            spent = ledger.spent()
+            if spent >= ledger.cap:
+                return self.refuse(402, 'billing_error', 'daily cap $%.2f reached ($%.4f spent today)' % (ledger.cap, spent))
+            counting = path.endswith('count_tokens')
+            beta = None
+            if not counting:
+                if not isinstance(body.get('max_tokens'), int) or body['max_tokens'] > max_tokens:
+                    body['max_tokens'] = max_tokens
+                for banned in ('speed', 'service_tier', 'container', 'mcp_servers', 'n'):
+                    body.pop(banned, None)
+                if provider == 'anthropic':
+                    if body.get('fallbacks') != 'default' or model not in FALLBACK_MODELS:
+                        body.pop('fallbacks', None)
+                    beta = FALLBACK_BETA if 'fallbacks' in body and FALLBACK_BETA in (self.headers.get('anthropic-beta') or '') else None
+                    if 'fallbacks' in body and not beta:
+                        body.pop('fallbacks')
+                elif body.get('stream'):
+                    body['stream_options'] = dict(include_usage=True)   # the only way a stream reports its usage
+            raw = json.dumps(body).encode()
+            conn = connect()
+            try:
+                headers = dict(self.auth(), **{'content-type': 'application/json',
+                                               'accept': self.headers.get('Accept') or 'application/json'})
+                if provider == 'anthropic':
+                    headers['anthropic-version'] = self.headers.get('anthropic-version') or '2026-10-21'
+                    if beta:
+                        headers['anthropic-beta'] = beta
+                conn.request('POST', path, raw, headers)
+                up = conn.getresponse()
+                self.send_response(up.status)
+                for name in ('Content-Type', 'retry-after', 'request-id', 'x-request-id'):
+                    if up.getheader(name):
+                        self.send_header(name, up.getheader(name))
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
+                rid = up.getheader('request-id') or up.getheader('x-request-id')
+                if 'text/event-stream' in (up.getheader('Content-Type') or ''):
+                    while True:
+                        line = up.readline()
+                        if not line:
+                            break
+                        self.wfile.write(line)
+                        self.wfile.flush()
+                        if not line.startswith(b'data:') or line[5:].strip() == b'[DONE]':
+                            continue
+                        try:
+                            ev = json.loads(line[5:])
+                        except ValueError:
+                            continue
+                        if provider != 'anthropic':
+                            if ev.get('usage'):
+                                usage = ev['usage']
+                            continue
+                        t = ev.get('type')
+                        if t == 'message_start':
+                            usage.update((ev.get('message') or {}).get('usage') or {})
+                            served = (ev.get('message') or {}).get('model') or served
+                        elif t == 'content_block_start' and (ev.get('content_block') or {}).get('type') == 'fallback':
+                            fallback = True
+                            served = ((ev['content_block'].get('to') or {}).get('model')) or served
+                        elif t == 'message_delta':
+                            usage.update(ev.get('usage') or {})
+                            stop = (ev.get('delta') or {}).get('stop_reason') or stop
+                            category = ((ev.get('delta') or {}).get('stop_details') or {}).get('category') or category
+                        elif t == 'error':
+                            errtext = json.dumps(ev.get('error'))[:500]
+                else:
+                    data = up.read()
+                    self.wfile.write(data)
+                    if up.status != 200:
+                        errtext = data[:500].decode('utf-8', 'replace')
+                    if not counting and up.status == 200:
+                        try:
+                            usage = json.loads(data).get('usage') or {}
+                        except ValueError:
+                            usage = {}
+                extra = ''.join(s for s in (
+                    ' served=%s' % served if served != model else '', ' FALLBACK' if fallback else '',
+                    ' stop=%s' % stop if stop and stop not in ('end_turn', 'tool_use') else '',
+                    ' category=%s' % category if category else '',
+                    ' rid=%s' % rid if (rid and (errtext or stop == 'refusal' or fallback)) else ''))
+                if not counting and provider == 'anthropic' and usage:
+                    usd = anthropic_cost(model, usage, served)
+                    total = ledger.add(usd, usage.get('input_tokens') or 0, usage.get('output_tokens') or 0,
+                                       usage.get('cache_read_input_tokens') or 0, usage.get('cache_creation_input_tokens') or 0)
+                    log('%s in=%s read=%s write=%s out=%s $%.5f today $%.4f%s' % (
+                        model, usage.get('input_tokens'), usage.get('cache_read_input_tokens'),
+                        usage.get('cache_creation_input_tokens'), usage.get('output_tokens'), usd, total, extra))
+                elif not counting and provider != 'anthropic' and up.status == 200:
+                    if usage:
+                        usd = openai_cost(rates, usage)
+                    else:
+                        # no usage reported (a cut stream): charge the request as if every output token was spent
+                        usd = (len(raw) / 4 * rates[0] + body['max_tokens'] * rates[1]) / 1e6
+                        extra += ' NO-USAGE (charged the estimate)'
+                    total = ledger.add(usd, usage.get('prompt_tokens') or 0, usage.get('completion_tokens') or 0,
+                                       (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
+                    log('%s in=%s out=%s $%.5f today $%.4f%s' % (model, usage.get('prompt_tokens'),
+                                                                  usage.get('completion_tokens'), usd, total, extra))
+                if errtext or (provider == 'anthropic' and not usage and not counting) or (counting and up.status != 200):
+                    log('%s %s status %d%s error=%s' % (model, path, up.status, extra, errtext or '(no usage)'))
+                self.close_connection = True
+            except OSError as e:
+                log('upstream error: %s' % type(e).__name__)
+                try:
+                    self.refuse(502, 'api_error', 'upstream unreachable')
+                except OSError:
+                    pass
+            finally:
+                conn.close()
+    return Relay
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog='caminus env relay', description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--provider', choices=sorted(PROVIDERS), default='anthropic')
+    ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra)')
+    ap.add_argument('--cap-usd', type=float, default=1.0, help='daily spend cap in USD')
+    ap.add_argument('--ttl', type=float, default=1800, help='seconds before the relay exits on its own')
+    ap.add_argument('--max-tokens', type=int, default=16000)
+    ap.add_argument('--model', action='append', help='anthropic: allowed model (repeatable); default claude-haiku-5-5')
+    ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key or ~/.config/caminus/deepinfra-key')
+    ap.add_argument('--ledger', help='default ~/.local/state/caminus/<provider>-relay-ledger.json')
+    ap.add_argument('--log', help='default ~/.local/state/caminus/<provider>-relay.log')
+    a = ap.parse_args(argv)
+    spec = PROVIDERS[a.provider]
+    state = Path.home() / '.local/state/caminus'
+    legacy = a.provider == 'anthropic'    # the first relay's file names, so its ledger keeps counting today
+    ledger_path = a.ledger or str(state / ('key-relay-ledger.json' if legacy else f'{a.provider}-relay-ledger.json'))
+    log_path = a.log or str(state / ('key-relay.log' if legacy else f'{a.provider}-relay.log'))
+    models = set(a.model or ['claude-haiku-5-5'])
+    if a.provider == 'anthropic':
+        unknown = models - set(PRICES)
+        if unknown:
+            sys.exit('no price for %s: add it to PRICES first' % ', '.join(sorted(unknown)))
+    elif a.model:
+        sys.exit('--model is for anthropic: deepinfra allows every model it publishes a price for (the cap is the guard)')
+    key_file = Path(os.path.expanduser(a.key_file or spec['key_file']))
+    try:
+        if key_file.stat().st_mode & 0o077:
+            sys.exit('%s is readable by others: chmod 600 it first' % key_file)
+        key = key_file.read_text().strip()
+    except OSError as e:
+        sys.exit('cannot read the key file %s: %s' % (key_file, type(e).__name__))
+    if not key:
+        sys.exit('key file is empty')
+    state.mkdir(parents=True, exist_ok=True)
+    logf = open(log_path, 'a', buffering=1)
+
+    def log(msg):
+        logf.write('%s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg))
+
+    ledger = Ledger(ledger_path, a.cap_usd)
+    prices = DeepInfraPrices(key, log) if a.provider == 'deepinfra' else None
+    port = a.port or spec['port']
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', port),
+                                          make_handler(a.provider, key, ledger, models, a.max_tokens, log, prices))
+    threading.Timer(a.ttl, srv.shutdown).start()
+    root = '/v1' if a.provider == 'anthropic' else '/v1/openai'
+    log('start %s port %d cap $%.2f ttl %ds%s (spent today $%.4f)' % (
+        a.provider, port, a.cap_usd, a.ttl, ' models %s' % sorted(models) if a.provider == 'anthropic' else '',
+        ledger.spent()))
+    print('relay %s on http://127.0.0.1:%d%s  cap $%.2f/day  ttl %ds  spent today $%.4f' % (
+        a.provider, port, root, a.cap_usd, a.ttl, ledger.spent()), flush=True)
+    try:
+        srv.serve_forever()
+    finally:
+        log('stop (spent today $%.4f)' % ledger.spent())
+
+
+if __name__ == '__main__':
+    main()
