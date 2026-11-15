@@ -115,6 +115,15 @@ func (m envModel) approvalDetail(order []int, sel, width int) []string {
 	}
 	if r.kind() == "question" {
 		add("question", r.Text)
+	} else {
+		// The row cuts a long command; the detail never does: what you approve must be visible in full.
+		for i, piece := range strings.Split(ansi.Hardwrap(residentText(r.Cmd), max(8, width-5), true), "\n") {
+			label := "cmd: "
+			if i > 0 {
+				label = "     "
+			}
+			out = append(out, envDim.Render(label)+lipgloss.NewStyle().Foreground(cText).Bold(true).Render(piece))
+		}
 	}
 	add("cwd", r.CWD)
 	add("why", r.Reason)
@@ -148,7 +157,7 @@ func (m envModel) approvalOverlay(w, h int) string {
 	for i := first; i < min(first+listH, len(order)); i++ {
 		rows = append(rows, m.approvalRow(order[i], i == sel, inner))
 	}
-	hint := "Enter shows the full request  ·  a a approve  ·  e edit  ·  d deny with an instruction"
+	hint := "Enter shows the full request  ·  a a approve  ·  e edit  ·  d deny  ·  /deny TEXT in the chat says what instead"
 	if m.chat.approvalDetail {
 		hint = "Enter folds the full request again  ·  a a approve  ·  e edit  ·  d deny"
 	}

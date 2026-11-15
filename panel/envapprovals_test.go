@@ -172,3 +172,20 @@ func TestApprovalsOverlayFitsTheTerminal(t *testing.T) {
 		t.Fatalf("help + overlay: %d rows overflow a 12-row terminal:\n%s", len(rows), ansi.Strip(strings.Join(rows, "\n")))
 	}
 }
+
+// A row may cut a long command, but the opened request must show every character of what a person approves.
+func TestApprovalDetailShowsTheWholeCommand(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 60, 30
+	bridge := t.TempDir()
+	long := "make -C /srv/build/" + strings.Repeat("deep/", 20) + "install-THE-END"
+	writeReq(t, bridge, "r1", long, 1)
+	m.bridge, m.seen = bridge, map[string]bool{}
+	m.refreshLocal()
+	m.chat.approvals, m.chat.approvalDetail = true, true
+	frame := ansi.Strip(m.approvalOverlay(60, 28))
+	joined := strings.ReplaceAll(strings.Join(strings.Fields(strings.NewReplacer("│", "", "cmd:", "").Replace(frame)), ""), " ", "")
+	if !strings.Contains(joined, strings.ReplaceAll(long, " ", "")) {
+		t.Fatalf("the opened request does not show the whole command:\n%s", frame)
+	}
+}
