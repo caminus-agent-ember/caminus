@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -23,7 +24,9 @@ import (
 // append events; they never replace the transcript or steal an unfinished draft.
 type residentChat struct {
 	ready, sending, newGoal, help, forceNew bool
-	expanded                                bool // Ctrl+E: every card open (tool calls, output, thinking)
+	expanded                                bool      // Ctrl+E: every card open (tool calls, output, thinking)
+	armed                                   string    // the root request a first "a" armed; a second approves
+	armedAt                                 time.Time // when it was armed (10 s to confirm)
 	compose                                 textarea.Model
 	transcript                              viewport.Model
 	target, selectID                        string
@@ -78,6 +81,9 @@ func highlightLive(line string) string {
 		line = line[open+1+shut+1:]
 	}
 }
+
+// appendText adds a streamed delta to the reply (the text only ever grows within a turn).
+func (l residentLive) appendText(delta string) residentLive { l.text += delta; return l }
 
 // body is the live reply as wrapped lines: its reasoning, the tools it started, then the text.
 func (l residentLive) body(width int) []string {
@@ -792,12 +798,25 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if !m.chat.compose.Focused() {
 		// A pending root request is decided right here, through the Requests page's own handler (the same sudo
 		// run, claim, audit entry and answer files): a approves, d denies, e opens it in the Requests editor.
+		// Approving runs a root command, so it takes two presses: the first a arms it and shows the exact
+		// command, a second a within 10 s approves. Any other key disarms. Denying runs nothing and needs one.
+		armed := m.chat.armed
+		m.chat.armed = ""
 		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "d" || k == "e") {
+			r := m.reqs[i]
+			if k == "a" && (armed != r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
+				m.chat.armed, m.chat.armedAt = r.ID, time.Now()
+				m.msg = "approve as root: " + terminalText(r.Cmd, false) + " ? press a again (any other key cancels)"
+				return m, nil
+			}
 			m.sel = i
 			if k == "e" {
 				m.tab = 0
 			}
 			return m.reqKeys(k)
+		}
+		if armed != "" {
+			m.msg = "approval cancelled"
 		}
 		switch k {
 		case "enter", "t":

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -1080,5 +1081,40 @@ func TestChatDecidesRootRequestsInline(t *testing.T) {
 		if m.pendingRoot() != -1 {
 			t.Fatal("a decided request still shows as waiting")
 		}
+	}
+}
+
+// Approving runs a root command: one stray "a" while reading must not do it. The first press only arms it and names
+// the command; a second approves; any other key in between disarms.
+func TestChatApprovalNeedsASecondPress(t *testing.T) {
+	m := chatFixture(t)
+	bridge := t.TempDir()
+	writeReq(t, bridge, "r1", "rm -rf /var/cache/foo", 1)
+	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
+	m.refreshLocal()
+	m.chat.compose.Blur()
+	press := func(r rune) {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(envModel)
+	}
+	press('a')
+	if m.chat.armed != "r1" || !strings.Contains(m.msg, "rm -rf /var/cache/foo") || !strings.Contains(m.msg, "press a again") {
+		t.Fatalf("the first a must only arm and name the command: %q", m.msg)
+	}
+	press('j') // scrolling in between
+	if m.chat.armed != "" {
+		t.Fatal("another key must disarm the approval")
+	}
+	press('a')
+	if m.chat.armed != "r1" {
+		t.Fatal("a fresh a arms again")
+	}
+	m.chat.armedAt = m.chat.armedAt.Add(-11 * time.Second)
+	press('a')
+	if m.chat.armed != "r1" {
+		t.Fatal("a stale arm (over 10 s) only re-arms")
+	}
+	if _, err := os.Stat(filepath.Join(bridge, "res", "r1.json")); err == nil {
+		t.Fatal("nothing may be decided before a confirmed approval")
 	}
 }
