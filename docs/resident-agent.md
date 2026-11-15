@@ -81,6 +81,22 @@ finished/cancelled goal is rejected. The conversation UI explicitly uses
 cannot be reopened this way. `env run`, jobs,
 sessions and all previous scriptable CLI flows remain available.
 
+When the selected goal calls `ask_user`, its question appears inline in place of
+the steering textbox. Use Up/Down to select a choice, then Enter to answer;
+number keys highlight a choice without submitting it. Select "Write your own
+answer" or press `e` for a Unicode multiline answer. Questions without choices
+open that text field directly. Escape returns from custom editing to the choices,
+or defers the question and restores the untouched steering draft. A question
+arriving over a draft cannot turn that draft's Enter into an answer: select or
+confirm the new input first. Deferred questions remain available in `/requests`.
+Refreshing never redirects a selected answer to another request; changed,
+withdrawn or already-answered requests require another review. Root requests
+always retain their explicit approval flow in `/requests`.
+
+Question tool arguments are rendered as the interactive question rather than raw
+JSON. The chosen human answer remains in conversation history. Normal PTY CRLF
+newlines render cleanly; control bytes in reviewed commands remain escaped.
+
 The daemon polls without inference while idle or waiting for human answers.
 There is no production step limit. Backend outages retain the goal and retry
 with backoff. `ROBOTS.md`, the resident's `IDENTITY.md` and `MEMORY.md` provide

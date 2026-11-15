@@ -26,6 +26,12 @@ type residentChat struct {
 	seq, rendered, renderWidth              int
 	content                                 string
 	markdown                                *glamour.TermRenderer
+	question                                *envReq
+	questionChoice                          int
+	questionCustom                          bool
+	questionArmed                           bool
+	questionInput                           textarea.Model
+	questionDeferred, questionError         string
 }
 
 type residentComposeResult struct {
@@ -89,6 +95,7 @@ func (m *envModel) receiveResident(msg residentMsg) {
 	if m.chat.compose.Value() == "" && !m.chat.sending && !m.chat.forceNew && m.chat.selectID == "" {
 		m.targetSelectedGoal()
 	}
+	m.syncQuestion()
 	m.syncChat()
 }
 
@@ -106,6 +113,10 @@ func (m *envModel) syncChat() {
 	w, h := max(20, m.width), max(12, m.height)
 	m.chat.compose.SetWidth(w - 4)
 	m.chat.compose.SetHeight(min(3, max(1, h-10)))
+	if m.chat.question != nil {
+		m.chat.questionInput.SetWidth(w - 4)
+		m.chat.questionInput.SetHeight(min(3, max(1, h-12)))
+	}
 	oldBottom := m.chat.transcript.AtBottom()
 	m.chat.transcript.SetWidth(w)
 	m.chat.transcript.SetHeight(max(1, h-3-lipgloss.Height(m.chatComposer())-2))
@@ -177,6 +188,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			call, _ := raw.(map[string]any)
 			f, _ := call["function"].(map[string]any)
 			name, _ := f["name"].(string)
+			if name == "ask_user" {
+				continue
+			} // the durable question gets a native UI below
 			rawArgs, _ := f["arguments"].(string)
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
@@ -196,8 +210,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return strings.Join(parts, "\n\n")
 	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
+		if str("name") == "ask_user" {
+			answer, _ := result["answer"].(string)
+			if answer == "" {
+				answer, _ = result["decision"].(string)
+			}
+			return heading("YOU · answer", "12") + "\n" + c.renderMarkdown(answer)
+		}
 		if output, ok := result["output"].(string); ok && output != "" {
-			return heading("OUTPUT · "+residentText(str("name")), "8") + "\n" + c.renderMarkdown(fenced(output, "text"))
+			return heading("OUTPUT · "+residentText(str("name")), "8") + "\n" + c.renderMarkdown(fenced(strings.ReplaceAll(output, "\r\n", "\n"), "text"))
 		}
 		if err, ok := result["error"].(string); ok {
 			return heading("TOOL ERROR", "9") + "\n" + c.renderMarkdown(fenced(err, "text"))
@@ -209,10 +230,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return heading("FINISHED", "10") + "\n" + c.renderMarkdown(str("summary"))
 	case "question", "approval_requested":
 		text := str("text")
+		label := "QUESTION"
 		if e.Kind == "approval_requested" {
 			text = str("reason") + "\n" + fenced(str("cmd"), "bash")
+			label = "ROOT REVIEW · /requests"
 		}
-		return heading("WAITING FOR YOU · /requests", "11") + "\n" + c.renderMarkdown(text)
+		return heading(label, "11") + "\n" + c.renderMarkdown(text)
 	case "compacted":
 		return heading("CONTEXT COMPACTED · conversation remains in this transcript", "11")
 	case "cancelled":
@@ -231,6 +254,9 @@ func shortGoal(id string) string {
 }
 
 func (m envModel) chatComposer() string {
+	if m.chat.question != nil {
+		return m.questionBox()
+	}
 	label := "New goal"
 	if !m.chat.newGoal {
 		label = "Steer goal " + shortGoal(m.chat.target)
@@ -300,6 +326,10 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	if _, ok := msg.(tea.MouseWheelMsg); ok {
 		m.chat.transcript, cmd = m.chat.transcript.Update(msg)
+	} else if m.chat.question != nil {
+		if m.chat.questionCustom {
+			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
+		}
 	} else if !m.chat.sending {
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
 	}
@@ -308,6 +338,9 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.initChat()
+	if m.chat.question != nil {
+		return m.questionKey(msg)
+	}
 	k := msg.String()
 	switch k {
 	case "ctrl+c":

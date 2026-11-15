@@ -41,6 +41,8 @@ import (
 )
 
 type envReq struct {
+	Agent   string   `json:"agent"`
+	Goal    string   `json:"goal"`
 	Digest  string   `json:"-"`
 	ID      string   `json:"id"`
 	Pid     int      `json:"pid"`
@@ -619,6 +621,7 @@ func (m *envModel) refreshLocal() {
 		m.sel = max(0, len(m.reqs)-1)
 	}
 	m.events = tailLines(m.auditPath, 200)
+	m.syncQuestion()
 }
 
 func (m envModel) onKey(k string) (tea.Model, tea.Cmd) {
