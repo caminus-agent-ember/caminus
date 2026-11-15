@@ -686,7 +686,43 @@ func (m envModel) chatBottom() string {
 	if m.chat.picker {
 		return m.pickerBox()
 	}
+	if line := m.todoPinned(); line != "" {
+		return line + "\n" + m.chatComposer()
+	}
 	return m.chatComposer()
+}
+
+// todoPinned is the selected goal's todo list (its newest todo event) as one line above the composer, while the goal
+// is open. bodyHeight measures chatBottom, so the line takes its row from the transcript.
+func (m envModel) todoPinned() string {
+	sel := m.selectedResidentGoal()
+	if sel == nil || sel.State == "completed" || sel.State == "cancelled" {
+		return ""
+	}
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != sel.ID || e.Kind != "todo" {
+			continue
+		}
+		raw, _ := e.Data["items"].([]any)
+		var items []todoItem
+		for _, r := range raw {
+			it, _ := r.(map[string]any)
+			text, _ := it["text"].(string)
+			state := map[string]string{"done": "done", "in_progress": "now"}[fmt.Sprint(it["state"])]
+			if state == "" {
+				state = "next"
+			}
+			if text != "" {
+				items = append(items, todoItem{residentText(text), state})
+			}
+		}
+		if len(items) == 0 {
+			return ""
+		}
+		return todoLine(items, max(20, m.width))
+	}
+	return ""
 }
 
 // contextBarSlots is the fixed width of the usage bar: readable at a glance,

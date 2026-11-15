@@ -236,16 +236,45 @@ class Resident(unittest.TestCase):
         self.assertTrue(any('change approach' in (r.get('error') or '').lower() for r in results),
                         [r.get('error') for r in results])
 
-    def test_the_ledger_is_pinned_into_every_turn(self):
+    def test_the_todo_list_is_pinned_into_every_turn_and_gates_finish(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),
-                     call('ledger',dict(milestones=['write it','check it'],blockers=['no editor'])),
+                     call('todo',dict(items=[dict(text='write it',state='done'),dict(text='check it',state='in_progress')],blockers=['no editor'])),
                      call('verify',dict(evidence='the file is there')),
-                     call('finish',dict(summary='Done.')))
-        self.cmd('once',['--goal','Write the file.'])
-        body=json.dumps(Endpoint.seen[-1][1])
-        self.assertIn('write it | check it',body)
-        self.assertIn('blocked by: no editor',body)
+                     call('finish',dict(summary='Done.')),
+                     call('finish',dict(summary='Done.',open='check it: left for the human')))
+        out=self.cmd('once',['--goal','Write the file.'])
+        self.assertEqual(out['state'],'completed')
+        bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
+        self.assertIn('[x] write it | [>] check it',bodies[-1])
+        self.assertIn('blocked by: no editor',bodies[-1])
+        self.assertTrue(any('todo list still has unfinished items (check it)' in b for b in bodies),'finish refused while an item is open')
+
+    def test_todo_rejects_two_in_progress_and_bad_states(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Plan.')
+            with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='in_progress'),dict(text='b',state='in_progress')],[])
+            with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='later')],[])
+            self.assertEqual(rt._todo(gid,['bare string'],[])['left'],1)
+            # a ledger stored before the todo list reads as pending items
+            rt.store.db.execute('UPDATE goals SET ledger=? WHERE id=?',(json.dumps(dict(milestones=['old step'],blockers=[])),gid))
+            self.assertEqual(rt.store.todo(gid)['items'],[dict(text='old step',state='pending')])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_ledger_call_from_an_older_history_still_works(self):
+        self.replies(call('ledger',dict(milestones=['first','second'])),call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal','Use the old tool.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:self.assertEqual([it['text'] for it in store.todo(out['id'])['items']],['first','second'])
+        finally:store.close()
+
+    def test_boolean_arguments_reach_the_tool(self):
+        (self.home/'t.txt').write_text('a a\n')
+        self.replies(call('edit',dict(path='t.txt',old='a',new='b',replace_all=True)),call('finish',dict(summary='Done.')))
+        self.cmd('once',['--goal','Replace both.'])
+        self.assertEqual((self.home/'t.txt').read_text(),'b b\n')
 
     def test_memory_index_is_frozen_per_goal_and_state_loads_first(self):
         with self.hermetic_home():

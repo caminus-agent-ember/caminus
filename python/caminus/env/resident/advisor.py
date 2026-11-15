@@ -150,7 +150,7 @@ class Advisor:
         if g.get('done_check'):
             parts.append('DONE CHECK:\n' + g['done_check'][:1000])
         if g.get('ledger'):
-            parts.append('LEDGER:\n' + str(g['ledger'])[:2000])
+            parts.append('TODO:\n' + str(g['ledger'])[:2000])      # the todo list lives in the ledger column
         recent = []
         for m in g['messages'][-14:]:
             text = m.get('content') or ''

@@ -1199,3 +1199,32 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 		t.Fatalf("hunk headers, read bodies or a repeated call card leaked:\n%s", v)
 	}
 }
+
+// The selected goal's newest todo list is pinned above the composer while the goal is open; the frame still fits.
+func TestTodoIsPinnedAboveTheComposer(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 24
+	todo := func(items ...map[string]any) residentEvent {
+		raw := make([]any, len(items))
+		for i, it := range items {
+			raw[i] = it
+		}
+		return residentEvent{Seq: 9, Goal: "original", Kind: "todo", Data: map[string]any{"items": raw}}
+	}
+	m.residentEvents = append(m.residentEvents,
+		todo(map[string]any{"text": "stale", "state": "pending"}),
+		todo(map[string]any{"text": "find the test", "state": "done"}, map[string]any{"text": "fix the bounds", "state": "in_progress"},
+			map[string]any{"text": "run the gate", "state": "pending"}))
+	m.syncChat()
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "todo") || !strings.Contains(frame, "fix the bounds") || strings.Contains(frame, "stale") {
+		t.Fatalf("the newest todo list is not pinned:\n%s", frame)
+	}
+	if rows := strings.Split(frame, "\n"); len(rows) > m.height {
+		t.Fatalf("the pinned line pushed the frame past the terminal: %d rows", len(rows))
+	}
+	m.resident.Goals[0].State = "completed"
+	if strings.Contains(ansi.Strip(m.render()), "fix the bounds") {
+		t.Fatal("a finished goal's list must not stay pinned")
+	}
+}
