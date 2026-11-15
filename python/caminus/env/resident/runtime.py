@@ -33,7 +33,8 @@ MCP_SCHEMA = dict(type='object', properties={}, required=[])   # marker: an MCP 
 LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type':'array','items':{'type':'string'}},
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
-PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
+PLAIN_TEXT_LIMIT = 3
+TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
 EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24}
 
@@ -190,7 +191,8 @@ class Runtime:
         self.idle_timeout = float(self.config.get('idle_timeout', 0) or 0)
         self.token_budget = int(self.config.get('token_budget', 0) or 0)
         self.progress = {}
-        self.plain_replies = {}  # goal -> consecutive plain-text replies; reset by any reply with tool calls
+        self.plain_replies = {}
+        self.truncations = {}    # goal -> replies in a row cut off at the output limit  # goal -> consecutive plain-text replies; reset by any reply with tool calls
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
         self.brains = Brains(self, self.primary)
@@ -970,6 +972,7 @@ class Runtime:
                     self._finish(gid,reply['content'])
             else:
                 self.plain_replies.pop(gid,None)
+            self.truncations.pop(gid,None)        # a whole reply arrived: the cut-off streak is over
             return True
         except Cancelled:
             # Cancelled between two streamed pieces: the model was closed, nothing was stored.
@@ -991,6 +994,22 @@ class Runtime:
                     self.store.update(gid,state='waiting_model',error=str(e))
                     self.store.event('model_cut',dict(error=str(e),attempt=attempt),gid)
                     return False
+                if isinstance(e,ModelTruncated):
+                    # The reply hit the output limit, so nothing in it ran. That is usually one oversized write:
+                    # tell the agent and let it try again in smaller pieces; only a repeated cut pauses the goal.
+                    count=self.truncations.get(gid,0)+1
+                    self.truncations[gid]=count
+                    if count<TRUNCATION_LIMIT:
+                        limit=int(self.config.get('max_tokens',4096))
+                        self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,
+                            f'[harness] Your last reply hit the output limit ({limit} tokens) and was cut off, so '
+                            'nothing in it ran. Keep each reply under the limit: write a big file in parts (write '
+                            'the first part, then add the rest with edit or further writes), and split long '
+                            'commands or text across steps.','nudge'))
+                        self.store.update(gid,state='working',error='')
+                        self.store.event('model_truncated',dict(error=str(e),recovered=True,streak=count,
+                                                                partial=e.partial),gid)
+                        return True
                 if isinstance(e,(ModelTruncated,ModelContextError)):
                     self.store.update(gid,state='paused',error=str(e))
                     self.store.event('model_truncated' if isinstance(e,ModelTruncated) else 'context_refused',
