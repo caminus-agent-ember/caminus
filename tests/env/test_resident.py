@@ -1508,7 +1508,12 @@ for line in sys.stdin:
         from caminus.env.resident import runtime as R
         for c in ('ls -la','git status && git diff --stat','grep -rn foo src | head','cat a.txt; wc -l a.txt'):
             self.assertTrue(R.read_only_command(c),c)
-        for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b'):
+        for c in ('git branch','git branch -a','find . -name "*.py"'):
+            self.assertTrue(R.read_only_command(c),c)
+        for c in ('make test','ls > out.txt','git commit -am x','echo $(rm x)','find . -delete','pytest','cat a | tee b',
+                  'env rm -rf folder','find . -execdir rm {} +','find . -ok rm {} ;','find . -fprint out.txt',
+                  'less notes.txt','tree -o out.txt','git branch -D main','git branch newname','git remote add x y',
+                  'git diff --output=patch.txt','ls & rm -rf x','xargs rm < list','timeout 5 rm x'):
             self.assertFalse(R.read_only_command(c),c)
         rt=Runtime(self.home)
         try:

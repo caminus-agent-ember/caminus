@@ -43,23 +43,32 @@ GATE_TURN_TIMEOUT = 120  # a per-turn gate gets two minutes (the finish gate kee
 GATE_SLOW = 30           # a gate slower than this runs per turn at most every GATE_SLOW_EVERY seconds
 GATE_SLOW_EVERY = 600
 INTERRUPT_HOLD = 120     # after an Esc, how long a goal waits for the message that steers it
-READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'less', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf',
-                       'which', 'type', 'ps', 'df', 'du', 'stat', 'file', 'tree', 'date', 'env', 'id', 'whoami',
-                       'uname', 'nvidia-smi', 'rocm-smi', 'amd-smi', 'free', 'uptime', 'sleep', 'true', 'diff'))
-READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'branch', 'remote', 'rev-parse', 'blame', 'ls-files'))
+# Programs that only read, whatever their arguments (anything that can start another program, open a shell or write
+# a file through a flag is left out: env, less, tree -o, xargs, timeout, nice ...).
+READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf', 'which',
+                       'type', 'ps', 'df', 'du', 'stat', 'file', 'date', 'id', 'whoami', 'uname', 'rocm-smi', 'amd-smi',
+                       'free', 'uptime', 'sleep', 'true', 'diff'))
+READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files'))
+# Arguments that make a read-only program act: find's -exec / -execdir / -ok / -okdir / -delete / -fprint* / -fls,
+# git's --output, and any redirection, substitution or tee.
+CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b')
 
 
 def read_only_command(cmd):
-    """A terminal command that changes nothing the gate could see: every part of a pipeline or && chain is a
-    read-only program, with no output redirection. Anything unclear counts as a change (the gate runs)."""
-    if not isinstance(cmd, str) or not cmd.strip() or re.search(r'>|\$\(|`|\btee\b|-delete\b|-exec\b', cmd):
+    """A terminal command that changes nothing: every part of a pipeline or && / || / ; chain is a read-only program
+    with no changing argument (CHANGING). Anything unclear counts as a change (the per-turn gate runs; plan mode
+    refuses it)."""
+    if not isinstance(cmd, str) or not cmd.strip() or CHANGING.search(cmd):
         return False
-    for part in re.split(r'\|\||&&|[|;\n]', cmd):
+    for part in re.split(r'\|\||&&|[|;&\n]', cmd):
         words = part.split()
         if not words:
             continue
         if words[0] == 'git':
-            if len(words) < 2 or words[1] not in READ_ONLY_GIT:
+            sub = words[1:2]
+            if sub == ['branch'] and all(w in ('-a', '-r', '-v', '-vv', '--list', '--show-current') for w in words[2:]):
+                continue                  # listing branches; with any other argument it creates or deletes one
+            if not sub or sub[0] not in READ_ONLY_GIT:
                 return False
         elif words[0] not in READ_ONLY:
             return False
