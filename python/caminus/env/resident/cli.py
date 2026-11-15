@@ -24,7 +24,7 @@ from .prompt import render as render_prompt
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -61,6 +61,16 @@ def parser():
                            help='prompt tokens a goal may reach before the watchdog pauses it (0: off)')
             p.add_argument('--no-loop-gates',action='store_true',
                            help='record loop_gates false: a fixture agent that predates the done check and skips it')
+        if op=='fallback':
+            p.add_argument('--model',help='the fallback model while the primary is unreachable, e.g. claude-haiku-5-5')
+            p.add_argument('--endpoint',help="its API root, e.g. the owner's key relay")
+            p.add_argument('--api',choices=('openai','anthropic'))
+            p.add_argument('--context',type=int)
+            p.add_argument('--effort',choices=('low','medium','high'))
+            p.add_argument('--api-key-env')
+            p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
+            p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
+            p.add_argument('--off',action='store_true')
         if op=='advisor':
             p.add_argument('--model',help='the advisor model, e.g. claude-opus-5-5 or claude-sonnet-5-5')
             p.add_argument('--endpoint',help="Messages API root; the owner's own key relay keeps the advisor's key and cap separate")
@@ -251,6 +261,29 @@ def main(argv=None,stdin=None):
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)
             return 0
         store=Store(home)
+        if a.op=='fallback':
+            from .brain import DEFAULTS as FB
+            from .model import Model, price
+            cfg=json.loads((home/'config.json').read_text())
+            fb={} if a.off else dict(cfg.get('fallback') or {})
+            if not a.off:
+                for flag in ('model','endpoint','api','context','effort','api_key_env','budget_usd','down_seconds'):
+                    v=getattr(a,flag)
+                    if v is not None:fb[flag]=v.rstrip('/') if flag=='endpoint' else v
+            if fb:
+                if not (fb.get('model') and fb.get('endpoint')):raise ValueError('a fallback needs --model and --endpoint')
+                m=Model({k:v for k,v in fb.items() if k not in FB})          # validates the endpoint and api
+                if m.remote and price(fb['model'],{}) is None:
+                    raise ValueError('no known price for %s, so its spend cannot be limited' % fb['model'])
+                cfg['fallback']=fb
+            else:
+                cfg.pop('fallback',None)
+            atomic_json(home/'config.json',cfg)
+            state=json.loads((home/'fallback.json').read_text()) if (home/'fallback.json').exists() else {}
+            import datetime
+            emit(dict(fallback={**FB,**fb} if fb else None,
+                      today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,turns=0))),a.json)
+            return 0
         if a.op=='advisor':
             from .advisor import Advisor, DEFAULTS
             from .model import price

@@ -16,6 +16,7 @@ from . import approval, discovery
 from .prompt import render as render_prompt
 from .freetime import FreeTime, KINDS as FREE_KINDS
 from .advisor import Advisor
+from .brain import Brains
 
 PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
@@ -133,6 +134,7 @@ class Runtime:
         if not 0 < target < trigger < 1:
             raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
         self.model = model or Model(self.config)
+        self.primary = self.model
         self.terminal = terminal or Terminal(self.home)
         self.mail = Mail(self.config)
         self.retry = {}
@@ -148,6 +150,7 @@ class Runtime:
         self.plain_replies = {}  # goal -> consecutive plain-text replies; reset by any reply with tool calls
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
+        self.brains = Brains(self, self.primary)
 
     def system(self,gid=None):
         """The stable prefix, and nothing else.
@@ -789,6 +792,8 @@ class Runtime:
                                                       budget=self.token_budget), gid)
                     return self._watchdog(gid, 'token budget %d over %d' % (used, self.token_budget),
                                           dict(tokens=used, budget=self.token_budget))
+            # the brain for this turn: the primary while it answers, the fallback while it is down (brain.py)
+            self.model = self.brains.choose(gid)
             messages, compacted = self._compact(gid,messages)
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return True
@@ -809,6 +814,7 @@ class Runtime:
                 live.clear()
             self._throughput_note(gid,getattr(self.model,'last_speed',None))
             self.free.account(gid)
+            self.brains.account(gid)
             if self.store.goal(gid)['state']=='cancelled':
                 return True
             self.retry.pop(gid,None)
@@ -833,7 +839,12 @@ class Runtime:
             # Cancelled between two streamed pieces: the model was closed, nothing was stored.
             return True
         except ModelError as e:
-            self._record_failure(gid, e)
+            self._record_failure(gid, e, who='resident' if self.model is self.primary else 'fallback')
+            if self.brains.on_failure(gid, e):
+                # the primary is unreachable and a fallback may take the turn: retry it at once
+                self.store.update(gid, state='waiting_model', error='primary unreachable; continuing on the fallback')
+                self.retry[gid] = (time.time(), self.retry.get(gid, (0, 0))[1])
+                return True
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return True
                 if isinstance(e,ModelTruncated) and getattr(e,'retryable',False):
