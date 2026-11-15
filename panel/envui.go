@@ -920,25 +920,25 @@ func (m envModel) render() string {
 	b.WriteString(envBorder.Render(m.pane()))
 	switch m.mode {
 	case "agentgoal":
-		b.WriteString("\n\n" + envWarn.Render("goal for "+m.agentName+" (enter sends, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("goal for "+m.agentName+" (enter sends, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "agentname":
-		b.WriteString("\n\n" + envWarn.Render("resident agent name:") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("resident agent name:") + "\n" + terminalText(m.edit, false) + "█")
 	case "edit":
-		b.WriteString("\n\n" + envWarn.Render("edit root command (enter runs it under sudo, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("edit root command (enter runs it under sudo, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "answer":
-		b.WriteString("\n\n" + envWarn.Render("answer the question (enter sends, esc cancels; a number picks a choice):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("answer the question (enter sends, esc cancels; a number picks a choice):") + "\n" + terminalText(m.edit, false) + "█")
 	case "note":
-		b.WriteString("\n\n" + envWarn.Render("note for the agent (enter leaves it, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("note for the agent (enter leaves it, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "newjob1":
-		b.WriteString("\n\n" + envWarn.Render("new detached job — name (enter, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("new detached job — name (enter, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "serve1":
-		b.WriteString("\n\n" + envWarn.Render("new server job — model name (enter, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("new server job — model name (enter, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "serve2":
-		b.WriteString("\n\n" + envWarn.Render("server "+m.newJob+" — placement auto|0|1|2 (enter=auto, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("server "+m.newJob+" — placement auto|0|1|2 (enter=auto, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	case "newjob2":
-		b.WriteString("\n\n" + envWarn.Render("new job "+m.newJob+" — command (enter spawns it detached, esc cancels):") + "\n" + m.edit + "█")
+		b.WriteString("\n\n" + envWarn.Render("new job "+m.newJob+" — command (enter spawns it detached, esc cancels):") + "\n" + terminalText(m.edit, false) + "█")
 	}
-	status := fmt.Sprintf("ssh: %s  requests: %d  jobs: %d  msg: %s", map[bool]string{true: "OK", false: "FAIL"}[m.sshOK], len(m.reqs), len(m.jobs), m.msg)
+	status := fmt.Sprintf("ssh: %s  requests: %d  jobs: %d  msg: %s", map[bool]string{true: "OK", false: "FAIL"}[m.sshOK], len(m.reqs), len(m.jobs), terminalText(m.msg, true))
 	b.WriteString("\n\n" + envDim.Render(status))
 	b.WriteString("\n" + envDim.Render("tab/1-7 panes · q quit · agent: n goal, s start, x stop, c cancel, m name · requests: a/e/d/s · r refresh"))
 	return b.String()
@@ -969,14 +969,17 @@ func (m envModel) reqPane() string {
 		lines = append(lines, envDim.Render("  none waiting"))
 	}
 	for i, r := range m.reqs {
-		body, tag := r.Cmd, "ROOT"
+		body, tag := terminalText(r.Cmd, false), "ROOT"
 		if r.kind() == "question" {
-			tag, body = "ASK ", r.Text
+			tag, body = "ASK ", terminalText(r.Text, false)
 			if len(r.Choices) > 0 {
-				body += "  [" + strings.Join(r.Choices, " | ") + "]"
+				body += "  [" + terminalText(strings.Join(r.Choices, " | "), false) + "]"
 			}
 		}
-		line := fmt.Sprintf("  %s %s from %s (pid %d, %s)\n    %s", tag, r.ID, r.User, r.Pid, r.CWD, body)
+		line := fmt.Sprintf("  %s %s from %s (pid %d, %s)\n    %s", tag, terminalText(r.ID, false), terminalText(r.User, false), r.Pid, terminalText(r.CWD, false), body)
+		if r.Reason != "" {
+			line += "\n    reason: " + terminalText(r.Reason, false)
+		}
 		if i == m.sel {
 			line = envSel.Render(line)
 		}

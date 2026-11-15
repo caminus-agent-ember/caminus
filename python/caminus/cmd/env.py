@@ -41,6 +41,7 @@ import sys
 import time
 
 from ..env import agent_side, audit, bridge, jobs, runner, serve, sessions, settings
+from ..env.display import terminal_text
 
 
 def _parser():
@@ -212,7 +213,7 @@ def main(rest, transport=None):
         else:
             for r in reqs:
                 body = r.get('cmd') if r.get('kind', 'root') == 'root' else r.get('text', '')
-                print(f"{r['id']} [{r.get('kind', 'root')}] from {r.get('user')}: {body}")
+                print(terminal_text(f"{r['id']} [{r.get('kind', 'root')}] from {r.get('user')}: {body}"))
         return 0
     if a.sub == 'answer':
         return _answer(a, tr)
@@ -455,11 +456,11 @@ def _watch(a, tr):
                 seen.add(req['id'])
                 kind = req.get('kind', 'root')
                 audit.log(ap, {'event': 'request', 'id': req['id'], 'kind': kind, 'from': req.get('user')})
-                print(f"\n{kind} request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})")
+                print('\n'+terminal_text(f"{kind} request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})"))
                 if kind == 'question':
-                    print(f"  {req.get('text', '')}")
+                    print('  '+terminal_text(req.get('text','')))
                     if req.get('choices'):
-                        print('  choices: ' + ' | '.join(f'{i + 1}) {c}' for i, c in enumerate(req['choices'])))
+                        print('  choices: ' + ' | '.join(terminal_text(f'{i + 1}) {c}') for i, c in enumerate(req['choices'])))
                     ans = input('answer (text, or choice number; empty denies): ')
                     if not ans.strip():
                         bridge.answer(settings.bridge_dir(), req['id'], 'denied', me,request=req)
@@ -471,7 +472,9 @@ def _watch(a, tr):
                         audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'answered', 'by': me, 'answer': ans})
                         _remember_qa(req.get('text', ''), ans, tr)
                     continue
-                print(f"  {req['cmd']}")
+                print('  '+terminal_text(req['cmd']))
+                if req.get('reason'):
+                    print('  reason: '+terminal_text(req['reason']))
                 choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
                 if choice not in ('a','e','d'):
                     continue

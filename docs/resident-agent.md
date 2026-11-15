@@ -120,6 +120,9 @@ An interrupted claim requires human inspection and is never automatically rerun.
 For scriptable root approvals, pass the reviewed request's `_digest` from
 `env reqs --json` as `env answer ID approved --digest HASH`. Approving by ID alone
 is rejected. An edited command still requires its reviewed request digest.
+Interactive approvals display terminal controls and Unicode formatting characters
+as visible escapes in commands, reasons and request metadata. The displayed
+escaping does not change the raw command bound to the reviewed digest.
 
 | Exit | State |
 |---|---|

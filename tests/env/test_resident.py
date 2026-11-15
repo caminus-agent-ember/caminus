@@ -120,6 +120,27 @@ class Resident(unittest.TestCase):
             self.assertEqual(rt.system(),before)
         finally:rt.mail.close();rt.store.close()
 
+    def test_approval_display_escapes_controls_but_executes_reviewed_bytes(self):
+        import contextlib,io
+        from unittest.mock import patch
+        from caminus.cmd import env as cmd_env
+        command='printf actual #\x1b[2K\rprintf harmless\u009b2K\u202e'
+        (self.bridge/'req').mkdir(parents=True,exist_ok=True)
+        request=dict(id='display-review',kind='root',cmd=command,user='agent\x1b[2J',
+                     cwd='work\rhidden',pid=1,ts=0,reason='reason\x1b[2K')
+        (self.bridge/'req/display-review.json').write_text(json.dumps(request))
+        calls=[]
+        def transport(argv,**kwargs):
+            calls.append(argv);return subprocess.CompletedProcess(argv,0,'fixture result','')
+        env=dict(CAMINUS_ENV_BRIDGE=str(self.bridge),CAMINUS_ENV_AUDIT=str(self.home/'audit.jsonl'))
+        output=io.StringIO()
+        with patch.dict(os.environ,env),patch('builtins.input',return_value='a'),contextlib.redirect_stdout(output):
+            self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
+        shown=output.getvalue()
+        for control in ('\x1b','\r','\u009b','\u202e'):self.assertNotIn(control,shown)
+        for visible in ('printf actual',r'\x1b',r'\r',r'\u202e'):self.assertIn(visible,shown)
+        self.assertEqual(calls,[['sudo','sh','-c',command]])
+
     def test_oneshot_actual_shell_and_json(self):
         # The model fixture must observe completion, not assume worker startup
         # takes less than one second on a busy CI runner.

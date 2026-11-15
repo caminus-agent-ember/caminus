@@ -120,12 +120,7 @@ func (m envModel) residentKeys(k string) (tea.Model, tea.Cmd) {
 }
 
 func residentText(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 32 && r != '\n' && r != '\t' {
-			return -1
-		}
-		return r
-	}, s)
+	return terminalText(s, true)
 }
 
 func (m envModel) residentPane() string {
