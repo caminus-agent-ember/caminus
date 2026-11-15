@@ -1360,6 +1360,35 @@ for line in sys.stdin:
             self.assertEqual(code,402);self.assertEqual(calls,[])
         finally:stop()
 
+    def test_a_relay_installs_as_an_owner_service_without_expiry(self):
+        from caminus.env import relay
+        import contextlib, io as _io
+        cfgdir=self.home/'xdg';key=self.home/'di-key';key.write_text('k');key.chmod(0o600)
+        calls=[]
+        class R:returncode=0;stdout='active\n';stderr=''
+        run=lambda argv,**k:(calls.append(argv),R())[1]
+        old=os.environ.get('XDG_CONFIG_HOME');os.environ['XDG_CONFIG_HOME']=str(cfgdir)
+        try:
+            with self.assertRaises(SystemExit):relay.service(['install','--provider','deepinfra'],run)   # no cap: refused
+            with self.assertRaises(SystemExit):relay.service(['install','--provider','deepinfra','--cap-usd','3','--key-file',str(self.home/'missing')],run)
+            out=_io.StringIO()
+            with contextlib.redirect_stdout(out):
+                relay.service(['install','--provider','deepinfra','--cap-usd','3','--key-file',str(key)],run)
+            unit=(cfgdir/'systemd/user/caminus-relay-deepinfra.service').read_text()
+            self.assertIn('--provider deepinfra --ttl 0 --cap-usd 3.0 --key-file',unit,'no expiry; the cap guards spend')
+            self.assertIn('Restart=on-failure',unit);self.assertIn('WantedBy=default.target',unit)
+            self.assertNotIn('\nk\n',unit,'the key itself never goes in the unit')
+            self.assertIn(['systemctl','--user','enable','--now','caminus-relay-deepinfra.service'],calls)
+            self.assertIn('enable-linger',out.getvalue())
+            out=_io.StringIO()
+            with contextlib.redirect_stdout(out):relay.service(['status'],run)
+            self.assertRegex(out.getvalue(),r'deepinfra\s+active\s+today \$');self.assertIn('not installed',out.getvalue())
+            with contextlib.redirect_stdout(_io.StringIO()):relay.service(['uninstall','--provider','deepinfra'],run)
+            self.assertFalse((cfgdir/'systemd/user/caminus-relay-deepinfra.service').exists())
+        finally:
+            if old is None:os.environ.pop('XDG_CONFIG_HOME',None)
+            else:os.environ['XDG_CONFIG_HOME']=old
+
     def test_the_anthropic_relay_serves_the_model_list_with_the_key(self):
         import urllib.request
         base,calls,ledger,log,stop=self._relay('anthropic',lambda c:(200,b'{"data":[]}','application/json'))
