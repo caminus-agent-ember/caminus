@@ -21,10 +21,14 @@ type residentGoal struct {
 	Steps   int    `json:"steps"`
 }
 type residentStatus struct {
-	Name        string         `json:"name"`
-	DaemonAlive bool           `json:"daemon_alive"`
-	Goals       []residentGoal `json:"goals"`
-	LastEvent   int            `json:"last_event"`
+	Name             string         `json:"name"`
+	Model            string         `json:"model"`
+	Context          int            `json:"context"`
+	CompactThreshold float64        `json:"compact_threshold"`
+	CompactTarget    float64        `json:"compact_target_ratio"`
+	DaemonAlive      bool           `json:"daemon_alive"`
+	Goals            []residentGoal `json:"goals"`
+	LastEvent        int            `json:"last_event"`
 }
 type residentEvent struct {
 	Seq  int            `json:"seq"`
@@ -33,6 +37,8 @@ type residentEvent struct {
 	Data map[string]any `json:"data"`
 }
 type residentMsg struct {
+	agent  string
+	epoch  uint64
 	status residentStatus
 	events []residentEvent
 	err    string
@@ -48,31 +54,43 @@ func residentCommand(m envModel, args []string, input string) *exec.Cmd {
 }
 
 func residentRefresh(m envModel) tea.Cmd {
+	name, after := m.agentName, m.chat.seq
+	epoch := m.residentEpoch
+	if name == "" {
+		name = "resident"
+	}
 	return func() tea.Msg {
 		if len(m.cli) == 0 {
-			return residentMsg{err: "resident controls need the caminus CLI (--cli)"}
-		}
-		name := m.agentName
-		if name == "" {
-			name = "resident"
+			return residentMsg{agent: name, epoch: epoch, err: "resident controls need the caminus CLI (--cli)"}
 		}
 		out, err := residentCommand(m, []string{"status", name, "--json"}, "").CombinedOutput()
 		if err != nil {
-			return residentMsg{err: strings.TrimSpace(string(out))}
+			return residentMsg{agent: name, epoch: epoch, err: strings.TrimSpace(string(out))}
 		}
 		var status residentStatus
 		if err = json.Unmarshal(out, &status); err != nil {
-			return residentMsg{err: err.Error()}
-		}
-		out, err = residentCommand(m, []string{"events", name, "--after", fmt.Sprint(max(0, status.LastEvent-200)), "--json"}, "").CombinedOutput()
-		if err != nil {
-			return residentMsg{status: status, err: strings.TrimSpace(string(out))}
+			return residentMsg{agent: name, epoch: epoch, err: err.Error()}
 		}
 		var events []residentEvent
-		if err = json.Unmarshal(out, &events); err != nil {
-			return residentMsg{err: err.Error()}
+		// Catch up from the durable cursor, including history predating launch.
+		// Bound each refresh; another tick continues a large backlog without
+		// replacing older entries or skipping a page while the agent works.
+		for page := 0; page < 4 && after < status.LastEvent; page++ {
+			out, err = residentCommand(m, []string{"events", name, "--after", fmt.Sprint(after), "--json"}, "").CombinedOutput()
+			if err != nil {
+				return residentMsg{agent: name, epoch: epoch, err: strings.TrimSpace(string(out))}
+			}
+			var batch []residentEvent
+			if err = json.Unmarshal(out, &batch); err != nil {
+				return residentMsg{agent: name, epoch: epoch, err: err.Error()}
+			}
+			if len(batch) == 0 {
+				break
+			}
+			events = append(events, batch...)
+			after = batch[len(batch)-1].Seq
 		}
-		return residentMsg{status: status, events: events}
+		return residentMsg{agent: name, epoch: epoch, status: status, events: events}
 	}
 }
 
@@ -97,6 +115,19 @@ func (m envModel) residentKeys(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "n", "enter":
 		m.mode, m.edit = "agentgoal", ""
+		m.steerGoal = ""
+	case "t":
+		if m.goalSel < 0 || m.goalSel >= len(m.resident.Goals) {
+			m.msg = "Select a goal to steer. Use n for a new goal."
+			return m, nil
+		}
+		goal := m.resident.Goals[m.goalSel]
+		if goal.ID == "" || goal.State == "completed" || goal.State == "cancelled" {
+			m.msg = "That goal is finished. Use n for a new goal."
+			return m, nil
+		}
+		m.mode, m.edit, m.steerGoal = "agentsteer", "", goal.ID
+		m.msg = "Steering is read between model steps; human/root waits and paused goals still need their normal answer or resume."
 	case "m":
 		m.mode, m.edit = "agentname", m.agentName
 	case "s":
@@ -128,7 +159,7 @@ func (m envModel) residentPane() string {
 	if m.resident.DaemonAlive {
 		state = "listening"
 	}
-	lines := []string{envHead.Render(fmt.Sprintf("RESIDENT %s · %s", m.agentName, state)), "n: give a goal · s: start · x: stop runtime · c: cancel goal · m: choose agent"}
+	lines := []string{envHead.Render(fmt.Sprintf("RESIDENT %s · %s", m.agentName, state)), "n: new goal · t: steer selected goal · s: start · x: stop runtime · c: cancel · m: agent"}
 	if len(m.resident.Goals) == 0 {
 		return strings.Join(append(lines, "\nWaiting for your first goal."), "\n")
 	}
@@ -166,17 +197,16 @@ func (m envModel) residentPane() string {
 			if s, ok := e.Data["question"].(string); ok {
 				text = s
 			}
+			if e.Kind == "user_message" {
+				if s, ok := e.Data["text"].(string); ok {
+					text = s
+				}
+			}
 			if text != "" {
 				activity = append(activity, e.Kind+": "+residentText(text))
 			}
 		}
-		if len(activity) > 6 {
-			activity = activity[len(activity)-6:]
-		}
 		joined := strings.Join(activity, "\n")
-		if len([]rune(joined)) > 6000 {
-			joined = string([]rune(joined)[len([]rune(joined))-6000:])
-		}
 		lines = append(lines, joined)
 	}
 	return strings.Join(lines, "\n")

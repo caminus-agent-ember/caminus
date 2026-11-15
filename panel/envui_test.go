@@ -295,12 +295,12 @@ func mustRead(t *testing.T, p string) string {
 func TestTabsAndJobKeys(t *testing.T) {
 	m := envModel{seen: map[string]bool{}, width: 120, height: 40}
 	mm, _ := m.onKey("tab")
-	if mm.(envModel).tab != 1 {
-		t.Fatal("tab should move to 1")
+	if mm.(envModel).tab != 7 {
+		t.Fatal("tab from a detail pane should return to sessions")
 	}
 	mm, _ = mm.(envModel).onKey("3")
-	if mm.(envModel).tab != 2 {
-		t.Fatal("key 3 should select procs tab")
+	if mm.(envModel).tab != 8 {
+		t.Fatal("key 3 should select settings")
 	}
 	// jobs tab: K on a selected job builds a kill script (via returned cmd; just check no panic and selection moves)
 	m = mm.(envModel)
