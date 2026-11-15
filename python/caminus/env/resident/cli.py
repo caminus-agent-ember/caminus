@@ -135,7 +135,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -186,6 +186,11 @@ def parser():
             p.add_argument('--read',help='one file from the journal, the studio or the shelf, as text')
         if op=='pause':
             p.add_argument('goal_id',nargs='?',help='the goal to pause; defaults to the most recent one')
+        if op=='queue':
+            p.add_argument('action',nargs='?',default='list',choices=('list','move','remove'),
+                           help='list the queue, move a queued goal, or remove (cancel) one')
+            p.add_argument('goal',nargs='?',help='the goal to move or remove (id or prefix)')
+            p.add_argument('--to',type=int,help='the new 1-based position for move')
         if op=='update':
             p.add_argument('--program',help='the runtime to install (default: the newest one install uploaded, ~/bin/caminus-agent)')
             p.add_argument('--now',action='store_true',help='at the next turn boundary instead of between goals')
@@ -558,6 +563,17 @@ def main(argv=None,stdin=None):
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0
+        if a.op=='queue':
+            act=a.action
+            if act=='move':
+                if not a.goal or a.to is None:raise ValueError('queue move GOAL --to N')
+                out=dict(queue=store.queue_move(a.goal,a.to))
+            elif act=='remove':
+                if not a.goal:raise ValueError('queue remove GOAL')
+                out=dict(queue=store.queue_remove(a.goal))
+            else:
+                out=dict(queue=store.queue())
+            emit(out,a.json);store.close();return 0
         if a.op=='pause':
             # Like /compact: a live runtime applies it between steps; with no daemon the CLI pauses it here.
             gid=store.resolve(a.goal_id) if a.goal_id else store.latest_goal()

@@ -2616,6 +2616,30 @@ for line in sys.stdin:
             self.assertEqual((note['tps'],note['tokens'],note['goal']),(88.0,88,gid))
             self.assertEqual(self.cmd('status')['tok_per_s'],88.0)
         finally:rt.mail.close();rt.store.close()
+    def test_the_goal_queue_lists_moves_and_removes_queued_goals(self):
+        a=self.cmd('send',['first'])['id']
+        b=self.cmd('send',['second'])['id']
+        c=self.cmd('send',['third'])['id']
+        q=self.cmd('queue')['queue']
+        self.assertEqual([r['id'] for r in q],[a,b,c])
+        self.assertEqual([r['position'] for r in q],[1,2,3])
+        moved=self.cmd('queue',['move',c,'--to','1'])['queue']
+        self.assertEqual([r['id'] for r in moved],[c,a,b])
+        self.assertEqual([r['position'] for r in moved],[1,2,3])
+        from caminus.env.resident.store import Store as QStore
+        store=QStore(self.home)
+        try:self.assertEqual(store.next_goal()[:3],[c,a,b])
+        finally:store.close()
+        removed=self.cmd('queue',['remove',b])['queue']
+        self.assertEqual([r['id'] for r in removed],[c,a])
+        self.assertEqual([r['position'] for r in removed],[1,2])
+        self.assertIn('dequeued',[e['kind'] for e in self.cmd('events')])
+        # only a queued goal moves; out-of-range positions are refused (exit 1)
+        self.cmd('cancel',[a])
+        self.cmd('queue',['move',a,'--to','1'],code=1)
+        self.cmd('queue',['remove',c],code=0)
+        self.cmd('queue',['move',c,'--to','5'],code=1)
+        self.cmd('queue',['remove',c],code=1)
 
 
 
