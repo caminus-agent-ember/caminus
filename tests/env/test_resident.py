@@ -71,14 +71,16 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         if isinstance(value,dict) and '_status' in value:
             self.respond(dict(error='refused by the fixture'),value['_status']);return
         if body.get('stream') and isinstance(value,dict) and '_deltas' in value:
-            self.stream(value['_deltas'],done=not value.get('_cut'));return
+            self.stream(value['_deltas'],done=not value.get('_cut'),slow=value.get('_slow'));return
         msg=dict(value(body) if callable(value) else value);reason=msg.pop('_finish_reason','stop')
         self.respond(dict(choices=[dict(message=msg,finish_reason=reason)],usage=dict(prompt_tokens=30,completion_tokens=10)))
 
-    def stream(self,deltas,done=True):
-        """an SSE reply in the shape the engine emits: delta chunks, then [DONE]; done=False cuts it short"""
+    def stream(self,deltas,done=True,slow=0):
+        """an SSE reply in the shape the engine emits: delta chunks, then [DONE]; done=False cuts it short;
+        slow spaces the chunks out (seconds per chunk) so a mid-stream event can race the reply"""
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
         for d in deltas:
+            if slow:time.sleep(slow)
             self.wfile.write(('data: '+json.dumps(d)+'\n\n').encode())
         if done:self.wfile.write(b'data: [DONE]\n\n')
         self.wfile.flush()
@@ -2724,6 +2726,32 @@ for line in sys.stdin:
         goals={g['id']:g for g in self.cmd('status')['goals']}
         self.assertEqual(goals[plain['id']]['plan'],0)
         self.assertEqual(goals[g['id']]['plan'],1)
+
+    def test_interrupt_drops_the_turn_being_generated(self):
+        gid=self.cmd('send',['stream goal'])['id']
+        streamed='INTERRUPT-ME-NOT'
+        self.replies(dict(_slow=.3,_deltas=[
+            dict(choices=[dict(delta=dict(content=streamed))]),
+            dict(choices=[dict(delta=dict(content=' tail'))]),
+            dict(choices=[dict(delta=dict(content=' more'))]),
+            dict(choices=[dict(delta=dict(content='',finish_reason='stop'))]),
+        ]),call('finish',dict(summary='after the interrupt')))
+        p=subprocess.Popen(self.argv('once',['--goal-id',gid]),stdout=subprocess.PIPE,text=True)
+        self.wait(lambda: any('stream goal' in json.dumps(b) for _,b in Endpoint.seen),15)
+        mid=self.cmd('interrupt',[gid])
+        self.assertEqual(mid,dict(goal=gid,queued=True))
+        out,_=p.communicate(timeout=25)
+        result=json.loads(out)
+        self.assertEqual(result['state'],'completed',result)
+        self.assertEqual(result['summary'],'after the interrupt')
+        kinds=[e['kind'] for e in self.cmd('events')]
+        self.assertIn('turn_interrupted',kinds)
+        # nothing of the dropped turn was stored or executed
+        self.assertNotIn(streamed,json.dumps(self.cmd('events')))
+        self.assertNotIn(streamed,json.dumps(Endpoint.seen[-1][1]))
+        # an Esc between turns interrupts nothing (and cannot cut the next turn)
+        self.assertEqual(self.cmd('interrupt',[gid]),dict(goal=gid,queued=True))
+        self.assertEqual([r['state'] for r in self.cmd('status')['goals']],['completed'])
 
     def test_unsend_pulls_back_undelivered_messages_only(self):
         gid=self.cmd('send',['goal'])['id']

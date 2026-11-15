@@ -205,6 +205,14 @@ class Live:
     def flush(self):
         if self.store.goal(self.gid)['state'] == 'cancelled':
             return False
+        # Esc while generating (agent interrupt): the request arrives through the store like /pause, and this
+        # turn is the thing it stops. Returning False makes the model raise Cancelled: nothing is stored or
+        # executed, the goal stays working, and the next message steers it.
+        req = self.store.pending_request(self.gid, 'interrupt')
+        if req is not None:
+            self.store.settle_request(req['id'], 'done')
+            self.store.event('turn_interrupted', {}, self.gid)
+            return False
         atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
                                     content=''.join(self.content), reasoning=''.join(self.reasoning),
                                     tools=self.tools))
@@ -1362,6 +1370,9 @@ class Runtime:
                 self.model.config['timeout'] = max(.1,min(self.base_timeout,g['deadline']-time.time())) if g['deadline'] else self.base_timeout
             # The live snapshot is what a UI shows while this call generates; the durable event below
             # replaces it. clear() runs on every exit path, so a failed or cancelled turn leaves no tail.
+            # An Esc that landed between turns caught nothing: settle it here so it cannot cut the next turn.
+            while (req := self.store.pending_request(gid, 'interrupt')):
+                self.store.settle_request(req['id'], 'done')
             live = Live(self.home, gid, self.store)
             try:
                 request = [self.system(),*messages]
