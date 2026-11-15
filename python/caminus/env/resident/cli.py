@@ -78,6 +78,17 @@ def summary(store,gid):
             'pending':[dict(id=a['id'],name=a['name'],request_id=a['bridge_id']) for a in store.actions(gid)]}
 
 
+def resume_goal(store,gid,max_steps=None,max_seconds=None):
+    # Cancellation/completion and this check-transition must share the same
+    # SQLite write lock; a stale read must never resurrect a finished goal.
+    with store.transaction():
+        g=store.goal(gid)
+        if g['state'] in ('completed','cancelled'):
+            raise ValueError('submit a new goal instead of replaying a finished one')
+        store.update(gid,state='working',step_limit=g['steps']+max_steps if max_steps else None,
+                     deadline=time.time()+max_seconds if max_seconds else None,error='')
+
+
 def unit_text(name,home,program=None):
     program=program or str(Path(sys.argv[0]).resolve())
     cmd=shlex.join([sys.executable,'-I',program,'run',name,'--home',str(home)]).replace('%','%%')
@@ -219,21 +230,14 @@ def main(argv=None,stdin=None):
                 emit(dict(id=a.goal_id,queued=True),a.json);store.close();return 0
             if a.goal_id:
                 gid=a.goal_id
-                g=store.goal(gid)
-                if g['state'] in ('completed','cancelled'):
-                    raise ValueError('submit a new goal instead of replaying a finished one')
-                store.update(gid,state='working',step_limit=g['steps']+a.max_steps if a.max_steps else None,
-                             deadline=time.time()+a.max_seconds if a.max_seconds else None,error='')
+                resume_goal(store,gid,a.max_steps,a.max_seconds)
             else:
                 gid=store.enqueue(text or '',getattr(a,'max_steps',None),getattr(a,'max_seconds',None))
             if a.op=='send':
                 emit(dict(id=gid,state='queued'),a.json);store.close();return 0
         elif a.op=='resume':
-            gid=a.goal_id;g=store.goal(gid)
-            if g['state'] in ('completed','cancelled'):
-                raise ValueError('submit a new goal instead of replaying a finished one')
-            store.update(gid,state='working',step_limit=g['steps']+a.max_steps if a.max_steps else None,
-                         deadline=time.time()+a.max_seconds if a.max_seconds else None,error='')
+            gid=a.goal_id
+            resume_goal(store,gid,a.max_steps,a.max_seconds)
             emit(summary(store,gid),a.json);store.close();return 0
         elif a.op=='cancel':
             gid=a.goal_id

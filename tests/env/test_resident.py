@@ -164,6 +164,30 @@ class Resident(unittest.TestCase):
         self.assertIn('Earlier observation: copper.',transcript)
         self.assertIn('Explain your earlier observation.',transcript)
 
+    def test_resume_check_and_transition_serialize_with_terminal_states(self):
+        import sqlite3
+        from unittest.mock import patch
+        from caminus.env.resident.cli import resume_goal
+        for terminal_state in ('cancelled','completed'):
+            store=Store(self.home);other=Store(self.home)
+            try:
+                gid=store.enqueue('Do not resurrect finished work.')
+                store.update(gid,state='paused')
+                other.db.execute('PRAGMA busy_timeout=0')
+                goal=store.goal;blocked=[]
+                def interleave(target):
+                    value=goal(target)
+                    try:other.update(target,state=terminal_state)
+                    except sqlite3.OperationalError as e:
+                        self.assertIn('locked',str(e));blocked.append(True)
+                    return value
+                with patch.object(store,'goal',side_effect=interleave):resume_goal(store,gid)
+                self.assertEqual(blocked,[True],'terminal state raced between check and transition')
+                other.update(gid,state=terminal_state)
+                with self.assertRaises(ValueError):resume_goal(store,gid)
+                self.assertEqual(store.goal(gid)['state'],terminal_state)
+            finally:other.close();store.close()
+
     def test_inflight_steering_is_observed_before_either_completion_path(self):
         for finish_tool in (False,True):
             class Model:
