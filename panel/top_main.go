@@ -43,23 +43,6 @@ import (
 
 var version = "dev" // set at build time: -ldflags "-X main.version=..."
 
-// ---------- palette ----------
-
-var (
-	cDim    = lipgloss.Color("#3b4252")
-	cMuted  = lipgloss.Color("#6b7489")
-	cText   = lipgloss.Color("#d8dee9")
-	cAccent = lipgloss.Color("#88c0d0")
-	cGreen  = lipgloss.Color("#a3be8c")
-	cYellow = lipgloss.Color("#ebcb8b")
-	cOrange = lipgloss.Color("#d08770")
-	cRed    = lipgloss.Color("#bf616a")
-	cPurple = lipgloss.Color("#b48ead")
-	cBlue   = lipgloss.Color("#81a1c1")
-	cTeal   = lipgloss.Color("#8fbcbb")
-	cGray   = lipgloss.Color("#4c566a")
-)
-
 func fg(c color.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
 
 // ---------- sessions ----------

@@ -59,6 +59,9 @@ func nextEnvTab(current, delta int) int {
 
 func residentSessions(m envModel) tea.Cmd {
 	return func() tea.Msg {
+		if len(m.cli) == 0 {
+			return residentSessionsMsg{agent: m.agentName, err: "resident sessions need the caminus CLI (--cli)"}
+		}
 		out, err := residentCommand(m, []string{"peers", m.agentName, "--json"}, "").CombinedOutput()
 		if err != nil {
 			return residentSessionsMsg{agent: m.agentName, err: strings.TrimSpace(string(out))}

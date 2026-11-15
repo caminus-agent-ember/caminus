@@ -6,6 +6,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
+	"os"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -37,6 +40,64 @@ type residentChat struct {
 	pickerSel                               int
 	slashIdx                                int
 	slashToken, slashText                   string
+	pathIdx                                 int
+	pathPrefix, pathPick                    string
+	live                                    residentLive
+	stream                                  *streamState
+}
+
+// residentLive is the reply being generated: shown under the durable transcript and replaced by it when the
+// turn lands. Nothing here is durable; the transcript stays the record. hold keeps the window where the reader
+// put it while more text arrives, so a long reply can be read at its own pace.
+type residentLive struct {
+	turn, text, reasoning string
+	tools                 []string
+	active, hold          bool
+	top                   int
+}
+
+// highlightLive colors the inline code spans of a streaming line, so live text reads like the rendered
+// transcript: `code` in the frost accent, everything else as written. Plain text otherwise - this runs on
+// every snapshot, so it stays a single pass with no parsing.
+func highlightLive(line string) string {
+	var b strings.Builder
+	for {
+		open := strings.IndexByte(line, '`')
+		if open < 0 {
+			b.WriteString(line)
+			return b.String()
+		}
+		shut := strings.IndexByte(line[open+1:], '`')
+		if shut < 0 {
+			b.WriteString(line)
+			return b.String()
+		}
+		b.WriteString(line[:open])
+		b.WriteString(envCode.Render(line[open+1 : open+1+shut]))
+		line = line[open+1+shut+1:]
+	}
+}
+
+// body is the live reply as wrapped lines: its reasoning, the tools it started, then the text.
+func (l residentLive) body(width int) []string {
+	var out []string
+	if l.reasoning != "" {
+		for _, ln := range strings.Split(ansi.Hardwrap(l.reasoning, width, true), "\n") {
+			out = append(out, envThink.Render(ln))
+		}
+	}
+	for _, name := range l.tools {
+		out = append(out, envDim.Render("RUN · ")+envTool.Render(residentText(name))+envDim.Render(" …"))
+	}
+	if l.text != "" {
+		for _, ln := range strings.Split(ansi.Hardwrap(l.text, width, true), "\n") {
+			out = append(out, highlightLive(ln))
+		}
+	}
+	if len(out) == 0 {
+		out = []string{envDim.Render("generating…")}
+	}
+	return out
 }
 
 type residentComposeResult struct {
@@ -87,6 +148,10 @@ func (m *envModel) receiveResident(msg residentMsg) {
 		if e.Seq > m.chat.seq {
 			m.residentEvents = append(m.residentEvents, e)
 			m.chat.seq = e.Seq
+			if e.Kind == "assistant" {
+				// The durable block replaces the live tail; keeping both would show the reply twice.
+				m.chat.live = residentLive{}
+			}
 		}
 	}
 	if m.chat.selectID != "" {
@@ -126,20 +191,33 @@ func (m *envModel) syncChat() {
 		m.chat.questionInput.SetHeight(min(3, max(1, h-12)))
 	}
 	oldBottom := m.chat.transcript.AtBottom()
-	m.chat.transcript.SetWidth(w)
-	// One header line and one footer line surround the transcript.
-	m.chat.transcript.SetHeight(max(1, h-1-lipgloss.Height(m.chatBottom())-1))
+	// A viewport re-wraps its whole content on a size change, and this runs on every live snapshot, so a
+	// 1 MB history would be re-read ten times a second while a reply streams. Only resize when it moved.
+	if m.chat.transcript.Width() != w {
+		m.chat.transcript.SetWidth(w)
+	}
+	// One header line and one footer line surround the transcript; the live tail sits between it and the
+	// composer, so a generating reply never rewrites the durable content.
+	// Half the body is the live window while a reply is written; the transcript keeps the other half.
+	tail := 0
+	if live := m.liveBlock(w); live != "" {
+		tail = lipgloss.Height(live)
+	}
+	height := max(1, m.bodyHeight()-tail)
 	if m.chat.help {
-		m.chat.transcript.SetHeight(max(1, m.chat.transcript.Height()-3))
+		height = max(1, height-3)
+	}
+	if m.chat.transcript.Height() != height {
+		m.chat.transcript.SetHeight(height)
 	}
 	if m.chat.renderWidth != w || m.chat.markdown == nil {
-		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(max(10, w-4)))
+		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(max(10, w-4)))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
 	changed := m.chat.rendered != len(m.residentEvents)
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		if block := m.chat.eventBlock(e); block != "" {
-			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
+			m.chat.content += ansi.Hardwrap(eventCard(block), w, true) + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
@@ -155,6 +233,83 @@ func (m *envModel) syncChat() {
 	}
 }
 
+// bodyHeight is the space between the header and the footer, without the composer.
+func (m envModel) bodyHeight() int {
+	return max(4, max(12, m.height)-1-lipgloss.Height(m.chatBottom())-1)
+}
+
+// liveHeight is the live window's content lines (its label included): half the body less the border, so the
+// transcript keeps the other half while a reply is being written.
+func (m envModel) liveHeight() int { return max(3, m.bodyHeight()/2-3) }
+
+// liveWindow is the number of body lines the live box shows: its content height less the label line.
+func (m envModel) liveWindow() int { return max(1, m.liveHeight()-1) }
+
+// liveTop is the first visible line: the tail while following, the held position otherwise.
+func (m envModel) liveTop(body int) int {
+	window := m.liveWindow()
+	if !m.chat.live.hold {
+		return max(0, body-window)
+	}
+	return max(0, min(m.chat.live.top, max(0, body-window)))
+}
+
+// scrollLive moves the live window and holds it, so text arriving mid-read cannot pull the view away.
+// Scrolling back to the bottom resumes following.
+func (m *envModel) scrollLive(delta int) {
+	l := &m.chat.live
+	if !l.active {
+		return
+	}
+	body := len(l.body(max(10, m.width-4)))
+	window := m.liveWindow()
+	top := max(0, min(m.liveTop(body)+delta, max(0, body-window)))
+	l.top = top
+	l.hold = top < max(0, body-window)
+}
+
+// liveBlock renders the reply being generated in a fixed-height window: its reasoning, the tools it has
+// started and the text so far. Plain text, not glamour: this is redrawn on every snapshot, and the durable
+// block is styled once when the turn lands.
+func (m envModel) liveBlock(w int) string {
+	l := m.chat.live
+	if !l.active {
+		return ""
+	}
+	inner := max(10, w-4)
+	body := l.body(inner)
+	height := m.liveHeight()
+	top := m.liveTop(len(body))
+	label := "THINKING · live · Ctrl+T hold · Alt+↑/↓ scroll"
+	if l.reasoning == "" {
+		label = "AGENT · live · Ctrl+T hold · Alt+↑/↓ scroll"
+	}
+	if l.hold {
+		label = fmt.Sprintf("LIVE · held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
+	}
+	rows := []string{envDim.Render(label)}
+	rows = append(rows, body[top:min(top+height-1, len(body))]...)
+	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
+}
+
+// envTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.
+func envTail(s string, width, maxLines int) string {
+	lines := strings.Split(ansi.Hardwrap(s, max(8, width), true), "\n")
+	if len(lines) > maxLines {
+		lines = append([]string{envDim.Render("…")}, lines[len(lines)-maxLines:]...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// stopStream ends the reader process and drops the live tail; the transcript already holds what is durable.
+func (c *residentChat) stopStream() {
+	if c.stream != nil {
+		c.stream.cancel()
+		c.stream = nil
+	}
+	c.live = residentLive{}
+}
+
 func (c *residentChat) renderMarkdown(text string) string {
 	text = residentText(text)
 	if c.markdown != nil {
@@ -163,6 +318,25 @@ func (c *residentChat) renderMarkdown(text string) string {
 		}
 	}
 	return text
+}
+
+// eventCard frames one event: its label, then its body behind a dim left rule, so the conversation reads as a
+// stack of blocks instead of one wall of text. Blank lines stay blank, so a card can breathe.
+func eventCard(block string) string {
+	lines := strings.Split(strings.TrimRight(block, "\n"), "\n")
+	if len(lines) < 2 {
+		return block
+	}
+	var b strings.Builder
+	b.WriteString(lines[0])
+	for _, ln := range lines[1:] {
+		if strings.TrimSpace(ansi.Strip(ln)) == "" {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString("\n" + envDim.Render("│ ") + ln)
+	}
+	return b.String()
 }
 
 func fenced(text, language string) string {
@@ -175,22 +349,27 @@ func fenced(text, language string) string {
 
 func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
-	heading := func(label, color string) string {
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color)).Render(label)
+	heading := func(label string, c color.Color) string {
+		return bold(c).Render(label)
 	}
 	switch e.Kind {
 	case "goal_queued":
-		return heading("YOU · goal "+shortGoal(e.Goal), "12") + "\n" + c.renderMarkdown(str("prompt"))
+		return heading("YOU · goal "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(str("prompt"))
 	case "user_message", "peer_message":
 		text := str("text")
 		if text == "" {
 			return ""
 		}
-		return heading("YOU · steer "+shortGoal(e.Goal), "12") + "\n" + c.renderMarkdown(text)
+		return heading("YOU · steer "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(text)
 	case "assistant":
 		var parts []string
+		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
+		// sent back to the model, so this block is display only.
+		if text := str("reasoning"); text != "" {
+			parts = append(parts, heading("THINKING", cMuted)+"\n"+c.renderMarkdown(text))
+		}
 		if text := str("content"); text != "" {
-			parts = append(parts, heading("AGENT", "10")+"\n"+c.renderMarkdown(text))
+			parts = append(parts, heading("AGENT", cGreen)+"\n"+c.renderMarkdown(text))
 		}
 		calls, _ := e.Data["tool_calls"].([]any)
 		for _, raw := range calls {
@@ -204,7 +383,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
-				parts = append(parts, heading("RUN · "+residentText(name), "14")+"\n"+c.renderMarkdown(fenced(command, "bash")))
+				parts = append(parts, heading("RUN · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(command, "bash")))
 			} else {
 				var pretty any
 				text := rawArgs
@@ -213,7 +392,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 						text = string(b)
 					}
 				}
-				parts = append(parts, heading("TOOL · "+residentText(name), "14")+"\n"+c.renderMarkdown(fenced(text, "json")))
+				parts = append(parts, heading("TOOL · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(text, "json")))
 			}
 		}
 		return strings.Join(parts, "\n\n")
@@ -224,19 +403,19 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if answer == "" {
 				answer, _ = result["decision"].(string)
 			}
-			return heading("YOU · answer", "12") + "\n" + c.renderMarkdown(answer)
+			return heading("YOU · answer", cBlue) + "\n" + c.renderMarkdown(answer)
 		}
 		if output, ok := result["output"].(string); ok && output != "" {
-			return heading("OUTPUT · "+residentText(str("name")), "8") + "\n" + c.renderMarkdown(fenced(strings.ReplaceAll(output, "\r\n", "\n"), "text"))
+			return heading("OUTPUT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(strings.ReplaceAll(output, "\r\n", "\n"), "text"))
 		}
 		if err, ok := result["error"].(string); ok {
-			return heading("TOOL ERROR", "9") + "\n" + c.renderMarkdown(fenced(err, "text"))
+			return heading("TOOL ERROR", cRed) + "\n" + c.renderMarkdown(fenced(err, "text"))
 		}
 		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
-			return heading("RESULT · "+residentText(str("name")), "8") + "\n" + c.renderMarkdown(fenced(string(b), "json"))
+			return heading("RESULT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(string(b), "json"))
 		}
 	case "finished":
-		return heading("FINISHED", "10") + "\n" + c.renderMarkdown(str("summary"))
+		return heading("FINISHED", cGreen) + "\n" + c.renderMarkdown(str("summary"))
 	case "question", "approval_requested":
 		text := str("text")
 		label := "QUESTION"
@@ -244,13 +423,20 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			text = str("reason") + "\n" + fenced(str("cmd"), "bash")
 			label = "ROOT REVIEW · /requests"
 		}
-		return heading(label, "11") + "\n" + c.renderMarkdown(text)
+		return heading(label, cYellow) + "\n" + c.renderMarkdown(text)
 	case "compacted":
-		return heading("CONTEXT COMPACTED · conversation remains in this transcript", "11")
+		return heading("CONTEXT COMPACTED · conversation remains in this transcript", cYellow)
 	case "cancelled":
-		return heading("GOAL CANCELLED · "+shortGoal(e.Goal), "11")
+		return heading("GOAL CANCELLED · "+shortGoal(e.Goal), cYellow)
 	case "model_unavailable", "model_truncated", "context_refused":
-		return heading(residentText(e.Kind), "9") + "\n" + c.renderMarkdown(str("error"))
+		text := str("error")
+		if partial, ok := e.Data["partial"].(map[string]any); ok {
+			if content, _ := partial["content"].(string); content != "" {
+				// Show what the model produced before it stopped, then why it stopped.
+				text = c.renderMarkdown(content) + "\n" + envDim.Render(residentText(text))
+			}
+		}
+		return heading(residentText(e.Kind), cRed) + "\n" + text
 	}
 	return ""
 }
@@ -291,6 +477,31 @@ func (m envModel) chatComposer() string {
 				lines = lines[:4]
 			}
 			input = envDim.Render(envClip("Tab completes · "+strings.Join(lines, "  "), max(18, m.width-6))) + "\n" + input
+		} else if token, ok := pathToken(value); ok {
+			// The path so far is rendered in the inline-code role, then what Tab
+			// can offer: directories in the navigation accent, files resting, and
+			// the absence of any match in the failure color so a typo shows itself.
+			input = envDim.Render("Tab completes · ") + envCode.Render(token)
+			if matches := pathMatches(token); len(matches) > 0 {
+				lines := matches
+				if len(lines) > 4 {
+					lines = lines[:4]
+				}
+				for i, l := range lines {
+					style := envDim
+					if strings.HasSuffix(l, "/") {
+						style = envTitle
+					}
+					if l == m.chat.pathPick && m.chat.pathIdx > 1 {
+						style = envSel
+					}
+					lines[i] = style.Render(l)
+				}
+				input += envDim.Render(" · " + strings.Join(lines, "  "))
+			} else {
+				input += envCtxHot.Render(" no match")
+			}
+			input = envClip(input, max(18, m.width-6)) + "\n" + input
 		}
 	}
 	if m.mode == "agentname" {
@@ -313,6 +524,93 @@ func (m envModel) chatBottom() string {
 	return m.chatComposer()
 }
 
+// contextBarSlots is the fixed width of the usage bar: readable at a glance,
+// small enough to keep the footer one line.
+const contextBarSlots = 10
+
+// humanTokens renders a token count at footer density: 482k, 1.0M.
+func humanTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1000:
+		return fmt.Sprintf("%dk", (n+500)/1000)
+	default:
+		return fmt.Sprint(n)
+	}
+}
+
+// compactTrigger normalizes the compaction threshold: a status without one
+// behaves like the daemon's default, never like "compact 0%".
+func compactTrigger(threshold float64) float64 {
+	if threshold <= 0 || threshold >= 1 {
+		return .85
+	}
+	return threshold
+}
+
+// contextBarLevel grades the measured footprint against the compaction
+// trigger: 0 comfortable, 1 approaching, 2 at or past the trigger.
+func contextBarLevel(used, capacity int, threshold float64) int {
+	if used <= 0 || capacity <= 0 {
+		return 0
+	}
+	switch share := float64(used) / float64(capacity); {
+	case share >= compactTrigger(threshold):
+		return 2
+	case share >= compactTrigger(threshold)-0.15:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// contextBar renders the measured context footprint for the footer as two
+// pieces: an accent (label, bar, share) that takes the level's color, and a
+// dim remainder (window size, trigger). A used count of 0 means the daemon
+// has not measured anything yet; then only the window size shows — capacity
+// is never presented as usage, and no percentage is invented from events.
+// tps is the measured decode speed of the agent's last streamed reply; it
+// only annotates a measured bar, and a count of 0 shows nothing at all.
+func contextBar(used, capacity int, threshold, tps float64) (accent, rest string) {
+	if capacity <= 0 {
+		return "", ""
+	}
+	if used <= 0 {
+		return "", "ctx " + humanTokens(capacity) + " window"
+	}
+	share := float64(used) / float64(capacity)
+	if share > 1 {
+		share = 1
+	}
+	filled := int(share*contextBarSlots + 0.5)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", contextBarSlots-filled)
+	speed := ""
+	if tps > 0 {
+		speed = fmt.Sprintf(" · %.0f tok/s", tps)
+	}
+	return fmt.Sprintf("ctx %s %d%%", bar, int(share*100+0.5)),
+		fmt.Sprintf(" of %s · compact %.0f%%", humanTokens(capacity), compactTrigger(threshold)*100) + speed
+}
+
+// contextStateStyle colors the header's status light by what it means: busy
+// work in cyan, healthy listening in green, something-needs-you in amber,
+// failure in red, anything else in the dim resting tone.
+func contextStateStyle(state string) lipgloss.Style {
+	switch state {
+	case "working", "queued", "waiting_model":
+		return envBusy
+	case "listening":
+		return envHead
+	case "waiting", "waiting_user", "waiting_root", "paused":
+		return envWarn
+	case "error":
+		return envCtxHot
+	default:
+		return envDim
+	}
+}
+
 func (m envModel) renderChat() string {
 	m.syncChat()
 	w := max(20, m.width)
@@ -332,28 +630,63 @@ func (m envModel) renderChat() string {
 		indicator = frames[m.tickN%len(frames)]
 	}
 	head := clip(envTitle.Render("CAMINUS") + " · " + residentText(m.agentName) +
-		"  " + envHead.Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
-	status := fmt.Sprintf("%s · ctx %d · SSH %s · %d requests", residentText(m.resident.Model), m.resident.Context, map[bool]string{true: "OK", false: "…"}[m.sshOK], len(m.reqs))
+		"  " + contextStateStyle(state).Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
+	accent, ctxRest := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold, m.resident.TokPerS)
+	ctxStyle := envCtxOK
+	switch contextBarLevel(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold) {
+	case 1:
+		ctxStyle = envWarn
+	case 2:
+		ctxStyle = envCtxHot
+	}
+	status := []string{envDim.Render(residentText(m.resident.Model))}
+	if accent+ctxRest != "" {
+		status = append(status, ctxStyle.Render(accent)+envDim.Render(ctxRest))
+	}
+	status = append(status,
+		envDim.Render("SSH "+map[bool]string{true: "OK", false: "…"}[m.sshOK]),
+		envDim.Render(fmt.Sprintf("%d requests", len(m.reqs))),
+	)
 	if !m.chat.transcript.AtBottom() {
-		status += fmt.Sprintf(" · history %.0f%%", m.chat.transcript.ScrollPercent()*100)
+		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
+	}
+	if m.chat.live.active {
+		hint := "live: Ctrl+T hold"
+		if m.chat.live.hold {
+			hint = "live: held · Ctrl+T follow"
+		}
+		status = append(status, envDim.Render(hint))
 	}
 	if m.chat.seq < m.resident.LastEvent {
-		status += " · loading history"
+		status = append(status, envDim.Render("loading history"))
 	}
 	if m.msg != "" {
-		status += " · " + terminalText(m.msg, false)
+		status = append(status, envDim.Render(terminalText(m.msg, false)))
 	}
-	foot := clip(envDim.Render(status + " · Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
+	status = append(status, envDim.Render("Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+P sessions · /help · Ctrl+C quit"))
+	foot := clip(strings.Join(status, " · "))
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
+		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
 	}
-	return strings.Join([]string{head, m.chat.transcript.View(), m.chatBottom(), foot}, "\n")
+	body := []string{head, m.chat.transcript.View()}
+	if live := m.liveBlock(w); live != "" {
+		body = append(body, live)
+	}
+	return strings.Join(append(body, m.chatBottom(), foot), "\n")
 }
 
 func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
-	if _, ok := msg.(tea.MouseWheelMsg); ok {
+	if wheel, ok := msg.(tea.MouseWheelMsg); ok {
+		if m.chat.live.active {
+			if wheel.Button == tea.MouseWheelUp {
+				m.scrollLive(-3)
+			} else {
+				m.scrollLive(3)
+			}
+			return m, nil
+		}
 		m.chat.transcript, cmd = m.chat.transcript.Update(msg)
 	} else if m.chat.question != nil && m.chat.questionArmed {
 		if m.chat.questionCustom {
@@ -389,15 +722,40 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if next, done := m.cycleSlash(); done {
 			return next, nil
 		}
+		if next, done := m.cyclePath(); done {
+			return next, nil
+		}
 		return m.onKey(k)
 	case "pgup":
+		if m.chat.live.active {
+			m.scrollLive(-m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
+		if m.chat.live.active {
+			m.scrollLive(m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageDown()
 		return m, nil
 	case "ctrl+l":
 		m.chat.transcript.GotoBottom()
+		m.chat.live.hold = false // follow the live tail again too
+		return m, nil
+	case "ctrl+t":
+		// Hold the live window where it is while the reply keeps arriving.
+		m.chat.live.hold = !m.chat.live.hold
+		if !m.chat.live.hold {
+			m.chat.live.top = 0 // following recomputes the tail from the body length
+		}
+		return m, nil
+	case "alt+up":
+		m.scrollLive(-3)
+		return m, nil
+	case "alt+down":
+		m.scrollLive(3)
 		return m, nil
 	case "esc":
 		m.chat.compose.Blur()
@@ -453,11 +811,16 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m envModel) submitCompose() (tea.Model, tea.Cmd) {
 	text := m.chat.compose.Value()
-	if strings.TrimSpace(text) == "" || m.chat.sending {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || m.chat.sending {
 		return m, nil
 	}
-	if strings.HasPrefix(strings.TrimSpace(text), "/") {
-		return m.chatSlash(strings.TrimSpace(text))
+	// A leading // sends the rest as a message, so a goal about /etc or /tmp is not taken for a command.
+	if strings.HasPrefix(trimmed, "//") {
+		return m.sendCompose(strings.TrimPrefix(trimmed, "/"))
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return m.chatSlash(trimmed)
 	}
 	return m.sendCompose(text)
 }
@@ -568,6 +931,11 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "Use /agent NAME"
 			return m, nil
 		}
+		// A typo here used to clear the transcript and leave an empty conversation behind.
+		if len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, arg) {
+			m.msg = "no such session " + terminalText(arg, true) + " · Ctrl+P lists them"
+			return m, nil
+		}
 		clear()
 		m.openResident(arg)
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
@@ -582,6 +950,43 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		clear()
 		return m, residentAction(m, []string{"cancel", m.agentName, g.ID, "--json"}, "")
+	case "/compact":
+		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
+		// pass rather than writing history from here.
+		g := m.selectedResidentGoal()
+		args := []string{"compact", m.agentName}
+		if g != nil {
+			args = append(args, g.ID)
+		}
+		clear()
+		return m, residentAction(m, args, "")
+	case "/steer":
+		// A steer redirects: it supersedes conflicting instructions and voids the plan. A plain message in the
+		// composer is a nudge, which keeps the plan, so the heavy one has to be asked for.
+		text := strings.TrimSpace(arg)
+		if text == "" || m.chat.target == "" {
+			m.msg = "usage: /steer TEXT — redirects the goal; a plain message nudges it"
+			return m, nil
+		}
+		clear()
+		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", m.chat.target,
+			"--steer", "--stdin", "--json"}, text)
+	case "/theme":
+		// The panel's colors; the transcript's markdown is rebuilt below to pick
+		// up the new roles. Nothing else in the session changes.
+		name := strings.TrimSpace(arg)
+		if name == "" {
+			m.msg = "themes: " + strings.Join(themeNames(), ", ") + " · /theme NAME"
+			return m, nil
+		}
+		if err := themeSet(name); err != nil {
+			m.msg = "no such theme: " + name + " · /theme lists"
+			return m, nil
+		}
+		m.chat.markdown = nil
+		m.msg = "theme: " + name
+		m.syncChat()
+		return m, nil
 	case "/resume":
 		g := m.selectedResidentGoal()
 		if g == nil {
@@ -591,7 +996,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		return m, residentAction(m, []string{"resume", m.agentName, g.ID, "--json"}, "")
 	default:
-		m.msg = "Unknown command. /help lists commands; your draft is retained."
+		m.msg = "Unknown command. /help lists commands; //text sends a message; your draft is retained."
 	}
 	m.syncChat()
 	return m, nil
@@ -602,6 +1007,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 var slashCommands = []struct{ name, hint string }{
 	{"/agent", "open another session NAME"},
 	{"/cancel", "cancel the selected goal"},
+	{"/compact", "summarize this goal's history into memory now"},
 	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "list goals"},
 	{"/help", "toggle the help footer"},
@@ -614,7 +1020,9 @@ var slashCommands = []struct{ name, hint string }{
 	{"/session", "open a session NAME"},
 	{"/sessions", "open the Sessions homepage"},
 	{"/start", "run this session's loop"},
+	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/stop", "stop this session's loop"},
+	{"/theme", "switch panel colors NAME; /theme lists"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.
@@ -634,6 +1042,129 @@ func slashMatches(draft string) []string {
 		}
 	}
 	return out
+}
+
+// pathToken reports the trailing token of the draft when it is a path the user
+// is still typing: it contains a separator (/, ~/ , ./, ../) and the draft does
+// not end in whitespace, so a finished word never matches. A leading / alone is
+// left to slashMatches, which sees commands first; a path wins once the token
+// goes deeper than a bare command could (/home) or does not start with / at all.
+func pathToken(draft string) (string, bool) {
+	if draft == "" || strings.Contains(draft, "\n") || strings.HasSuffix(draft, " ") {
+		return "", false
+	}
+	token := draft
+	if i := strings.LastIndex(draft, " "); i >= 0 {
+		token = draft[i+1:]
+	}
+	if !strings.Contains(token, "/") {
+		return "", false
+	}
+	if strings.HasPrefix(token, "/") && !strings.HasPrefix(token, "//") {
+		if rest := token[1:]; !strings.Contains(rest, "/") {
+			// A bare /word still belongs to the command completer until no
+			// command could grow into it; /h stays /help, /home is a path.
+			if isCommandPrefix(rest) {
+				return "", false
+			}
+		}
+	}
+	return token, true
+}
+
+// isCommandPrefix reports whether the word after the leading slash could still
+// complete to any slash command.
+func isCommandPrefix(token string) bool {
+	for _, c := range slashCommands {
+		if strings.HasPrefix(c.name[1:], token) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathMatches lists what the typed path points at, directories first with
+// their trailing separator, so Tab keeps descending into a directory and the
+// same token prefix re-lists its children. Hidden entries only surface once
+// the typed prefix includes their dot. The list is capped so /usr/lib never
+// floods the hint line.
+func pathMatches(token string) []string {
+	dir, prefix := token, ""
+	if !strings.HasSuffix(token, "/") {
+		i := strings.LastIndex(token, "/")
+		prefix = token[i+1:]
+		dir = token[:i+1]
+	}
+	if dir == "~" {
+		dir = "~/"
+	}
+	fsDir := dir
+	if strings.HasPrefix(fsDir, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		fsDir = home + fsDir[1:]
+	}
+	entries, err := os.ReadDir(fsDir)
+	if err != nil {
+		return nil
+	}
+	var dirs, files []string
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
+			continue
+		}
+		if e.IsDir() {
+			dirs = append(dirs, dir+name+"/")
+		} else {
+			files = append(files, dir+name)
+		}
+	}
+	out := append(dirs, files...)
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return out
+}
+
+// cyclePath completes the trailing path token on Tab. The first Tab takes the
+// best match; later Tabs cycle the rest of that list; taking a directory puts
+// its separator on the draft, so the next Tab walks into it. A token that
+// already names exactly one thing leaves Tab free. picks state (pathPrefix,
+// pathPick, pathIdx) survives only while the token is untouched.
+func (m envModel) cyclePath() (tea.Model, bool) {
+	value := m.chat.compose.Value()
+	token, ok := pathToken(value)
+	if !ok {
+		return m, false
+	}
+	prefix, idx := token, 0
+	switch {
+	case token == m.chat.pathPick && strings.HasSuffix(token, "/"):
+		prefix, idx = token, 0
+		m.chat.pathIdx = 0
+	case token == m.chat.pathPrefix || token == m.chat.pathPick:
+		// pathIdx already points at the next pick of the running cycle.
+		prefix, idx = m.chat.pathPrefix, m.chat.pathIdx
+	}
+	matches := pathMatches(prefix)
+	if len(matches) == 0 {
+		return m, false
+	}
+	if len(matches) == 1 && matches[0] == token {
+		return m, false
+	}
+	pick := matches[idx%len(matches)]
+	m.chat.pathIdx = idx + 1
+	m.chat.pathPrefix = prefix
+	m.chat.pathPick = pick
+	m.chat.compose.SetValue(value[:len(value)-len(token)] + pick)
+	return m, true
 }
 
 // cycleSlash completes the draft to the next matching command on Tab without
@@ -673,9 +1204,17 @@ func (m envModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "pgup":
+		if m.chat.live.active {
+			m.scrollLive(-m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
+		if m.chat.live.active {
+			m.scrollLive(m.liveHeight())
+			return m, nil
+		}
 		m.chat.transcript.PageDown()
 		return m, nil
 	case "tab", "shift+tab":
@@ -735,8 +1274,8 @@ func (m envModel) pickerBox() string {
 	if len(names) == 0 {
 		rows = append(rows, envDim.Render("no matching session"))
 	}
-	for idx, name := range names[first:min(maxRows, len(names))] {
-		idx += first
+	for idx := first; idx < min(first+maxRows, len(names)); idx++ {
+		name := names[idx]
 		mark := "  "
 		if idx == m.chat.pickerSel {
 			mark = "› "

@@ -23,6 +23,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -38,7 +39,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 )
 
 type envReq struct {
@@ -198,16 +198,26 @@ func tickCmd() tea.Cmd {
 }
 
 func sshCmd(m envModel, what, script string) *exec.Cmd {
-	c := exec.Command("ssh", "-i", m.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+	cmd, _ := sshCmdTimeout(m, what, script)
+	return cmd
+}
+
+// sshCmdTimeout bounds a remote call: a stalled SSH session must not leave a child running for the life
+// of the panel, and the caller releases the timer as soon as the call returns.
+func sshCmdTimeout(m envModel, what, script string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	c := exec.CommandContext(ctx, "ssh", "-i", m.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
 		"-o", "ControlMaster=auto", "-o", "ControlPath="+filepath.Join(os.TempDir(), "caminus-envui-%r@%h:%p"),
 		m.user+"@127.0.0.1", "bash", "-s")
 	c.Stdin = strings.NewReader(script)
-	return c
+	return c, cancel
 }
 
 func sshRun(m envModel, what, script string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := sshOutput(sshCmd(m, what, script))
+		cmd, cancel := sshCmdTimeout(m, what, script)
+		defer cancel()
+		out, err := sshOutput(cmd)
 		return sshOutMsg{what: what, out: out, err: err}
 	}
 }
@@ -224,7 +234,9 @@ func sshOutput(cmd *exec.Cmd) (string, error) {
 
 func probeCmd(m envModel) tea.Cmd {
 	return func() tea.Msg {
-		out, err := sshOutput(sshCmd(m, "probe", "id -un"))
+		cmd, cancel := sshCmdTimeout(m, "probe", "id -un")
+		defer cancel()
+		out, err := sshOutput(cmd)
 		ok := err == nil && strings.TrimSpace(out) == m.user
 		detail := ""
 		if err != nil {
@@ -508,6 +520,11 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, residentRefresh(m))
 			}
 		}
+		// The conversation page keeps one live reader open; it is started here so a page that was
+		// entered without a key press (a reopened session) streams too.
+		if m.tab == 6 && m.chat.stream == nil {
+			cmds = append(cmds, startStream(m))
+		}
 		return m, tea.Batch(cmds...)
 	case probeMsg:
 		m.sshOK, m.sshN = msg.ok, msg.n
@@ -551,7 +568,8 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingLast != "" {
 				last := m.pendingLast
 				m.pendingLast = ""
-				if last != m.defaultAgent && len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, last) {
+				gone := msg.err != "" || (len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, last))
+				if last != m.defaultAgent && gone {
 					m.agentName = m.defaultAgent
 					m.residentEpoch++
 					m.resident, m.residentEvents, m.chat = residentStatus{}, nil, residentChat{}
@@ -575,6 +593,42 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case residentActionMsg:
 		m.msg = msg.text
 		return m, residentRefresh(m)
+	case residentStreamStartMsg:
+		if msg.err != "" || msg.epoch != m.residentEpoch || msg.agent != m.agentName {
+			return m, nil
+		}
+		m.chat.stopStream()
+		m.chat.stream = msg.state
+		return m, streamLine(msg.agent, msg.epoch, msg.state.sc)
+	case residentLiveMsg:
+		if msg.epoch != m.residentEpoch || (msg.agent != "" && msg.agent != m.agentName) {
+			m.chat.stopStream()
+			return m, nil
+		}
+		if msg.err != "" || msg.done {
+			m.chat.stopStream()
+			m.syncChat()
+			return m, nil
+		}
+		if msg.reset || msg.turn != m.chat.live.turn {
+			m.chat.live = residentLive{turn: msg.turn, text: msg.text, reasoning: msg.reasoning,
+				tools: msg.tools, active: true}
+		} else {
+			m.chat.live.text += msg.text
+			m.chat.live.reasoning += msg.reasoning
+			if len(msg.tools) > 0 {
+				m.chat.live.tools = msg.tools
+			}
+		}
+		wasBottom := m.chat.transcript.AtBottom()
+		m.syncChat()
+		if wasBottom {
+			m.chat.transcript.GotoBottom()
+		}
+		if m.chat.stream != nil {
+			return m, streamLine(msg.agent, msg.epoch, m.chat.stream.sc)
+		}
+		return m, nil
 	case sshOutMsg:
 		switch msg.what {
 		case "jobs":
@@ -608,8 +662,12 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.msg += "; " + err.Error()
 		}
 		m.refreshLocal()
-		return m, tickCmd()
+		return m, nil // the running tick chain continues; a second one would double every poll
 	case tea.KeyPressMsg:
+		if m.tab != 6 {
+			// Leaving the conversation page ends its live reader; the next visit starts a fresh one.
+			m.chat.stopStream()
+		}
 		if m.tab == 6 && (m.mode == "" || m.mode == "normal") {
 			return m.chatKey(msg)
 		}
@@ -747,7 +805,8 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(text) == "" || goal == "" {
 			return m, nil
 		}
-		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--stdin", "--json"}, text)
+		// The steering draft is the explicit form: it redirects the goal rather than nudging it.
+		return m, residentAction(m, []string{"send", m.agentName, "--goal-id", goal, "--steer", "--stdin", "--json"}, text)
 	case "agentname":
 		m.agentName = strings.TrimSpace(m.edit)
 		m.mode, m.edit, m.goalSel = "normal", "", 0
@@ -1014,16 +1073,8 @@ func currentUser() string {
 }
 
 // ---------------------------------------------------------------- view
-
-var (
-	envTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	envSel    = lipgloss.NewStyle().Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15"))
-	envHead   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
-	envDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	envWarn   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
-	envTabOn  = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15"))
-	envBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
-)
+// The named styles (envTitle, envSel, ...) live in theme.go, built from the
+// theme's roles; a theme switch rebuilds them there.
 
 func (m envModel) render() string {
 	if m.tab == 6 {

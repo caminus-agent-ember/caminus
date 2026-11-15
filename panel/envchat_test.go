@@ -5,17 +5,26 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"io/fs"
 )
 
-func chatFixture() envModel {
+// chatFixture isolates the panel's user-state writes (last-session file) in a
+// temporary state dir; a test or benchmark must never touch the human's state.
+func chatFixture(tb testing.TB) envModel {
+	tb.Helper()
+	tb.Setenv("XDG_STATE_HOME", tb.TempDir())
 	m := envModel{agentName: "resident", tab: 6, width: 90, height: 28, mode: "normal"}
 	m.initChat()
 	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574, DaemonAlive: true, LastEvent: 1, Goals: []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}}, events: []residentEvent{{Seq: 1, Goal: "original", Kind: "goal_queued", Data: map[string]any{"prompt": "a goal"}}}})
@@ -23,7 +32,7 @@ func chatFixture() envModel {
 }
 
 func TestChatRetainsTranscriptAndScrollAnchorOnRefresh(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	for i := 2; i < 32; i++ {
 		m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: i, Goal: "original", Kind: "assistant", Data: map[string]any{"content": fmt.Sprintf("Observation %d stays in the transcript.", i)}}}})
 	}
@@ -49,7 +58,7 @@ func TestChatRetainsTranscriptAndScrollAnchorOnRefresh(t *testing.T) {
 }
 
 func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.chat.compose.SetValue("Use existing tools.\nKeep café and 漢字 intact.")
 	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{LastEvent: 2, Goals: []residentGoal{{ID: "other", State: "working"}, {ID: "original", State: "working"}}}})
 	if m.chat.target != "original" {
@@ -73,7 +82,7 @@ func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
 }
 
 func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.chat.compose.SetValue("/new")
 	next, cmd := m.submitCompose()
 	m = next.(envModel)
@@ -101,7 +110,7 @@ func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
 
 func TestChatPasteAndFrameStayWithinTerminal(t *testing.T) {
 	for _, size := range [][2]int{{40, 18}, {80, 24}, {140, 40}} {
-		m := chatFixture()
+		m := chatFixture(t)
 		m.width, m.height = size[0], size[1]
 		text := "a Unicode café draft\nsecond line\nthird line\nfourth line"
 		next, _ := m.Update(tea.PasteMsg{Content: text})
@@ -126,7 +135,7 @@ func TestChatPasteAndFrameStayWithinTerminal(t *testing.T) {
 }
 
 func TestChatDisplaysCommandArgumentsAndEscapesControls(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	e := residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{"name": "terminal", "arguments": "{\"command\":\"printf hello #\\u001b[2K\\rhidden\"}"}}}}}
 	block := m.chat.eventBlock(e)
 	plain := ansi.Strip(block)
@@ -167,6 +176,7 @@ func TestChatLoadsHistoryAcrossMoreThanOnePageAndRejectsOldAgent(t *testing.T) {
 }
 
 func TestSessionHomeOpensChatAndKeepsFiveMainPages(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := envModel{agentName: "resident", tab: 7, sessionNames: []string{"resident", "research"}, sessionSel: 1, width: 90, height: 28}
 	next, _ := m.sessionKeys("enter")
 	m = next.(envModel)
@@ -179,7 +189,7 @@ func TestSessionHomeOpensChatAndKeepsFiveMainPages(t *testing.T) {
 }
 
 func TestChatRejectsResponsesFromAnEarlierVisitToTheSameSession(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.openResident("other")
 	m.openResident("resident")
 	next, _ := m.Update(residentMsg{agent: "resident", epoch: 0, status: residentStatus{LastEvent: 900}, events: []residentEvent{{Seq: 900}}})
@@ -221,7 +231,7 @@ func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
 }
 
 func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	text := "start_" + strings.Repeat("A", 160) + strings.Repeat("界🙂", 40) + "_end"
 	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": text}}}}})
 	for _, width := range []int{90, 40, 120} {
@@ -231,7 +241,10 @@ func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
 		if !utf8.ValidString(plain) {
 			t.Fatal("wrapping split a UTF-8 character")
 		}
-		if !strings.Contains(strings.Join(strings.Fields(plain), ""), text) {
+		// The card rule sits at the start of every wrapped line, so drop it before asking whether the
+		// unbroken run survived: the invariant is that no character is lost or split, not that the gutter
+		// is invisible.
+		if !strings.Contains(strings.ReplaceAll(strings.Join(strings.Fields(plain), ""), "│", ""), text) {
 			t.Fatal("long output disappeared during wrapping/resize")
 		}
 		for _, line := range strings.Split(m.chat.content, "\n") {
@@ -250,11 +263,20 @@ func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
 	}
 }
 
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	if got := slashMatches("/se"); fmt.Sprint(got) != "[/session /sessions]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); len(got) != 4 || got[0] != "/session" || got[3] != "/stop" {
+	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop]" {
+		t.Fatalf("unexpected matches: %v", got)
+	}
+	if got := slashMatches("/s"); len(got) != 5 || got[0] != "/session" || got[4] != "/stop" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -263,11 +285,11 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /resume /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /steer /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
-	m := chatFixture()
+	m := chatFixture(t)
 	m.chat.compose.SetValue("/s")
 	next, done := m.cycleSlash()
 	m = next.(envModel)
@@ -295,7 +317,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 }
 
 func TestQuickSwitcherOpensRecordsAndFiltersSessions(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.sessionNames = []string{"research", "resident"}
 	m.chat.compose.SetValue("an unsent draft")
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
@@ -328,7 +350,7 @@ func TestQuickSwitcherOpensRecordsAndFiltersSessions(t *testing.T) {
 		t.Fatalf("Enter did not open the selected session: %q", m.agentName)
 	}
 	// A question arriving with the switcher open keeps F2 as the explicit takeover.
-	m2 := chatFixture()
+	m2 := chatFixture(t)
 	m2.sessionNames = []string{"resident"}
 	m2.chat.picker = true
 	wrong := envReq{ID: "q1", Kind: "question"}
@@ -372,11 +394,22 @@ func TestLaunchReopensLastSessionAndFallsBackWhenGone(t *testing.T) {
 	if m2.tab != 7 || m2.agentName != "resident" || !m2.chat.ready {
 		t.Fatal("a vanished session did not fall back to the homepage")
 	}
+	m3 := envModel{agentName: "resident", defaultAgent: "resident", tab: 7, width: 90, height: 28}
+	m3.initChat()
+	openLastSession(&m3)
+	if m3.pendingLast == "" {
+		t.Fatal("fixture broken: no pending last session")
+	}
+	next, _ = m3.Update(residentSessionsMsg{agent: "ghost", err: "no such resident"})
+	m3 = next.(envModel)
+	if m3.tab != 7 || m3.agentName != "resident" || m3.pendingLast != "" {
+		t.Fatal("an unresolvable last session did not fall back to the homepage")
+	}
 }
 
 func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {110, 32}} {
-		m := chatFixture()
+		m := chatFixture(t)
 		m.width, m.height = size[0], size[1]
 		for i := 2; i < 60; i++ {
 			m.receiveResident(residentMsg{agent: "resident", status: m.resident,
@@ -413,5 +446,562 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 				t.Fatalf("%v: switcher line too wide", size)
 			}
 		}
+	}
+}
+
+func TestLiveTailShowsThinkingToolsAndTextThenYieldsToTheDurableBlock(t *testing.T) {
+	m := chatFixture(t)
+	// a turn's first line carries the whole text, later lines carry the suffix
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1", text: "Half", reasoning: "Weighing options.",
+		tools: []string{"terminal"}, reset: true})
+	m = next.(envModel)
+	if !m.chat.live.active {
+		t.Fatal("the live tail did not start")
+	}
+	live := ansi.Strip(m.liveBlock(m.width))
+	for _, want := range []string{"THINKING", "Weighing options.", "RUN · terminal", "Half"} {
+		if !strings.Contains(live, want) {
+			t.Fatalf("live tail missing %q:\n%s", want, live)
+		}
+	}
+	next, _ = m.Update(residentLiveMsg{agent: "resident", turn: "t1", text: " an answer."})
+	m = next.(envModel)
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "Half an answer.") {
+		t.Fatal("streamed deltas did not accumulate")
+	}
+	// the durable reply replaces the tail and shows its reasoning as its own block
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original",
+		Kind: "assistant", Data: map[string]any{"content": "Half an answer.", "reasoning": "Weighing options."}}}})
+	if m.chat.live.active {
+		t.Fatal("the durable reply must end the live tail")
+	}
+	durable := ansi.Strip(m.chat.content)
+	if !strings.Contains(durable, "THINKING") || !strings.Contains(durable, "AGENT") || !strings.Contains(durable, "Half an answer.") {
+		t.Fatalf("durable blocks missing:\n%s", durable)
+	}
+	if strings.Contains(ansi.Strip(m.liveBlock(m.width)), "Half an answer.") {
+		t.Fatal("the live tail outlived the durable block")
+	}
+}
+
+func TestLiveTailStaysBoundedAndRejectsAnotherVisit(t *testing.T) {
+	long := strings.Repeat("word ", 400)
+	if got := strings.Count(envTail(long, 40, 8), "\n"); got > 8 {
+		t.Fatalf("live tail kept %d lines", got)
+	}
+	m := chatFixture(t)
+	m.residentEpoch = 3
+	next, _ := m.Update(residentLiveMsg{agent: "resident", epoch: 2, turn: "t", text: "ghost", reset: true})
+	if next.(envModel).chat.live.active {
+		t.Fatal("a stream from an earlier visit painted the tail")
+	}
+}
+
+func TestQuickSwitcherScrollsPastTheFirstPageWithoutPanicking(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 12 // four visible rows, so a ten-session list needs paging
+	names := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	m.sessionNames = names
+	m.chat.picker = true
+	for sel := range names {
+		m.chat.pickerSel = sel
+		box := ansi.Strip(m.pickerBox()) // panicked with "slice bounds out of range" before the fix
+		if !strings.Contains(box, "› "+names[sel]) {
+			t.Fatalf("selection %d (%s) is not shown:\n%s", sel, names[sel], box)
+		}
+	}
+}
+
+func TestResidentCommandsWithoutTheCLIReportInsteadOfPanicking(t *testing.T) {
+	m := chatFixture(t)
+	m.cli = nil
+	if cmd := residentCommand(m, []string{"status", "resident", "--json"}, ""); cmd != nil {
+		t.Fatal("a missing --cli must not build a command")
+	}
+	msg := residentSessions(m)()
+	if sessions, ok := msg.(residentSessionsMsg); !ok || sessions.err == "" {
+		t.Fatalf("sessions without a CLI must report an error, got %#v", msg)
+	}
+}
+
+// The context bar shows what the daemon measured, graded against the
+// compaction trigger, and never invents a percentage of its own. The accent
+// piece (label, bar, share) takes the level's color; the counts stay dim.
+func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
+	accent, rest := contextBar(0, 1048574, .85, 0)
+	if accent != "" || rest != "ctx 1.0M window" || strings.Contains(rest, "%") {
+		t.Fatalf("unmeasured context showed usage: %q / %q", accent, rest)
+	}
+	if accent, rest := contextBar(0, 0, .85, 0); accent != "" || rest != "" {
+		t.Fatalf("no capacity, no bar: %q / %q", accent, rest)
+	}
+	accent, rest = contextBar(314573, 1048574, .85, 0) // 30%
+	if filled := strings.Count(accent, "█"); filled != 3 || !strings.Contains(accent, "░") {
+		t.Fatalf("30%% carved the bar wrong: %q", accent)
+	}
+	if !strings.Contains(accent, "ctx") || !strings.Contains(accent, "30%") || strings.Count(accent, "%") != 1 {
+		t.Fatalf("accent lost its bar and share: %q", accent)
+	}
+	if !strings.Contains(rest, "of 1.0M · compact 85%") {
+		t.Fatalf("dim piece lost counts and trigger: %q", rest)
+	}
+	if _, rest := contextBar(314573, 1048574, .85, 87.3); !strings.Contains(rest, "87 tok/s") || !strings.Contains(rest, "compact 85%") {
+		t.Fatalf("measured tok/s did not annotate the dim piece: %q", rest)
+	}
+	if _, rest := contextBar(314573, 1048574, .85, 0); strings.Contains(rest, "tok/s") {
+		t.Fatalf("no speed reported, none may show: %q", rest)
+	}
+	if _, rest := contextBar(0, 1048574, .85, 87.3); strings.Contains(rest, "tok/s") {
+		t.Fatalf("tok/s without a measured context bar: %q", rest)
+	}
+	if accent, _ := contextBar(1048575, 1048574, .85, 0); !strings.HasPrefix(accent, "ctx ██████████ 100%") {
+		t.Fatalf("usage past the window did not clamp: %q", accent)
+	}
+	if got := humanTokens(999); got != "999" || humanTokens(482000) != "482k" || humanTokens(1048574) != "1.0M" {
+		t.Fatalf("token formatting drifted: %s %s %s", humanTokens(999), humanTokens(482000), humanTokens(1048574))
+	}
+	tests := []struct {
+		used, capacity int
+		threshold      float64
+		level          int
+	}{
+		{0, 1048574, .85, 0},
+		{314573, 1048574, .85, 0},
+		{838861, 1048574, .85, 1}, // 80%: within fifteen points of the trigger
+		{891288, 1048574, .85, 2}, // at the trigger
+	}
+	for _, tc := range tests {
+		if got := contextBarLevel(tc.used, tc.capacity, tc.threshold); got != tc.level {
+			t.Fatalf("level(%d/%d, %.2f) = %d, want %d", tc.used, tc.capacity, tc.threshold, got, tc.level)
+		}
+	}
+	states := map[string]int{"working": 1, "queued": 1, "waiting_model": 1, "listening": 1,
+		"waiting": 2, "waiting_user": 2, "paused": 2, "error": 3, "stopped": 0, "completed": 0}
+	for state, want := range states {
+		if got := contextStateStyle(state); got.Render("#") == envDim.Render("#") && want != 0 {
+			t.Fatalf("state %q rendered in the resting tone", state)
+		}
+	}
+	if contextStateStyle("stopped").Render("#") != envDim.Render("#") || contextStateStyle("nonsense").Render("#") != envDim.Render("#") {
+		t.Fatal("unknown states must rest in dim")
+	}
+}
+
+// The measured bar lands in the live footer, warning color included, without
+// pushing the frame past its width.
+func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.ContextUsed = 891288 // at the trigger: hot
+	m.resident.TokPerS = 91.4       // the daemon's last measured decode speed
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "ctx ") || !strings.Contains(frame, "85% of 1.0M · compact 85% · 91 tok/s") {
+		t.Fatalf("footer lost the measured bar:\n%s", frame)
+	}
+	for _, row := range strings.Split(frame, "\n") {
+		if ansi.StringWidth(row) > m.width {
+			t.Fatalf("footer line too wide: %q", row)
+		}
+	}
+}
+
+func TestSlashPrefixedMessageSendsVerbatimWithDoubleSlash(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.compose.SetValue("//tmp is full, the build failed")
+	next, _ := m.submitCompose()
+	m = next.(envModel)
+	if m.msg != "" || !m.chat.sending {
+		t.Fatalf("//text must be sent as a message, got msg=%q sending=%v", m.msg, m.chat.sending)
+	}
+	m2 := chatFixture(t)
+	m2.chat.compose.SetValue("/tmp is full")
+	next, _ = m2.submitCompose()
+	m2 = next.(envModel)
+	if !strings.Contains(m2.msg, "Unknown command") || m2.chat.sending {
+		t.Fatalf("an unknown command must be reported, not sent: msg=%q sending=%v", m2.msg, m2.chat.sending)
+	}
+}
+
+func TestSessionCommandRejectsAnUnknownNameWithoutClearingTheTranscript(t *testing.T) {
+	m := chatFixture(t)
+	m.sessionNames = []string{"resident", "research"}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+		events: []residentEvent{{Seq: 2, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "keep me"}}}})
+	before := len(m.residentEvents)
+	m.chat.compose.SetValue("/session rescarch")
+	next, _ := m.submitCompose()
+	m = next.(envModel)
+	if m.agentName != "resident" || len(m.residentEvents) != before {
+		t.Fatalf("a typo switched sessions: agent=%q events=%d/%d", m.agentName, len(m.residentEvents), before)
+	}
+	if !strings.Contains(ansi.Strip(m.chat.content), "keep me") {
+		t.Fatal("a typo cleared the transcript")
+	}
+	if !strings.Contains(m.msg, "no such session") {
+		t.Fatalf("no warning shown: %q", m.msg)
+	}
+	m.chat.compose.SetValue("/session research")
+	next, _ = m.submitCompose()
+	m = next.(envModel)
+	if m.agentName != "research" {
+		t.Fatalf("a known session did not open: %q", m.agentName)
+	}
+}
+
+func TestTruncatedReplyShowsWhatTheModelWroteBeforeItStopped(t *testing.T) {
+	m := chatFixture(t)
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original",
+		Kind: "model_truncated", Data: map[string]any{
+			"error":   "the reply ended before it was complete; nothing was executed",
+			"partial": map[string]any{"content": "Half an answer"}}}}})
+	block := ansi.Strip(m.chat.content)
+	if !strings.Contains(block, "Half an answer") {
+		t.Fatalf("the partial reply is not shown:\n%s", block)
+	}
+	if !strings.Contains(block, "before it was complete") {
+		t.Fatalf("the reason is not shown:\n%s", block)
+	}
+}
+
+// liveWindow is the visible body of the live block, without its border or label line.
+func liveWindow(m envModel) string {
+	body := m.chat.live.body(m.width - 4)
+	top := m.liveTop(len(body))
+	return strings.Join(body[top:min(top+m.liveHeight(), len(body))], "\n")
+}
+
+func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 30
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
+		reasoning: strings.Repeat("thinking line ", 200), reset: true})
+	m = next.(envModel)
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "THINKING · live") {
+		t.Fatalf("the live window is not following:\n%s", ansi.Strip(m.liveBlock(m.width)))
+	}
+	m.scrollLive(-8)
+	held := ansi.Strip(m.liveBlock(m.width))
+	if !strings.Contains(held, "held") {
+		t.Fatalf("scrolling did not hold the window:\n%s", held)
+	}
+	// more of the reply arrives: the held window must keep showing the same lines
+	before := liveWindow(m)
+	next, _ = m.Update(residentLiveMsg{agent: "resident", turn: "t1", text: "and now an answer"})
+	m = next.(envModel)
+	if after := liveWindow(m); after != before {
+		t.Fatalf("the held window moved while text arrived:\n%s\n---\n%s", before, after)
+	}
+	// Ctrl+T resumes following, so the newest text is visible again
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	m = next.(envModel)
+	if m.chat.live.hold {
+		t.Fatal("Ctrl+T did not resume following")
+	}
+	if !strings.Contains(ansi.Strip(m.liveBlock(m.width)), "and now an answer") {
+		t.Fatal("the resumed window does not show the newest text")
+	}
+	// scrolling back to the bottom resumes too
+	m.scrollLive(-4)
+	m.scrollLive(100)
+	if m.chat.live.hold {
+		t.Fatal("scrolling to the bottom must resume following")
+	}
+}
+
+func TestLiveWindowTakesHalfTheBodyAndLeavesTheRestToTheTranscript(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
+		reasoning: strings.Repeat("thinking about it ", 60), reset: true})
+	m = next.(envModel)
+	body := m.bodyHeight()
+	live := lipgloss.Height(m.liveBlock(m.width))
+	if live < body/2-2 || live > body/2+2 {
+		t.Fatalf("live window is %d lines of a %d-line body; expected about half", live, body)
+	}
+	transcript := m.chat.transcript.Height()
+	if transcript < body-live-2 || transcript > body-live+2 {
+		t.Fatalf("transcript is %d lines, expected about %d", transcript, body-live)
+	}
+}
+
+// sgr is the escape a color renders as, so a test can assert a palette role without hardcoding its hex.
+func sgr(color color.Color) string {
+	out := lipgloss.NewStyle().Foreground(color).Render("x")
+	return strings.SplitN(out, "x", 2)[0]
+}
+
+func TestLiveTextIsColoredLikeTheTranscript(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.live = residentLive{active: true, turn: "t1", text: "run `go test ./...` now", tools: []string{"terminal"}}
+	block := m.liveBlock(m.width)
+	if !strings.Contains(block, sgr(cTeal)) {
+		t.Fatalf("inline code is not colored:\n%q", block)
+	}
+	if !strings.Contains(block, sgr(cOrange)) {
+		t.Fatalf("the running tool is not colored:\n%q", block)
+	}
+}
+
+func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 30
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "goal_queued", Data: map[string]any{"prompt": "fix the build"}},
+		{Seq: 2, Goal: "g1", Kind: "assistant", Data: map[string]any{"content": "on it"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	lines := strings.Split(ansi.Strip(m.chat.content), "\n")
+	if !strings.HasPrefix(lines[0], "YOU · goal") {
+		t.Fatalf("the first line is not the goal's label: %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "│ fix the build") {
+		t.Fatalf("the body is not behind the card rule: %q", lines[1])
+	}
+	var seen bool
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "AGENT") {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatalf("the reply has no label:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestMarkdownColorsFencedCodeWithTheNordTheme(t *testing.T) {
+	r, err := glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(80))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Render("```go\nfunc main() { println(\"hi\", 42) }\n```\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spans := strings.Count(out, "38;2;"); spans < 3 {
+		t.Fatalf("fenced code has %d colored spans, expected syntax coloring:\n%q", spans, out)
+	}
+}
+
+// themeFixture saves the panel's theme state and restores it after the test;
+// the theme is global and no test may leave a switched palette behind.
+func themeFixture(tb testing.TB) {
+	tb.Helper()
+	saved := themeCurrent
+	tb.Cleanup(func() {
+		themeCurrent = saved
+		applyThemeStyles()
+	})
+}
+
+func TestThemeParsesTheEmbeddedCaminusFile(t *testing.T) {
+	data, err := fs.ReadFile(themeFS, "themes/caminus.theme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, bad := parseTheme(data)
+	if len(bad) != 0 {
+		t.Fatalf("the built-in caminus theme has bad lines: %v", bad)
+	}
+	for _, role := range []string{"text", "accent", "ok", "warn", "action", "hot", "user", "chrome", "code_theme"} {
+		if got[role] == "" {
+			t.Fatalf("the built-in caminus theme does not set %s", role)
+		}
+	}
+}
+
+func TestThemeLoadSwitchesRolesAndStyles(t *testing.T) {
+	themeFixture(t)
+	before := themeRole("accent")
+	if err := themeLoad("nord"); err != nil {
+		t.Fatal(err)
+	}
+	after := themeRole("accent")
+	if before == after {
+		t.Fatalf("loading nord left accent at %s", after)
+	}
+	if envTitle.Render("x") == "" {
+		t.Fatal("the rebuilt styles no longer render")
+	}
+	if themeLoad("no-such-theme") == nil {
+		t.Fatal("a nonexistent theme loaded without error")
+	}
+	if themeRole("accent") != after {
+		t.Fatal("a failed load changed the palette")
+	}
+}
+
+func TestThemeNamesListTheBuiltins(t *testing.T) {
+	names := themeNames()
+	for _, want := range []string{"caminus", "nord", "catppuccin-mocha", "dracula", "gruvbox-dark", "tokyo-night"} {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s missing from themeNames: %v", want, names)
+		}
+	}
+}
+
+func TestThemeParseToleratesBtopKeysAndUnknownLines(t *testing.T) {
+	text := `# a comment
+main_fg = #e5e9f0
+title_fg = #88c0d0
+cpu_load_start_low = #abcdef
+not a mapping at all
+code_theme = monokai
+`
+	got, bad := parseTheme([]byte(text))
+	if got["text"] != "#e5e9f0" || got["accent"] != "#88c0d0" || got["code_theme"] != "monokai" {
+		t.Fatalf("the aliases or code_theme did not land: %v", got)
+	}
+	if _, present := got["cpu_load_start_low"]; present {
+		t.Fatalf("an unmapped btop key was applied as a role: %v", got)
+	}
+	if len(bad) != 1 || !strings.Contains(bad[0], "not a mapping") {
+		t.Fatalf("only lines that are not key = value should be bad, got %v", bad)
+	}
+}
+
+func TestThemeSetPersistsAndTheSlashCommandSwitches(t *testing.T) {
+	themeFixture(t)
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	m := chatFixture(t)
+	tm, _ := m.chatSlash("/theme")
+	list := tm.(envModel)
+	if !strings.Contains(list.msg, "caminus") || !strings.Contains(list.msg, "nord") {
+		t.Fatalf("/theme does not list themes: %q", list.msg)
+	}
+	tn, _ := m.chatSlash("/theme nope")
+	nope := tn.(envModel)
+	if !strings.Contains(nope.msg, "no such theme") {
+		t.Fatalf("/theme nope did not report the failure: %q", nope.msg)
+	}
+	ts, _ := m.chatSlash("/theme nord")
+	m = ts.(envModel)
+	// syncChat rebuilds the renderer straight away when markdown was nilled, so
+	// the next reply is styled in the new theme, not the old one.
+	if m.chat.markdown == nil {
+		t.Fatal("/theme nord left the markdown renderer unbuilt")
+	}
+	if themeRole("accent") != "#88c0d0" {
+		t.Fatalf("/theme nord did not switch the palette: %s", themeRole("accent"))
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, "caminus", "panel-theme"))
+	if err != nil || strings.TrimSpace(string(saved)) != "nord" {
+		t.Fatalf("the choice was not persisted (err=%v): %q", err, saved)
+	}
+}
+
+func TestPathTokenDetectsPathsButLeavesCommandsAlone(t *testing.T) {
+	for _, want := range []string{"/home/ig", "~/src/", "./build/x", "../notes", "/home"} {
+		if _, ok := pathToken(want); !ok {
+			t.Fatalf("%q should be a path token", want)
+		}
+	}
+	for _, no := range []string{"", "hello", "/h", "goal one", "see /home later ", "a\nb /home"} {
+		if tok, ok := pathToken(no); ok {
+			t.Fatalf("%q should not be a path token (got %q)", no, tok)
+		}
+	}
+}
+
+func TestPathMatchesListsDirectoriesFirstAndHidesDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "zeta.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".hidden"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpha", "inner.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := dir + "/"
+	if got := pathMatches(d); len(got) != 2 || got[0] != d+"alpha/" || got[1] != d+"zeta.txt" {
+		t.Fatalf("unexpected matches: %v", got)
+	}
+	if got := pathMatches(d + "a"); len(got) != 1 || got[0] != d+"alpha/" {
+		t.Fatalf("prefix filter failed: %v", got)
+	}
+	if got := pathMatches(d + "."); len(got) != 1 || !strings.HasSuffix(got[0], ".hidden") {
+		t.Fatalf("dot entries should surface with a dot prefix: %v", got)
+	}
+	if got := pathMatches(dir + "/nowhere/"); len(got) != 0 {
+		t.Fatalf("an unreadable directory should match nothing: %v", got)
+	}
+}
+
+func TestTabCompletesAWalksIntoDirectoriesAndCyclesFiles(t *testing.T) {
+	themeFixture(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "walk", "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "beta.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gamma.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "walk", "alpha", "inner.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := chatFixture(t)
+	m.chat.compose.SetValue(dir + "/walk/a")
+	m.chat.compose.Focus()
+	next, _ := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(envModel)
+	if m.chat.compose.Value() != dir+"/walk/alpha/" {
+		t.Fatalf("first Tab should take the directory: %q", m.chat.compose.Value())
+	}
+	next, _ = m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(envModel)
+	if m.chat.compose.Value() != dir+"/walk/alpha/inner.txt" {
+		t.Fatalf("Tab in the directory should descend: %q", m.chat.compose.Value())
+	}
+	// From a files-only view cycling walks the matches in order; directories
+	// would have gone first.
+	files := t.TempDir()
+	if err := os.WriteFile(filepath.Join(files, "beta.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(files, "gamma.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reset := chatFixture(t)
+	reset.chat.compose.SetValue(files + "/")
+	for _, want := range []string{files + "/beta.txt", files + "/gamma.txt"} {
+		nx, _ := reset.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
+		reset = nx.(envModel)
+		if got := reset.chat.compose.Value(); got != want {
+			t.Fatalf("cycling files: got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestChatComposerHintsAboutPathsThematically(t *testing.T) {
+	themeFixture(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	m := chatFixture(t)
+	m.chat.compose.SetValue("./")
+	view := m.chatComposer()
+	if !strings.Contains(view, "Tab completes") || !strings.Contains(view, "sub/") {
+		t.Fatalf("a path in progress gets no completion hint:\n%s", view)
+	}
+	m.chat.compose.SetValue("./zzz")
+	if view := m.chatComposer(); !strings.Contains(view, "no match") {
+		t.Fatalf("a dead path should announce itself:\n%s", view)
 	}
 }

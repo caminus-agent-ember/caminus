@@ -21,6 +21,33 @@ defaults:
     shell: bash   # (bash -eo pipefail: a failing command in a pipe fails the step)
 
 jobs:
+  panel:
+    name: Panel tests and executable
+    if: github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: panel/go.mod
+          cache-dependency-path: panel/go.sum
+      - name: Panel controls and approval display tests
+        working-directory: panel
+        run: go test ./...
+      - name: Build the tested panel
+        working-directory: panel
+        run: go build -o "$RUNNER_TEMP/caminus-panel" .
+      - name: Resident typing cost with growing history
+        working-directory: panel
+        run: go test -run '^$' -bench '^BenchmarkResidentTyping$' -benchtime=200ms -benchmem
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: caminus-panel-linux
+          path: ${{ runner.temp }}/caminus-panel
+          retention-days: 7
   cpu:
     name: CPU suites, sdist, vendored code, privacy scan
     if: github.repository == 'jdominick05/caminus'
@@ -72,6 +99,19 @@ jobs:
         run: |
           python -m build --sdist --outdir "$RUNNER_TEMP/sdist" .
           python -m twine check --strict "$RUNNER_TEMP"/sdist/*
+
+      - name: Resident failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, same pin as build.yml
+        with:
+          name: resident-failure-evidence
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/ci/resident.log
+            ${{ runner.temp }}/ci/resident/
+            ${{ runner.temp }}/ci/env.log
+            ${{ runner.temp }}/ci/resident_compare.log
 
       - name: Vendored code (gguf-py at upstream llama.cpp 5aeac37a35; ggml's MMQ at the ignite-llama fork commit e4e3f8eda)
         # kernels/ggml_mmq's headers name the fork's development commit 842653396, published as e4e3f8eda with identical

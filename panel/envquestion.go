@@ -49,7 +49,9 @@ func (m *envModel) syncQuestion() {
 		m.chat.questionInput.SetWidth(max(16, m.width-4))
 		m.chat.questionInput.SetHeight(3)
 		m.chat.questionCustom = len(r.Choices) == 0
-		m.chat.questionArmed = m.chat.compose.Value() == ""
+		// Arming is for a human who is looking at the conversation with an empty composer. A blurred
+		// composer means they are browsing: Enter there returns to typing, so it must not answer.
+		m.chat.questionArmed = m.chat.compose.Value() == "" && m.chat.compose.Focused()
 		if m.chat.questionArmed {
 			m.chat.compose.Blur()
 		}
@@ -94,7 +96,7 @@ func (m envModel) questionBox() string {
 			}
 			row := wrap(fmt.Sprintf("%s%d. %s", mark, i+1, text))
 			if i == m.chat.questionChoice {
-				row = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")).Render(row)
+				row = bold(cAccent).Render(row)
 			}
 			parts = append(parts, row)
 			if i == m.chat.questionChoice {
@@ -109,7 +111,7 @@ func (m envModel) questionBox() string {
 		body = view.View()
 		hint = "↑/↓ select · Enter answer · e custom · Esc defer"
 	}
-	return envBorder.BorderForeground(lipgloss.Color("12")).Width(max(18, m.width-2)).Render(body + "\n" + envDim.Render(envClip(hint, w)))
+	return envBorder.BorderForeground(cAccent).Width(max(18, m.width-2)).Render(body + "\n" + envDim.Render(envClip(hint, w)))
 }
 
 func (m envModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -125,6 +127,9 @@ func (m envModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			m.msg = "Question waiting. F2 answers it; your steering draft is preserved."
+			if !m.chat.compose.Focused() {
+				return m, m.chat.compose.Focus() // Enter returns to typing, as the footer says
+			}
 			return m, nil
 		case "esc":
 			return m.deferQuestion()

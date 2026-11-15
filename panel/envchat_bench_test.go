@@ -18,7 +18,7 @@ var residentFrameSink string
 func BenchmarkResidentTyping(b *testing.B) {
 	for _, lines := range []int{20, 2000, 10000} {
 		b.Run(fmt.Sprintf("history_%d_lines", lines), func(b *testing.B) {
-			m := chatFixture()
+			m := chatFixture(b)
 			m.width, m.height = 200, 60
 			m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": strings.Repeat("Observed tool output with a Unicode café and a stable, unchanged transcript.\n", lines)}}}}})
 			b.ReportAllocs()

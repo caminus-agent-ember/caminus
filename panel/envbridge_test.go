@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestWithdrawnRequestRejectsCachedApprovalAndAnswer(t *testing.T) {
@@ -111,5 +113,34 @@ func TestBridgeLockIsSharedWithPython(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Python did not observe Go lock: %v", err)
+	}
+}
+
+func TestBridgeLockGivesUpQuicklyInsteadOfFreezingThePanel(t *testing.T) {
+	bridge := t.TempDir()
+	dir := filepath.Join(bridge, "req")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+	holder, err := os.OpenFile(filepath.Join(dir, id+".lock"), os.O_RDWR|os.O_CREATE, 0o660)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err = withBridgeLock(bridge, id, func() error {
+		t.Fatal("the body must not run while another writer holds the lock")
+		return nil
+	})
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("a held lock must report busy, got %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("waited %v inside the update loop; the panel would freeze", elapsed)
 	}
 }
