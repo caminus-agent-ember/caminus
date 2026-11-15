@@ -16,7 +16,7 @@ import (
 
 func questionFixture(t *testing.T, choices []string) envModel {
 	t.Helper()
-	m := chatFixture()
+	m := chatFixture(t)
 	m.bridge = t.TempDir()
 	m.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
 	m.resident.Goals[0].State = "waiting_user"
@@ -209,7 +209,7 @@ func TestQuestionWithoutDraftOpensPickerDirectly(t *testing.T) {
 }
 
 func TestQuestionToolJSONIsReplacedByHumanQuestionAndAnswer(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	call := residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{"name": "ask_user", "arguments": `{"question":"What next?","choices":["A","B"]}`}}}}}
 	if m.chat.eventBlock(call) != "" {
 		t.Fatal("raw ask_user JSON still displayed")
