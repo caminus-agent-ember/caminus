@@ -28,6 +28,7 @@ func chatFixture(tb testing.TB) envModel {
 	tb.Setenv("XDG_STATE_HOME", tb.TempDir())
 	m := envModel{agentName: "resident", tab: 6, width: 90, height: 28, mode: "normal"}
 	m.initChat()
+	m.chat.cards = true // the card tests predate the compact view; TestCompactTranscript covers it
 	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574, DaemonAlive: true, LastEvent: 1, Goals: []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}}, events: []residentEvent{{Seq: 1, Goal: "original", Kind: "goal_queued", Data: map[string]any{"prompt": "a goal"}}}})
 	return m
 }
@@ -1604,5 +1605,40 @@ func TestTheBoundedHistoryTrimKeepsTheDrawnPosition(t *testing.T) {
 		{Seq: 10000 + maxResidentEvents + 1, Kind: "note", Data: map[string]any{}}}})
 	if m.chat.rendered != len(m.residentEvents) || len(m.residentEvents) > maxResidentEvents {
 		t.Fatalf("after the trim: rendered %d, events %d", m.chat.rendered, len(m.residentEvents))
+	}
+}
+
+func TestCompactTranscriptFoldsToolWorkIntoOneLine(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.cards, m.chat.content, m.chat.rendered = false, "", 0
+	call := func(name, args string) map[string]any {
+		return map[string]any{"id": "c", "type": "function", "function": map[string]any{"name": name, "arguments": args}}
+	}
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 500, Kind: "assistant", Data: map[string]any{"content": "Checking the CVEs now.", "reasoning": "long thoughts",
+			"tool_calls": []any{call("terminal", `{"command":"ls cve/"}`), call("read", `{"path":"a.md"}`)}}},
+		residentEvent{Seq: 501, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"running": false, "output": "x"}}},
+		residentEvent{Seq: 502, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
+		residentEvent{Seq: 503, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("terminal", `{"command":"jq . n.json"}`), call("terminal", `{"session":"abc"}`)}}},
+		residentEvent{Seq: 504, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"error": "boom"}}},
+		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md", "passed": false}},
+	)
+	m.syncChat()
+	v := ansi.Strip(m.chat.transcript.View())
+	if !strings.Contains(v, "● Checking the CVEs now.") || strings.Contains(v, "agent\n") {
+		t.Fatalf("the agent's words stay whole:\n%s", v)
+	}
+	if !strings.Contains(v, "Ran 2 commands, read 1 file · 1 failed · gate fails") {
+		t.Fatalf("the tool work is one line (a poll is not a command):\n%s", v)
+	}
+	for _, clutter := range []string{"PRIVILEGED-STAGE1", "output  terminal", "thinking ·", "jq . n.json"} {
+		if strings.Contains(v, clutter) {
+			t.Fatalf("compact hides %q:\n%s", clutter, v)
+		}
+	}
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"content": "Two CVEs are patched."}})
+	m.syncChat()
+	if v = ansi.Strip(m.chat.transcript.View()); !strings.Contains(v, "Two CVEs are patched.") || !strings.Contains(v, "gate fails") {
+		t.Fatalf("the next reply fixes the line above it:\n%s", v)
 	}
 }

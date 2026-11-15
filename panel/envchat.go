@@ -55,6 +55,8 @@ type residentChat struct {
 	histIdx                                 int         // Ctrl+R: how far back it is
 	full                                    bool        // Ctrl+O: cards show every line
 	rootSel                                 string      // the root request the decision keys act on (shared card)
+	group                                   toolGroup   // compact view: the tool work since the last drawn block
+	cards                                   bool        // Ctrl+E: every tool card instead of the compact line
 	view                                    textView    // /btw's answer, /diff
 	rewind                                  rewindState // the /rewind step picker
 	recapNow                                float64     // when the recap was taken: saved as seen on dismiss
@@ -301,18 +303,42 @@ func (m *envModel) syncChat() {
 		m.chat.transcript.SetHeight(height)
 	}
 	if m.chat.renderWidth != w || m.chat.markdown == nil {
-		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(max(10, w-4)))
+		// Prose wraps at a reading width, not the terminal's: a 250-column line is hard to read. Tool lines, the
+		// header and the status line still use the full width.
+		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(envMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
 	changed := m.chat.rendered != len(m.residentEvents)
+	if m.chat.rendered == 0 {
+		m.chat.group = toolGroup{} // drawing from the start (a resize, Ctrl+E): the group starts over too
+	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
+		// Compact (the default): tool work folds into one line between the agent's words; Ctrl+E draws every card.
+		if !m.chat.cards && !m.chat.expanded {
+			if e.Kind == "assistant" {
+				// its words first (they close the line above them), then its calls start the next line
+				if block := m.chat.eventBlock(compactAssistant(e)); block != "" {
+					m.chat.flushGroup(w)
+					m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
+				}
+				m.chat.fold(e)
+				continue
+			}
+			if m.chat.fold(e) {
+				continue
+			}
+		}
 		if block := m.chat.eventBlock(e); block != "" {
+			m.chat.flushGroup(w)
 			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
 	if changed || m.chat.transcript.TotalLineCount() == 0 {
 		body := strings.TrimRight(m.chat.content, "\n")
+		if !m.chat.group.empty() {
+			body += "\n\n" + m.chat.group.line(w) // the work in progress, fixed when the next block arrives
+		}
 		if body == "" {
 			body = mascotBeside(0, "", envTitle.Render("CAMINUS")+envDim.Render(" env"),
 				"Your agent's conversation and commands will stay here.",
@@ -447,6 +473,27 @@ func (c *residentChat) renderMarkdown(text string) string {
 
 // eventCard frames one event: its label, then its body behind a dim left rule, so the conversation reads as a
 // stack of blocks instead of one wall of text. Blank lines stay blank, so a card can breathe.
+// bulletBlock is a reply in the compact view: a bullet, then the text with a hanging indent; no label line, no
+// rule, so the agent's words read as prose (the cards view keeps the labelled card).
+// readingWidth is the column prose wraps at in the transcript, whatever the terminal's width.
+const readingWidth = 100
+
+func bulletBlock(text string) string {
+	lines := strings.Split(strings.Trim(text, "\n"), "\n")
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[0])) == "" {
+		lines = lines[1:]
+	}
+	for i, ln := range lines {
+		ln = strings.TrimPrefix(ln, "  ") // the markdown renderer's own left margin: the bullet's indent replaces it
+		if i == 0 {
+			lines[i] = bold(cGreen).Render("● ") + ln
+		} else {
+			lines[i] = "  " + ln
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func eventCard(block string) string {
 	lines := strings.Split(strings.TrimRight(block, "\n"), "\n")
 	if len(lines) < 2 {
@@ -479,6 +526,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
 	w := max(20, c.renderWidth)
 	turn := func(mark, label string, col color.Color, body string) string {
+		if !c.cards && !c.expanded { // compact: the label, then the text indented, without the rule
+			lines := strings.Split(strings.Trim(body, "\n"), "\n")
+			for i, ln := range lines {
+				if strings.TrimSpace(ansi.Strip(ln)) != "" {
+					lines[i] = "  " + strings.TrimPrefix(ln, "  ")
+				}
+			}
+			return bold(col).Render(mark+" "+label) + "\n" + strings.Join(lines, "\n")
+		}
 		return eventCard(bold(col).Render(mark+" "+label) + "\n" + body)
 	}
 	firstLine := func(s string) string {
@@ -524,7 +580,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			}
 		}
 		if text := str("content"); text != "" {
-			parts = append(parts, turn(g.agent, "agent", cGreen, c.renderMarkdown(text)))
+			if !c.cards && !c.expanded {
+				parts = append(parts, bulletBlock(c.renderMarkdown(text)))
+			} else {
+				parts = append(parts, turn(g.agent, "agent", cGreen, c.renderMarkdown(text)))
+			}
 		}
 		calls, _ := e.Data["tool_calls"].([]any)
 		for _, raw := range calls {
@@ -1069,10 +1129,20 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.live.hold = false // follow the live tail again too
 		return m, nil
 	case "ctrl+e":
-		// open or fold every card; drawn blocks are final, so the transcript is drawn again once
-		m.chat.expanded = !m.chat.expanded
+		// three views, in turn: compact (tool work folded into one line between the agent's words), every card
+		// folded, every card open. Drawn blocks are final, so the transcript is drawn again once.
+		switch {
+		case !m.chat.cards:
+			m.chat.cards, m.chat.expanded = true, false
+			m.msg = "every tool card, folded · Ctrl+E opens them"
+		case !m.chat.expanded:
+			m.chat.expanded = true
+			m.msg = "every tool card, open · Ctrl+E back to compact"
+		default:
+			m.chat.cards, m.chat.expanded = false, false
+			m.msg = "compact: tool work in one line · Ctrl+E shows every card"
+		}
 		m.chat.content, m.chat.rendered = "", 0
-		m.msg = map[bool]string{true: "cards open · Ctrl+E folds", false: "cards folded · Ctrl+E opens"}[m.chat.expanded]
 		m.syncChat()
 		return m, nil
 	case "ctrl+t":
