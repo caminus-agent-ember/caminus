@@ -22,6 +22,7 @@ from . import outputs
 from . import housemate
 from . import leases
 from . import agenda
+from . import judge
 from .brain import Brains
 
 TODO_STATES = ('pending', 'in_progress', 'done')
@@ -58,8 +59,8 @@ TOOLS = [
          dict(question={'type':'string'}, choices={'type':'array','items':{'type':'string'}}), ('question',)),
     tool('ask_root', 'Request that your human review and execute an exact root command. You have no root privileges. The human may approve, edit or deny; execution output returns here.',
          dict(command={'type':'string'}, reason={'type':'string'}), ('command','reason')),
-    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists.',
-         dict(check={'type':'string'}), ('check',)),
+    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run in your home) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
+         dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
     tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
@@ -176,6 +177,7 @@ class Runtime:
         # The loop's gates: a goal states what done looks like before it can complete, and cannot finish
         # without exercising that check. Fixture agents that predate the loop record loop_gates false.
         self.loop_gates = bool(self.config.get('loop_gates', True))
+        self.judge = bool(self.config.get('judge', True))   # the fresh-context check of every graded finish
         # The watchdog: stop a goal that is spending or spinning without moving, and leave the reason where
         # a human will see it. Zero disables either bound.
         self.idle_timeout = float(self.config.get('idle_timeout', 0) or 0)
@@ -375,13 +377,13 @@ class Runtime:
         return name + ':' + hashlib.sha1(json.dumps(args, sort_keys=True, ensure_ascii=False)
                                          .encode()).hexdigest()[:12]
 
-    def _define_done(self, gid, check):
-        check = (check or '').strip()
+    def _define_done(self, gid, check, gate=''):
+        check, gate = (check or '').strip(), (gate or '').strip()
         if not check:
             raise ValueError('the done check must say something checkable')
-        self.store.update(gid, done_check=check)
-        self.store.event('done_check', dict(check=check), gid)
-        return dict(done_check=check)
+        self.store.update(gid, done_check=check, gate=gate or None)
+        self.store.event('done_check', dict(check=check, gate=gate), gid)
+        return dict(done_check=check, gate=gate or None)
 
     def _todo(self, gid, items, blockers):
         """Replace the goal's checklist. One item in progress at a time keeps the list honest about now."""
@@ -538,7 +540,7 @@ class Runtime:
                     raise ValueError('no done check yet: call define_done with what done looks like, '
                                      'as something you can check, before any other work')
                 if name == 'define_done':
-                    result = self._define_done(action['goal'], args['check'])
+                    result = self._define_done(action['goal'], args['check'], args.get('gate', ''))
                 elif name == 'verify':
                     result = self._verify(action['goal'], args['evidence'])
                 elif name == 'todo':
@@ -610,6 +612,10 @@ class Runtime:
                 result = housemate.wait(self, action['goal'], args['until'], args.get('target', ''), args.get('timeout', 300))
             elif name == 'machine':
                 result = housemate.machine(self)
+            elif (name == 'finish' and 'error' not in result and self.loop_gates and self.judge
+                  and self.store.goal(action['goal']).get('kind', 'work') not in FREE_KINDS):
+                # the gate and the judge: slow, so outside the write transaction, before the goal completes
+                result = judge.review(self, action['goal'], result)
         except (OSError, ValueError, KeyError, TypeError) as e:
             result = dict(error=str(e))
         failure = self._failure_text(result)
@@ -631,6 +637,12 @@ class Runtime:
             self.progress[action['goal']] = time.time()
         if action['name'] == 'finish' and 'error' not in result:
             self._finish(action['goal'],result['summary'],result.get('open',''))
+        elif action['name'] == 'finish' and result.get('pause'):
+            # the judge found it impossible, or refused it too often: a person decides
+            with self.store.transaction():
+                if self.store.goal(action['goal'])['state'] != 'cancelled':
+                    self.store.update(action['goal'], state='paused', error=result['pause'])
+                    self.store.event('report', dict(level='need_you', text=result['pause']), action['goal'])
         return True
 
     def _restate_goal(self, gid, messages):

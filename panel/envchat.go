@@ -593,6 +593,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			}
 		}
 		return toolCard("error", strings.ReplaceAll(e.Kind, "_", " "), firstLine(text), false, true, body, w)
+	case "judged":
+		v := str("verdict")
+		return toolCard("gate", "judge: "+strings.ReplaceAll(v, "_", " "), firstLine(str("reason")), v == "met" || v == "unread", v != "met", lines(str("reason"), 6), w)
+	case "gate":
+		ok, _ := e.Data["passed"].(bool)
+		return toolCard("gate", "gate: "+firstLine(str("command")), map[bool]string{true: "passed", false: "failed"}[ok], ok, !ok, lines(str("output"), 12), w)
 	case "report":
 		if str("level") == "need_you" {
 			return turn("!", "needs you", cRed, c.renderMarkdown(str("text")))

@@ -1262,3 +1262,22 @@ func TestReportsAndScheduleNotes(t *testing.T) {
 		}
 	}
 }
+
+// The gate and the judge show their verdicts: a pass is a quiet line, a refusal stays open with its reason.
+func TestGateAndJudgeVerdicts(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "gate", Data: map[string]any{"command": "make test", "passed": false, "output": "exit 2\n1 failed"}},
+		{Seq: 2, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "not_yet", "reason": "no test output shows the fix"}},
+		{Seq: 3, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "41 passed"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix", "judge: met  ·  41 passed"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
+	}
+}

@@ -45,7 +45,7 @@ def call(name,args):
 
 
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[]
+    queues={};seen=[];judges={};judge_seen=[]
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
@@ -54,7 +54,17 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if self.path.endswith('/count_tokens'):
             self.respond(dict(input_tokens=len(json.dumps(body))//4));return
-        key=self.path.split('/')[1];self.seen.append((key,body))
+        key=self.path.split('/')[1]
+        msgs=body.get('messages') or [{}]
+        if not str(msgs[0].get('content','')).startswith('JUDGE'):self.seen.append((key,body))
+        else:
+            self.judge_seen.append((key,body))
+            # the loop judge has its own queue and its own record, so a test's agent replies and its view of the
+            # agent's conversation are not disturbed by it; default verdict: met
+            jq=self.judges.get(key)
+            verdict=jq.popleft() if jq else dict(verdict='met',reason='the fixture judge accepts')
+            self.respond(dict(choices=[dict(message=dict(role='assistant',content=json.dumps(verdict)),finish_reason='stop')],
+                              usage=dict(prompt_tokens=30,completion_tokens=10)));return
         q=self.queues[key]
         if not q:self.respond(dict(error='fixture exhausted'),500);return
         value=q.popleft()
@@ -96,6 +106,7 @@ class Resident(unittest.TestCase):
         self.assertEqual(p.returncode,code,p.stdout+'\n'+p.stderr)
         return json.loads(p.stdout)
     def replies(self,*messages):Endpoint.queues[self.key]=deque(messages)
+    def verdicts(self,*values):Endpoint.judges[self.key]=deque(values)
     def steers(self,gid):
         import sqlite3
         db=sqlite3.connect(self.home/'agent.sqlite3');db.row_factory=sqlite3.Row
@@ -453,6 +464,49 @@ class Resident(unittest.TestCase):
             self.assertTrue(any(e['kind']=='woke' and e['data']['early'] for e in rt.store.events()))
             self.assertEqual(rt.store.db.execute("SELECT count(*) FROM inbox WHERE goal=? AND text LIKE '[scheduled%'",(other,)).fetchone()[0],0)
         finally:rt.mail.close();rt.store.close()
+
+    def test_the_gate_and_the_judge_check_a_finish(self):
+        self.gates_on()
+        (self.home/'ok.flag').unlink(missing_ok=True)
+        self.verdicts(dict(verdict='not_yet',reason='no test output shows the fix'))
+        self.replies(call('define_done',dict(check='ok.flag exists',gate='test -f ok.flag')),
+                     call('verify',dict(evidence='I checked')),
+                     call('finish',dict(summary='Done.')),                     # the gate fails: no ok.flag
+                     call('terminal',dict(command='touch ok.flag')),
+                     call('verify',dict(evidence='ok.flag is there')),
+                     call('finish',dict(summary='Done.')),                     # the judge says not yet
+                     call('verify',dict(evidence='ls shows ok.flag')),
+                     call('finish',dict(summary='Done, with evidence.')))      # met
+        out=self.cmd('once',['--goal','Make ok.flag.'])
+        self.assertEqual(out['state'],'completed')
+        bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
+        self.assertTrue(any('the gate failed' in b for b in bodies),'the gate refused the first finish')
+        self.assertTrue(any('not done yet, by the evidence: no test output shows the fix' in b for b in bodies))
+        judged=[json.dumps(b) for k,b in Endpoint.judge_seen if k==self.key]
+        self.assertEqual(len(judged),2,'the judge ran for the two finishes past the gate')
+        self.assertNotIn('I checked',judged[0].split('THE AGENT SAYS')[0].split('EVIDENCE')[0],'the judge sees evidence, not reasoning')
+        store=Store(self.home)
+        try:self.assertEqual([e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged'],['not_yet','met'])
+        finally:store.close()
+
+    def test_an_impossible_verdict_pauses_the_goal_for_the_human(self):
+        self.gates_on()
+        self.verdicts(dict(verdict='impossible',reason='writing /etc needs root and none was approved'))
+        self.replies(call('define_done',dict(check='/etc/x exists')),call('verify',dict(evidence='tried')),call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal','Write /etc/x.'],code=22)
+        self.assertEqual(out['state'],'paused');self.assertIn('impossible',out['error'])
+        store=Store(self.home)
+        try:self.assertTrue(any(e['kind']=='report' and e['data']['level']=='need_you' for e in store.events(limit=500)))
+        finally:store.close()
+
+    def test_an_unreadable_judge_reply_does_not_trap_the_goal(self):
+        from caminus.env.resident import judge
+        self.assertIsNone(judge.verdict('looks fine to me'))
+        self.assertEqual(judge.verdict('sure: {"verdict": "met", "reason": "tests pass"}')['verdict'],'met')
+        self.gates_on()
+        self.verdicts('not json at all')
+        self.replies(call('define_done',dict(check='x')),call('verify',dict(evidence='y')),call('finish',dict(summary='Done.')))
+        self.assertEqual(self.cmd('once',['--goal','Anything.'])['state'],'completed')
 
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
