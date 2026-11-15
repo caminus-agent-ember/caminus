@@ -297,7 +297,9 @@ func (m *envModel) syncChat() {
 	if changed || m.chat.transcript.TotalLineCount() == 0 {
 		body := strings.TrimRight(m.chat.content, "\n")
 		if body == "" {
-			body = "Your agent's conversation and commands will stay here.\n\nType a goal below. /help shows the controls."
+			body = mascotBeside(0, "", envTitle.Render("CAMINUS")+envDim.Render(" env"),
+				"Your agent's conversation and commands will stay here.",
+				envDim.Render("Type a goal below. /help shows the controls."))
 		}
 		m.chat.transcript.SetContent(body)
 	}
