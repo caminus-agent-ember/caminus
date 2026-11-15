@@ -24,7 +24,7 @@ from .prompt import render as render_prompt
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -71,6 +71,12 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='mcp':
+            p.add_argument('action',nargs='?',default='list',choices=('list','add','remove','off','on'))
+            p.add_argument('server',nargs='?',help='the server name (letters, digits, - and _)')
+            p.add_argument('--env',action='append',default=[],help='KEY=VALUE for its environment (repeat)')
+            # (after --: the command that starts the server, e.g. -- npx -y @modelcontextprotocol/server-memory;
+            #  main() splits it off before parsing)
         if op=='advisor':
             p.add_argument('--model',help='the advisor model, e.g. claude-opus-5-5 or claude-sonnet-5-5')
             p.add_argument('--endpoint',help="Messages API root; the owner's own key relay keeps the advisor's key and cap separate")
@@ -166,7 +172,12 @@ def main(argv=None,stdin=None):
     if argv[:1]==['request']:
         payload=json.load(stdin or sys.stdin)
         return main(payload['args'],stdin=io.StringIO(payload.get('stdin','')))
+    cmdline=[]
+    if argv[:1]==['mcp'] and '--' in argv:
+        # an MCP server's own command line follows --; split it off before parsing, so flags like npx -y stay its own
+        cut=argv.index('--');argv,cmdline=argv[:cut],argv[cut+1:]
     a=parser().parse_args(argv)
+    if a.op=='mcp':a.cmdline=cmdline
     try:
         if getattr(a,'max_steps',None) is not None and a.max_steps<1 or getattr(a,'max_seconds',None) is not None and a.max_seconds<=0:
             raise ValueError('test budgets must be positive')
@@ -283,6 +294,36 @@ def main(argv=None,stdin=None):
             import datetime
             emit(dict(fallback={**FB,**fb} if fb else None,
                       today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,turns=0))),a.json)
+            return 0
+        if a.op=='mcp':
+            import re as _re
+            cfg=json.loads((home/'config.json').read_text())
+            servers=dict(cfg.get('mcp') or {})
+            if a.action!='list':
+                if not a.server or not _re.fullmatch(r'[A-Za-z0-9_-]{1,40}',a.server):
+                    raise ValueError('name the server: letters, digits, - and _ (at most 40)')
+                if a.action=='add':
+                    cmdline=a.cmdline
+                    if not cmdline:raise ValueError('mcp add SERVER -- COMMAND [ARGS...]: give the command after --')
+                    env={}
+                    for kv in a.env:
+                        k,sep,v=kv.partition('=')
+                        if not sep or not k:raise ValueError('--env takes KEY=VALUE')
+                        env[k]=v
+                    servers[a.server]=dict(command=cmdline[0],args=cmdline[1:],env=env,enabled=True)
+                elif a.server not in servers:
+                    raise ValueError('no MCP server named '+a.server)
+                elif a.action=='remove':
+                    servers.pop(a.server)
+                else:
+                    servers[a.server]['enabled']=a.action=='on'
+                if servers:cfg['mcp']=servers
+                else:cfg.pop('mcp',None)
+                atomic_json(home/'config.json',cfg)
+            # an env value can be a secret: show only its keys
+            emit(dict(mcp={n:dict(command=v['command'],args=v.get('args',[]),env=sorted(v.get('env') or {}),
+                                  enabled=v.get('enabled',True)) for n,v in servers.items()},
+                      note='restart the agent (stop, start) for a change to reach a running daemon'),a.json)
             return 0
         if a.op=='advisor':
             from .advisor import Advisor, DEFAULTS

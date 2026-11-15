@@ -549,6 +549,106 @@ class Resident(unittest.TestCase):
         try:self.assertEqual([e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged'],['met'])
         finally:store.close()
 
+    def test_web_search_through_ddgs_and_web_fetch_as_text(self):
+        from caminus.env.resident import web
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Look something up.')
+            rt.config['search_python']=str(self.home/'missing'/'python')
+            with unittest.mock.patch.object(Path,'home',return_value=self.home/'nohome'),unittest.mock.patch.object(web.sys,'executable',str(self.home/'nopython')):
+                with self.assertRaises(ValueError) as c:web.search(rt,'rdna3 wmma')
+            self.assertIn('ddgs is not installed',str(c.exception))
+            venv=self.home/'venv';subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True)
+            site=next(venv.glob('lib/python*/site-packages'));(site/'ddgs').mkdir()
+            (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        return [dict(title="RDNA3 ISA",href="https://example.org/isa",body="the guide for "+q)]*min(2,k["max_results"])\n')
+            rt.config['search_python']=str(venv/'bin'/'python')
+            out=web.search(rt,'rdna3 wmma',max_results=5)
+            self.assertEqual(out['results'][0],dict(title='RDNA3 ISA',url='https://example.org/isa',snippet='the guide for rdna3 wmma'))
+            with self.assertRaises(ValueError):web.search(rt,'x',timelimit='z')
+            class Resp:
+                status=200;headers={'Content-Type':'text/html; charset=utf-8'}
+                def __init__(self,body):self.body=body
+                def read(self,n):return self.body[:n]
+                def geturl(self):return 'https://example.org/page'
+                def __enter__(self):return self
+                def __exit__(self,*a):return False
+            page=b'<html><head><title>WMMA notes</title><script>evil()</script></head><body><h1>Tiles</h1><p>16x16 &amp; fp16.</p><p>'+b'x'*5000+b'</p></body></html>'
+            rt.web_opener=lambda req,timeout:Resp(page)
+            f=web.fetch(rt,'https://example.org/page',max_chars=1000)
+            self.assertEqual(f['title'],'WMMA notes');self.assertIn('Tiles',f['text']);self.assertIn('16x16 & fp16.',f['text'])
+            self.assertNotIn('evil',f['text']);self.assertIn('more characters',f['more'])
+            with self.assertRaises(ValueError):web.fetch(rt,'file:///etc/passwd')
+        finally:rt.mail.close();rt.store.close()
+
+    MCP_SERVER = r"""
+import json, sys
+modern = sys.argv[1] == 'modern'; ready = False
+def out(m): sys.stdout.write(json.dumps(m) + '\n'); sys.stdout.flush()
+for line in sys.stdin:
+    m = json.loads(line); mid = m.get('id'); meth = m.get('method'); params = m.get('params') or {}
+    if mid is None:
+        if meth == 'notifications/initialized': ready = True
+        continue
+    meta = params.get('_meta') or {}
+    if modern:
+        if meta.get('io.modelcontextprotocol/protocolVersion') != '2026-07-28' or 'io.modelcontextprotocol/clientCapabilities' not in meta:
+            out(dict(jsonrpc='2.0', id=mid, error=dict(code=-32602, message='missing _meta'))); continue
+        if meth == 'server/discover':
+            out(dict(jsonrpc='2.0', id=mid, result=dict(resultType='complete', supportedVersions=['2026-07-28']))); continue
+    else:
+        if meth == 'initialize':
+            out(dict(jsonrpc='2.0', id=mid, result=dict(protocolVersion='2025-11-25', capabilities=dict(tools={}), serverInfo=dict(name='legacy')))); continue
+        if not ready:
+            out(dict(jsonrpc='2.0', id=mid, error=dict(code=-32601, message='not initialized'))); continue
+    if meth == 'tools/list':
+        out(dict(jsonrpc='2.0', id=mid, result=dict(tools=[dict(name='shout', description='upper-case a word',
+            inputSchema=dict(type='object', properties=dict(word=dict(type='string')), required=['word']))])))
+    elif meth == 'tools/call':
+        w = params['arguments'].get('word', '')
+        if w == 'boom':
+            out(dict(jsonrpc='2.0', id=mid, result=dict(content=[dict(type='text', text='it broke')], isError=True)))
+        elif w == 'die':
+            sys.exit(3)
+        else:
+            out(dict(jsonrpc='2.0', id=mid, result=dict(content=[dict(type='text', text=w.upper())])))
+"""
+
+    def test_mcp_client_talks_to_modern_and_legacy_servers(self):
+        from caminus.env.resident import mcp as mcpmod
+        script=self.home/'fake_mcp.py';script.write_text(self.MCP_SERVER)
+        rt=Runtime(self.home)
+        try:
+            rt.config['mcp']={'new':dict(command=sys.executable,args=['-I',str(script),'modern']),
+                              'old':dict(command=sys.executable,args=['-I',str(script),'legacy'])}
+            m=mcpmod.MCP(rt)
+            names=[t['function']['name'] for t in m.tools()]
+            self.assertEqual(sorted(names),['mcp__new__shout','mcp__old__shout'])
+            self.assertEqual((m.servers['new'].era,m.servers['old'].era),('modern','legacy'))
+            self.assertEqual(m.call('mcp__new__shout',dict(word='hi'))['output'],'HI')
+            self.assertEqual(m.call('mcp__old__shout',dict(word='yo'))['output'],'YO')
+            self.assertIn('reported an error: it broke',m.call('mcp__new__shout',dict(word='boom'))['error'])
+            with self.assertRaises(Exception):m.call('mcp__old__shout',dict(word='die'))
+            self.assertEqual(m.call('mcp__old__shout',dict(word='back'))['output'],'BACK','a dead server is restarted')
+            m.stop()
+        finally:rt.mail.close();rt.store.close()
+
+    def test_mcp_tools_reach_the_model_and_run_through_the_loop(self):
+        script=self.home/'fake_mcp.py';script.write_text(self.MCP_SERVER)
+        self.cmd('mcp',['add','echo','--env','TOKEN=secret','--',sys.executable,'-I',str(script),'legacy'])
+        listed=self.cmd('mcp')['mcp']['echo']
+        self.assertEqual(listed['env'],['TOKEN'],'env values (secrets) are never printed')
+        self.assertEqual(listed['args'],['-I',str(script),'legacy'],'arguments that start with - are kept')
+        self.replies(call('mcp__echo__shout',dict(word='hello')),call('finish',dict(summary='Shouted.')))
+        out=self.cmd('once',['--goal','Use the echo server.'])
+        self.assertEqual(out['state'],'completed')
+        first=[b for k,b in Endpoint.seen if k==self.key][0]
+        self.assertIn('mcp__echo__shout',[t['function']['name'] for t in first['tools']])
+        store=Store(self.home)
+        try:self.assertTrue(any(e['kind']=='tool_result' and e['data']['result'].get('output')=='HELLO' for e in store.events(limit=500)))
+        finally:store.close()
+        self.cmd('mcp',['remove','echo'])
+        self.assertEqual(self.cmd('mcp')['mcp'],{})
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)
@@ -992,17 +1092,23 @@ class Resident(unittest.TestCase):
                 rt._bridge(dict(name='ask_user',goal=gid,id='p'*32,bridge_id=None),dict(question='And another?'))
         finally:rt.mail.close();rt.store.close()
 
-    def test_free_time_keeps_its_own_window_and_recaps_for_the_return(self):
-        rt=self.free_runtime(context_tokens=60000)
+    def test_free_time_uses_the_full_window_and_recaps_for_the_return(self):
+        rt=self.free_runtime()
         try:
             work=rt.store.enqueue('Earlier work.');rt.store.update(work,state='completed')
             self.assertEqual(rt.free.window(work,1048574),1048574,'work keeps the whole window')
             gid=rt.free.pulse()
-            self.assertEqual(rt.free.window(gid,1048574),60000,'a stretch stays inside the server side slot')
+            self.assertEqual(rt.free.window(gid,1048574),1048574,'free time has the full window (the server snapshots the conversation)')
+
             rt._finish(gid,'Read about tide pools; sketched one in the studio.')
             text=self.cmd('heartbeat',['recap'])['recap']
             self.assertIn('While you were away (1 stretch)',text);self.assertIn('tide pools',text)
         finally:rt.mail.close();rt.store.close()
+        capped=self.free_runtime(context_tokens=60000)
+        try:
+            g=capped.store.enqueue('A capped stretch.',kind='free')
+            self.assertEqual(capped.free.window(g,1048574),60000,'context_tokens can still cap free time')
+        finally:capped.mail.close();capped.store.close()
 
     # ---- advisor ----------------------------------------------------------------------------------------------
 
