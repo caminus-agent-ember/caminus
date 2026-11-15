@@ -2707,6 +2707,21 @@ for line in sys.stdin:
         self.assertEqual(goals[plain['id']]['plan'],0)
         self.assertEqual(goals[g['id']]['plan'],1)
 
+    def test_unsend_pulls_back_undelivered_messages_only(self):
+        gid=self.cmd('send',['goal'])['id']
+        self.cmd('send',['ZZONE one','--goal-id',gid])
+        self.cmd('send',['ZZTWO two','--goal-id',gid])
+        self.assertEqual(self.cmd('unsend',[gid]),dict(goal=gid,text='ZZTWO two'))
+        self.assertIn('message_withdrawn',[e['kind'] for e in self.cmd('events')])
+        # delivered rows stay delivered: a turn that read the inbox cannot be pulled back
+        self.replies(dict(role='assistant',content='noted'))
+        self.cmd('once',['--goal-id',gid])            # drains the older row and finishes (fixture gates off)
+        self.assertEqual(self.cmd('unsend',[gid]),dict(goal=gid,text=None))
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('ZZONE one',body)
+        self.assertNotIn('ZZTWO',body)                # the withdrawn text never reached a turn
+        self.cmd('unsend',['missing-goal'],code=1)
+
     def test_the_goal_queue_lists_moves_and_removes_queued_goals(self):
         a=self.cmd('send',['first'])['id']
         b=self.cmd('send',['second'])['id']

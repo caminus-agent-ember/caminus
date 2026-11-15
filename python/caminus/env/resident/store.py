@@ -330,6 +330,19 @@ class Store:
     def settle_request(self, rid, state, error=''):
         self.db.execute('UPDATE requests SET state=?, error=?, updated=? WHERE id=?', (state, error, time.time(), rid))
 
+    def unsend(self, prefix):
+        """Pull back the newest inbox row the goal has not read yet (the up-arrow on an empty composer):
+        remove it and return its text, or None when there is nothing to withdraw."""
+        with self.transaction():
+            gid = self.resolve(prefix)
+            row = self.db.execute('SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id DESC LIMIT 1',
+                                  (gid,)).fetchone()
+            if row is None:
+                return gid, None
+            self.db.execute('DELETE FROM inbox WHERE id=?', (row['id'],))
+            self.event('message_withdrawn', dict(text=row['text']), gid)
+            return gid, row['text']
+
     def resolve(self, prefix):
         """A goal by exact id or unambiguous prefix, so a person can type the eight characters a UI shows."""
         row = self.db.execute('SELECT id FROM goals WHERE id=?', (prefix,)).fetchone()
