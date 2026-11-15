@@ -55,6 +55,8 @@ func questionResponse(t *testing.T, m envModel, id string) map[string]any {
 
 func TestInlineQuestionSelectorAnswersOnlyAfterEnter(t *testing.T) {
 	m := questionFixture(t, []string{"Inspect read-only", "Ask for the required root command"})
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyF2})
+	m = next.(envModel)
 	view := ansi.Strip(m.render())
 	for _, want := range []string{"YOUR ANSWER", "↑/↓ select · Enter answer", "Inspect read-only", "Write your own answer"} {
 		if !strings.Contains(view, want) {
@@ -64,7 +66,7 @@ func TestInlineQuestionSelectorAnswersOnlyAfterEnter(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(m.bridge, "res", "question-a.json")); !os.IsNotExist(err) {
 		t.Fatal("rendering submitted a response")
 	}
-	next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(envModel)
 	if m.chat.questionChoice != 1 {
 		t.Fatal("Down did not select the next choice")
@@ -82,7 +84,9 @@ func TestInlineQuestionSelectorAnswersOnlyAfterEnter(t *testing.T) {
 
 func TestInlineCustomAnswerPreservesUnicodeAndRequiresText(t *testing.T) {
 	m := questionFixture(t, []string{"First", "Second"})
-	next, _ := m.questionKey(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyF2})
+	m = next.(envModel)
+	next, _ = m.questionKey(tea.KeyPressMsg{Code: 'e', Text: "e"})
 	m = next.(envModel)
 	next, cmd := m.questionKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(envModel)
@@ -152,6 +156,7 @@ func TestQuestionFrameFitsLongChoicesAndCustomInput(t *testing.T) {
 	for _, size := range [][2]int{{40, 18}, {80, 24}, {140, 40}} {
 		m := questionFixture(t, []string{strings.Repeat("Long first choice ", 8), strings.Repeat("Second choice ", 10)})
 		m.width, m.height = size[0], size[1]
+		m.chat.questionArmed = true
 		for _, custom := range []bool{false, true} {
 			m.chat.questionCustom = custom
 			frame := m.render()
@@ -169,13 +174,37 @@ func TestQuestionFrameFitsLongChoicesAndCustomInput(t *testing.T) {
 
 func TestQuestionArrivalDoesNotTurnDraftSubmissionIntoAnAnswer(t *testing.T) {
 	m := questionFixture(t, []string{"First", "Second"})
-	next, cmd := m.questionKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	for _, r := range "jk2e" {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(envModel)
+	}
+	next, _ := m.chatUpdate(tea.PasteMsg{Content: " pasted"})
+	m = next.(envModel)
+	if m.chat.compose.Value() != "keep this steering draftjk2e pasted" || m.chat.questionArmed {
+		t.Fatal("ordinary draft input activated or entered the picker")
+	}
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(envModel)
 	if cmd != nil || m.chat.question == nil {
 		t.Fatal("question arrival captured a draft Enter as consent")
 	}
 	if _, err := os.Stat(filepath.Join(m.bridge, "res", "question-a.json")); !os.IsNotExist(err) {
 		t.Fatal("draft Enter submitted an answer")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyF2})
+	m = next.(envModel)
+	if !m.chat.questionArmed {
+		t.Fatal("F2 did not explicitly activate the picker")
+	}
+}
+
+func TestQuestionWithoutDraftOpensPickerDirectly(t *testing.T) {
+	m := questionFixture(t, []string{"First", "Second"})
+	m.chat.question = nil
+	m.chat.compose.Reset()
+	m.syncQuestion()
+	if !m.chat.questionArmed || !strings.Contains(ansi.Strip(m.render()), "YOUR ANSWER") {
+		t.Fatal("empty composer should show the inline picker immediately")
 	}
 }
 

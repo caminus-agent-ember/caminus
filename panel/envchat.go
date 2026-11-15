@@ -254,11 +254,14 @@ func shortGoal(id string) string {
 }
 
 func (m envModel) chatComposer() string {
-	if m.chat.question != nil {
+	if m.chat.question != nil && m.chat.questionArmed {
 		return m.questionBox()
 	}
 	label := "New goal"
-	if !m.chat.newGoal {
+	if m.chat.question != nil && !m.chat.questionArmed {
+		label = "Question waiting · F2 to answer · your draft is preserved"
+	}
+	if !m.chat.newGoal && m.chat.question == nil {
 		label = "Steer goal " + shortGoal(m.chat.target)
 		if g := m.selectedResidentGoal(); g != nil && g.ID == m.chat.target && g.State == "completed" {
 			label = "Continue conversation · " + shortGoal(m.chat.target)
@@ -326,7 +329,7 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	if _, ok := msg.(tea.MouseWheelMsg); ok {
 		m.chat.transcript, cmd = m.chat.transcript.Update(msg)
-	} else if m.chat.question != nil {
+	} else if m.chat.question != nil && m.chat.questionArmed {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
@@ -341,6 +344,10 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.chat.question != nil {
 		return m.questionKey(msg)
 	}
+	return m.chatDraftKey(msg)
+}
+
+func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	switch k {
 	case "ctrl+c":

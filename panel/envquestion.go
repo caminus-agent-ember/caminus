@@ -50,8 +50,10 @@ func (m *envModel) syncQuestion() {
 		m.chat.questionInput.SetHeight(3)
 		m.chat.questionCustom = len(r.Choices) == 0
 		m.chat.questionArmed = m.chat.compose.Value() == ""
-		m.chat.compose.Blur()
-		if m.chat.questionCustom {
+		if m.chat.questionArmed {
+			m.chat.compose.Blur()
+		}
+		if m.chat.questionCustom && m.chat.questionArmed {
 			m.chat.questionInput.Focus()
 		}
 		return
@@ -112,6 +114,24 @@ func (m envModel) questionBox() string {
 
 func (m envModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	if !m.chat.questionArmed {
+		switch k {
+		case "f2":
+			m.chat.questionArmed = true
+			m.chat.compose.Blur()
+			if m.chat.questionCustom {
+				return m, m.chat.questionInput.Focus()
+			}
+			return m, nil
+		case "enter":
+			m.msg = "Question waiting. F2 answers it; your steering draft is preserved."
+			return m, nil
+		case "esc":
+			return m.deferQuestion()
+		default:
+			return m.chatDraftKey(msg)
+		}
+	}
 	switch k {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -131,11 +151,7 @@ func (m envModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.chat.questionCustom = false
 			return m, nil
 		}
-		m.chat.questionDeferred = m.chat.question.ID
-		m.chat.question = nil
-		m.chat.questionError = ""
-		m.msg = "Question deferred; /requests answers it. Steering does not answer a pending question."
-		return m, m.chat.compose.Focus()
+		return m.deferQuestion()
 	}
 	if m.chat.questionCustom {
 		switch k {
@@ -162,11 +178,6 @@ func (m envModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.questionCustom = true
 		return m, m.chat.questionInput.Focus()
 	case "enter":
-		if !m.chat.questionArmed {
-			m.chat.questionArmed = true
-			m.msg = "Steering draft kept. Select a choice, then press Enter to answer."
-			return m, nil
-		}
 		if m.chat.questionChoice == len(m.chat.question.Choices) {
 			m.chat.questionCustom = true
 			return m, m.chat.questionInput.Focus()
@@ -180,10 +191,15 @@ func (m envModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	if k == "up" || k == "down" || k == "j" || k == "k" || k == "home" || k == "end" || len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
-		m.chat.questionArmed = true
-	}
 	return m, nil
+}
+
+func (m envModel) deferQuestion() (tea.Model, tea.Cmd) {
+	m.chat.questionDeferred = m.chat.question.ID
+	m.chat.question = nil
+	m.chat.questionError = ""
+	m.msg = "Question deferred; /requests answers it. Steering does not answer a pending question."
+	return m, m.chat.compose.Focus()
 }
 
 func (m envModel) answerQuestion(answer string) (tea.Model, tea.Cmd) {

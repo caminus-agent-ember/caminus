@@ -87,8 +87,9 @@ number keys highlight a choice without submitting it. Select "Write your own
 answer" or press `e` for a Unicode multiline answer. Questions without choices
 open that text field directly. Escape returns from custom editing to the choices,
 or defers the question and restores the untouched steering draft. A question
-arriving over a draft cannot turn that draft's Enter into an answer: select or
-confirm the new input first. Deferred questions remain available in `/requests`.
+arriving over a draft keeps the textbox active and requires **F2** to take over
+the question. Ordinary letters, numbers, paste, cursor movement and Enter cannot
+become an answer in that state. Deferred questions remain available in `/requests`.
 Refreshing never redirects a selected answer to another request; changed,
 withdrawn or already-answered requests require another review. Root requests
 always retain their explicit approval flow in `/requests`.
