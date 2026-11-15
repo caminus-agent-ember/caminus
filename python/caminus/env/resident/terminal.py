@@ -128,6 +128,8 @@ def worker_env(home):
         name = 'CAMINUS_AGENT_API_KEY'
     for var in {name, 'CAMINUS_AGENT_API_KEY', 'ANTHROPIC_API_KEY'}:
         env.pop(var, None)
+    # Commands here must never block on a pager: nothing waits for a keypress.
+    env.update(PAGER='cat', GIT_PAGER='cat', MANPAGER='cat')
     return env
 
 
@@ -156,7 +158,7 @@ class Terminal:
         job = self.jobs / session
         if args.get('command'):
             if args.get('session'):
-                raise ValueError('use stdin to send commands to an existing terminal')
+                raise ValueError('use stdin to send commands to an existing terminal; to wait for more output from a running session, call terminal with only session (no command) and optionally yield_ms (default 1000, max 10000)')
             cwd = Path(args.get('cwd') or self.home).expanduser().resolve()
             if not cwd.is_dir():
                 raise ValueError('cwd is not a directory')

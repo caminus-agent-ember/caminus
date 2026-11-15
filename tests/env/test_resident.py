@@ -27,7 +27,7 @@ from caminus.env.resident.mail import Mail
 from caminus.env.resident import approval
 from caminus.env import bridge as human_bridge
 
-ap=argparse.ArgumentParser();ap.add_argument('--scratch',required=True);A=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument('--scratch',required=True);ap.add_argument('-k',action='append',default=[],metavar='PATTERN');A=ap.parse_args()
 S=Path(A.scratch).resolve();S.mkdir(parents=True,exist_ok=True)
 BOOT="import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"
 
@@ -1417,7 +1417,23 @@ class WorkerEnv(unittest.TestCase):
         env=worker_env(home)
         self.assertNotIn('MY_PROVIDER_KEY',env);self.assertIn('PATH',env)
 
+    def test_pagers_disabled(self):
+        from caminus.env.resident.terminal import worker_env
+        env=worker_env(S/('env-'+uuid.uuid4().hex))
+        for var in ('PAGER','GIT_PAGER','MANPAGER'): self.assertEqual(env.get(var),'cat',var)
 
-result=unittest.main(argv=[sys.argv[0]],exit=False).result
+    def test_poll_hint_in_refusal(self):
+        from caminus.env.resident.terminal import Terminal
+        home=S/('term-'+uuid.uuid4().hex);home.mkdir(parents=True);term=Terminal(home)
+        session='ab'*16
+        with self.assertRaises(ValueError) as cm: term.call(session,dict(session=session,command='true'))
+        msg=str(cm.exception)
+        self.assertIn('use stdin to send commands to an existing terminal',msg)
+        self.assertIn('only session (no command)',msg);self.assertIn('yield_ms',msg)
+        desc=[t for t in TOOLS if t['function']['name']=='terminal'][0]['function']['description']
+        self.assertIn('yield_ms',desc);self.assertIn('only its session id',desc)
+
+
+result=unittest.main(argv=[sys.argv[0]]+[x for pat in A.k for x in ('-k',pat)],exit=False).result
 print('RESULT','PASS' if result.wasSuccessful() else 'FAIL')
 raise SystemExit(not result.wasSuccessful())
