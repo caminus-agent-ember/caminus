@@ -94,7 +94,7 @@ func (m *envModel) receiveResident(msg residentMsg) {
 
 func (m *envModel) targetSelectedGoal() {
 	g := m.selectedResidentGoal()
-	m.chat.newGoal = g == nil || g.State == "completed" || g.State == "cancelled"
+	m.chat.newGoal = g == nil || g.State == "cancelled"
 	m.chat.target = ""
 	if !m.chat.newGoal {
 		m.chat.target = g.ID
@@ -234,6 +234,9 @@ func (m envModel) chatComposer() string {
 	label := "New goal"
 	if !m.chat.newGoal {
 		label = "Steer goal " + shortGoal(m.chat.target)
+		if g := m.selectedResidentGoal(); g != nil && g.ID == m.chat.target && g.State == "completed" {
+			label = "Continue conversation · " + shortGoal(m.chat.target)
+		}
 	}
 	if m.chat.sending {
 		label = "Sending…"
@@ -386,7 +389,7 @@ func (m envModel) submitCompose() (tea.Model, tea.Cmd) {
 func (m envModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 	args := []string{"send", m.agentName, "--stdin", "--json"}
 	if !m.chat.newGoal {
-		args = append(args, "--goal-id", m.chat.target)
+		args = append(args, "--goal-id", m.chat.target, "--continue")
 	}
 	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true

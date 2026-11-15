@@ -150,6 +150,20 @@ class Resident(unittest.TestCase):
         self.assertEqual(subprocess.run(args,capture_output=True,text=True,timeout=15).returncode,1)
         self.assertIn('Source-only memory.',self.cmd('memory')['memory'])
 
+    def test_explicit_followup_continues_completed_conversation(self):
+        self.replies(call('finish',dict(summary='Earlier observation: copper.')))
+        first=self.cmd('once',['--goal','Inspect the inventory.'])
+        self.cmd('send',['--goal-id',first['id'],'--continue','--stdin'],stdin='Explain your earlier observation.')
+        status=self.cmd('status')
+        self.assertEqual(len(status['goals']),1)
+        self.assertEqual(status['goals'][0]['state'],'working')
+        self.replies(call('finish',dict(summary='Explained copper.')))
+        self.cmd('once',['--goal-id',first['id']])
+        request=[v for k,v in Endpoint.seen if k==self.key][-1]
+        transcript=json.dumps(request['messages'])
+        self.assertIn('Earlier observation: copper.',transcript)
+        self.assertIn('Explain your earlier observation.',transcript)
+
     def test_inflight_steering_is_observed_before_either_completion_path(self):
         for finish_tool in (False,True):
             class Model:

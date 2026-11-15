@@ -43,8 +43,9 @@ current model/context/compaction settings; it is read-only.
 Inside a conversation, a fixed multiline textbox stays below a scrollable
 transcript. Ordinary typing goes into that textbox. Enter sends; Alt+Enter or
 Shift+Enter inserts a newline; bracketed paste preserves Unicode and multiple
-lines. Text steers the selected unfinished goal, or creates a new goal when
-there is no unfinished target. `/new [goal]` explicitly starts another goal.
+lines. Text steers the selected working goal. After completion, the next message
+explicitly continues that same conversation with its previous context. A cancelled
+goal starts fresh; `/new [goal]` explicitly starts another goal.
 A refresh never redirects a draft. Failed delivery retains its text.
 
 The transcript retains earlier goals, messages, commands and results. It loads
@@ -74,8 +75,10 @@ Most controls use slash commands:
 Requests retain their review controls: `a` answers/approves, `e` edits a root
 command, `d` denies. Root execution hands the actual terminal to the human for
 sudo. Steering does not approve root, answer a pending question or resume a
-paused goal. Accepted in-flight steering is observed before completion; a send
-that loses the race to a finished/cancelled goal is rejected. `env run`, jobs,
+paused goal. Accepted in-flight steering is observed before completion; ordinary CLI steering to a
+finished/cancelled goal is rejected. The conversation UI explicitly uses
+`send --goal-id ID --continue` for completed-goal follow-ups; cancelled goals
+cannot be reopened this way. `env run`, jobs,
 sessions and all previous scriptable CLI flows remain available.
 
 The daemon polls without inference while idle or waiting for human answers.

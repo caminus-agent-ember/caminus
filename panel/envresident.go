@@ -61,15 +61,15 @@ func residentRefresh(m envModel) tea.Cmd {
 	}
 	return func() tea.Msg {
 		if len(m.cli) == 0 {
-			return residentMsg{agent: name, err: "resident controls need the caminus CLI (--cli)"}
+			return residentMsg{agent: name, epoch: epoch, err: "resident controls need the caminus CLI (--cli)"}
 		}
 		out, err := residentCommand(m, []string{"status", name, "--json"}, "").CombinedOutput()
 		if err != nil {
-			return residentMsg{agent: name, err: strings.TrimSpace(string(out))}
+			return residentMsg{agent: name, epoch: epoch, err: strings.TrimSpace(string(out))}
 		}
 		var status residentStatus
 		if err = json.Unmarshal(out, &status); err != nil {
-			return residentMsg{agent: name, err: err.Error()}
+			return residentMsg{agent: name, epoch: epoch, err: err.Error()}
 		}
 		var events []residentEvent
 		// Catch up from the durable cursor, including history predating launch.
@@ -78,11 +78,11 @@ func residentRefresh(m envModel) tea.Cmd {
 		for page := 0; page < 4 && after < status.LastEvent; page++ {
 			out, err = residentCommand(m, []string{"events", name, "--after", fmt.Sprint(after), "--json"}, "").CombinedOutput()
 			if err != nil {
-				return residentMsg{agent: name, err: strings.TrimSpace(string(out))}
+				return residentMsg{agent: name, epoch: epoch, err: strings.TrimSpace(string(out))}
 			}
 			var batch []residentEvent
 			if err = json.Unmarshal(out, &batch); err != nil {
-				return residentMsg{agent: name, err: err.Error()}
+				return residentMsg{agent: name, epoch: epoch, err: err.Error()}
 			}
 			if len(batch) == 0 {
 				break

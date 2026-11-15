@@ -58,6 +58,8 @@ def parser():
             p.add_argument('--goal')
             p.add_argument('--stdin',action='store_true',help='read goal text from stdin')
             p.add_argument('--goal-id',help='resume an existing goal, or send it a steering message')
+        if op=='send':
+            p.add_argument('--continue',dest='continue_goal',action='store_true',help='allow an explicit follow-up to a completed goal, preserving its conversation')
         if op in ('once','resume'):
             p.add_argument('--max-steps',type=int,help='optional test budget; production daemon has no step limit')
             p.add_argument('--max-seconds',type=float,help='optional test budget, retained in the goal checkpoint')
@@ -206,8 +208,12 @@ def main(argv=None,stdin=None):
             if a.op=='send' and a.goal_id:
                 if not text:raise ValueError('steering text is required')
                 with store.transaction():
-                    if store.goal(a.goal_id)['state'] in ('completed','cancelled'):
+                    state=store.goal(a.goal_id)['state']
+                    if state=='cancelled' or state=='completed' and not a.continue_goal:
                         raise ValueError('goal finished; submit a new goal instead of steering it')
+                    if state=='completed':
+                        store.update(a.goal_id,state='working',summary='',error='',deadline=None,step_limit=None)
+                        store.event('goal_continued',{},a.goal_id)
                     store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(a.goal_id,text))
                     store.event('user_message',dict(text=text),a.goal_id)
                 emit(dict(id=a.goal_id,queued=True),a.json);store.close();return 0
