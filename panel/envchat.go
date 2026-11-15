@@ -23,6 +23,7 @@ import (
 // append events; they never replace the transcript or steal an unfinished draft.
 type residentChat struct {
 	ready, sending, newGoal, help, forceNew bool
+	expanded                                bool // Ctrl+E: every card open (tool calls, output, thinking)
 	compose                                 textarea.Model
 	transcript                              viewport.Model
 	target, selectID                        string
@@ -225,7 +226,7 @@ func (m *envModel) syncChat() {
 	changed := m.chat.rendered != len(m.residentEvents)
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		if block := m.chat.eventBlock(e); block != "" {
-			m.chat.content += ansi.Hardwrap(eventCard(block), w, true) + "\n\n"
+			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
@@ -356,29 +357,56 @@ func fenced(text, language string) string {
 	return fence + language + "\n" + text + "\n" + fence
 }
 
+// eventBlock draws one durable event in the shell's style (shell.go): the human's words and the agent's replies as
+// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+E expands them all), root
+// requests as the inline approval card. The result is final: syncChat caches it and never draws it again.
 func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
-	heading := func(label string, c color.Color) string {
-		return bold(c).Render(label)
+	w := max(20, c.renderWidth)
+	turn := func(mark, label string, col color.Color, body string) string {
+		return eventCard(bold(col).Render(mark+" "+label) + "\n" + body)
+	}
+	firstLine := func(s string) string {
+		s = strings.TrimSpace(residentText(s))
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[:i] + " …"
+		}
+		return s
+	}
+	lines := func(s string, limit int) []string {
+		all := strings.Split(strings.TrimRight(strings.ReplaceAll(residentText(s), "\r\n", "\n"), "\n"), "\n")
+		if len(all) > limit {
+			all = append([]string{fmt.Sprintf("… %d earlier lines", len(all)-limit)}, all[len(all)-limit:]...)
+		}
+		return all
 	}
 	switch e.Kind {
 	case "goal_queued":
-		return heading("YOU · goal "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(str("prompt"))
+		label := "you · goal " + shortGoal(e.Goal)
+		if k, _ := e.Data["kind"].(string); k == "free" || k == "dream" {
+			label = "free time · " + k // the resident's own hours: the invitation, not the human's words
+			return toolCard(k, "stretch "+shortGoal(e.Goal)+" started", "", true, c.expanded, lines(str("prompt"), 30), w)
+		}
+		return turn(g.user, label, cBlue, c.renderMarkdown(str("prompt")))
 	case "user_message", "peer_message":
 		text := str("text")
 		if text == "" {
 			return ""
 		}
-		return heading("YOU · steer "+shortGoal(e.Goal), cBlue) + "\n" + c.renderMarkdown(text)
+		return turn(g.user, "you · steer "+shortGoal(e.Goal), cBlue, c.renderMarkdown(text))
 	case "assistant":
 		var parts []string
 		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
 		// sent back to the model, so this block is display only.
 		if text := str("reasoning"); text != "" {
-			parts = append(parts, heading("THINKING", cMuted)+"\n"+c.renderMarkdown(text))
+			if c.expanded {
+				parts = append(parts, eventCard(envThink.Render(g.expanded+" thinking")+"\n"+envThink.Render(c.renderMarkdown(text))))
+			} else {
+				parts = append(parts, envDim.Render(g.collapsed+" thinking · "+fmt.Sprintf("%d lines", strings.Count(text, "\n")+1)))
+			}
 		}
 		if text := str("content"); text != "" {
-			parts = append(parts, heading("AGENT", cGreen)+"\n"+c.renderMarkdown(text))
+			parts = append(parts, turn(g.agent, "agent", cGreen, c.renderMarkdown(text)))
 		}
 		calls, _ := e.Data["tool_calls"].([]any)
 		for _, raw := range calls {
@@ -392,19 +420,26 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
-				parts = append(parts, heading("RUN · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(command, "bash")))
-			} else {
-				var pretty any
-				text := rawArgs
-				if json.Unmarshal([]byte(rawArgs), &pretty) == nil {
-					if b, err := json.MarshalIndent(pretty, "", "  "); err == nil {
-						text = string(b)
-					}
-				}
-				parts = append(parts, heading("TOOL · "+residentText(name), cOrange)+"\n"+c.renderMarkdown(fenced(text, "json")))
+				parts = append(parts, toolCard("terminal", firstLine(command), "", true, c.expanded, lines(command, 40), w))
+				continue
 			}
+			summary := ""
+			for _, key := range []string{"path", "question", "summary", "check", "evidence", "label", "id", "topic", "to"} {
+				if v, ok := args[key].(string); ok && v != "" {
+					summary = firstLine(v)
+					break
+				}
+			}
+			var pretty any
+			text := rawArgs
+			if json.Unmarshal([]byte(rawArgs), &pretty) == nil {
+				if b, err := json.MarshalIndent(pretty, "", "  "); err == nil {
+					text = string(b)
+				}
+			}
+			parts = append(parts, toolCard(residentText(name), summary, "", true, c.expanded, lines(text, 40), w))
 		}
-		return strings.Join(parts, "\n\n")
+		return strings.Join(parts, "\n")
 	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
 		if str("name") == "ask_user" {
@@ -412,40 +447,50 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if answer == "" {
 				answer, _ = result["decision"].(string)
 			}
-			return heading("YOU · answer", cBlue) + "\n" + c.renderMarkdown(answer)
-		}
-		if output, ok := result["output"].(string); ok && output != "" {
-			return heading("OUTPUT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(strings.ReplaceAll(output, "\r\n", "\n"), "text"))
+			return turn(g.user, "you · answer", cBlue, c.renderMarkdown(answer))
 		}
 		if err, ok := result["error"].(string); ok {
-			return heading("TOOL ERROR", cRed) + "\n" + c.renderMarkdown(fenced(err, "text"))
+			// a failed call stays open: the reason is what the reader needs
+			return toolCard("error", residentText(str("name")), firstLine(err), false, true, lines(err, 12), w)
+		}
+		if output, ok := result["output"].(string); ok {
+			meta := fmt.Sprintf("%d lines", strings.Count(strings.TrimRight(output, "\n"), "\n")+1)
+			if code, ok := result["exit_code"].(float64); ok {
+				meta = fmt.Sprintf("exit %d · ", int(code)) + meta
+			} else if running, _ := result["running"].(bool); running {
+				meta = "running · " + meta
+			}
+			if strings.TrimSpace(output) == "" {
+				meta = strings.TrimSuffix(meta, " · 1 lines") + " · no output"
+			}
+			code, _ := result["exit_code"].(float64)
+			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
 		}
 		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
-			return heading("RESULT · "+residentText(str("name")), cMuted) + "\n" + c.renderMarkdown(fenced(string(b), "json"))
+			return toolCard("result", residentText(str("name")), "", true, c.expanded, lines(string(b), 30), w)
 		}
 	case "finished":
-		return heading("FINISHED", cGreen) + "\n" + c.renderMarkdown(str("summary"))
-	case "question", "approval_requested":
-		text := str("text")
-		label := "QUESTION"
-		if e.Kind == "approval_requested" {
-			text = str("reason") + "\n" + fenced(str("cmd"), "bash")
-			label = "ROOT REVIEW · /requests"
-		}
-		return heading(label, cYellow) + "\n" + c.renderMarkdown(text)
+		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
+	case "approval_requested":
+		return approvalCardKeys("root", residentText(str("cmd")), residentText(str("reason")), false, w)
+	case "question":
+		return turn("?", "question", cYellow, c.renderMarkdown(str("text")))
 	case "compacted":
-		return heading("CONTEXT COMPACTED · conversation remains in this transcript", cYellow)
+		return toolCard("note", "context compacted", "the whole conversation stays in this transcript", true, false, nil, w)
 	case "cancelled":
-		return heading("GOAL CANCELLED · "+shortGoal(e.Goal), cYellow)
-	case "model_unavailable", "model_truncated", "context_refused":
-		text := str("error")
+		return toolCard("note", "goal "+shortGoal(e.Goal)+" cancelled", "", true, false, nil, w)
+	case "model_unavailable", "model_truncated", "context_refused", "model_refused", "model_gave_up":
+		text := residentText(str("error"))
+		body := lines(text, 12)
 		if partial, ok := e.Data["partial"].(map[string]any); ok {
 			if content, _ := partial["content"].(string); content != "" {
-				// Show what the model produced before it stopped, then why it stopped.
-				text = c.renderMarkdown(content) + "\n" + envDim.Render(residentText(text))
+				// what the model produced before it stopped, then why it stopped
+				body = append(lines(content, 20), "", text)
 			}
 		}
-		return heading(residentText(e.Kind), cRed) + "\n" + text
+		return toolCard("error", strings.ReplaceAll(e.Kind, "_", " "), firstLine(text), false, true, body, w)
+	case "brain":
+		return toolCard("note", "now answering: "+residentText(str("model")), str("brain"), true, false, nil, w)
 	}
 	return ""
 }
@@ -710,6 +755,13 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false // follow the live tail again too
+		return m, nil
+	case "ctrl+e":
+		// open or fold every card; drawn blocks are final, so the transcript is drawn again once
+		m.chat.expanded = !m.chat.expanded
+		m.chat.content, m.chat.rendered = "", 0
+		m.msg = map[bool]string{true: "cards open · Ctrl+E folds", false: "cards folded · Ctrl+E opens"}[m.chat.expanded]
+		m.syncChat()
 		return m, nil
 	case "ctrl+t":
 		// Hold the live window where it is while the reply keeps arriving.

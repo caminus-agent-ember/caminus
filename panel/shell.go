@@ -167,12 +167,24 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		if !ok {
 			icon, st = g.fail, envCtxHot
 		}
+	case "error":
+		icon, st = g.fail, envCtxHot
+	case "output", "result":
+		icon, st = "", envDim
+		if !ok {
+			icon, st = g.fail, envWarn
+		}
+	case "note":
+		icon, st = g.idle, envDim
+	case "free", "dream":
+		icon, st = g.done, envCtxOK
 	}
+	label := strings.TrimSpace(icon + " " + kind)
 	fold := g.collapsed
 	if expanded {
 		fold = g.expanded
 	}
-	line := envDim.Render(fold) + " " + st.Render(icon+" "+kind) + "  " + lipgloss.NewStyle().Foreground(cText).Render(what)
+	line := envDim.Render(fold) + " " + st.Render(label) + "  " + lipgloss.NewStyle().Foreground(cText).Render(what)
 	if meta != "" {
 		line += envDim.Render("  ·  " + meta)
 	}
@@ -190,21 +202,33 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		case strings.HasPrefix(b, "-"):
 			st = envCtxHot
 		}
-		out = append(out, "   "+rule+st.Render(ansi.Truncate(b, max(4, w-6), "…")))
+		// an open card shows everything: long lines wrap under the rule, nothing is cut
+		for _, piece := range strings.Split(ansi.Hardwrap(b, max(4, w-6), true), "\n") {
+			out = append(out, "   "+rule+st.Render(piece))
+		}
 	}
 	return strings.Join(out, "\n")
 }
 
 // approvalCard: a root request or a question, inline where the human is already looking.
 func approvalCard(kind, cmd, why string, w int) string {
+	return approvalCardKeys(kind, cmd, why, true, w)
+}
+
+// approvalCardKeys draws the card; inline false says where to decide instead of offering keys the view does not
+// handle yet (the chat decides root requests in /requests until its own keys are wired).
+func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	title := g.root + " ROOT"
 	if kind == "question" {
 		title = "? QUESTION"
 	}
-	inner := lipgloss.NewStyle().Foreground(cText).Bold(true).Render(cmd) + "\n" +
-		envDim.Render("why: "+why) + "\n" +
-		envWarn.Render("[a]") + envDim.Render("pprove  ") + envWarn.Render("[e]") + envDim.Render("dit  ") +
+	keys := envWarn.Render("[a]") + envDim.Render("pprove  ") + envWarn.Render("[e]") + envDim.Render("dit  ") +
 		envWarn.Render("[d]") + envDim.Render("eny  · or type what to do instead")
+	if !inline {
+		keys = envDim.Render("decide in ") + envWarn.Render("/requests")
+	}
+	inner := lipgloss.NewStyle().Foreground(cText).Bold(true).Render(cmd) + "\n" +
+		envDim.Render("why: "+why) + "\n" + keys
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).
 		Width(min(w, 72)).Render(inner)
 	// the title rides on the top border

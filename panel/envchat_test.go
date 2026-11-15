@@ -139,7 +139,7 @@ func TestChatDisplaysCommandArgumentsAndEscapesControls(t *testing.T) {
 	e := residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{"name": "terminal", "arguments": "{\"command\":\"printf hello #\\u001b[2K\\rhidden\"}"}}}}}
 	block := m.chat.eventBlock(e)
 	plain := ansi.Strip(block)
-	for _, want := range []string{"RUN", "terminal", "printf", `\x1b`, "hidden"} {
+	for _, want := range []string{g.tool + " terminal", "printf", `\x1b`, "hidden"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("missing %q in %q", want, plain)
 		}
@@ -233,6 +233,7 @@ func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
 func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
 	m := chatFixture(t)
 	text := "start_" + strings.Repeat("A", 160) + strings.Repeat("界🙂", 40) + "_end"
+	m.chat.expanded = true // output is folded by default; an open card must keep every character
 	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": text}}}}})
 	for _, width := range []int{90, 40, 120} {
 		m.width = width
@@ -476,7 +477,7 @@ func TestLiveTailShowsThinkingToolsAndTextThenYieldsToTheDurableBlock(t *testing
 		t.Fatal("the durable reply must end the live tail")
 	}
 	durable := ansi.Strip(m.chat.content)
-	if !strings.Contains(durable, "THINKING") || !strings.Contains(durable, "AGENT") || !strings.Contains(durable, "Half an answer.") {
+	if !strings.Contains(durable, g.collapsed+" thinking") || !strings.Contains(durable, g.agent+" agent") || !strings.Contains(durable, "Half an answer.") {
 		t.Fatalf("durable blocks missing:\n%s", durable)
 	}
 	if strings.Contains(ansi.Strip(m.liveBlock(m.width)), "Half an answer.") {
@@ -756,7 +757,7 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	lines := strings.Split(ansi.Strip(m.chat.content), "\n")
-	if !strings.HasPrefix(lines[0], "YOU · goal") {
+	if !strings.HasPrefix(lines[0], g.user+" you · goal") {
 		t.Fatalf("the first line is not the goal's label: %q", lines[0])
 	}
 	if !strings.HasPrefix(lines[1], "│ fix the build") {
@@ -764,7 +765,7 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	}
 	var seen bool
 	for _, ln := range lines {
-		if strings.HasPrefix(ln, "AGENT") {
+		if strings.HasPrefix(ln, g.agent+" agent") {
 			seen = true
 		}
 	}
@@ -1007,5 +1008,42 @@ func TestChatComposerHintsAboutPathsThematically(t *testing.T) {
 	m.chat.compose.SetValue("./zzz")
 	if view := m.chatComposer(); !strings.Contains(view, "no match") {
 		t.Fatalf("a dead path should announce itself:\n%s", view)
+	}
+}
+
+// The redesign's transcript: tool calls fold to one line until Ctrl+E opens every card; a failed call stays open
+// with its reason; a root request is the inline approval card.
+func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{
+			"name": "terminal", "arguments": `{"command":"make test\nmake lint"}`}}}}},
+		{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{
+			"output": "41 passed\nall green", "exit_code": float64(0)}}},
+		{Seq: 3, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "write", "result": map[string]any{
+			"error": "permission denied: /etc/hosts"}}},
+		{Seq: 4, Goal: "g1", Kind: "approval_requested", Data: map[string]any{"cmd": "apt-get install -y libcmocka-dev", "reason": "the test needs it"}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	folded := ansi.Strip(m.chat.content)
+	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "decide in /requests"} {
+		if !strings.Contains(folded, want) {
+			t.Fatalf("folded transcript missing %q:\n%s", want, folded)
+		}
+	}
+	if strings.Contains(folded, "all green") || strings.Contains(folded, "make lint") {
+		t.Fatalf("a folded card showed its body:\n%s", folded)
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	m = next.(envModel)
+	open := ansi.Strip(m.chat.content)
+	if !m.chat.expanded || !strings.Contains(open, "all green") || !strings.Contains(open, "make lint") {
+		t.Fatalf("Ctrl+E did not open the cards:\n%s", open)
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	if next.(envModel).chat.expanded {
+		t.Fatal("a second Ctrl+E must fold them again")
 	}
 }
