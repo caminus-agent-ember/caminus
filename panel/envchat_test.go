@@ -15,7 +15,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-func chatFixture() envModel {
+// chatFixture isolates the panel's user-state writes (last-session file) in a
+// temporary state dir; a test or benchmark must never touch the human's state.
+func chatFixture(tb testing.TB) envModel {
+	tb.Helper()
+	tb.Setenv("XDG_STATE_HOME", tb.TempDir())
 	m := envModel{agentName: "resident", tab: 6, width: 90, height: 28, mode: "normal"}
 	m.initChat()
 	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574, DaemonAlive: true, LastEvent: 1, Goals: []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}}, events: []residentEvent{{Seq: 1, Goal: "original", Kind: "goal_queued", Data: map[string]any{"prompt": "a goal"}}}})
@@ -23,7 +27,7 @@ func chatFixture() envModel {
 }
 
 func TestChatRetainsTranscriptAndScrollAnchorOnRefresh(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	for i := 2; i < 32; i++ {
 		m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: i, Goal: "original", Kind: "assistant", Data: map[string]any{"content": fmt.Sprintf("Observation %d stays in the transcript.", i)}}}})
 	}
@@ -49,7 +53,7 @@ func TestChatRetainsTranscriptAndScrollAnchorOnRefresh(t *testing.T) {
 }
 
 func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.chat.compose.SetValue("Use existing tools.\nKeep café and 漢字 intact.")
 	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{LastEvent: 2, Goals: []residentGoal{{ID: "other", State: "working"}, {ID: "original", State: "working"}}}})
 	if m.chat.target != "original" {
@@ -73,7 +77,7 @@ func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
 }
 
 func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.chat.compose.SetValue("/new")
 	next, cmd := m.submitCompose()
 	m = next.(envModel)
@@ -101,7 +105,7 @@ func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
 
 func TestChatPasteAndFrameStayWithinTerminal(t *testing.T) {
 	for _, size := range [][2]int{{40, 18}, {80, 24}, {140, 40}} {
-		m := chatFixture()
+		m := chatFixture(t)
 		m.width, m.height = size[0], size[1]
 		text := "a Unicode café draft\nsecond line\nthird line\nfourth line"
 		next, _ := m.Update(tea.PasteMsg{Content: text})
@@ -126,7 +130,7 @@ func TestChatPasteAndFrameStayWithinTerminal(t *testing.T) {
 }
 
 func TestChatDisplaysCommandArgumentsAndEscapesControls(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	e := residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{"name": "terminal", "arguments": "{\"command\":\"printf hello #\\u001b[2K\\rhidden\"}"}}}}}
 	block := m.chat.eventBlock(e)
 	plain := ansi.Strip(block)
@@ -167,6 +171,7 @@ func TestChatLoadsHistoryAcrossMoreThanOnePageAndRejectsOldAgent(t *testing.T) {
 }
 
 func TestSessionHomeOpensChatAndKeepsFiveMainPages(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := envModel{agentName: "resident", tab: 7, sessionNames: []string{"resident", "research"}, sessionSel: 1, width: 90, height: 28}
 	next, _ := m.sessionKeys("enter")
 	m = next.(envModel)
@@ -179,7 +184,7 @@ func TestSessionHomeOpensChatAndKeepsFiveMainPages(t *testing.T) {
 }
 
 func TestChatRejectsResponsesFromAnEarlierVisitToTheSameSession(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.openResident("other")
 	m.openResident("resident")
 	next, _ := m.Update(residentMsg{agent: "resident", epoch: 0, status: residentStatus{LastEvent: 900}, events: []residentEvent{{Seq: 900}}})
@@ -221,7 +226,7 @@ func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
 }
 
 func TestHistoryWrapPreservesLongUnicodeOutputAndReflowsOnResize(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	text := "start_" + strings.Repeat("A", 160) + strings.Repeat("界🙂", 40) + "_end"
 	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": text}}}}})
 	for _, width := range []int{90, 40, 120} {
@@ -267,7 +272,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
-	m := chatFixture()
+	m := chatFixture(t)
 	m.chat.compose.SetValue("/s")
 	next, done := m.cycleSlash()
 	m = next.(envModel)
@@ -295,7 +300,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 }
 
 func TestQuickSwitcherOpensRecordsAndFiltersSessions(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	m.sessionNames = []string{"research", "resident"}
 	m.chat.compose.SetValue("an unsent draft")
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
@@ -328,7 +333,7 @@ func TestQuickSwitcherOpensRecordsAndFiltersSessions(t *testing.T) {
 		t.Fatalf("Enter did not open the selected session: %q", m.agentName)
 	}
 	// A question arriving with the switcher open keeps F2 as the explicit takeover.
-	m2 := chatFixture()
+	m2 := chatFixture(t)
 	m2.sessionNames = []string{"resident"}
 	m2.chat.picker = true
 	wrong := envReq{ID: "q1", Kind: "question"}
@@ -372,11 +377,22 @@ func TestLaunchReopensLastSessionAndFallsBackWhenGone(t *testing.T) {
 	if m2.tab != 7 || m2.agentName != "resident" || !m2.chat.ready {
 		t.Fatal("a vanished session did not fall back to the homepage")
 	}
+	m3 := envModel{agentName: "resident", defaultAgent: "resident", tab: 7, width: 90, height: 28}
+	m3.initChat()
+	openLastSession(&m3)
+	if m3.pendingLast == "" {
+		t.Fatal("fixture broken: no pending last session")
+	}
+	next, _ = m3.Update(residentSessionsMsg{agent: "ghost", err: "no such resident"})
+	m3 = next.(envModel)
+	if m3.tab != 7 || m3.agentName != "resident" || m3.pendingLast != "" {
+		t.Fatal("an unresolvable last session did not fall back to the homepage")
+	}
 }
 
 func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {110, 32}} {
-		m := chatFixture()
+		m := chatFixture(t)
 		m.width, m.height = size[0], size[1]
 		for i := 2; i < 60; i++ {
 			m.receiveResident(residentMsg{agent: "resident", status: m.resident,
@@ -417,7 +433,7 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 }
 
 func TestLiveTailShowsThinkingToolsAndTextThenYieldsToTheDurableBlock(t *testing.T) {
-	m := chatFixture()
+	m := chatFixture(t)
 	// a turn's first line carries the whole text, later lines carry the suffix
 	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1", text: "Half", reasoning: "Weighing options.",
 		tools: []string{"terminal"}, reset: true})
@@ -456,7 +472,7 @@ func TestLiveTailStaysBoundedAndRejectsAnotherVisit(t *testing.T) {
 	if got := strings.Count(envTail(long, 40, 8), "\n"); got > 8 {
 		t.Fatalf("live tail kept %d lines", got)
 	}
-	m := chatFixture()
+	m := chatFixture(t)
 	m.residentEpoch = 3
 	next, _ := m.Update(residentLiveMsg{agent: "resident", epoch: 2, turn: "t", text: "ghost", reset: true})
 	if next.(envModel).chat.live.active {

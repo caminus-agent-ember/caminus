@@ -556,7 +556,8 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingLast != "" {
 				last := m.pendingLast
 				m.pendingLast = ""
-				if last != m.defaultAgent && len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, last) {
+				gone := msg.err != "" || (len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, last))
+				if last != m.defaultAgent && gone {
 					m.agentName = m.defaultAgent
 					m.residentEpoch++
 					m.resident, m.residentEvents, m.chat = residentStatus{}, nil, residentChat{}
