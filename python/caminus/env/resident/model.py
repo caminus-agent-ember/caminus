@@ -45,11 +45,24 @@ FALLBACK_MODELS = ('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'cla
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 
 
+# Prices a provider published (the model catalog: DeepInfra's per-model pricing), in the PRICES row form. Filled from
+# a config's `prices` when the runtime starts, so a catalog model is metered like a built-in one.
+CATALOG_PRICES = {}
+
+
+def remember_prices(model, prices):
+    """prices: {input, output, cache_read} in USD per million tokens, as the catalog stores them."""
+    if model and prices and prices.get('input') is not None and prices.get('output') is not None:
+        inp, out = float(prices['input']), float(prices['output'])
+        read = float(prices['cache_read']) if prices.get('cache_read') is not None else inp
+        CATALOG_PRICES[model] = ((inp, out, read, inp),) * 2 + (10**9,)
+
+
 def price(model, usage, served=None):
     """the USD cost of one call's usage on a priced model, or None when the model's price is not known. When a fallback
     served the call (served differs from model), it is priced at the serving model's rates, or at the highest known
     rates when that model is not in the table: an estimate that errs high."""
-    row = PRICES.get(model)
+    row = PRICES.get(model) or CATALOG_PRICES.get(model)
     if row is None:
         return None
     if served and served != model:
@@ -102,7 +115,9 @@ class Model:
         if self.api not in ('openai', 'anthropic'):
             raise ValueError('api must be openai or anthropic')
         # A remote provider bills each call: the runtime bounds its retries (a local server is waited for).
-        self.remote = parsed.hostname not in LOOPBACK
+        # A paid provider reached through the owner's key relay listens on loopback but bills like a remote one.
+        self.direct = parsed.hostname not in LOOPBACK
+        self.remote = self.direct or bool(config.get('relay'))
         self.context = config.get('context')
         if self.api == 'anthropic' and self.context is None:
             raise ValueError('the anthropic api needs an explicit context window (--context)')
@@ -121,7 +136,7 @@ class Model:
             # No key is refused before anything is sent, unless the endpoint is a local relay that adds it.
             if key:
                 headers['x-api-key'] = key
-            elif self.remote:
+            elif self.direct:
                 err = ModelError('the API key variable %s is not set in the agent environment' % name)
                 err.status = 401
                 raise err
@@ -180,6 +195,9 @@ class Model:
         for name in ('top_k','top_p','min_p','presence_penalty'):
             if name in self.config:
                 body[name] = self.config[name]
+        if self.config.get('effort'):
+            # OpenAI-compatible providers (DeepInfra) take reasoning depth as reasoning_effort; 'none' turns it off.
+            body['reasoning_effort'] = self.config['effort']
         if tools:
             body['tools'] = tools
         if on_delta is not None:

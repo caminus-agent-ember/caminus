@@ -1171,6 +1171,109 @@ for line in sys.stdin:
         self.assertFalse(list((self.bridge/'req').glob('*.json')))
         self.assertFalse(list((self.bridge/'res').glob('*.json')) if (self.bridge/'res').is_dir() else [])
 
+    CATALOG_REPLIES = {
+        'http://relay/anthropic/v1/models?limit=1000': dict(data=[
+            dict(id='claude-opus-5-5',display_name='Claude Opus 5.5',max_input_tokens=1000000,max_tokens=128000,
+                 capabilities=dict(image_input=dict(supported=True),
+                                   thinking=dict(supported=True,types=dict(enabled=dict(supported=False),adaptive=dict(supported=True))),
+                                   effort=dict(supported=True,low=dict(supported=True),medium=dict(supported=True),
+                                               high=dict(supported=True),xhigh=dict(supported=True),max=dict(supported=True)))),
+            dict(id='claude-haiku-4-5',display_name='Claude Haiku 4.5',max_input_tokens=200000,max_tokens=64000,
+                 capabilities=dict(thinking=dict(supported=True,types=dict(enabled=dict(supported=True),adaptive=dict(supported=False))),
+                                   effort=dict(supported=False)))]),
+        'http://relay/deepinfra/v1/openai/models': dict(object='list',data=[
+            dict(id='zai-org/GLM-5.2',object='model',created=1,owned_by='deepinfra',root='zai-org/GLM-5.2',
+                 metadata=dict(description='x',tags=['chat','reasoning','reasoning_effort','prompt_cache'],context_length=202752,
+                               max_tokens=16384,pricing=dict(input_tokens=0.6,output_tokens=2.2,cache_read_tokens=0.11))),
+            dict(id='BAAI/bge-m3',object='model',created=1,owned_by='deepinfra',root='BAAI/bge-m3',
+                 metadata=dict(description='x',tags=['embed'],pricing=dict(input_tokens=0.01)))]),
+        'http://127.0.0.1:8092/v1/models': dict(data=[dict(id='k3-coder')]),
+        'http://127.0.0.1:8092/props': dict(n_ctx=1048576),
+    }
+
+    def catalog_opener(self, seen=None):
+        import io as _io
+        replies=self.CATALOG_REPLIES
+        class R(_io.BytesIO):
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        def opener(req,timeout=None):
+            if seen is not None:seen.append((req.full_url,dict(req.header_items())))
+            if req.full_url not in replies:raise OSError('unreachable: '+req.full_url)
+            return R(json.dumps(replies[req.full_url]).encode())
+        return opener
+
+    def test_the_catalog_normalizes_what_each_provider_says(self):
+        from caminus.env.resident import catalog
+        cfg=dict(providers=dict(anthropic=dict(kind='anthropic',endpoint='http://relay/anthropic/v1',relay=True),
+                                deepinfra=dict(kind='deepinfra',endpoint='http://relay/deepinfra/v1/openai',relay=True),
+                                local=dict(kind='local',endpoint='http://127.0.0.1:8092/v1'),
+                                gone=dict(kind='openai',endpoint='http://down.example/v1')))
+        seen=[]
+        cat=catalog.refresh(self.home,cfg,opener=self.catalog_opener(seen))
+        by={m['id']:m for m in cat['models']}
+        opus=by['claude-opus-5-5']
+        self.assertEqual((opus['context'],opus['max_output'],opus['thinking'],opus['vision']),(1000000,128000,'adaptive',True))
+        self.assertEqual(opus['efforts'],['low','medium','high','xhigh','max'])
+        self.assertIsNone(opus['prices'],'Anthropic publishes no prices in the list: the built-in table meters it')
+        h45=by['claude-haiku-4-5'];self.assertEqual((h45['efforts'],h45['thinking']),([],'toggle'))
+        glm=by['zai-org/GLM-5.2']
+        self.assertEqual((glm['context'],glm['max_output'],glm['efforts'],glm['thinking']),(202752,16384,['none','low','medium','high'],'toggle'))
+        self.assertEqual(glm['prices'],dict(input=0.6,output=2.2,cache_read=0.11))
+        self.assertNotIn('BAAI/bge-m3',by,'an embedding model is not a brain')
+        self.assertEqual(by['k3-coder']['context'],1048576,'the local window comes from /props')
+        self.assertFalse(cat['providers']['gone']['ok']);self.assertTrue(cat['providers']['deepinfra']['ok'])
+        self.assertFalse(any('x-api-key' in h or 'Authorization' in h for _,h in seen),'through the relay no key is sent')
+        # a provider that goes away keeps its last entries, marked stale
+        cfg['providers']['deepinfra']['endpoint']='http://relay/broken/v1/openai'
+        again=catalog.refresh(self.home,cfg,opener=self.catalog_opener())
+        glm2=next(m for m in again['models'] if m['id']=='zai-org/GLM-5.2')
+        self.assertTrue(glm2['stale']);self.assertFalse(again['providers']['deepinfra']['ok'])
+        self.assertIsNotNone(catalog.find(again,'deepinfra/zai-org/GLM-5.2'),'provider/id picks the provider')
+
+    def test_model_and_effort_pick_from_the_catalog_and_a_running_resident_follows(self):
+        from caminus.env.resident import catalog
+        from caminus.env.resident.model import price
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['providers']=dict(anthropic=dict(kind='anthropic',endpoint='http://relay/anthropic/v1',relay=True),
+                               deepinfra=dict(kind='deepinfra',endpoint='http://relay/deepinfra/v1/openai',relay=True))
+        (self.home/'config.json').write_text(json.dumps(conf))
+        catalog.refresh(self.home,conf,opener=self.catalog_opener())
+        out=self.cmd('model',['zai-org/GLM-5.2'])
+        cur=out['current']
+        self.assertEqual((cur['model'],cur['provider'],cur['context'],cur['max_tokens'],cur['effort'],cur['relay']),
+                         ('zai-org/GLM-5.2','deepinfra',202752,16384,'medium',True))
+        self.assertNotIn('api',json.loads((self.home/'config.json').read_text()),'OpenAI-compatible is the default transport')
+        with self.assertRaises(AssertionError):self.cmd('effort',['xhigh'])          # not a level GLM offers
+        self.assertEqual(self.cmd('effort',['none'])['effort'],'none')
+        out=self.cmd('model',['claude-opus-5-5'])['current']
+        self.assertEqual((out['api'],out['thinking'],out['effort'],out['context']),('anthropic','adaptive','medium',1000000))
+        self.assertEqual(self.cmd('effort',['xhigh'])['effort'],'xhigh')
+        # a running resident takes the new brain at its next turn, and meters a catalog model by its prices
+        rt=Runtime(self.home)
+        try:
+            self.cmd('model',['zai-org/GLM-5.2'])
+            gid=rt.store.enqueue('Switch.')
+            rt._follow_config()
+            self.assertEqual(rt.model.config['model'],'zai-org/GLM-5.2');self.assertTrue(rt.model.remote,'relayed: billed and bounded')
+            self.assertIn('model_switched',[e['kind'] for e in rt.store.events()])
+            self.assertAlmostEqual(price('zai-org/GLM-5.2',dict(prompt_tokens=1_000_000,completion_tokens=1_000_000)),2.8)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_openai_transport_sends_reasoning_effort(self):
+        from caminus.env.resident.model import Model
+        sent=[]
+        m=Model(dict(endpoint='http://127.0.0.1:1/v1',model='zai-org/GLM-5.2',context=200000,effort='low'))
+        m.request=lambda url,body=None:(sent.append(body),dict(choices=[dict(message=dict(content='ok'),finish_reason='stop')]))[1]
+        m.complete([dict(role='user',content='hi')])
+        chat=[b for b in sent if b and 'max_tokens' in b]
+        self.assertEqual(chat[0]['reasoning_effort'],'low')
+        m2=Model(dict(endpoint='http://127.0.0.1:1/v1',model='k3-coder',context=200000))
+        m2.request=lambda url,body=None:(sent.append(body),dict(choices=[dict(message=dict(content='ok'),finish_reason='stop')]))[1]
+        m2.complete([dict(role='user',content='hi')])
+        chat=[b for b in sent if b and 'max_tokens' in b]
+        self.assertNotIn('reasoning_effort',chat[1],'no effort set: nothing sent (the local server)')
+
     def test_an_unanswered_question_goes_to_the_advisor_when_there_is_one(self):
         rt=Runtime(self.home)
         try:

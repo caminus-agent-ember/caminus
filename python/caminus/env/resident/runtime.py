@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 import uuid
 
-from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled
+from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices
 from .store import log_failure, Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
@@ -184,6 +184,11 @@ class Runtime:
         target = self.config.get('compact_target_ratio', .2)
         if not 0 < target < trigger < 1:
             raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
+        for cfg in (self.config, self.config.get('fallback'), self.config.get('advisor')):
+            if isinstance(cfg, dict) and cfg.get('prices'):
+                remember_prices(cfg.get('model'), cfg['prices'])   # a catalog model is metered like a built-in one
+        self._own_model = model is None       # a test may inject its model; only an own one follows /model
+        self._config_stamp = self._stamp()
         self.model = model or Model(self.config)
         self.primary = self.model
         self.terminal = terminal or Terminal(self.home)
@@ -934,7 +939,47 @@ class Runtime:
             self.store.event('watchdog', dict(reason=reason or 'stopped', **(detail or {})), gid)
         return True
 
+    MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
+                  'provider', 'provider_kind', 'api_key_env', 'temperature')
+
+    def _stamp(self):
+        try:
+            st = (self.home / 'config.json').stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _follow_config(self):
+        """/model and /effort write the config; a running resident takes the new brain at its next turn."""
+        stamp = self._stamp()
+        if stamp == self._config_stamp:
+            return
+        self._config_stamp = stamp
+        try:
+            fresh = json.loads((self.home / 'config.json').read_text())
+        except (OSError, ValueError):
+            return                            # half-written: the next turn reads it again
+        changed = [k for k in self.MODEL_KEYS if fresh.get(k) != self.config.get(k)]
+        self.config.update({k: fresh.get(k) for k in self.MODEL_KEYS if k in fresh})
+        for k in self.MODEL_KEYS:
+            if k not in fresh:
+                self.config.pop(k, None)
+        for k in ('question_timeout', 'judge_model'):
+            if k in fresh:
+                self.config[k] = fresh[k]
+        if not changed or not self._own_model:
+            return
+        if self.config.get('prices'):
+            remember_prices(self.config.get('model'), self.config['prices'])
+        model = Model(self.config)
+        if self.brains.primary is self.model:
+            self.brains.primary = model
+        self.model = self.primary = model
+        self.store.event('model_switched', dict(model=self.config.get('model'), provider=self.config.get('provider'),
+                                                effort=self.config.get('effort'), changed=changed))
+
     def _tick(self, gid):
+        self._follow_config()
         g = self.store.goal(gid)
         leases.sweep(self)                    # a lease ends with its goal, wherever the goal stopped
         if g['state'] in ('completed','cancelled','paused','error'):
