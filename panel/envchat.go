@@ -166,11 +166,12 @@ func (m *envModel) syncChat() {
 	m.chat.transcript.SetWidth(w)
 	// One header line and one footer line surround the transcript; the live tail sits between it and the
 	// composer, so a generating reply never rewrites the durable content.
+	// Half the body is the live window while a reply is written; the transcript keeps the other half.
 	tail := 0
 	if live := m.liveBlock(w); live != "" {
 		tail = lipgloss.Height(live)
 	}
-	m.chat.transcript.SetHeight(max(1, h-1-lipgloss.Height(m.chatBottom())-1-tail))
+	m.chat.transcript.SetHeight(max(1, m.bodyHeight()-tail))
 	if m.chat.help {
 		m.chat.transcript.SetHeight(max(1, m.chat.transcript.Height()-3))
 	}
@@ -197,19 +198,25 @@ func (m *envModel) syncChat() {
 	}
 }
 
-// liveHeight is the live window's line count: half the page while a reply is being written, because at a few
-// hundred tokens a second a small window is unreadable. The transcript keeps at least a few lines above it.
-func (m envModel) liveHeight() int {
-	return max(10, min(m.height/2, max(6, m.height-14)))
+// bodyHeight is the space between the header and the footer, without the composer.
+func (m envModel) bodyHeight() int {
+	return max(4, max(12, m.height)-1-lipgloss.Height(m.chatBottom())-1)
 }
+
+// liveHeight is the live window's content lines (its label included): half the body less the border, so the
+// transcript keeps the other half while a reply is being written.
+func (m envModel) liveHeight() int { return max(3, m.bodyHeight()/2-3) }
+
+// liveWindow is the number of body lines the live box shows: its content height less the label line.
+func (m envModel) liveWindow() int { return max(1, m.liveHeight()-1) }
 
 // liveTop is the first visible line: the tail while following, the held position otherwise.
 func (m envModel) liveTop(body int) int {
-	height := m.liveHeight()
+	window := m.liveWindow()
 	if !m.chat.live.hold {
-		return max(0, body-height)
+		return max(0, body-window)
 	}
-	return max(0, min(m.chat.live.top, max(0, body-height)))
+	return max(0, min(m.chat.live.top, max(0, body-window)))
 }
 
 // scrollLive moves the live window and holds it, so text arriving mid-read cannot pull the view away.
@@ -220,10 +227,10 @@ func (m *envModel) scrollLive(delta int) {
 		return
 	}
 	body := len(l.body(max(10, m.width-4)))
-	height := m.liveHeight()
-	top := max(0, min(m.liveTop(body)+delta, max(0, body-height)))
+	window := m.liveWindow()
+	top := max(0, min(m.liveTop(body)+delta, max(0, body-window)))
 	l.top = top
-	l.hold = top < max(0, body-height)
+	l.hold = top < max(0, body-window)
 }
 
 // liveBlock renders the reply being generated in a fixed-height window: its reasoning, the tools it has
@@ -246,7 +253,7 @@ func (m envModel) liveBlock(w int) string {
 		label = fmt.Sprintf("LIVE · held · %d below · Ctrl+T follow", max(0, len(body)-(top+height)))
 	}
 	rows := []string{envDim.Render(label)}
-	rows = append(rows, body[top:min(top+height, len(body))]...)
+	rows = append(rows, body[top:min(top+height-1, len(body))]...)
 	return envBorder.Width(max(18, w-2)).Render(strings.Join(rows, "\n"))
 }
 
@@ -479,17 +486,17 @@ func contextBarLevel(used, capacity int, threshold float64) int {
 	}
 }
 
-// contextBar renders the measured context footprint for the footer. A used
-// count of 0 means the daemon has not measured anything yet; then only the
-// window size is shown — capacity is never presented as usage, and no
-// percentage is invented from events.
-func contextBar(used, capacity int, threshold float64) string {
+// contextBar renders the measured context footprint for the footer as two
+// pieces: an accent (label, bar, share) that takes the level's color, and a
+// dim remainder (window size, trigger). A used count of 0 means the daemon
+// has not measured anything yet; then only the window size shows — capacity
+// is never presented as usage, and no percentage is invented from events.
+func contextBar(used, capacity int, threshold float64) (accent, rest string) {
 	if capacity <= 0 {
-		return ""
+		return "", ""
 	}
-	window := "ctx " + humanTokens(capacity) + " window"
 	if used <= 0 {
-		return window
+		return "", "ctx " + humanTokens(capacity) + " window"
 	}
 	share := float64(used) / float64(capacity)
 	if share > 1 {
@@ -497,7 +504,26 @@ func contextBar(used, capacity int, threshold float64) string {
 	}
 	filled := int(share*contextBarSlots + 0.5)
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", contextBarSlots-filled)
-	return fmt.Sprintf("ctx %s %d%% of %s · compact %.0f%%", bar, int(share*100+0.5), humanTokens(capacity), compactTrigger(threshold)*100)
+	return fmt.Sprintf("ctx %s %d%%", bar, int(share*100+0.5)),
+		fmt.Sprintf(" of %s · compact %.0f%%", humanTokens(capacity), compactTrigger(threshold)*100)
+}
+
+// contextStateStyle colors the header's status light by what it means: busy
+// work in cyan, healthy listening in green, something-needs-you in amber,
+// failure in red, anything else in the dim resting tone.
+func contextStateStyle(state string) lipgloss.Style {
+	switch state {
+	case "working", "queued", "waiting_model":
+		return envBusy
+	case "listening":
+		return envHead
+	case "waiting", "waiting_user", "waiting_root", "paused":
+		return envWarn
+	case "error":
+		return envCtxHot
+	default:
+		return envDim
+	}
 }
 
 func (m envModel) renderChat() string {
@@ -519,9 +545,9 @@ func (m envModel) renderChat() string {
 		indicator = frames[m.tickN%len(frames)]
 	}
 	head := clip(envTitle.Render("CAMINUS") + " · " + residentText(m.agentName) +
-		"  " + envHead.Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
-	ctxText := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold)
-	ctxStyle := envDim
+		"  " + contextStateStyle(state).Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
+	accent, ctxRest := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold)
+	ctxStyle := envCtxOK
 	switch contextBarLevel(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold) {
 	case 1:
 		ctxStyle = envWarn
@@ -529,8 +555,8 @@ func (m envModel) renderChat() string {
 		ctxStyle = envCtxHot
 	}
 	status := []string{envDim.Render(residentText(m.resident.Model))}
-	if ctxText != "" {
-		status = append(status, ctxStyle.Render(ctxText))
+	if accent+ctxRest != "" {
+		status = append(status, ctxStyle.Render(accent)+envDim.Render(ctxRest))
 	}
 	status = append(status,
 		envDim.Render("SSH "+map[bool]string{true: "OK", false: "…"}[m.sshOK]),

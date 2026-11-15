@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -508,23 +509,28 @@ func TestResidentCommandsWithoutTheCLIReportInsteadOfPanicking(t *testing.T) {
 }
 
 // The context bar shows what the daemon measured, graded against the
-// compaction trigger, and never invents a percentage of its own.
+// compaction trigger, and never invents a percentage of its own. The accent
+// piece (label, bar, share) takes the level's color; the counts stay dim.
 func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
-	if got := contextBar(0, 1048574, .85); got != "ctx 1.0M window" || strings.Contains(got, "%") {
-		t.Fatalf("unmeasured context showed usage: %q", got)
+	accent, rest := contextBar(0, 1048574, .85)
+	if accent != "" || rest != "ctx 1.0M window" || strings.Contains(rest, "%") {
+		t.Fatalf("unmeasured context showed usage: %q / %q", accent, rest)
 	}
-	if got := contextBar(0, 0, .85); got != "" || strings.Contains(got, "%") {
-		t.Fatalf("no capacity, no bar: %q", got)
+	if accent, rest := contextBar(0, 0, .85); accent != "" || rest != "" {
+		t.Fatalf("no capacity, no bar: %q / %q", accent, rest)
 	}
-	bar := contextBar(314573, 1048574, .85) // 30%
-	if filled := strings.Count(bar, "█"); filled != 3 || !strings.Contains(bar, "░") {
-		t.Fatalf("30%% carved the bar wrong: %q", bar)
+	accent, rest = contextBar(314573, 1048574, .85) // 30%
+	if filled := strings.Count(accent, "█"); filled != 3 || !strings.Contains(accent, "░") {
+		t.Fatalf("30%% carved the bar wrong: %q", accent)
 	}
-	if !strings.Contains(bar, "30% of 1.0M · compact 85%") {
-		t.Fatalf("bar lost counts and trigger: %q", bar)
+	if !strings.Contains(accent, "ctx") || !strings.Contains(accent, "30%") || strings.Count(accent, "%") != 1 {
+		t.Fatalf("accent lost its bar and share: %q", accent)
 	}
-	if got := contextBar(1048575, 1048574, .85); !strings.HasPrefix(got, "ctx ██████████ 100% of 1.0M") {
-		t.Fatalf("usage past the window did not clamp: %q", got)
+	if !strings.Contains(rest, "of 1.0M · compact 85%") {
+		t.Fatalf("dim piece lost counts and trigger: %q", rest)
+	}
+	if accent, _ := contextBar(1048575, 1048574, .85); !strings.HasPrefix(accent, "ctx ██████████ 100%") {
+		t.Fatalf("usage past the window did not clamp: %q", accent)
 	}
 	if got := humanTokens(999); got != "999" || humanTokens(482000) != "482k" || humanTokens(1048574) != "1.0M" {
 		t.Fatalf("token formatting drifted: %s %s %s", humanTokens(999), humanTokens(482000), humanTokens(1048574))
@@ -543,6 +549,16 @@ func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
 		if got := contextBarLevel(tc.used, tc.capacity, tc.threshold); got != tc.level {
 			t.Fatalf("level(%d/%d, %.2f) = %d, want %d", tc.used, tc.capacity, tc.threshold, got, tc.level)
 		}
+	}
+	states := map[string]int{"working": 1, "queued": 1, "waiting_model": 1, "listening": 1,
+		"waiting": 2, "waiting_user": 2, "paused": 2, "error": 3, "stopped": 0, "completed": 0}
+	for state, want := range states {
+		if got := contextStateStyle(state); got.Render("#") == envDim.Render("#") && want != 0 {
+			t.Fatalf("state %q rendered in the resting tone", state)
+		}
+	}
+	if contextStateStyle("stopped").Render("#") != envDim.Render("#") || contextStateStyle("nonsense").Render("#") != envDim.Render("#") {
+		t.Fatal("unknown states must rest in dim")
 	}
 }
 
@@ -662,5 +678,22 @@ func TestLiveWindowScrollsAndHoldsWhileTheReplyKeepsArriving(t *testing.T) {
 	m.scrollLive(100)
 	if m.chat.live.hold {
 		t.Fatal("scrolling to the bottom must resume following")
+	}
+}
+
+func TestLiveWindowTakesHalfTheBodyAndLeavesTheRestToTheTranscript(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	next, _ := m.Update(residentLiveMsg{agent: "resident", turn: "t1",
+		reasoning: strings.Repeat("thinking about it ", 60), reset: true})
+	m = next.(envModel)
+	body := m.bodyHeight()
+	live := lipgloss.Height(m.liveBlock(m.width))
+	if live < body/2-2 || live > body/2+2 {
+		t.Fatalf("live window is %d lines of a %d-line body; expected about half", live, body)
+	}
+	transcript := m.chat.transcript.Height()
+	if transcript < body-live-2 || transcript > body-live+2 {
+		t.Fatalf("transcript is %d lines, expected about %d", transcript, body-live)
 	}
 }
