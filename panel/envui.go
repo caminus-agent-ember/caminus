@@ -575,6 +575,8 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.openResident(msg.name)
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
+	case modelsLoadedMsg:
+		return m.modelsLoaded(msg), nil
 	case residentActionMsg:
 		m.msg = msg.text
 		return m, residentRefresh(m)

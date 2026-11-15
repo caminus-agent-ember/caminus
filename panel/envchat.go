@@ -47,7 +47,8 @@ type residentChat struct {
 	approvalDetail                          bool // Enter opened the selected request in full
 	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
 	goalsSel                                int
-	page, pageTop                           int // an old page shown as an overlay (-1: none), and its scroll
+	models                                  modelsState // the Models overlay (/model)
+	page, pageTop                           int         // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
 	slashToken, slashText                   string
 	pathIdx                                 int
@@ -868,6 +869,10 @@ func (m envModel) renderChat() string {
 		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
 		return head + "\n" + m.goalsOverlay(w, h) + "\n" + foot
 	}
+	if m.chat.models.open {
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.modelsOverlay(w, h) + "\n" + foot
+	}
 	if m.chat.page >= 0 {
 		// a typed prompt opened from the page (a new note) sits under the overlay
 		prompt := m.promptBox(max(18, w-2))
@@ -901,7 +906,7 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals {
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
 	}
@@ -915,6 +920,9 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.chat.goals {
 		return m.goalsKey(msg)
+	}
+	if m.chat.models.open {
+		return m.modelsKey(msg)
 	}
 	if m.chat.page >= 0 {
 		return m.pageKey(msg)
@@ -1214,6 +1222,18 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		clear()
 		return m, residentAction(m, []string{"cancel", m.agentName, g.ID, "--json"}, "")
+	case "/model", "/models":
+		// alone: the Models overlay over the catalog; with an id (provider/id when two serve it): pick it
+		clear()
+		if id := strings.TrimSpace(arg); id != "" && command == "/model" {
+			m.msg = "switching to " + id + "…"
+			return m, pickModel(m, id)
+		}
+		m.chat.models.open, m.chat.models.loading, m.chat.models.err = true, true, ""
+		return m, fetchModels(m, false)
+	case "/effort":
+		clear()
+		return m, setEffort(m, strings.TrimSpace(arg))
 	case "/compact":
 		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
 		// pass rather than writing history from here.
@@ -1311,6 +1331,8 @@ var slashCommands = []struct{ name, hint string }{
 	{"/approvals", "open the approvals overlay (Ctrl+A)"},
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
+	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
+	{"/model", "pick the brain: the models overlay; or /model ID"},
 	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "the goals overlay (Ctrl+G)"},
 	{"/help", "toggle the help footer"},
