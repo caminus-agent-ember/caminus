@@ -656,6 +656,7 @@ for line in sys.stdin:
                 gid=rt.store.enqueue('Commit something.')
                 note=rt.context_message(gid)['content']
                 self.assertIn('MODEL: this turn is answered by fixture',note)
+                self.assertIn('REPLY LIMIT: each reply, text and tool calls together, is at most',note)
                 self.assertNotIn('MODEL:',rt.system()['content'],'the brain can change between turns: it stays out of the cached prefix')
             finally:rt.mail.close();rt.store.close()
 

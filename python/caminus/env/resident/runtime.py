@@ -239,6 +239,10 @@ class Runtime:
         if (name := (getattr(self.model, 'config', None) or {}).get('model') or self.config.get('model')):
             parts.append(f'MODEL: this turn is answered by {name}. When you say who you are (a commit\'s '
                          f'Assisted-by trailer, a report), name this model, not one you see in your history.')
+        # The reply limit: a reply past it is cut off and nothing in it runs, so the agent must know it beforehand.
+        parts.append(f"REPLY LIMIT: each reply, text and tool calls together, is at most "
+                     f"{int(self.config.get('max_tokens',4096)):,} tokens. Write a big file in parts (write, then edit "
+                     f"or further writes) rather than in one call.")
         if (note := self._context_budget(gid)):
             parts.append(note.strip())
         if (line := self.advisor.status_line(gid)):
