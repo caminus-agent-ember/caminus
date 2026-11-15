@@ -1132,6 +1132,45 @@ for line in sys.stdin:
         out=self.cmd('once',['--goal-id',first['id']])
         self.assertEqual(out['state'],'completed','a run after the timeout carries on without the human')
 
+    def _timeout_now(self, **extra):
+        conf=json.loads((self.home/'config.json').read_text());conf.update(question_timeout=0,**extra)
+        (self.home/'config.json').write_text(json.dumps(conf))
+
+    def test_an_unanswered_permission_request_is_a_no_end_to_end(self):
+        (self.home/'reports.txt').write_text('keep me')
+        # An advisor that cannot be reached: a permission request must not even try it.
+        self._timeout_now(advisor=dict(model='claude-opus-5-5',endpoint='http://127.0.0.1:1/v1',budget_usd=1))
+        self.replies(call('ask_user',dict(question='May I delete reports.txt?',choices=['delete','keep'],
+                                          recommended='delete',approval=True)),
+                     call('finish',dict(summary='Left reports.txt for my human to decide.')))
+        out=self.cmd('once',['--goal','Clean up old files.'])
+        self.assertEqual(out['state'],'completed','a refusal does not stop the goal')
+        after=json.dumps([b for k,b in Endpoint.seen if k==self.key][-1])
+        self.assertIn('Treat this as NO',after,'the agent is told the unanswered permission request is a no')
+        self.assertNotIn('recommended option',after);self.assertNotIn('advisor',after.split('Treat this as NO')[0][-400:])
+        ev=next(e for e in self.cmd('events') if e['kind']=='question_unanswered')['data']
+        self.assertEqual((ev['approval'],ev['outcome']),(True,'no'))
+        self.assertFalse((self.home/'failures.jsonl').exists(),'no advisor call was made')
+        self.assertEqual((self.home/'reports.txt').read_text(),'keep me')
+        self.assertFalse(list((self.bridge/'req').glob('*.json')),'withdrawn by the resident')
+        self.assertFalse(list((self.bridge/'res').glob('*.json')) if (self.bridge/'res').is_dir() else [],
+                         'it never writes a decision on the human\'s behalf')
+
+    def test_an_unanswered_root_request_is_never_run_end_to_end(self):
+        self._timeout_now()
+        self.replies(call('ask_root',dict(command='touch /root-was-run',reason='needs root')),
+                     call('finish',dict(summary='Carried on without root.')))
+        out=self.cmd('once',['--goal','Install a tool.'])
+        self.assertEqual(out['state'],'completed')
+        after=json.dumps([b for k,b in Endpoint.seen if k==self.key][-1])
+        self.assertIn('NOT run',after)
+        result=next(e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='ask_root')
+        self.assertEqual((result['decision'],result['by']),('denied','timeout'),'the agent is told it was denied, never approved')
+        self.assertIn('root_unanswered',[e['kind'] for e in self.cmd('events')])
+        self.assertNotIn('approval_executed',[e['kind'] for e in self.cmd('events')])
+        self.assertFalse(list((self.bridge/'req').glob('*.json')))
+        self.assertFalse(list((self.bridge/'res').glob('*.json')) if (self.bridge/'res').is_dir() else [])
+
     def test_an_unanswered_question_goes_to_the_advisor_when_there_is_one(self):
         rt=Runtime(self.home)
         try:
