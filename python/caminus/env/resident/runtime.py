@@ -34,6 +34,7 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
+SUMMARY_TOKENS = 2048    # a compaction summary's output allowance
 TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
 EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24}
@@ -772,8 +773,10 @@ class Runtime:
         # The fixed head - the prompt, the tool schemas and the goal - is not negotiable, and every tool the
         # loop grows makes it bigger. On a small window the target can land below it, so compact as far as
         # the head allows rather than refusing to compact at all.
-        target_tokens = max(target_tokens, pinned_tokens + 1024)
-        summary_limit = min(2048, reserve, target_tokens - pinned_tokens - 512)
+        # The summary keeps its full SUMMARY_TOKENS too: with many tool schemas (an MCP server's) the head alone can
+        # fill a 20 % target, which left the summary a few hundred tokens and cut it off on every compaction.
+        target_tokens = max(target_tokens, min(pinned_tokens + SUMMARY_TOKENS + 512, size - reserve - 256))
+        summary_limit = min(SUMMARY_TOKENS, reserve, target_tokens - pinned_tokens - 512)
         if summary_limit < 1:
             raise ModelContextError('goal and persistent memory cannot fit the compaction target')
         # Retain complete assistant/tool groups only while they leave room for
@@ -801,7 +804,18 @@ class Runtime:
                     raise ModelContextError('working memory cannot fit the model context')
                 take = max(1,take//2)
             summary_options = dict(model=self.config['compaction_model']) if self.config.get('compaction_model') else {}
-            summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
+            try:
+                summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
+            except ModelTruncated as e:
+                # A summary cut at its limit is still the best working memory there is; refusing it failed the
+                # turn, and the next compaction was cut the same way until the goal paused.
+                if getattr(e,'retryable',False):
+                    raise
+                part = e.partial.get('content','') if isinstance(e.partial,dict) else str(e.partial or '')
+                if not part.strip():
+                    raise
+                summary = part.rstrip() + '\n[this summary was cut off at its length limit]'
+                self.store.event('summary_cut',dict(limit=summary_limit,chars=len(part)),gid)
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
         after_tokens = self.model.tokens([system,*compacted,*tail],self.tools)

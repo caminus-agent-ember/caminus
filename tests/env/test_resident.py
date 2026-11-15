@@ -1457,6 +1457,32 @@ for line in sys.stdin:
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_large_tool_head_still_leaves_the_summary_its_room_and_a_cut_summary_is_kept(self):
+        from caminus.env.resident.model import ModelTruncated
+        seen=[]
+        class BoundedModel:
+            def context_size(self):return 100000
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                assert self.tokens(messages,tools)+max_tokens<self.context_size(),'compaction overflow'
+                seen.append(max_tokens)
+                raise ModelTruncated(dict(role='assistant',content='## Working memory\nverified: the parser; next: tests'))
+        rt=Runtime(self.home,model=BoundedModel())
+        try:
+            rt.config['compact_target_ratio']=.2
+            gid=rt.store.enqueue('Keep working.')
+            rt.mcp.servers={'big':None}           # many MCP tool schemas: a large fixed head
+            rt._tools=rt.tools+[dict(type='function',function=dict(name='mcp__big__t%d'%i,description='x'*2600,
+                                    parameters={'type':'object','properties':{}})) for i in range(28)]
+            history=rt.store.goal(gid)['messages']+[dict(role='assistant',content='observation '*2000) for _ in range(12)]
+            compacted,done=rt._compact(gid,history,force=False)
+            self.assertTrue(done)
+            self.assertGreaterEqual(min(seen),2048,'the summary keeps its full allowance next to a large tool head')
+            self.assertIn('verified: the parser',json.dumps(compacted))
+            self.assertIn('cut off at its length limit',json.dumps(compacted))
+            self.assertTrue(any(e['kind']=='summary_cut' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+
     def test_compaction_counts_the_trailing_context_message(self):
         with self.hermetic_home():
             self._test_compaction_counts_the_trailing_context_message()
