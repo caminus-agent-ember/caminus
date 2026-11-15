@@ -330,10 +330,10 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/session /sessions /settings]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop]" {
+	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); len(got) != 6 || got[0] != "/session" || got[5] != "/settings" {
+	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/session /sessions /settings /start /steer /stop /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -342,7 +342,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /recap /studio /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -1318,5 +1318,39 @@ func TestModelsOverlayListsTheCatalogAndPicks(t *testing.T) {
 	next, cmd = m.chatSlash("/effort high")
 	if cmd == nil {
 		t.Fatal("/effort LEVEL runs the effort command")
+	}
+}
+
+func TestRecapCardAndStudioOverlay(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	m := chatFixture(t)
+	m = m.receiveRecap(recapMsg{agent: m.agentName, text: "While you were away (1 stretch):\n- 03:10 free time: Sketched a tide pool.", now: 1794790000})
+	view := ansi.Strip(m.renderChat())
+	if !strings.Contains(view, "While you were away (1 stretch)") || !strings.Contains(view, "Sketched a tide pool.") {
+		t.Fatalf("the recap card is missing:\n%s", view)
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(envModel)
+	if m.chat.recap != "" || loadSeen(m.agentName) != 1794790000 {
+		t.Fatalf("Esc dismisses the card and remembers when you looked: recap=%q seen=%v", m.chat.recap, loadSeen(m.agentName))
+	}
+	next, _ = m.chatSlash("/studio")
+	m = next.(envModel)
+	if !m.chat.studio.open {
+		t.Fatal("/studio opens the overlay")
+	}
+	m.chat.studio.loading = false
+	m.chat.studio.list = []studioEntry{{Path: "/h/studio/for-you/sketch.svg", Name: "sketch.svg", Mtime: 1794780000, group: "for you"},
+		{Path: "/h/journal/2026-11-15.md", Name: "2026-11-15.md", Head: "Tide pools", Mtime: 1794770000, group: "journal"}}
+	view = ansi.Strip(m.renderChat())
+	for _, want := range []string{"STUDIO  2", "for you", "sketch.svg", "journal", "Tide pools"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("studio misses %q:\n%s", want, view)
+		}
+	}
+	next, cmd := m.studioKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(envModel)
+	if cmd == nil || m.chat.studio.reading != "/h/studio/for-you/sketch.svg" {
+		t.Fatal("Enter reads the selected entry")
 	}
 }

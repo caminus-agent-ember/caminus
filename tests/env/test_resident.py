@@ -1363,6 +1363,29 @@ for line in sys.stdin:
             if old is None:os.environ.pop('CAMINUS_ENV_BRIDGE',None)
             else:os.environ['CAMINUS_ENV_BRIDGE']=old
 
+    def test_studio_lists_what_free_time_made_and_reads_only_inside(self):
+        (self.home/'journal').mkdir();(self.home/'studio/for-you').mkdir(parents=True)
+        (self.home/'journal/2026-11-15.md').write_text('# Tide pools\nRead about them.')
+        (self.home/'studio/poem.md').write_text('a poem')
+        (self.home/'studio/for-you/sketch.svg').write_text('<svg/>')
+        (self.home/'studio/PROJECTS.md').write_text('- tide pool atlas')
+        out=self.cmd('studio')
+        self.assertEqual([e['name'] for e in out['journal']],['2026-11-15.md']);self.assertEqual(out['journal'][0]['head'],'Tide pools')
+        self.assertEqual([e['name'] for e in out['studio']],['poem.md'],'the shelf and PROJECTS.md are listed on their own')
+        self.assertEqual([e['name'] for e in out['shelf']],['sketch.svg']);self.assertIn('tide pool atlas',out['projects'])
+        self.assertEqual(self.cmd('studio',['--read','journal/2026-11-15.md'])['text'],'# Tide pools\nRead about them.')
+        (self.home/'secret.txt').write_text('no')
+        self.cmd('studio',['--read','secret.txt'],code=1)
+        self.cmd('studio',['--read','studio/../secret.txt'],code=1)
+
+    def test_the_recap_counts_from_a_given_time(self):
+        rt=Runtime(self.home)
+        try:
+            g=rt.store.enqueue('A stretch.',kind='free');rt.store.update(g,state='completed',summary='Sketched a tide pool.')
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('Sketched a tide pool',self.cmd('heartbeat',['recap','--since','0'])['recap'])
+        self.assertEqual(self.cmd('heartbeat',['recap','--since',str(time.time()+60)])['recap'],'','nothing since then')
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]

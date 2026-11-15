@@ -26,6 +26,40 @@ def _current(cfg):
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
 
 
+def studio_op(a,home):
+    """What free time made: the journal (newest first), the studio, the "for you" shelf and PROJECTS.md; --read gives
+    one file, only from those folders."""
+    import time as _t
+    journal,studio=home/'journal',home/'studio'
+    shelf=studio/'for-you'
+    roots=[journal.resolve(),studio.resolve()]
+    if a.read:
+        f=Path(a.read).expanduser()
+        f=(home/f if not f.is_absolute() else f).resolve()
+        if not any(f==r or r in f.parents for r in roots) or not f.is_file():
+            raise ValueError('studio --read takes a file in the journal or the studio')
+        raw=f.read_bytes()[:64*1024]
+        emit(dict(path=str(f),text=raw.decode('utf-8','replace'),truncated=f.stat().st_size>64*1024),a.json);return 0
+    def entries(folder,skip=()):
+        if not folder.is_dir():return []
+        out=[]
+        for f in folder.rglob('*'):
+            if not f.is_file() or any(s in f.parents or f==s for s in skip) or f.name.startswith('.'):continue
+            st=f.stat()
+            head=''
+            if st.st_size<512*1024:
+                try:
+                    for line in f.read_text(errors='replace').splitlines():
+                        line=line.strip().lstrip('#').strip()
+                        if line:head=line[:160];break
+                except OSError:pass
+            out.append(dict(path=str(f),name=str(f.relative_to(folder)),size=st.st_size,mtime=st.st_mtime,head=head))
+        return sorted(out,key=lambda e:-e['mtime'])[:200]
+    projects=(studio/'PROJECTS.md').read_text(errors='replace')[:8000] if (studio/'PROJECTS.md').is_file() else ''
+    emit(dict(journal=entries(journal),studio=entries(studio,(shelf,studio/'PROJECTS.md')),shelf=entries(shelf),
+              projects=projects,now=_t.time()),a.json);return 0
+
+
 def model_ops(a,home):
     """provider / models / model / effort: the brains this resident can use, found by asking the providers."""
     import re as _re
@@ -101,7 +135,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -148,6 +182,8 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='studio':
+            p.add_argument('--read',help='one file from the journal, the studio or the shelf, as text')
         if op=='pause':
             p.add_argument('goal_id',nargs='?',help='the goal to pause; defaults to the most recent one')
         if op=='update':
@@ -188,6 +224,7 @@ def parser():
             p.add_argument('--rest-minutes',type=float)
             p.add_argument('--budget-usd',type=float,help='daily free-time allowance on a priced remote model')
             p.add_argument('--afk-minutes',type=float,help='how long a free-time question waits for an answer')
+            p.add_argument('--since',type=float,help='recap: stretches since this Unix time (default: the newest goal from you)')
             p.add_argument('--messages-per-day',type=int)
             p.add_argument('--stretch-minutes',type=float)
         if op=='message':
@@ -394,6 +431,8 @@ def main(argv=None,stdin=None):
             return 0
         if a.op in ('provider','models','model','effort'):
             return model_ops(a,home)
+        if a.op=='studio':
+            return studio_op(a,home)
         if a.op=='update':
             import time as _t
             program=Path(a.program).expanduser().resolve() if a.program else (Path.home()/'bin/caminus-agent').resolve()
@@ -473,7 +512,7 @@ def main(argv=None,stdin=None):
             if a.state=='recap':
                 from .freetime import recap
                 st=Store(home)
-                try:emit(dict(recap=recap(st)),a.json)
+                try:emit(dict(recap=recap(st,a.since),now=__import__('time').time()),a.json)
                 finally:st.close()
                 return 0
             if a.state in ('on','off'):ft['enabled']=a.state=='on'

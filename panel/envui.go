@@ -540,6 +540,14 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.receiveResident(msg)
 		}
+		if msg.err == "" && m.chat.recapAsked == recapNotAsked && validSessionName(m.agentName) {
+			// once per opened session: what free time did since you last looked (nothing when you never looked away)
+			m.chat.recapAsked = recapAtOpen
+			if seen := loadSeen(m.agentName); seen > 0 {
+				return m, fetchRecap(m, seen)
+			}
+			return m, fetchRecap(m, 0)
+		}
 		return m, nil
 	case residentComposeResult:
 		return m.finishCompose(msg)
@@ -577,6 +585,23 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	case modelsLoadedMsg:
 		return m.modelsLoaded(msg), nil
+	case recapMsg:
+		return m.receiveRecap(msg), nil
+	case studioMsg:
+		m.chat.studio.loading, m.chat.studio.err = false, msg.err
+		if msg.err == "" {
+			m.chat.studio.list, m.chat.studio.projects = msg.entries, msg.projects
+		}
+		return m, nil
+	case studioTextMsg:
+		if msg.path == m.chat.studio.reading {
+			if msg.err != "" {
+				m.chat.studio.err = msg.err
+			} else {
+				m.chat.studio.text = strings.Split(msg.text, "\n")
+			}
+		}
+		return m, nil
 	case residentActionMsg:
 		m.msg = msg.text
 		return m, residentRefresh(m)
