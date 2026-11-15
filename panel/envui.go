@@ -91,6 +91,7 @@ type envModel struct {
 	residentEvents []residentEvent
 	goalSel        int
 	chat           residentChat
+	residentEpoch  uint64
 	sessionNames   []string
 	sessionSel     int
 	sessionMemory  string
@@ -520,7 +521,7 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.servers = msg
 		return m, nil
 	case residentMsg:
-		if msg.agent != "" && msg.agent != m.agentName {
+		if msg.epoch != m.residentEpoch || (msg.agent != "" && msg.agent != m.agentName) {
 			return m, nil
 		}
 		if msg.err != "" {
@@ -697,6 +698,7 @@ func (m envModel) submitInput() (tea.Model, tea.Cmd) {
 		m.agentName = strings.TrimSpace(m.edit)
 		m.mode, m.edit, m.goalSel = "normal", "", 0
 		m.resident, m.residentEvents, m.chat = residentStatus{}, nil, residentChat{}
+		m.residentEpoch++
 		m.initChat()
 		return m, residentRefresh(m)
 	case "sessionnew":

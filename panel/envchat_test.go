@@ -176,3 +176,19 @@ func TestSessionHomeOpensChatAndKeepsFiveMainPages(t *testing.T) {
 		t.Fatal("navigation should start at sessions with five pages")
 	}
 }
+
+func TestChatRejectsResponsesFromAnEarlierVisitToTheSameSession(t *testing.T) {
+	m := chatFixture()
+	m.openResident("other")
+	m.openResident("resident")
+	next, _ := m.Update(residentMsg{agent: "resident", epoch: 0, status: residentStatus{LastEvent: 900}, events: []residentEvent{{Seq: 900}}})
+	m = next.(envModel)
+	if m.chat.seq != 0 || len(m.residentEvents) != 0 {
+		t.Fatal("old visit skipped initial history pages")
+	}
+	m.chat.target, m.chat.selectID, m.chat.newGoal = "new-id", "new-id", false
+	m.receiveResident(residentMsg{agent: "resident", epoch: m.residentEpoch, status: residentStatus{Goals: []residentGoal{{ID: "old", State: "completed"}}}})
+	if m.chat.target != "new-id" || m.chat.newGoal {
+		t.Fatal("stale status redirected a just-submitted goal")
+	}
+}

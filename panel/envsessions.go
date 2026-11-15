@@ -70,6 +70,7 @@ func createResidentSession(m envModel, name string) tea.Cmd {
 
 func (m *envModel) openResident(name string) {
 	if name != m.agentName {
+		m.residentEpoch++
 		m.agentName = name
 		m.resident = residentStatus{}
 		m.residentEvents = nil

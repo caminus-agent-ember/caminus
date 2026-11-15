@@ -38,6 +38,7 @@ type residentEvent struct {
 }
 type residentMsg struct {
 	agent  string
+	epoch  uint64
 	status residentStatus
 	events []residentEvent
 	err    string
@@ -54,6 +55,7 @@ func residentCommand(m envModel, args []string, input string) *exec.Cmd {
 
 func residentRefresh(m envModel) tea.Cmd {
 	name, after := m.agentName, m.chat.seq
+	epoch := m.residentEpoch
 	if name == "" {
 		name = "resident"
 	}
@@ -88,7 +90,7 @@ func residentRefresh(m envModel) tea.Cmd {
 			events = append(events, batch...)
 			after = batch[len(batch)-1].Seq
 		}
-		return residentMsg{agent: name, status: status, events: events}
+		return residentMsg{agent: name, epoch: epoch, status: status, events: events}
 	}
 }
 

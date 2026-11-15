@@ -30,6 +30,7 @@ type residentChat struct {
 
 type residentComposeResult struct {
 	agent, id, err string
+	epoch          uint64
 }
 
 func (m *envModel) initChat() {
@@ -85,7 +86,7 @@ func (m *envModel) receiveResident(msg residentMsg) {
 			break
 		}
 	}
-	if m.chat.compose.Value() == "" && !m.chat.sending && !m.chat.forceNew {
+	if m.chat.compose.Value() == "" && !m.chat.sending && !m.chat.forceNew && m.chat.selectID == "" {
 		m.targetSelectedGoal()
 	}
 	m.syncChat()
@@ -387,25 +388,25 @@ func (m envModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 	if !m.chat.newGoal {
 		args = append(args, "--goal-id", m.chat.target)
 	}
-	name := m.agentName
+	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true
 	return m, func() tea.Msg {
 		out, err := residentCommand(m, args, text).CombinedOutput()
 		if err != nil {
-			return residentComposeResult{agent: name, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
+			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
 		var reply struct {
 			ID string `json:"id"`
 		}
 		if err = json.Unmarshal(out, &reply); err != nil || reply.ID == "" {
-			return residentComposeResult{agent: name, err: "Unrecognized delivery response; draft retained. Inspect /goals before retrying."}
+			return residentComposeResult{agent: name, epoch: epoch, err: "Unrecognized delivery response; draft retained. Inspect /goals before retrying."}
 		}
-		return residentComposeResult{agent: name, id: reply.ID}
+		return residentComposeResult{agent: name, epoch: epoch, id: reply.ID}
 	}
 }
 
 func (m envModel) finishCompose(msg residentComposeResult) (tea.Model, tea.Cmd) {
-	if msg.agent != m.agentName {
+	if msg.agent != m.agentName || msg.epoch != m.residentEpoch {
 		return m, nil
 	}
 	m.chat.sending = false
