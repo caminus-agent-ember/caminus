@@ -1093,6 +1093,52 @@ for line in sys.stdin:
                 rt._bridge(dict(name='ask_user',goal=gid,id='p'*32,bridge_id=None),dict(question='And another?'))
         finally:rt.mail.close();rt.store.close()
 
+    def test_nothing_waits_on_the_human_past_the_timeout(self):
+        rt=Runtime(self.home)
+        try:
+            rt.config['question_timeout']=0
+            gid=rt.store.enqueue('Tidy the reports.')
+            rt.advisor.raw=lambda g,msgs,n,who='judge':(_ for _ in ()).throw(ValueError('no advisor'))
+            q=rt._bridge(dict(name='ask_user',goal=gid,id='q'*32,bridge_id=None),
+                         dict(question='Delete the old reports or archive them?',choices=['delete','archive'],recommended='archive'))
+            self.assertEqual((q['decision'],q['by']),('answered','timeout'))
+            self.assertIn('not their answer',q['answer']);self.assertIn('recommended option: archive',q['answer'])
+            self.assertIn('Silence is not approval',q['answer'])
+            self.assertFalse(list((self.bridge/'req').glob('*.json')),'the resident withdraws its own question')
+            r=rt._bridge(dict(name='ask_root',goal=gid,id='r'*32,bridge_id=None),dict(command='apt-get install jq',reason='x'))
+            self.assertEqual((r['decision'],r['by']),('denied','timeout'),'silence never grants root')
+            self.assertIn('NOT run',r['reason'])
+            self.assertFalse(list((self.bridge/'req').glob('*.json')))
+            kinds=[e['kind'] for e in rt.store.events()]
+            self.assertIn('question_unanswered',kinds);self.assertIn('root_unanswered',kinds)
+            rt.config['advisor']=dict(model='claude-opus-5-5',endpoint='http://127.0.0.1:1/v1',budget_usd=1)
+            rt.advisor.raw=lambda *a,**k:self.fail('a permission request never goes to the advisor')
+            a=rt._bridge(dict(name='ask_user',goal=gid,id='p'*32,bridge_id=None),
+                         dict(question='May I delete ~/old-reports?',choices=['yes','no'],recommended='yes',approval=True))
+            self.assertIn('Treat this as NO',a['answer'],'an unanswered permission request is a no');self.assertNotIn('recommended option',a['answer'])
+            rt.config.pop('advisor')
+            rt.config['question_timeout']=3600
+            self.assertIsNone(rt._bridge(dict(name='ask_user',goal=gid,id='w'*32,bridge_id=None),dict(question='Wait?')),
+                              'inside the timeout the question waits for the human')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_unanswered_question_goes_to_the_advisor_when_there_is_one(self):
+        rt=Runtime(self.home)
+        try:
+            rt.config['question_timeout']=0
+            gid=rt.store.enqueue('Pick a log format.')
+            asked=[]
+            rt.config['advisor']=dict(model='claude-opus-5-5',endpoint='http://127.0.0.1:1/v1',budget_usd=1)
+            def raw(g,msgs,n,who='judge'):
+                asked.append((who,msgs[0]['content']));return ('JSON lines: tools read it and it appends safely.','claude-opus-5-5')
+            rt.advisor.raw=raw
+            q=rt._bridge(dict(name='ask_user',goal=gid,id='a'*32,bridge_id=None),
+                         dict(question='CSV or JSON lines?',choices=['CSV','JSON lines'],recommended='CSV'))
+            self.assertIn('The advisor (claude-opus-5-5) suggests: JSON lines',q['answer'])
+            self.assertEqual(asked[0][0],'question');self.assertIn('THE AGENT RECOMMENDS: CSV',asked[0][1])
+            self.assertIn("Silence is not the human's approval",asked[0][1])
+        finally:rt.mail.close();rt.store.close()
+
     def test_free_time_uses_the_full_window_and_recaps_for_the_return(self):
         rt=self.free_runtime()
         try:

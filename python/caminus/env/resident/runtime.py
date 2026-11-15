@@ -34,6 +34,7 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
+QUESTION_TIMEOUT = 900   # seconds a question or root request waits before the resident carries on without it
 SUMMARY_TOKENS = 2048    # a compaction summary's output allowance
 TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error'}
@@ -60,9 +61,15 @@ TOOLS = [
     tool('terminal', 'Use the Ubuntu OS through a real persistent terminal. Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output; a poll returns only output it has not returned before, and says no_new_output when nothing arrived. Paths and programs are those of your Unix account.',
          dict(command={'type':'string'}, cwd={'type':'string'}, session={'type':'string'}, stdin={'type':'string'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, offset={'type':'integer'}, max_output={'type':'integer'})),
-    tool('ask_user', 'Pause this goal and ask your human for clarification. The answer will return as this tool result; do not guess an answer.',
-         dict(question={'type':'string'}, choices={'type':'array','items':{'type':'string'}}), ('question',)),
-    tool('ask_root', 'Request that your human review and execute an exact root command. You have no root privileges. The human may approve, edit or deny; execution output returns here.',
+    tool('ask_user', 'Ask your human a question; the answer returns as this tool result. Your human may be away: if '
+         'no answer arrives in time (question_timeout, 15 minutes by default) the question is withdrawn and you carry '
+         'on with the better option (the advisor\'s pick when one is configured, else your recommended choice). So '
+         'give choices and say which you recommend. Silence is never approval: an irreversible change, an action in '
+         'your human\'s name or spending money falls back to the safe, reversible option. Set approval true when '
+         'you are asking permission for one of those: then no answer in time means NO.',
+         dict(question={'type':'string'}, choices={'type':'array','items':{'type':'string'}},
+              recommended={'type':'string'}, approval={'type':'boolean'}), ('question',)),
+    tool('ask_root', 'Request that your human review and execute an exact root command. You have no root privileges. The human may approve, edit or deny; execution output returns here. With no answer in time (question_timeout) the request is withdrawn and the command is not run: carry on without it.',
          dict(command={'type':'string'}, reason={'type':'string'}), ('command','reason')),
     tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run in your home) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
@@ -365,20 +372,65 @@ class Runtime:
             # The answer stays in the goal's transcript; the agent decides what to remember (nothing is written to
             # its memory automatically).
             return result
-        if kind == 'question' and self.free.is_free(action['goal']):
-            # AFK: free time never blocks on its human. Past the window the resident withdraws its own question
-            # (it never writes an answer on the human's behalf) and carries on; the question stays in the events.
-            asked = json.loads(req.read_text()).get('ts', time.time()) if req.exists() else time.time()
-            if time.time() - asked >= self.free.afk_seconds:
-                try:
-                    req.unlink()
-                except OSError:
-                    pass
-                self.store.event('question_unanswered', dict(id=rid, text=args.get('question', '')), action['goal'])
-                return dict(id=rid, decision='answered',
-                            answer='(no answer: your human is away. Carry on, and note the question in your journal.)')
+        # Nothing blocks on the human: past the timeout the resident withdraws its own request (it never writes a
+        # decision on the human's behalf) and carries on. A root command is then not run; silence never grants root.
+        free = self.free.is_free(action['goal'])
+        timeout = self.free.afk_seconds if free else float(self.config.get('question_timeout', QUESTION_TIMEOUT))
+        asked = json.loads(req.read_text()).get('ts', time.time()) if req.exists() else time.time()
+        if timeout >= 0 and time.time() - asked >= timeout:
+            try:
+                req.unlink()
+            except OSError:
+                pass
+            return self._unanswered(action, args, kind, rid, timeout, free)
         self.store.update(action['goal'], state='waiting_root' if kind == 'root' else 'waiting_user')
         return None
+
+    def _unanswered(self, action, args, kind, rid, timeout, free):
+        gid, mins = action['goal'], max(1, round(timeout / 60))
+        if kind == 'root':
+            self.store.event('root_unanswered', dict(id=rid, command=args.get('command', ''), after_s=int(timeout)), gid)
+            return dict(id=rid, decision='denied', by='timeout',
+                        reason=f'no answer from your human in {mins} min, so the request was withdrawn and the command '
+                               'was NOT run. Carry on without it (a user-level route, or other parts of the goal); if '
+                               'the goal truly cannot go on without root, say so with report need_you and keep the '
+                               'rest moving.')
+        if free:
+            self.store.event('question_unanswered', dict(id=rid, text=args.get('question', ''), by='free time'), gid)
+            return dict(id=rid, decision='answered', by='timeout',
+                        answer='(no answer: your human is away. Carry on, and note the question in your journal.)')
+        q, choices, rec = args.get('question', ''), args.get('choices') or [], args.get('recommended') or ''
+        if args.get('approval'):
+            # Asking permission: an unanswered request is a refusal, never the advisor's or the agent's call.
+            self.store.event('question_unanswered', dict(id=rid, text=q, approval=True, outcome='no'), gid)
+            return dict(id=rid, decision='answered', by='timeout',
+                        answer=f'(no answer from your human in {mins} min.) Treat this as NO: do not take that '
+                               'action. Take the safe, reversible route instead, or leave it for your human: note it '
+                               'in STATE.md and name it in your finish as waiting for their decision. Carry on with '
+                               'the rest of the goal.')
+        advice, who = '', ''
+        if self.advisor.cfg:
+            brief = (f"An agent asked its human this and got no answer in {mins} minutes; it must carry on now.\n"
+                     f"GOAL:\n{self.store.goal(gid)['prompt'][:3000]}\n\nQUESTION:\n{q}\n"
+                     + (('CHOICES:\n' + '\n'.join('- ' + str(c) for c in choices) + '\n') if choices else '')
+                     + (f'THE AGENT RECOMMENDS: {rec}\n' if rec else '')
+                     + "\nPick the better option and say why in two sentences. Silence is not the human's approval: "
+                       "for an irreversible change, an action in the human's name or spending money, pick the safe, "
+                       "reversible option.")
+            try:
+                advice, who = self.advisor.raw(gid, [dict(role='user', content=brief)], 500, who='question')
+            except Exception:
+                advice = ''
+        self.store.event('question_unanswered', dict(id=rid, text=q, recommended=rec, advisor=who,
+                                                     advice=advice[:1000]), gid)
+        pick = (f'The advisor ({who}) suggests: {advice.strip()}' if advice.strip() else
+                f'Go with your recommended option: {rec}.' if rec else 'Go with the option you judge best.')
+        return dict(id=rid, decision='answered', by='timeout',
+                    answer=f'(no answer from your human in {mins} min; this is not their answer.) {pick} '
+                           'Silence is not approval: for an irreversible change, an action in your human\'s name '
+                           'or spending money, take the safe, reversible option or leave it for them. Record the '
+                           'choice and why in STATE.md, mention it in your finish, and carry on; your human can '
+                           'steer you later.')
 
     @staticmethod
     def _failure_text(result):
