@@ -225,7 +225,7 @@ func statusLine(s status, w int) string {
 	bar := barSt.Render(strings.Repeat(g.bar, full)) + envDim.Render(strings.Repeat(g.barEmpty, cells-full))
 	segs := []string{
 		strings.TrimSpace(g.model + " " + s.brain),
-		fmt.Sprintf("%s/%s %s", short(s.used), short(s.window), bar),
+		envDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
 		strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd)),
 	}
 	if s.tps > 0 {
@@ -242,7 +242,16 @@ func statusLine(s status, w int) string {
 			left += edge.Render(g.segL) + pill.Render(sg) + edge.Render(g.segR) + " "
 		}
 	} else {
-		left = envDim.Render(strings.Join(segs, g.segR))
+		// each segment styled on its own: a segment with its own colours (the bar) would end the outer style early
+		styled := make([]string, len(segs))
+		for i, sg := range segs {
+			if strings.Contains(sg, "\x1b[") {
+				styled[i] = sg
+			} else {
+				styled[i] = envDim.Render(sg)
+			}
+		}
+		left = strings.Join(styled, envDim.Render(g.segR))
 	}
 	keys := envDim.Render(strings.Join(s.keys, "  "))
 	gap := w - lipgloss.Width(left) - lipgloss.Width(keys)
