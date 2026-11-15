@@ -4,6 +4,8 @@ CMD detached in the agent user (nohup + setsid, log and pid under ~/env-logs and
 import re
 import shlex
 
+from . import shell
+
 JOBS_DIR = '~/env-jobs'
 LOGS_DIR = '~/env-logs'
 _NAME = re.compile(r'^[A-Za-z0-9_.-]+$')
@@ -18,7 +20,7 @@ def check_name(name):
 def spawn_script(name, cmd_argv, jobs_dir=JOBS_DIR, logs_dir=LOGS_DIR):
     """the shell script that starts cmd_argv detached and prints its pid"""
     check_name(name)
-    cmd = ' '.join(shlex.quote(str(a)) for a in cmd_argv)
+    cmd = shell.quote_argv(cmd_argv)
     return (f'mkdir -p {jobs_dir} {logs_dir}; '
             f'nohup setsid bash -c {shlex.quote(cmd)} > {logs_dir}/{name}.log 2>&1 & '
             f'echo $! > {jobs_dir}/{name}.pid; cat {jobs_dir}/{name}.pid')

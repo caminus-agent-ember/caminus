@@ -53,6 +53,16 @@ def main():
     from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, serve, sessions, settings
     from caminus.cmd import env as cmd_env
 
+    # Optional runtime sharing is operator-selected, portable and fail-visible.
+    plan=cmd_env.PROVISION
+    check(all(value not in plan for value in ('miniforge3','envs/drafter','src/caminus/public','2>/dev/null || true')),
+          'setup: no workstation-specific runtime sources or suppressed mount failures')
+    check(all(value in plan for value in ('runtime_source=','package_source=','models_source=',
+                                         '/opt/caminus-runtime/python/bin/python -I','remount,bind,ro')),
+          'setup: explicit runtime sources and read-only mount examples')
+    check(all(line.startswith('#') for line in plan.splitlines() if 'sudo mount' in line),
+          'setup: optional inference mounts require a separate operator choice')
+
     # settings: environment first
     check(settings.user() == 'test-agent', 'settings.user from the environment')
     check(settings.bridge_dir() == bridge_dir, 'settings.bridge_dir from the environment')
@@ -127,6 +137,30 @@ def main():
     check(bridge_dir in src, 'agent_side: the bridge path is baked into ask-root')
     compile(src, 'ask-root', 'exec')
     check(True, 'agent_side: ask-root compiles')
+
+    # The standalone helper must share requests with the human even when the
+    # bridge's group differs from the agent process's primary group.
+    helper_bridge=os.path.join(S,'helper-bridge')
+    helper_group=next((g for g in os.getgroups() if g!=os.getgid()),os.getgid())
+    for name in ('req','res'):
+        path=os.path.join(helper_bridge,name);os.makedirs(path,mode=0o770)
+        os.chown(path,-1,helper_group)
+    helper=os.path.join(S,'ask-root-helper.py')
+    with open(helper,'w') as f:f.write(agent_side.ask_root_source(helper_bridge))
+    process=subprocess.Popen([sys.executable,'-I',helper,'fixture-command-never-executed'],
+                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
+                             env=dict(os.environ,CAMINUS_ENV_TIMEOUT='5'))
+    deadline=time.monotonic()+3;requests=[]
+    while time.monotonic()<deadline and not requests:
+        requests=bridge.pending(helper_bridge)
+        if not requests:time.sleep(.02)
+    check(bool(requests),'agent_side: standalone request appears')
+    if requests:
+        rid=requests[0]['id'];info=os.stat(os.path.join(helper_bridge,'req',rid+'.json'))
+        check(info.st_gid==helper_group and info.st_mode&0o777==0o660,'agent_side: request has bridge group and mode660')
+        bridge.answer(helper_bridge,rid,'denied','fixture-human')
+    out,err=process.communicate(timeout=6)
+    check(process.returncode==126,'agent_side: standalone denial returns without executing root')
     cmd = agent_side.install_command(bridge_dir, settings.agent_bin(), prompt.text(), settings.robots_path(),
                                      prompt.MEMORY_TEMPLATE, settings.memory_path())
     check('base64 -d' in cmd and settings.agent_bin() in cmd and settings.robots_path() in cmd
@@ -220,6 +254,22 @@ def main():
             pass
     check(True, 'jobs: bad names rejected')
 
+    # the live reader must inherit stdout: a buffered call would hold every line until the stream ends
+    from caminus.env import agent_host as _agent_host
+    live_calls, plain_calls = [], []
+    old_stream, old_run = runner.run_shell_stream, runner.run_shell
+    runner.run_shell_stream = lambda script: live_calls.append(script) or subprocess.CompletedProcess([], 0)
+    runner.run_shell = lambda script, transport=None, **kw: plain_calls.append(script) or subprocess.CompletedProcess([], 0)
+    try:
+        _agent_host.main(['stream', 'resident', '--once'], transport=lambda *a, **k: None)
+        check(live_calls and 'stream' in live_calls[0] and not plain_calls,
+              'agent_host: stream keeps its lines flowing over SSH')
+        live_calls.clear(); plain_calls.clear()
+        _agent_host.main(['status', 'resident', '--json'], transport=lambda *a, **k: None)
+        check(plain_calls and not live_calls, 'agent_host: a one-shot operation stays buffered')
+    finally:
+        runner.run_shell_stream, runner.run_shell = old_stream, old_run
+
     # sessions: tmux script builders
     import shlex as _shlex
     s = sessions.new_script('coder', ['qwen', '-p', 'hi there'])
@@ -235,6 +285,32 @@ def main():
         check(False, 'sessions: bad session name accepted')
     except ValueError:
         check(True, 'sessions: bad session names rejected')
+
+    # a ~/ path in the command must expand in the session's own shell: `caminus env serve` starts the session as
+    # `bash ~/homes/NAME/run.sh`, and quoting the tilde made the shell look for a literal `~` directory (exit 127)
+    from caminus.env import shell as _shell
+    check(_shell.quote_arg('~') == '"$HOME"', 'shell: a bare tilde is the agent user home')
+    check(_shell.quote_arg('~agent/x') == _shlex.quote('~agent/x'), 'shell: another user\'s tilde is quoted, never guessed')
+    check(_shell.quote_arg('~/.local/bin/caminus') == '"$HOME"/.local/bin/caminus',
+          'shell: a ~/ path expands at run time and stays quoted after the home')
+    s = sessions.new_script('demo', ['bash', '~/homes/demo/run.sh'])
+    check('"$HOME"/homes/demo/run.sh' in s and "'~/" not in s,
+          'sessions: new leaves a ~/ path to expand in the session shell')
+    s2 = sessions.new_script('demo', ['bash', '~/homes/a$(id)/run.sh'])
+    check(_shlex.split(_shlex.split(s2)[-1]) == ['bash', '$HOME/homes/a$(id)/run.sh'],
+          'sessions: only the home expands; the rest of a ~/ path stays one quoted word')
+    home = os.path.join(S, 'agent-home')
+    os.makedirs(os.path.join(home, 'homes', 'demo'), exist_ok=True)
+    launcher = os.path.join(home, 'homes', 'demo', 'run.sh')
+    with open(launcher, 'w') as f:
+        f.write('#!/bin/bash\necho launcher-ran\n')
+    os.chmod(launcher, 0o700)
+    r = subprocess.run(['bash', '-lc', _shlex.split(s)[-1]], env=dict(os.environ, HOME=home),
+                       capture_output=True, text=True)
+    check(r.returncode == 0 and 'launcher-ran' in (r.stdout or ''),
+          'sessions: the run.sh command new_script builds runs in the session shell')
+    s = jobs.spawn_script('demo', ['bash', '~/homes/demo/run.sh'])
+    check('bash "$HOME"/homes/demo/run.sh' in s, 'jobs: spawn leaves a ~/ path to expand in the detached shell')
 
     # serve: placement resolution, port allocation, per-name home, launcher
     from caminus.cmd import manage as _manage
@@ -282,6 +358,11 @@ def main():
     check('HIP_VISIBLE_DEVICES=1,2' in lc and 'PYTHONPATH=/opt/pkg' in lc and "CAMINUS_QWEN_HOME='~/homes/coder/qwen-home'" in lc
           and lc.rstrip().endswith('serve --model /m.gguf --port 8092') and 'bash /opt/guard.sh' in lc,
           'serve: launcher has placement, per-name env, guard and serve argv')
+    check('sys.path.insert(0,' in lc and '-m caminus' not in lc,
+          'serve: a shared package is bootstrapped explicitly, because -I ignores PYTHONPATH')
+    plain = serve.launcher('coder', ['--model', '/m.gguf'], [0], runtime='python3 -I', pkg='', guard='')
+    check('-m caminus serve --model /m.gguf' in plain and 'sys.path.insert' not in plain,
+          'serve: without a shared package the module entry point is unchanged')
     args = serve.remap_paths(['--model', '/models/m.gguf', '--drafter', '/models/d.gguf'],
                              '/models', '/opt/caminus-runtime/models')
     check(args[1] == '/opt/caminus-runtime/models/m.gguf' and args[3] == '/opt/caminus-runtime/models/d.gguf',

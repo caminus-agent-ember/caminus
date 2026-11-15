@@ -41,6 +41,7 @@ import sys
 import time
 
 from ..env import agent_side, audit, bridge, jobs, runner, serve, sessions, settings
+from ..env.display import terminal_text
 
 
 def _parser():
@@ -61,6 +62,9 @@ def _parser():
     sub.add_parser('prompt', help="print ROBOTS.md, the agent environment's own instructions")
 
     sub.add_parser('ui', help='the TUI: queued root requests + the live audit log (caminus-panel env)')
+
+    p = sub.add_parser('agent', add_help=False, help='resident agent: install/init/start/send/once/status/events/resume/cancel')
+    p.add_argument('args', nargs=argparse.REMAINDER)
 
     p = sub.add_parser('spawn', help='start a command detached in the agent user')
     p.add_argument('--name', '-n', required=True)
@@ -90,6 +94,7 @@ def _parser():
 
     p = sub.add_parser('answer', help='answer one request: approved | edited TEXT | denied | answered TEXT')
     p.add_argument('--json', action='store_true')
+    p.add_argument('--digest',help='the reviewed _digest from env reqs --json; required for approved/edited root decisions')
     p.add_argument('id')
     p.add_argument('decision', choices=['approved', 'edited', 'denied', 'answered'])
     p.add_argument('text', nargs='?')
@@ -136,6 +141,9 @@ def _parser():
 
 
 def main(rest, transport=None):
+    if rest[:1] == ['agent']:
+        from ..env import agent_host
+        return agent_host.main(rest[1:], transport or subprocess.run)
     extra_serve = None
     if rest[:1] == ['serve'] and '--' in rest:
         i = rest.index('--')
@@ -205,7 +213,7 @@ def main(rest, transport=None):
         else:
             for r in reqs:
                 body = r.get('cmd') if r.get('kind', 'root') == 'root' else r.get('text', '')
-                print(f"{r['id']} [{r.get('kind', 'root')}] from {r.get('user')}: {body}")
+                print(terminal_text(f"{r['id']} [{r.get('kind', 'root')}] from {r.get('user')}: {body}"))
         return 0
     if a.sub == 'answer':
         return _answer(a, tr)
@@ -281,12 +289,17 @@ sudo mkdir -p {bridge}/req {bridge}/res {bridge}/notes
 sudo chown root:{group} {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo chmod 770 {bridge} {bridge}/req {bridge}/res {bridge}/notes
 sudo loginctl enable-linger {user}                   # its long-running servers survive logout
-# optional, for `caminus env serve` (the server runs as the agent user and must read python+torch+caminus):
-sudo mkdir -p /opt/caminus-runtime && sudo mount --bind "$HOME/miniforge3" /opt/caminus-runtime/conda 2>/dev/null || true
-sudo mount --bind "$HOME/src" /opt/caminus-runtime/src 2>/dev/null || true
-sudo mount --bind "$HOME/.local/share/caminus/models" /opt/caminus-runtime/models 2>/dev/null || true
-# then: export CAMINUS_ENV_PYTHON='/opt/caminus-runtime/conda/envs/drafter/bin/python -I'
-#       export CAMINUS_ENV_PKG=/opt/caminus-runtime/src/caminus/public/python
+# optional inference runtime: choose explicit sources for this installation before running these commented commands.
+# runtime_source=/absolute/path/to/python-prefix       # contains bin/python and its dependencies
+# package_source=/absolute/path/to/package-root       # contains the caminus package
+# models_source=/absolute/path/to/model-directory
+# test -x "$runtime_source/bin/python" && test -d "$package_source/caminus" && test -d "$models_source"
+# sudo mkdir -p /opt/caminus-runtime/python /opt/caminus-runtime/package /opt/caminus-runtime/models
+# sudo mount --bind "$runtime_source" /opt/caminus-runtime/python && sudo mount -o remount,bind,ro /opt/caminus-runtime/python
+# sudo mount --bind "$package_source" /opt/caminus-runtime/package && sudo mount -o remount,bind,ro /opt/caminus-runtime/package
+# sudo mount --bind "$models_source" /opt/caminus-runtime/models && sudo mount -o remount,bind,ro /opt/caminus-runtime/models
+# then: export CAMINUS_ENV_PYTHON='/opt/caminus-runtime/python/bin/python -I'
+#       export CAMINUS_ENV_PKG=/opt/caminus-runtime/package
 #       export CAMINUS_ENV_MODELS=/opt/caminus-runtime/models
 ssh-keygen -t ed25519 -f {key} -N '' -C caminus-env   # if {key} does not exist yet
 # then add this line to {user_home}/.ssh/authorized_keys (dir 700, file 600, owned by {user}):
@@ -422,6 +435,15 @@ def _ask(a):
     return 0
 
 
+def _root_result(req,decision,cmd,actor,tr):
+    token=bridge.claim(settings.bridge_dir(),req,decision,actor,cmd)
+    audit.log(settings.audit_path(),dict(event='root_claim',id=req['id'],decision=decision,by=actor,cmd=cmd))
+    try:r=bridge.execute_root(cmd,runner=tr)
+    except (OSError,ValueError) as e:r=subprocess.CompletedProcess(['sudo','sh','-c',cmd],127,'',str(e))
+    bridge.finish(settings.bridge_dir(),req['id'],token,r.returncode,r.stdout or '',r.stderr or '')
+    return r
+
+
 def _watch(a, tr):
     os.umask(0o007)          # bridge files must stay readable by the agent user
     me = getpass.getuser()
@@ -430,53 +452,65 @@ def _watch(a, tr):
     while True:
         reqs = [r for r in bridge.pending(settings.bridge_dir()) if r['id'] not in seen]
         for req in reqs:
-            seen.add(req['id'])
-            kind = req.get('kind', 'root')
-            audit.log(ap, {'event': 'request', 'id': req['id'], 'kind': kind, 'from': req.get('user')})
-            print(f"\n{kind} request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})")
-            if kind == 'question':
-                print(f"  {req.get('text', '')}")
-                if req.get('choices'):
-                    print('  choices: ' + ' | '.join(f'{i + 1}) {c}' for i, c in enumerate(req['choices'])))
-                ans = input('answer (text, or choice number; empty denies): ')
-                if not ans.strip():
-                    bridge.answer(settings.bridge_dir(), req['id'], 'denied', me)
-                    audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'denied', 'by': me})
-                else:
-                    if req.get('choices') and ans.strip().isdigit() and 1 <= int(ans) <= len(req['choices']):
-                        ans = req['choices'][int(ans) - 1]
-                    bridge.answer(settings.bridge_dir(), req['id'], 'answered', me, answer_text=ans)
-                    audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'answered', 'by': me, 'answer': ans})
-                    _remember_qa(req.get('text', ''), ans, tr)
-                continue
-            print(f"  {req['cmd']}")
-            choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
-            if choice == 's':
-                continue
-            if choice == 'd':
-                bridge.answer(settings.bridge_dir(), req['id'], 'denied', me)
-                audit.log(ap, {'event': 'root_decision', 'id': req['id'], 'decision': 'denied', 'by': me})
-                print('denied.')
-                continue
-            cmd = req['cmd']
-            if choice == 'e':
-                cmd = input('root command: ').strip()
-                if not cmd:
+            try:
+                seen.add(req['id'])
+                kind = req.get('kind', 'root')
+                audit.log(ap, {'event': 'request', 'id': req['id'], 'kind': kind, 'from': req.get('user')})
+                print('\n'+terminal_text(f"{kind} request {req['id']} from {req.get('user')} (pid {req.get('pid')}, cwd {req.get('cwd')})"))
+                if kind == 'question':
+                    print('  '+terminal_text(req.get('text','')))
+                    if req.get('choices'):
+                        print('  choices: ' + ' | '.join(terminal_text(f'{i + 1}) {c}') for i, c in enumerate(req['choices'])))
+                    ans = input('answer (text, or choice number; empty denies): ')
+                    if not ans.strip():
+                        bridge.answer(settings.bridge_dir(), req['id'], 'denied', me,request=req)
+                        audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'denied', 'by': me})
+                    else:
+                        if req.get('choices') and ans.strip().isdigit() and 1 <= int(ans) <= len(req['choices']):
+                            ans = req['choices'][int(ans) - 1]
+                        bridge.answer(settings.bridge_dir(), req['id'], 'answered', me, answer_text=ans,request=req)
+                        audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'answered', 'by': me, 'answer': ans})
+                        _remember_qa(req.get('text', ''), ans, tr)
                     continue
-            r = bridge.execute_root(cmd, runner=tr)
-            bridge.answer(settings.bridge_dir(), req['id'],
-                          'edited' if cmd != req['cmd'] else 'approved', me, cmd=cmd,
-                          rc=r.returncode, out=r.stdout or '', err=r.stderr or '')
-            audit.log(ap, {'event': 'root_result', 'id': req['id'], 'decision': 'approved' if cmd == req['cmd'] else 'edited',
-                           'by': me, 'cmd': cmd, 'rc': r.returncode})
-            sys.stdout.write(r.stdout or '')
-            sys.stderr.write(r.stderr or '')
+                print('  '+terminal_text(req['cmd']))
+                if req.get('reason'):
+                    print('  reason: '+terminal_text(req['reason']))
+                choice = input('approve [a] / edit [e] / deny [d] / skip [s]: ').strip().lower()
+                if choice not in ('a','e','d'):
+                    continue
+                if choice == 'd':
+                    bridge.answer(settings.bridge_dir(), req['id'], 'denied', me,request=req)
+                    audit.log(ap, {'event': 'root_decision', 'id': req['id'], 'decision': 'denied', 'by': me})
+                    print('denied.')
+                    continue
+                cmd = req['cmd']
+                if choice == 'e':
+                    cmd = input('root command: ').strip()
+                    if not cmd:
+                        continue
+                try:r = _root_result(req,'edited' if cmd != req['cmd'] else 'approved',cmd,me,tr)
+                except (OSError,ValueError) as e:
+                    print('request not executed: '+str(e),file=sys.stderr)
+                    continue
+                audit.log(ap, {'event': 'root_result', 'id': req['id'], 'decision': 'approved' if cmd == req['cmd'] else 'edited',
+                               'by': me, 'cmd': cmd, 'rc': r.returncode})
+                sys.stdout.write(r.stdout or '')
+                sys.stderr.write(r.stderr or '')
+            except (OSError,ValueError) as e:
+                print('request processing stopped: '+str(e),file=sys.stderr)
         if a.once:
             return 0
         time.sleep(0.5)
 
 
 def _answer(a, tr):
+    try:return _answer_pending(a,tr)
+    except (OSError,ValueError) as e:
+        print('caminus env answer: '+str(e),file=sys.stderr)
+        return 2
+
+
+def _answer_pending(a, tr):
     """answer one pending request non-interactively (for scripts and tests); approved/edited run sudo"""
     me = getpass.getuser()
     reqs = {r['id']: r for r in bridge.pending(settings.bridge_dir())}
@@ -484,16 +518,25 @@ def _answer(a, tr):
         print(f'caminus env answer: no pending request {a.id} (caminus env reqs)', file=sys.stderr)
         return 2
     req = reqs[a.id]
+    if a.decision in ('approved','edited') and not a.digest:
+        print('caminus env answer: root approval requires --digest from the request you reviewed (env reqs --json)',file=sys.stderr)
+        return 2
+    if a.digest is not None and a.digest!=req['_digest']:
+        print('caminus env answer: request changed since review; review it again',file=sys.stderr)
+        return 2
     ap = settings.audit_path()
     if a.decision == 'denied':
-        bridge.answer(settings.bridge_dir(), a.id, 'denied', me)
+        bridge.answer(settings.bridge_dir(), a.id, 'denied', me,request=req)
         audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'denied', 'by': me})
         res = {'id': a.id, 'decision': 'denied'}
     elif a.decision == 'answered':
+        if req.get('kind','root')!='question':
+            print('caminus env answer: a root request needs a root decision',file=sys.stderr)
+            return 2
         if not a.text:
             print('caminus env answer: answered needs TEXT', file=sys.stderr)
             return 2
-        bridge.answer(settings.bridge_dir(), a.id, 'answered', me, answer_text=a.text)
+        bridge.answer(settings.bridge_dir(), a.id, 'answered', me, answer_text=a.text,request=req)
         audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'answered', 'by': me, 'answer': a.text})
         _remember_qa(req.get('text', ''), a.text, tr)
         res = {'id': a.id, 'decision': 'answered', 'answer': a.text}
@@ -502,9 +545,7 @@ def _answer(a, tr):
         if not cmd:
             print('caminus env answer: no command to run', file=sys.stderr)
             return 2
-        r = bridge.execute_root(cmd, runner=tr)
-        bridge.answer(settings.bridge_dir(), a.id, a.decision, me, cmd=cmd, rc=r.returncode,
-                      out=r.stdout or '', err=r.stderr or '')
+        r = _root_result(req,a.decision,cmd,me,tr)
         audit.log(ap, {'event': 'root_result', 'id': a.id, 'decision': a.decision, 'by': me,
                        'cmd': cmd, 'rc': r.returncode})
         sys.stdout.write(r.stdout or '')
