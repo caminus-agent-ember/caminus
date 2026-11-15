@@ -333,7 +333,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}

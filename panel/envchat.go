@@ -42,6 +42,9 @@ type residentChat struct {
 	picker                                  bool
 	pickerQuery                             string
 	pickerSel                               int
+	approvals                               bool // the Approvals overlay is over the conversation
+	approvalSel                             int  // the row it has selected
+	approvalDetail                          bool // Enter opened the selected request in full
 	slashIdx                                int
 	slashToken, slashText                   string
 	pathIdx                                 int
@@ -757,7 +760,13 @@ func (m envModel) renderChat() string {
 	head := shellHeader(residentText(m.agentName), state, goalText, steps, w)
 	foot := m.chatFoot(w)
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow")
+		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /requests · /remember TEXT") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals")
+	}
+	if m.chat.approvals {
+		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
+		// small so a short terminal (with /help's extra lines) still gets a box inside the frame.
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.approvalOverlay(w, h) + "\n" + foot
 	}
 	body := []string{head, m.chat.transcript.View()}
 	if live := m.liveBlock(w); live != "" {
@@ -783,7 +792,8 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending {
+	} else if !m.chat.sending && !m.chat.approvals {
+		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
 	}
 	return m, cmd
@@ -791,6 +801,9 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.initChat()
+	if m.chat.approvals {
+		return m.approvalKey(msg)
+	}
 	if m.chat.picker {
 		return m.pickerKey(msg)
 	}
@@ -809,6 +822,13 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
+	case "ctrl+a":
+		// The Approvals overlay over the conversation: the requests a person has to decide, in the one box every
+		// overlay uses. It owns the keys while it is open, so the composer lets go of them.
+		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
+		m.chat.armed = ""
+		m.chat.compose.Blur()
+		return m, nil
 	case "tab", "shift+tab":
 		if next, done := m.cycleSlash(); done {
 			return next, nil
@@ -1005,6 +1025,12 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	case "/requests":
 		clear()
 		m.tab = 0
+	case "/approvals":
+		// The overlay over the conversation; /requests still opens the page that edits and answers.
+		clear()
+		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
+		m.chat.armed = ""
+		m.chat.compose.Blur()
 	case "/sessions":
 		clear()
 		m.tab = 7
@@ -1164,6 +1190,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 // chatSlash. The list stays in one place so the two never drift apart.
 var slashCommands = []struct{ name, hint string }{
 	{"/agent", "open another session NAME"},
+	{"/approvals", "open the approvals overlay (Ctrl+A)"},
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/goal", "select a goal by ID prefix"},
@@ -1464,7 +1491,7 @@ func (m envModel) chatFoot(w int) string {
 	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
 	keys := []string{"esc browse", "^P sessions", "/help"}
 	if len(m.reqs) > 0 {
-		keys = append([]string{fmt.Sprintf("%s %d pending /requests", g.root, len(m.reqs))}, keys...)
+		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
 	}
 	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: -1, tps: m.resident.TokPerS,

@@ -382,7 +382,7 @@ func overlayBox(title, body, keys string, w, h int) string {
 	if len(lines) > h-4 {
 		lines = lines[:h-4]
 	}
-	lines = append(lines, envDim.Render(keys+"  ·  esc close"))
+	lines = append(lines, envDim.Render(ansi.Truncate(keys+"  ·  esc close", max(8, w-4), "…")))
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).Padding(0, 1).
 		Width(w).Render(strings.Join(lines, "\n"))
 }
