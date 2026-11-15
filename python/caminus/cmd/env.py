@@ -64,6 +64,10 @@ def _parser():
     p = sub.add_parser('agent', add_help=False, help='resident agent: install/init/start/send/once/status/events/resume/cancel')
     p.add_argument('args', nargs=argparse.REMAINDER)
 
+    p = sub.add_parser('relay', add_help=False,
+                       help="a spend-capped key relay for a paid provider (anthropic, deepinfra), run as the owner")
+    p.add_argument('args', nargs=argparse.REMAINDER)
+
     p = sub.add_parser('spawn', help='start a command detached in the agent user')
     p.add_argument('--name', '-n', required=True)
     p.add_argument('cmd', nargs=argparse.REMAINDER)
@@ -136,6 +140,9 @@ def main(rest, transport=None):
     if rest[:1] == ['agent']:
         from ..env import agent_host
         return agent_host.main(rest[1:], transport or subprocess.run)
+    if rest[:1] == ['relay']:
+        from ..env import relay
+        return relay.main(rest[1:]) or 0
     extra_serve = None
     if rest[:1] == ['serve'] and '--' in rest:
         i = rest.index('--')
