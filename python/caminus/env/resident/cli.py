@@ -266,7 +266,10 @@ def main(argv=None,stdin=None):
                         store.event('goal_continued',{},a.goal_id)
                     store.db.execute('INSERT INTO inbox(goal,text) VALUES(?,?)',(a.goal_id,text))
                     store.event('user_message',dict(text=text),a.goal_id)
-                emit(dict(id=a.goal_id,queued=True),a.json);store.close();return 0
+                    # A paused goal keeps the text but will not read it until someone resumes: say so
+                    # rather than reporting a delivery the agent will never act on.
+                    resume_required=state in ('paused','error','waiting_user','waiting_root')
+                emit(dict(id=a.goal_id,queued=True,resume_required=resume_required),a.json);store.close();return 0
             if a.goal_id:
                 gid=a.goal_id
                 resume_goal(store,gid,a.max_steps,a.max_seconds)
@@ -328,8 +331,17 @@ def main(argv=None,stdin=None):
             # A daemon already owns the loop. Oneshot submits and observes that same loop.
             watch=Store(home)
             try:
+                ticks=0
                 while watch.goal(gid)['state'] not in PAUSED|{'waiting_model'}:
                     observe(watch)
+                    ticks+=1
+                    if ticks%20==0:
+                        beat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
+                        if beat.get('pid') and not alive(beat['pid']):
+                            # The daemon that held the loop is gone; report it instead of waiting forever.
+                            failed=dict(summary(watch,gid),error='the daemon holding this goal exited; run resume')
+                            emit(failed if a.json or a.jsonl else dict(error=failed['error']),a.json or a.jsonl)
+                            return EXIT['error']
                     time.sleep(.1)
                 observe(watch)
             finally:watch.close()

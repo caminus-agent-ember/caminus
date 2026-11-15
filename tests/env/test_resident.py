@@ -50,6 +50,8 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         q=self.queues[key]
         if not q:self.respond(dict(error='fixture exhausted'),500);return
         value=q.popleft()
+        if isinstance(value,dict) and '_status' in value:
+            self.respond(dict(error='refused by the fixture'),value['_status']);return
         if body.get('stream') and isinstance(value,dict) and '_deltas' in value:
             self.stream(value['_deltas']);return
         msg=dict(value(body) if callable(value) else value);reason=msg.pop('_finish_reason','stop')
@@ -587,6 +589,36 @@ class Resident(unittest.TestCase):
             self.assertEqual(g['state'],'error');self.assertIn('ZeroDivisionError',g['error'])
             self.assertTrue(any(e['kind']=='runtime_error' for e in rt.store.events()))
             self.assertFalse(rt.tick(gid),'a finished goal is not retried')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_permanent_model_refusal_stops_the_goal(self):
+        self.replies({'_status':401})
+        result=self.cmd('once',['--goal','This model refuses.'],code=1)
+        self.assertEqual(result['state'],'error')
+        event=next(e for e in self.cmd('events') if e['kind']=='model_refused')
+        self.assertEqual(event['data']['status'],401)
+
+    def test_steering_a_paused_goal_reports_that_it_requires_resume(self):
+        self.replies(call('terminal',dict(command='printf ready')))
+        first=self.cmd('once',['--goal','Work on this goal.','--max-steps','1'],code=22)
+        sent=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Use the other approach.')
+        self.assertTrue(sent['queued']);self.assertTrue(sent['resume_required'],
+            'a paused goal will not read steering until it is resumed')
+
+    def test_store_indexes_the_per_tick_queries(self):
+        store=Store(self.home)
+        try:
+            names={r['name'] for table in ('inbox','actions','events') for r in store.db.execute('PRAGMA index_list('+table+')')}
+            self.assertTrue({'inbox_goal','actions_goal','events_goal'} <= names,names)
+        finally:store.close()
+
+    def test_truncated_memory_says_so_in_the_prompt(self):
+        (self.home/'MEMORY.md').write_text('x'*40000)
+        rt=Runtime(self.home)
+        try:
+            content=rt.system()['content']
+            self.assertIn('MEMORY.md truncated',content)
+            self.assertIn('7232 characters omitted',content)
         finally:rt.mail.close();rt.store.close()
 
     def test_malformed_tools_are_results_not_daemon_crashes(self):

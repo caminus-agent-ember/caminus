@@ -87,7 +87,9 @@ Requests retain their review controls: `a` answers/approves, `e` edits a root
 command, `d` denies. Root execution hands the actual terminal to the human for
 sudo. Steering does not approve root, answer a pending question or resume a
 paused goal. Accepted in-flight steering is observed before completion; ordinary CLI steering to a
-finished/cancelled goal is rejected. The conversation UI explicitly uses
+finished/cancelled goal is rejected, and steering a paused goal reports
+`resume_required` so a queued message is not mistaken for delivered work.
+The conversation UI explicitly uses
 `send --goal-id ID --continue` for completed-goal follow-ups; cancelled goals
 cannot be reopened this way. `env run`, jobs,
 sessions and all previous scriptable CLI flows remain available.

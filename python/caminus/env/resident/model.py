@@ -47,7 +47,11 @@ class Model:
                 if len(raw) > 16 * 1024 * 1024:
                     raise ModelError('model response exceeds16MiB')
                 return json.loads(raw)
-        except (OSError, ValueError, urllib.error.HTTPError) as e:
+        except urllib.error.HTTPError as e:
+            err = ModelError(str(e))
+            err.status = e.code      # a refusal must not be retried like an outage
+            raise err from e
+        except (OSError, ValueError) as e:
             raise ModelError(str(e)) from e
 
     def context_size(self):
@@ -164,7 +168,11 @@ class Model:
                                 slot['arguments'] += fn['arguments']
         except Cancelled:
             raise
-        except (OSError, ValueError, KeyError, IndexError, TypeError, urllib.error.HTTPError) as e:
+        except urllib.error.HTTPError as e:
+            err = ModelError(str(e))
+            err.status = e.code      # a refusal must not be retried like an outage
+            raise err from e
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             raise ModelError(str(e)) from e
         self.last_usage = usage
         try:

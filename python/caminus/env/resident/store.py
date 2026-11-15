@@ -58,6 +58,11 @@ class Store:
             id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
             text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS peer_deliveries(id TEXT PRIMARY KEY, goal TEXT, error TEXT);
+          -- Every tick asks for a goal's unconsumed inbox rows, its pending actions and whether
+          -- discovery already ran; without these the answer is a full scan of a table that only grows.
+          CREATE INDEX IF NOT EXISTS inbox_goal ON inbox(goal,consumed);
+          CREATE INDEX IF NOT EXISTS actions_goal ON actions(goal,state);
+          CREATE INDEX IF NOT EXISTS events_goal ON events(goal,kind);
         ''')
 
     def close(self):

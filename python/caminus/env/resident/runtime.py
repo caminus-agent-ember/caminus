@@ -116,8 +116,14 @@ class Runtime:
     def system(self):
         out = render_prompt(self.home)
         for p in (Path.home() / 'ROBOTS.md', self.home / 'IDENTITY.md', self.home / 'MEMORY.md'):
-            if p.is_file():
-                out += '\n\n' + p.name + ':\n' + p.read_text()[:32768]
+            if not p.is_file():
+                continue
+            text = p.read_text()
+            limit = 32768
+            if len(text) > limit:
+                # Say so in the prompt: a silent cut leaves the model believing it read its whole memory.
+                text = text[:limit] + f'\n[{p.name} truncated: {len(text) - limit} characters omitted from the end]'
+            out += '\n\n' + p.name + ':\n' + text
         return dict(role='system', content=out)
 
     def _bridge(self, action, args):
@@ -369,6 +375,13 @@ class Runtime:
                     self.store.update(gid,state='paused',error=str(e))
                     self.store.event('model_truncated' if isinstance(e,ModelTruncated) else 'context_refused',
                                      dict(error=str(e),**(dict(partial=e.partial) if isinstance(e,ModelTruncated) else {})),gid)
+                    return True
+                status=getattr(e,'status',0)
+                if status in (400,401,403,404,413,422):
+                    # A misconfigured model (wrong alias, revoked key, rejected context) never succeeds:
+                    # stop this goal with the reason instead of waking the loop forever.
+                    self.store.update(gid,state='error',error=str(e))
+                    self.store.event('model_refused',dict(error=str(e),status=status),gid)
                     return True
                 attempt=self.retry.get(gid,(0,0))[1]+1
                 self.retry[gid]=(time.time()+min(30,2**min(attempt,5)),attempt)
