@@ -264,6 +264,42 @@ class Resident(unittest.TestCase):
                 self.assertIn('written mid-goal',rt.context_message(g2)['content'],'the next goal sees the new index')
             finally:rt.mail.close();rt.store.close()
 
+    def test_file_tools_read_edit_write(self):
+        from caminus.env.resident import files
+        home=self.home
+        w=files.write(home,'src/a.py','def f(n):\n    if n > 3:\n        return 1\n    return 0\n')
+        self.assertTrue(w['created']);self.assertIn('4 lines',w['note'])
+        r=files.read(home,'src/a.py',offset=2,limit=2)
+        self.assertEqual(r['shown'],'2-3');self.assertIn('     2\t    if n > 3:',r['text']);self.assertIn('offset=4',r['next'])
+        e=files.edit(home,'src/a.py','if n > 3:','if n >= 3:')
+        self.assertEqual((e['added'],e['removed']),(1,1));self.assertIn('-    if n > 3:',e['diff']);self.assertIn('+    if n >= 3:',e['diff'])
+        with self.assertRaises(ValueError) as c:files.edit(home,'src/a.py','return','yield')
+        self.assertIn('occurs 2 times',str(c.exception))
+        self.assertEqual(files.edit(home,'src/a.py','return','yield',replace_all=True)['replaced'],2)
+        with self.assertRaises(ValueError) as c:files.edit(home,'src/a.py','  if n >= 3:  \n','x')
+        self.assertIn('not found',str(c.exception))
+        (home/'b.bin').write_bytes(b'\0\1\2')
+        with self.assertRaises(ValueError):files.read(home,'b.bin')
+        self.assertIn('src/',files.read(home,'.')['entries'])
+        # a CRLF file keeps its endings, and the mode survives an edit
+        p=home/'win.txt';p.write_bytes(b'one\r\ntwo\r\n');p.chmod(0o640)
+        files.edit(home,'win.txt','one\ntwo','uno\ndos')
+        self.assertEqual(p.read_bytes(),b'uno\r\ndos\r\n');self.assertEqual(p.stat().st_mode&0o777,0o640)
+
+    def test_file_tools_through_the_loop(self):
+        self.replies(call('write',dict(path='notes.txt',content='alpha\nbeta\n')),
+                     call('edit',dict(path='notes.txt',old='beta',new='gamma')),
+                     call('read',dict(path='notes.txt')),
+                     call('finish',dict(summary='Edited.')))
+        out=self.cmd('once',['--goal','Write and edit a file.'])
+        self.assertEqual(out['state'],'completed')
+        self.assertEqual((self.home/'notes.txt').read_text(),'alpha\ngamma\n')
+        store=Store(self.home)
+        try:
+            results=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result']
+            self.assertTrue(any(r.get('name')=='edit' and '+gamma' in r['result'].get('diff','') for r in results),results)
+        finally:store.close()
+
     def test_context_names_the_model_answering_this_turn(self):
         with self.hermetic_home():
             rt=Runtime(self.home)
@@ -1087,7 +1123,9 @@ class Resident(unittest.TestCase):
         try:
             gid=rt.store.enqueue('Continue the long task.')
             rt.store.event('startup_discovery',dict(topic='skipped in this test'),gid)   # keeps the kept tail small
-            messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*30000)]+[dict(role='assistant',content='observation '*20) for _ in range(10)]
+            # (28,000 filler characters: the tool definitions grow as tools are added, and the precondition below
+            # needs the history alone to stay under the window with the reply budget)
+            messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*28000)]+[dict(role='assistant',content='observation '*20) for _ in range(10)]
             rt.store.update(gid,messages=messages)
             history=rt.model.tokens([rt.system(gid),*messages],TOOLS)
             # The history alone leaves room for the reply budget too, so only the trailing context overflows.

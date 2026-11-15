@@ -1173,3 +1173,29 @@ func TestChatApprovalNeedsASecondPress(t *testing.T) {
 		t.Fatal("nothing may be decided before a confirmed approval")
 	}
 }
+
+// An edit is a diff card, open while short; a read is one quiet line; their call cards are not repeated.
+func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"function": map[string]any{
+			"name": "edit", "arguments": `{"path":"src/parse.c","old":"n > len","new":"n >= len"}`}}}}},
+		{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "edit", "result": map[string]any{
+			"path": "src/parse.c", "added": float64(1), "removed": float64(1),
+			"diff": "@@ -1,3 +1,3 @@\n int f(void) {\n-    if (n > len) return -1;\n+    if (n >= len) return -1;"}}},
+		{Seq: 3, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
+			"path": "src/parse.c", "shown": "1-40", "text": "secret body"}}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "-    if (n > len) return -1;", "+    if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "@@") || strings.Contains(v, "secret body") || strings.Count(v, "src/parse.c") != 2 {
+		t.Fatalf("hunk headers, read bodies or a repeated call card leaked:\n%s", v)
+	}
+}

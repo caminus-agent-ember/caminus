@@ -176,6 +176,8 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		}
 	case "note":
 		icon, st = g.idle, envDim
+	case "read":
+		icon, st = g.collapsed, envDim
 	case "free", "dream":
 		icon, st = g.done, envCtxOK
 	}

@@ -17,6 +17,7 @@ from .prompt import render as render_prompt
 from .freetime import FreeTime, KINDS as FREE_KINDS
 from .advisor import Advisor
 from .memory import Memory
+from . import files
 from .brain import Brains
 
 PLAIN_TEXT_LIMIT = 3  # consecutive plain-text replies (no tool call) before a goal pauses
@@ -52,6 +53,12 @@ TOOLS = [
          dict(check={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
+    tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
+         dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
+    tool('edit', 'Replace exact text in a file. old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
+         dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
+    tool('write', 'Create a file, or replace a whole file, with content. Returns the diff against what was there.',
+         dict(path={'type':'string'}, content={'type':'string'}), ('path','content')),
     tool('remember', 'Save one lasting fact as a note (notes/NAME.md) with a one-line entry in MEMORY.md, your notes index. The index is capped at 4 KB and loads into every goal; a note is read on demand. Refused when the index is full: merge or drop lines first. The new line shows from your next goal.',
          dict(name={'type':'string'}, text={'type':'string'}, summary={'type':'string'}), ('name','text','summary')),
     tool('history_search', 'Full-text search over your own past: earlier goals, your replies, tool results, finish summaries, your journal and notes. No model call; returns short snippets with where they came from.',
@@ -493,6 +500,12 @@ class Runtime:
                     result = self._verify(action['goal'], args['evidence'])
                 elif name == 'ledger':
                     result = self._ledger(action['goal'], args.get('milestones'), args.get('blockers'))
+                elif name == 'read':
+                    result = files.read(self.home, args['path'], args.get('offset'), args.get('limit'))
+                elif name == 'edit':
+                    result = files.edit(self.home, args['path'], args['old'], args['new'], bool(args.get('replace_all')))
+                elif name == 'write':
+                    result = files.write(self.home, args['path'], args['content'])
                 elif name == 'remember':
                     result = self.memory.remember(args['name'], args['text'], args['summary'])
                 elif name == 'history_search':

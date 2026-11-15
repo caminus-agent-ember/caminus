@@ -481,9 +481,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			call, _ := raw.(map[string]any)
 			f, _ := call["function"].(map[string]any)
 			name, _ := f["name"].(string)
-			if name == "ask_user" {
+			if name == "ask_user" || name == "read" || name == "edit" || name == "write" {
 				continue
-			} // the durable question gets a native UI below
+			} // the durable question gets a native UI below; a file tool's result card says what it did
 			rawArgs, _ := f["arguments"].(string)
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
@@ -516,6 +516,34 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				answer, _ = result["decision"].(string)
 			}
 			return turn(g.user, "you · answer", cBlue, c.renderMarkdown(answer))
+		}
+		if name := str("name"); (name == "edit" || name == "write") && result["error"] == nil {
+			// an edit is a diff card: open when it is short, folded (Ctrl+E) when it is long
+			path, _ := result["path"].(string)
+			added, _ := result["added"].(float64)
+			removed, _ := result["removed"].(float64)
+			meta := fmt.Sprintf("+%d −%d", int(added), int(removed))
+			if created, _ := result["created"].(bool); created {
+				note, _ := result["note"].(string)
+				meta = note
+			}
+			diff, _ := result["diff"].(string)
+			var body []string
+			for _, ln := range strings.Split(residentText(diff), "\n") {
+				if ln != "" && !strings.HasPrefix(ln, "@@") {
+					body = append(body, ln)
+				}
+			}
+			return toolCard("edit", residentText(path), meta, true, c.expanded || len(body) <= 12, body, w)
+		}
+		if str("name") == "read" && result["error"] == nil {
+			path, _ := result["path"].(string)
+			shown, _ := result["shown"].(string)
+			meta := "lines " + shown
+			if dir, _ := result["directory"].(bool); dir {
+				meta = "directory"
+			}
+			return toolCard("read", residentText(path), meta, true, false, nil, w)
 		}
 		if err, ok := result["error"].(string); ok {
 			// a failed call stays open: the reason is what the reader needs
