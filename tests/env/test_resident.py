@@ -917,6 +917,26 @@ class Resident(unittest.TestCase):
             self.assertEqual(status['context_used'],measured)
         finally:rt.mail.close();rt.store.close()
 
+    def test_throughput_note_shows_only_measured_decode_speed(self):
+        class SpeedModel:
+            last_speed = None
+            def context_size(self):return 65536
+            def tokens(self,messages,tools):return 10
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                return dict(role='assistant',content='done')
+        rt=Runtime(self.home,model=SpeedModel())
+        try:
+            rt.run(target=rt.store.enqueue('A backend that sends no usage chunk.'))
+            self.assertFalse((self.home/'throughput.json').exists(),
+                             'no measured usage, no speed reported to the UI')
+            rt.model.last_speed=dict(tokens=88,seconds=1.0,tps=88.0)
+            gid=rt.store.enqueue('Stream something.')
+            rt.run(target=gid)
+            note=json.loads((self.home/'throughput.json').read_text())
+            self.assertEqual((note['tps'],note['tokens'],note['goal']),(88.0,88,gid))
+            self.assertEqual(self.cmd('status')['tok_per_s'],88.0)
+        finally:rt.mail.close();rt.store.close()
+
 
 result=unittest.main(argv=[sys.argv[0]],exit=False).result
 print('RESULT','PASS' if result.wasSuccessful() else 'FAIL')

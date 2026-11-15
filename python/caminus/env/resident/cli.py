@@ -217,8 +217,11 @@ def main(argv=None,stdin=None):
             # Measured prompt footprint from the last turn's compaction probe; absent when the
             # runtime has never measured this agent, so a UI shows capacity only, no estimate.
             measured=json.loads((home/'context.json').read_text()) if (home/'context.json').exists() else {}
+            # Measured decode speed of the last streamed reply; absent until a reply reports usage.
+            speed=json.loads((home/'throughput.json').read_text()) if (home/'throughput.json').exists() else {}
             emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
+                      tok_per_s=speed.get('tps') if isinstance(speed,dict) else None,
                       compact_threshold=cfg.get('compact_threshold',.85),compact_target_ratio=cfg.get('compact_target_ratio',.2),
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,**store.status()),True)
             store.close();return 0

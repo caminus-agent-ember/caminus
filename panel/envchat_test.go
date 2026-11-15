@@ -517,14 +517,14 @@ func TestResidentCommandsWithoutTheCLIReportInsteadOfPanicking(t *testing.T) {
 // compaction trigger, and never invents a percentage of its own. The accent
 // piece (label, bar, share) takes the level's color; the counts stay dim.
 func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
-	accent, rest := contextBar(0, 1048574, .85)
+	accent, rest := contextBar(0, 1048574, .85, 0)
 	if accent != "" || rest != "ctx 1.0M window" || strings.Contains(rest, "%") {
 		t.Fatalf("unmeasured context showed usage: %q / %q", accent, rest)
 	}
-	if accent, rest := contextBar(0, 0, .85); accent != "" || rest != "" {
+	if accent, rest := contextBar(0, 0, .85, 0); accent != "" || rest != "" {
 		t.Fatalf("no capacity, no bar: %q / %q", accent, rest)
 	}
-	accent, rest = contextBar(314573, 1048574, .85) // 30%
+	accent, rest = contextBar(314573, 1048574, .85, 0) // 30%
 	if filled := strings.Count(accent, "█"); filled != 3 || !strings.Contains(accent, "░") {
 		t.Fatalf("30%% carved the bar wrong: %q", accent)
 	}
@@ -534,7 +534,16 @@ func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
 	if !strings.Contains(rest, "of 1.0M · compact 85%") {
 		t.Fatalf("dim piece lost counts and trigger: %q", rest)
 	}
-	if accent, _ := contextBar(1048575, 1048574, .85); !strings.HasPrefix(accent, "ctx ██████████ 100%") {
+	if _, rest := contextBar(314573, 1048574, .85, 87.3); !strings.Contains(rest, "87 tok/s") || !strings.Contains(rest, "compact 85%") {
+		t.Fatalf("measured tok/s did not annotate the dim piece: %q", rest)
+	}
+	if _, rest := contextBar(314573, 1048574, .85, 0); strings.Contains(rest, "tok/s") {
+		t.Fatalf("no speed reported, none may show: %q", rest)
+	}
+	if _, rest := contextBar(0, 1048574, .85, 87.3); strings.Contains(rest, "tok/s") {
+		t.Fatalf("tok/s without a measured context bar: %q", rest)
+	}
+	if accent, _ := contextBar(1048575, 1048574, .85, 0); !strings.HasPrefix(accent, "ctx ██████████ 100%") {
 		t.Fatalf("usage past the window did not clamp: %q", accent)
 	}
 	if got := humanTokens(999); got != "999" || humanTokens(482000) != "482k" || humanTokens(1048574) != "1.0M" {
@@ -572,8 +581,9 @@ func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
 func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
 	m := chatFixture(t)
 	m.resident.ContextUsed = 891288 // at the trigger: hot
+	m.resident.TokPerS = 91.4       // the daemon's last measured decode speed
 	frame := ansi.Strip(m.render())
-	if !strings.Contains(frame, "ctx ") || !strings.Contains(frame, "85% of 1.0M · compact 85%") {
+	if !strings.Contains(frame, "ctx ") || !strings.Contains(frame, "85% of 1.0M · compact 85% · 91 tok/s") {
 		t.Fatalf("footer lost the measured bar:\n%s", frame)
 	}
 	for _, row := range strings.Split(frame, "\n") {

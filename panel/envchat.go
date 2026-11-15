@@ -542,7 +542,9 @@ func contextBarLevel(used, capacity int, threshold float64) int {
 // dim remainder (window size, trigger). A used count of 0 means the daemon
 // has not measured anything yet; then only the window size shows — capacity
 // is never presented as usage, and no percentage is invented from events.
-func contextBar(used, capacity int, threshold float64) (accent, rest string) {
+// tps is the measured decode speed of the agent's last streamed reply; it
+// only annotates a measured bar, and a count of 0 shows nothing at all.
+func contextBar(used, capacity int, threshold, tps float64) (accent, rest string) {
 	if capacity <= 0 {
 		return "", ""
 	}
@@ -555,8 +557,12 @@ func contextBar(used, capacity int, threshold float64) (accent, rest string) {
 	}
 	filled := int(share*contextBarSlots + 0.5)
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", contextBarSlots-filled)
+	speed := ""
+	if tps > 0 {
+		speed = fmt.Sprintf(" · %.0f tok/s", tps)
+	}
 	return fmt.Sprintf("ctx %s %d%%", bar, int(share*100+0.5)),
-		fmt.Sprintf(" of %s · compact %.0f%%", humanTokens(capacity), compactTrigger(threshold)*100)
+		fmt.Sprintf(" of %s · compact %.0f%%", humanTokens(capacity), compactTrigger(threshold)*100) + speed
 }
 
 // contextStateStyle colors the header's status light by what it means: busy
@@ -597,7 +603,7 @@ func (m envModel) renderChat() string {
 	}
 	head := clip(envTitle.Render("CAMINUS") + " · " + residentText(m.agentName) +
 		"  " + contextStateStyle(state).Render(indicator+" "+state) + " · " + fmt.Sprintf("%d steps", steps))
-	accent, ctxRest := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold)
+	accent, ctxRest := contextBar(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold, m.resident.TokPerS)
 	ctxStyle := envCtxOK
 	switch contextBarLevel(m.resident.ContextUsed, m.resident.Context, m.resident.CompactThreshold) {
 	case 1:

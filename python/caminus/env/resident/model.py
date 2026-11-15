@@ -1,6 +1,7 @@
 """OpenAI-compatible local-model transport; no engine, GPU or agent-CLI dependency."""
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +36,7 @@ class Model:
         self.context = config.get('context')
         self.counter = True
         self.last_usage = {}
+        self.last_speed = None
 
     def request(self, url, body=None):
         headers = {'Content-Type': 'application/json'}
@@ -78,9 +80,12 @@ class Model:
         if tools:
             body['tools'] = tools
         if on_delta is not None:
+            # usage in the final chunk gives the generated token count for a client-measured decode speed
+            body['stream_options'] = dict(include_usage=True)
             return self._stream(body, on_delta)
         result = self.request(self.base + '/chat/completions', body)
         self.last_usage = result.get('usage') or {}
+        self.last_speed = None     # no decode timing without streamed pieces: nothing is reported rather than a wrong number
         try:
             m = result['choices'][0]['message']
             if result['choices'][0].get('finish_reason') == 'length':
@@ -115,6 +120,8 @@ class Model:
         headers['Authorization'] = 'Bearer ' + key
         req = urllib.request.Request(self.base + '/chat/completions', json.dumps(body).encode(), headers)
         content, reasoning, calls, finish, usage = [], [], {}, None, {}
+        self.last_speed = None
+        t_first = t_last = None    # decode window: first choice-chunk to the last chunk read, prefill excluded
         done_seen = False
         try:
             with self.opener(req, timeout=float(self.config.get('timeout', 900))) as r:
@@ -142,6 +149,10 @@ class Model:
                         done_seen = True
                         break
                     chunk = json.loads(data)
+                    now = time.monotonic()
+                    if chunk.get('choices') and t_first is None:
+                        t_first = now
+                    t_last = now
                     if chunk.get('usage'):
                         usage = chunk['usage']
                     for choice in chunk.get('choices') or []:
@@ -177,6 +188,10 @@ class Model:
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             raise ModelError(str(e)) from e
         self.last_usage = usage
+        tokens = usage.get('completion_tokens') if isinstance(usage, dict) else None
+        if isinstance(tokens, int) and tokens > 0 and t_first and t_last > t_first:
+            self.last_speed = dict(tokens=tokens, seconds=round(t_last - t_first, 3),
+                                   tps=round(tokens / (t_last - t_first), 1))
         try:
             out = dict(role='assistant', content=''.join(content))
             if reasoning:

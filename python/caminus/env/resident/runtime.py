@@ -278,6 +278,15 @@ class Runtime:
         """
         atomic_json(self.home / 'context.json', dict(goal=gid, tokens=tokens, size=size, ts=time.time()))
 
+    def _throughput_note(self,gid,speed):
+        """Record the decode speed of the last streamed reply: the usage token count over client-measured
+        decode time (first to final chunk, prefill and queueing excluded) — measured, never estimated; a
+        non-streamed reply or a backend that sends no usage reports nothing. Like context.json, one small
+        file rewritten in place by the runtime lock's owner, for the UI footer."""
+        if not isinstance(speed,dict) or not isinstance(speed.get('tps'),(int,float)) or not speed['tps'] > 0:
+            return
+        atomic_json(self.home/'throughput.json',dict(goal=gid,ts=time.time(),**speed))
+
     def _compact(self, gid, messages, force=False):
         """Summarize the transcript into working memory. Automatic compaction waits for the trigger; a
         user's /compact sets force, because asking for it is the point."""
@@ -412,6 +421,7 @@ class Runtime:
                                             on_delta=live.on_delta)
             finally:
                 live.clear()
+            self._throughput_note(gid,getattr(self.model,'last_speed',None))
             if self.store.goal(gid)['state']=='cancelled':
                 return True
             self.retry.pop(gid,None)
