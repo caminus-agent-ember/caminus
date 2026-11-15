@@ -335,8 +335,10 @@ class Store:
         remove it and return its text, or None when there is nothing to withdraw."""
         with self.transaction():
             gid = self.resolve(prefix)
-            row = self.db.execute('SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id DESC LIMIT 1',
-                                  (gid,)).fetchone()
+            # Only the human's own words: the harness writes notes to the inbox too (gate results, answers to the
+            # agent's requests, cut-off notices), all tagged with a leading [...]; pulling one back would delete it.
+            row = self.db.execute("SELECT id,text FROM inbox WHERE goal=? AND consumed=0 AND substr(text,1,1)!='[' "
+                                  'ORDER BY id DESC LIMIT 1', (gid,)).fetchone()
             if row is None:
                 return gid, None
             self.db.execute('DELETE FROM inbox WHERE id=?', (row['id'],))

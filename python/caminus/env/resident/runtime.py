@@ -42,6 +42,7 @@ GATE_TRIGGERS = ('edit', 'write', 'terminal')   # tools after which the goal's g
 GATE_TURN_TIMEOUT = 120  # a per-turn gate gets two minutes (the finish gate keeps its ten); past it, finish-only
 GATE_SLOW = 30           # a gate slower than this runs per turn at most every GATE_SLOW_EVERY seconds
 GATE_SLOW_EVERY = 600
+INTERRUPT_HOLD = 120     # after an Esc, how long a goal waits for the message that steers it
 READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'less', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf',
                        'which', 'type', 'ps', 'df', 'du', 'stat', 'file', 'tree', 'date', 'env', 'id', 'whoami',
                        'uname', 'nvidia-smi', 'rocm-smi', 'amd-smi', 'free', 'uptime', 'sleep', 'true', 'diff'))
@@ -185,6 +186,7 @@ class Live:
         self.turn = uuid.uuid4().hex[:12]
         self.content, self.reasoning, self.tools = [], [], []
         self.last = 0.0
+        self.interrupted = False
 
     def on_delta(self, kind, value):
         """the model's per-piece callback; False cancels the stream (the goal was cancelled meanwhile)"""
@@ -212,6 +214,7 @@ class Live:
         if req is not None:
             self.store.settle_request(req['id'], 'done')
             self.store.event('turn_interrupted', {}, self.gid)
+            self.interrupted = True
             return False
         atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
                                     content=''.join(self.content), reasoning=''.join(self.reasoning),
@@ -255,7 +258,8 @@ class Runtime:
         self.plain_replies = {}
         self.truncations = {}    # goal -> replies in a row cut off at the output limit
         self._gate_dirty, self._gate_last = set(), {}   # goals whose files changed this turn; the last gate result
-        self._gate_slow = {}     # goal -> when a slow per-turn gate last ran, or 'off' after a timeout
+        self._gate_slow = {}
+        self._held = {}          # goal -> when an Esc interrupted its turn: it waits for the human's message     # goal -> when a slow per-turn gate last ran, or 'off' after a timeout
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
         self.brains = Brains(self, self.primary)
@@ -691,9 +695,19 @@ class Runtime:
             refused = False
             signature = self._signature(name, args)
             # Plan mode (planning.py): a plan-first goal with no approved plan only explores; these refusals
-            # do not feed the failure ledger (refused stays True).
-            if name in planning.PLAN_REFUSED and self.store.goal(gid_now).get('plan') == 1:
+            # count as failures like any other refusal: an agent that keeps trying to change things is paused.
+            plan_mode = self.store.goal(gid_now).get('plan') == 1
+            if name in planning.PLAN_REFUSED and plan_mode:
                 raise ValueError(planning.refused_text(name))
+            if name == 'terminal' and plan_mode and (args.get('stdin') is not None or
+                                                     (args.get('command') and not read_only_command(args['command']))):
+                # The terminal is not only a promise in plan mode: a command runs only when every part of it is a
+                # read-only program (the per-turn gate's classifier: anything unclear counts as a change), and
+                # typing into a running shell is refused (it could run anything).
+                raise ValueError(planning.refused_text('terminal'))
+            if name == 'propose_plan' and not plan_mode:
+                raise ValueError('propose_plan is for a plan-first goal (one sent with --plan); this goal can act '
+                                 'directly, or ask your human with ask_user')
             # Step 8, the runtime half: a call that has already failed twice is not retried. The prompt
             # tells the model to change approach; this is the backstop for when it does not.
             if name not in ('define_done', 'verify', 'finish'):
@@ -1328,6 +1342,13 @@ class Runtime:
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot model-step budget reached')
             return True
+        if gid in self._held:
+            # only the human's message lifts it, not a harness note ([gate], [answer ...]: same rule as unsend)
+            waiting = self.store.db.execute("SELECT 1 FROM inbox WHERE goal=? AND consumed=0 AND substr(text,1,1)!='[' "
+                                            'LIMIT 1', (gid,)).fetchone()
+            if not waiting and time.time() - self._held[gid] < INTERRUPT_HOLD:
+                return False
+            self._held.pop(gid, None)
         self.poll_requests(gid)
         self._gate_check(gid, g)
         try:
@@ -1419,7 +1440,11 @@ class Runtime:
             self.truncations.pop(gid,None)        # a whole reply arrived: the cut-off streak is over
             return True
         except Cancelled:
-            # Cancelled between two streamed pieces: the model was closed, nothing was stored.
+            # Cancelled between two streamed pieces: the model was closed, nothing was stored. After an Esc the goal
+            # holds for the human's message (it would otherwise start the same turn again at once), at most
+            # INTERRUPT_HOLD seconds.
+            if getattr(live, 'interrupted', False):
+                self._held[gid] = time.time()
             return True
         except ModelError as e:
             self._record_failure(gid, e, who='resident' if self.model is self.primary else 'fallback')

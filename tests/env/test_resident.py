@@ -1571,6 +1571,36 @@ for line in sys.stdin:
             self.assertEqual(g['state'],'paused');self.assertIn('the same call failed 3 times',g['error'])
         finally:rt.mail.close();rt.store.close()
 
+    def test_review_fixes_for_plan_unsend_interrupt_and_btw(self):
+        from caminus.env.resident import btw
+        self.replies(dict(role='assistant',content='It is waiting on sleep.'))
+        rt=Runtime(self.home)
+        try:
+            # plan mode: the terminal runs only read-only commands; propose_plan only in plan mode
+            pg=rt.store.enqueue('Plan it.',plan=1)
+            def run(gid,name,args):
+                rt.store.model_reply(gid,call(name,args))
+                rt._action(rt.store.actions(gid)[0])
+                return [e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result'][-1]
+            self.assertIn('plan mode',run(pg,'terminal',dict(command='rm -f notes.txt',yield_ms=0)).get('error',''))
+            self.assertNotIn('error',run(pg,'terminal',dict(command='ls',yield_ms=200)))
+            wg=rt.store.enqueue('Just do it.')
+            self.assertIn('plan-first goal',run(wg,'propose_plan',dict(plan='x')).get('error',''))
+            # unsend pulls back the human's message, never a harness note
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(wg,'please use tabs','nudge'))
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(wg,'[gate] the gate fails now','nudge'))
+            self.assertEqual(rt.store.unsend(wg),(wg,'please use tabs'))
+            self.assertEqual(rt.store.unsend(wg),(wg,None))
+            # after an Esc the goal holds for the human's message
+            rt._held[wg]=time.time()
+            self.assertFalse(rt._tick(wg),'held: no new turn without a message')
+            # btw sends the recent conversation as text: a call with no result yet breaks no request
+            rt.store.model_reply(wg,call('terminal',dict(command='sleep 1')))
+            self.assertEqual(btw.ask(rt,wg,'what are you doing?'),'It is waiting on sleep.')
+            body=[b for k,b in Endpoint.seen if k==self.key][-1]
+            self.assertFalse([m for m in body['messages'] if m.get('role')=='tool' or m.get('tool_calls')])
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
@@ -2769,6 +2799,9 @@ for line in sys.stdin:
         self.wait(lambda: any('stream goal' in json.dumps(b) for _,b in Endpoint.seen),15)
         mid=self.cmd('interrupt',[gid])
         self.assertEqual(mid,dict(goal=gid,queued=True))
+        # the interrupted goal holds for the human's message (it would otherwise rerun the same turn at once)
+        self.wait(lambda: 'turn_interrupted' in [e['kind'] for e in self.cmd('events')],15)
+        self.cmd('send',['--goal-id',gid,'carry on, and finish'])
         out,_=p.communicate(timeout=25)
         result=json.loads(out)
         self.assertEqual(result['state'],'completed',result)

@@ -31,14 +31,38 @@ def ask(rt, gid, question):
                                              'your human and kept nowhere else; you have no tools): '
                                              + question)
     max_tokens = min(int(rt.config.get('max_tokens', 4096)), rt.model.context_size() // 4)
-    messages = rt.store.goal(gid)['messages'][-KEEP:]
+    # The recent conversation goes as text, not as chat turns: a slice of the history can start with a tool result
+    # whose call was cut off, or end with a call still running, and the APIs refuse either.
+    lines = [_line(m) for m in rt.store.goal(gid)['messages'][-KEEP:]]
+    lines = [l for l in lines if l]
     while True:
-        request = [brief(rt, gid), *messages, question_msg]
+        context = dict(role='user', content='RECENT CONVERSATION (oldest first):\n' + '\n'.join(lines))
+        request = [brief(rt, gid), context, question_msg] if lines else [brief(rt, gid), question_msg]
         if rt.model.tokens(request, []) + max_tokens + HEADROOM <= rt.model.context_size():
             break
-        if not messages:
+        if not lines:
             raise ValueError('the goal does not fit the model window for a side question: compact it first')
-        messages = messages[1:]           # trim older context until the request and its answer fit
-    answer = rt.model.complete(request, None, max_tokens=max_tokens)['content']
+        lines = lines[1:]                 # trim older context until the request and its answer fit
+    answer = rt.model.complete(request, None, max_tokens=max_tokens).get('content') or ''
+    try:
+        rt._meter(gid)                    # a paid brain's side question shows in the spend like any turn
+    except Exception:
+        pass
     rt.store.event('btw', dict(question=question, answer=answer[:300]), gid)
     return answer
+
+
+def _line(m):
+    """One message as a line of text for the side question's context."""
+    role, content = m.get('role'), m.get('content') or ''
+    if isinstance(content, list):
+        content = ' '.join(p.get('text', '') for p in content if isinstance(p, dict))
+    content = ' '.join(str(content).split())[:1200]
+    if role == 'assistant':
+        calls = ', '.join((c.get('function') or {}).get('name', '?') for c in m.get('tool_calls') or [])
+        return 'agent: ' + content + ((' [called ' + calls + ']') if calls else '')
+    if role == 'tool':
+        return 'tool result: ' + content[:600]
+    if role == 'user':
+        return 'human: ' + content
+    return ''
