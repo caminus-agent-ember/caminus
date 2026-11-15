@@ -823,7 +823,7 @@ class Runtime:
                 result = judge.review(self, action['goal'], result)
         except (OSError, ValueError, KeyError, TypeError) as e:
             result = dict(error=str(e))
-        failure = self._failure_text(result)
+        failure = None if result.get('waiting') else self._failure_text(result)
         if failure and not refused:
             try:
                 count = self.store.note_failure(action['goal'], signature, failure)
@@ -835,6 +835,16 @@ class Runtime:
                                    dict(call=signature, error=failure[:200]))
             except Exception:
                 pass                          # the ledger is a backstop, never a reason to lose the error
+        elif failure and refused:
+            # The repeat was refused before it ran. Refusals were not counted, so a model that kept repeating a
+            # refused call looped forever and the watchdog never fired: two refusals of the same call pause the goal.
+            try:
+                count = self.store.note_failure(action['goal'], 'refused:' + signature, failure)
+                if count >= 2:
+                    self._watchdog(action['goal'], 'the same call was retried %d times after failing twice' % count,
+                                   dict(call=signature, error=failure[:200]))
+            except Exception:
+                pass
         # A result past about 8K tokens has its large text moved to ~/outputs: the model gets a preview and the path.
         result = outputs.spill(self.home, action['name'], action['id'], result)
         self.store.action_result(action, result)

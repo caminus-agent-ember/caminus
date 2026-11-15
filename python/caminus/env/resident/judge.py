@@ -144,7 +144,8 @@ def review(rt, gid, result):
             return dict(error=f'the judge has said wait {waits} times (latest: {v["reason"]}). The goal is paused for '
                         'your human.', pause='judge said wait %d times: %s' % (waits, v['reason']))
         return dict(error='not proven yet, something is still running: ' + v['reason'] + ' Use the wait tool (until '
-                    'process, port, file, session or time) for it instead of polling, then verify and finish again.')
+                    'process, port, file, session or time) for it instead of polling, then verify and finish again.',
+                    waiting=True)   # not a failure: the repeat-failure watchdog does not count it (WAIT_LIMIT does)
     if refusals + 1 >= JUDGE_LIMIT:
         return dict(error=f'the judge refused this finish {refusals + 1} times (latest: {v["reason"]}). The goal is '
                     'paused for your human to decide.', pause='judge refused the finish %d times: %s'

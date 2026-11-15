@@ -1542,6 +1542,35 @@ for line in sys.stdin:
             self.assertEqual(steers,['use the vendored copy in third_party/'],'the instruction is a steer, once')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_repeat_failure_watchdog_really_pauses_the_goal(self):
+        bad=call('read',dict(path='no/such/file.txt'))
+        self.replies(*[dict(bad,tool_calls=[dict(bad['tool_calls'][0],id=f'c{i}')]) for i in range(6)])
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Read a file that is not there.')
+            for _ in range(12):
+                if rt.store.goal(gid)['state']=='paused':break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'paused','two failures then two refused repeats pause the goal, and it stays paused')
+            self.assertIn('retried 2 times after failing twice',g['error'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_repeated_failing_finish_is_stopped_by_the_watchdog(self):
+        # finish is never refused up front, so its own failures must reach the watchdog (they did not: the result's
+        # recording set the goal back to working)
+        self.gates_on()
+        self.replies(*[call('finish',dict(summary='Done.')) for _ in range(5)])
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Finish without a done check.')
+            for _ in range(12):
+                if rt.store.goal(gid)['state']=='paused':break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'paused');self.assertIn('the same call failed 3 times',g['error'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
