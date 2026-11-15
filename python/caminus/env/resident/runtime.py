@@ -36,6 +36,7 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
+GATE_TRIGGERS = ('edit', 'write', 'terminal')   # tools after which the goal's gate runs again
 COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
 RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
@@ -213,7 +214,8 @@ class Runtime:
         self.token_budget = int(self.config.get('token_budget', 0) or 0)
         self.progress = {}
         self.plain_replies = {}
-        self.truncations = {}    # goal -> replies in a row cut off at the output limit  # goal -> consecutive plain-text replies; reset by any reply with tool calls
+        self.truncations = {}    # goal -> replies in a row cut off at the output limit
+        self._gate_dirty, self._gate_last = set(), {}   # goals whose files changed this turn; the last gate result
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
         self.brains = Brains(self, self.primary)
@@ -586,6 +588,8 @@ class Runtime:
             if not isinstance(args, dict):
                 raise ValueError('tool arguments must be an object')
             name = action['name']
+            if name in GATE_TRIGGERS:
+                self._gate_dirty.add(action['goal'])
             schemas = {t['function']['name']:t['function']['parameters'] for t in TOOLS} | LEGACY_TOOLS
             schema = schemas.get(name)
             if schema is None and name.startswith('mcp__') and self.mcp.route(name):
@@ -986,6 +990,31 @@ class Runtime:
                 goals.pop(k)
         atomic_json(path, state)
 
+    def _gate_check(self, gid, g):
+        """The goal's gate after a turn that changed something (an edit, a write, a terminal command), before the next
+        model call. The agent hears only a change: the gate starting to fail (with its output) or passing again. The
+        judge still runs at finish only: per turn it would bill every step. gate_each_turn false turns this off."""
+        if gid not in self._gate_dirty:
+            return
+        self._gate_dirty.discard(gid)
+        gate = g.get('gate')
+        if not gate or not self.config.get('gate_each_turn', True) or g.get('kind', 'work') in FREE_KINDS:
+            return
+        from .judge import run_gate
+        ok, out = run_gate(self.home, gate)
+        last = self._gate_last.get(gid)
+        self._gate_last[gid] = (ok, out if not ok else '')
+        self.store.event('gate', dict(command=gate, passed=ok, output=out[-2000:], when='turn'), gid)
+        if last is not None and last[0] == ok and (ok or last[1] == out):
+            return                            # unchanged: no new message
+        if last is None and ok:
+            note = '[gate] the done check\'s gate passes. If the goal is done, verify it and finish.'
+        elif ok:
+            note = '[gate] the gate passes again. If the goal is done, verify it and finish.'
+        else:
+            note = '[gate] the done check\'s gate fails now:\n' + out[-3000:]
+        self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
+
     def compaction_ratios(self):
         """(trigger, target) as fractions of the window. A paid brain resends its whole context every turn, so it
         compacts earlier: by default at 38 % of the window and down to 7.6 % (the owner's Hermes setting: on a 1M
@@ -1157,6 +1186,7 @@ class Runtime:
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot model-step budget reached')
             return True
+        self._gate_check(gid, g)
         try:
             with self.store.transaction():
                 rows = list(self.store.db.execute(

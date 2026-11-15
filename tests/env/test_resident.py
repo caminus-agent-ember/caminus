@@ -1418,6 +1418,28 @@ for line in sys.stdin:
         st=self.cmd('status')
         self.assertAlmostEqual(st['compact_threshold'],.38,msg='a paid brain reports the early trigger')
 
+    def test_the_gate_runs_after_a_changing_turn_and_speaks_only_on_a_change(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make check.txt say ok.')
+            rt.store.update(gid,gate='grep -q ok check.txt')
+            g=lambda:rt.store.goal(gid)
+            inbox=lambda:[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? ORDER BY id',(gid,))]
+            rt._gate_check(gid,g())
+            self.assertEqual(inbox(),[],'a turn that changed nothing does not run the gate')
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertIn('gate fails now',inbox()[-1])
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertEqual(len(inbox()),1,'the same failure is not repeated')
+            (self.home/'check.txt').write_text('ok')
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertIn('passes again',inbox()[-1])
+            self.assertEqual(sum(1 for e in rt.store.events() if e['kind']=='gate' and e['data'].get('when')=='turn'),3)
+            rt.config['gate_each_turn']=False
+            rt._gate_dirty.add(gid);rt._gate_check(gid,g())
+            self.assertEqual(len(inbox()),2,'gate_each_turn false turns it off')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
