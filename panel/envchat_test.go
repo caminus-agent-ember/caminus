@@ -1105,7 +1105,7 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 }
 
 // A waiting root request is decided in the chat through the Requests page's own handler: d writes the denial to the
-// bridge (and the audit), /deny TEXT denies and steers the goal with what to do instead.
+// bridge (and the audit), /deny TEXT denies with what to do instead in the same answer (the runtime steers with it).
 func TestChatDecidesRootRequestsInline(t *testing.T) {
 	for _, viaSlash := range []bool{false, true} {
 		m := chatFixture(t)
@@ -1116,14 +1116,10 @@ func TestChatDecidesRootRequestsInline(t *testing.T) {
 		if m.pendingRoot() != 0 {
 			t.Fatal("the waiting request is not found")
 		}
-		var cmd tea.Cmd
 		if viaSlash {
 			var next tea.Model
-			next, cmd = m.chatSlash("/deny use the vendored copy in third_party/ instead")
+			next, _ = m.chatSlash("/deny use the vendored copy in third_party/ instead")
 			m = next.(envModel)
-			if cmd == nil {
-				t.Fatal("/deny must also send the steer")
-			}
 		} else {
 			m.chat.compose.Blur()
 			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
@@ -1132,6 +1128,9 @@ func TestChatDecidesRootRequestsInline(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json"))
 		if err != nil || !strings.Contains(string(data), `"denied"`) {
 			t.Fatalf("no denial in the bridge (slash=%v): %s %v", viaSlash, data, err)
+		}
+		if viaSlash && !strings.Contains(string(data), `"answer":"use the vendored copy in third_party/ instead"`) {
+			t.Fatalf("/deny carries its instruction in the denial: %s", data)
 		}
 		if m.pendingRoot() != -1 {
 			t.Fatal("a decided request still shows as waiting")
