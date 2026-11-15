@@ -1277,6 +1277,147 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
+        cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)
+        name=json.loads((self.home/'config.json').read_text())['name']
+        (units/f'caminus-agent-{name}.service').write_text('[Service]\nExecStart=old\n')
+        new=self.home/'abc123.pyz';new.write_text('zip')
+        old=os.environ.get('XDG_CONFIG_HOME');os.environ['XDG_CONFIG_HOME']=str(cfgdir)
+        calls=[]
+        class R:returncode=0
+        try:
+            out=self.cmd('update',['--program',str(new)])
+            self.assertTrue(out['queued']);self.assertEqual(out['runtime'],'abc123.pyz')
+            rt=Runtime(self.home);rt.systemctl=lambda argv,**k:(calls.append(argv),R())[1]
+            try:
+                gid=rt.store.enqueue('Busy.');rt.store.update(gid,state='working')
+                self.assertFalse(rt._maybe_update(),'a goal is mid-run: the update waits for it')
+                self.assertTrue((self.home/'update.json').exists());self.assertEqual(calls,[])
+                rt.store.update(gid,state='completed')
+                self.assertTrue(rt._maybe_update(),'between goals it installs and restarts')
+                unit=(units/f'caminus-agent-{name}.service').read_text()
+                self.assertIn(str(new),unit);self.assertIn(f'run {name} --home',unit)
+                self.assertIn(['systemctl','--user','restart','--no-block',f'caminus-agent-{name}.service'],calls)
+                self.assertFalse((self.home/'update.json').exists())
+                self.assertIn('updating',[e['kind'] for e in rt.store.events()])
+                # --now does not wait for the running goal
+                self.cmd('update',['--program',str(new),'--now'])
+                g2=rt.store.enqueue('Busy again.');rt.store.update(g2,state='working')
+                self.assertTrue(rt._maybe_update())
+            finally:rt.mail.close();rt.store.close()
+            # the new daemon's heartbeat names its runtime: --wait confirms it
+            (self.home/'heartbeat.json').write_text(json.dumps(dict(pid=1,ts=time.time(),state='listening',runtime='abc123.pyz')))
+            done=self.cmd('update',['--program',str(new),'--wait','1'])
+            self.assertFalse(done['applied'],'the marker is still waiting for a daemon')
+        finally:
+            if old is None:os.environ.pop('XDG_CONFIG_HOME',None)
+            else:os.environ['XDG_CONFIG_HOME']=old
+
+    def test_the_emergency_stop_pauses_everything_after_the_step_and_resumes_nothing(self):
+        self.replies(call('finish',dict(summary='never')))
+        rt=Runtime(self.home)
+        try:
+            a=rt.store.enqueue('One.');b=rt.store.enqueue('Two.');rt.store.update(a,state='working')
+            self.bridge.mkdir(parents=True,exist_ok=True)
+            (self.bridge/'STOP').write_text('the owner is debugging the GPUs\n')
+            ran=[]
+            rt.tick=lambda gid:ran.append(gid)
+            out=rt.run(target=a)
+            self.assertEqual(ran,[],'nothing runs while the stop is on')
+            self.assertEqual(out['state'],'paused');self.assertIn('the owner is debugging the GPUs',out['error'])
+            self.assertEqual(rt.store.goal(b)['state'],'paused')
+            self.assertIn('emergency_stop',[e['kind'] for e in rt.store.events()])
+            (self.bridge/'STOP').unlink()
+            self.assertFalse(rt._emergency_stop())
+            self.assertEqual(rt.store.goal(a)['state'],'paused','lifting the stop resumes nothing on its own')
+            (self.home/'STOP').write_text('')
+            self.assertFalse(rt._emergency_stop(),'only the bridge stop counts: a file in the agent home it could delete')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_emergency_stop_ends_running_terminal_commands(self):
+        rt=Runtime(self.home)
+        try:
+            out=rt.terminal.call('a'*32,dict(command='sleep 300',yield_ms=300))
+            self.assertTrue(out['running'])
+            pid=json.loads((self.home/'jobs'/('a'*32)/'state.json').read_text())['pid']
+            self.bridge.mkdir(parents=True,exist_ok=True);(self.bridge/'STOP').write_text('halt\n')
+            self.assertTrue(rt._emergency_stop())
+            end=time.time()+5
+            while time.time()<end and rt.terminal.call('a'*32,dict(yield_ms=100))['running']:pass
+            self.assertFalse(rt.terminal.call('a'*32,dict(yield_ms=100))['running'],'the running command was ended')
+            ev=[e for e in rt.store.events() if e['kind']=='emergency_stop' and 'terminals_ended' in e['data']]
+            self.assertEqual(ev[0]['data']['terminals_ended'],['a'*32])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_pause_is_applied_between_steps(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Work.');rt.store.update(gid,state='working')
+            rt.store.request(gid,'pause')
+            rt._apply_pauses()
+            g=rt.store.goal(gid)
+            self.assertEqual((g['state'],g['error']),('paused','paused by your human'))
+            self.assertIn('paused',[e['kind'] for e in rt.store.events()])
+        finally:rt.mail.close();rt.store.close()
+        done=self.cmd('pause',[gid])
+        self.assertEqual(done['state'],'paused','with no daemon the CLI pauses it at once')
+
+    def test_stop_all_writes_and_lifts_the_shared_stop(self):
+        from caminus.cmd import env as envcmd
+        import contextlib, io as _io
+        self.bridge.mkdir(parents=True,exist_ok=True)
+        old=os.environ.get('CAMINUS_ENV_BRIDGE');os.environ['CAMINUS_ENV_BRIDGE']=str(self.bridge)
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--reason','GPU fault'])
+            stop=self.bridge/'STOP'
+            self.assertEqual(stop.read_text(),'GPU fault\n')
+            self.assertEqual(stop.stat().st_mode&0o777,0o640,'group-readable, not group-writable: the agent cannot rewrite it')
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--clear'])
+            self.assertFalse(stop.exists())
+        finally:
+            if old is None:os.environ.pop('CAMINUS_ENV_BRIDGE',None)
+            else:os.environ['CAMINUS_ENV_BRIDGE']=old
+
+    def test_studio_lists_what_free_time_made_and_reads_only_inside(self):
+        (self.home/'journal').mkdir();(self.home/'studio/for-you').mkdir(parents=True)
+        (self.home/'journal/2026-11-15.md').write_text('# Tide pools\nRead about them.')
+        (self.home/'studio/poem.md').write_text('a poem')
+        (self.home/'studio/for-you/sketch.svg').write_text('<svg/>')
+        (self.home/'studio/PROJECTS.md').write_text('- tide pool atlas')
+        out=self.cmd('studio')
+        self.assertEqual([e['name'] for e in out['journal']],['2026-11-15.md']);self.assertEqual(out['journal'][0]['head'],'Tide pools')
+        self.assertEqual([e['name'] for e in out['studio']],['poem.md'],'the shelf and PROJECTS.md are listed on their own')
+        self.assertEqual([e['name'] for e in out['shelf']],['sketch.svg']);self.assertIn('tide pool atlas',out['projects'])
+        self.assertEqual(self.cmd('studio',['--read','journal/2026-11-15.md'])['text'],'# Tide pools\nRead about them.')
+        (self.home/'secret.txt').write_text('no')
+        self.cmd('studio',['--read','secret.txt'],code=1)
+        self.cmd('studio',['--read','studio/../secret.txt'],code=1)
+
+    def test_the_recap_counts_from_a_given_time(self):
+        rt=Runtime(self.home)
+        try:
+            g=rt.store.enqueue('A stretch.',kind='free');rt.store.update(g,state='completed',summary='Sketched a tide pool.')
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('Sketched a tide pool',self.cmd('heartbeat',['recap','--since','0'])['recap'])
+        self.assertEqual(self.cmd('heartbeat',['recap','--since',str(time.time()+60)])['recap'],'','nothing since then')
+
+    def test_every_priced_turn_is_metered_and_reported(self):
+        from caminus.env.resident.model import remember_prices
+        remember_prices('zai-org/GLM-5.2',dict(input=1.0,output=2.0))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Spend.')
+            rt.model.config=dict(rt.model.config,model='zai-org/GLM-5.2')
+            rt.model.last_usage=dict(prompt_tokens=1_000_000,completion_tokens=500_000)
+            rt._meter(gid);rt._meter(gid)
+            rt.model.config=dict(rt.model.config,model='fixture');rt._meter(gid)   # an unpriced (local) turn adds nothing
+        finally:rt.mail.close();rt.store.close()
+        st=self.cmd('status')
+        self.assertAlmostEqual(st['spend_today'],4.0);self.assertAlmostEqual(st['spend_goals'][gid],4.0)
+        conf=json.loads((self.home/'config.json').read_text());conf['relay']=True;(self.home/'config.json').write_text(json.dumps(conf))
+        st=self.cmd('status')
+        self.assertAlmostEqual(st['compact_threshold'],.38,msg='a paid brain reports the early trigger')
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.env.resident.model import Model
         sent=[]
@@ -1359,6 +1500,35 @@ for line in sys.stdin:
             code,body=self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[]))
             self.assertEqual(code,402);self.assertEqual(calls,[])
         finally:stop()
+
+    def test_a_relay_installs_as_an_owner_service_without_expiry(self):
+        from caminus.env import relay
+        import contextlib, io as _io
+        cfgdir=self.home/'xdg';key=self.home/'di-key';key.write_text('k');key.chmod(0o600)
+        calls=[]
+        class R:returncode=0;stdout='active\n';stderr=''
+        run=lambda argv,**k:(calls.append(argv),R())[1]
+        old=os.environ.get('XDG_CONFIG_HOME');os.environ['XDG_CONFIG_HOME']=str(cfgdir)
+        try:
+            with self.assertRaises(SystemExit):relay.service(['install','--provider','deepinfra'],run)   # no cap: refused
+            with self.assertRaises(SystemExit):relay.service(['install','--provider','deepinfra','--cap-usd','3','--key-file',str(self.home/'missing')],run)
+            out=_io.StringIO()
+            with contextlib.redirect_stdout(out):
+                relay.service(['install','--provider','deepinfra','--cap-usd','3','--key-file',str(key)],run)
+            unit=(cfgdir/'systemd/user/caminus-relay-deepinfra.service').read_text()
+            self.assertIn('--provider deepinfra --ttl 0 --cap-usd 3.0 --key-file',unit,'no expiry; the cap guards spend')
+            self.assertIn('Restart=on-failure',unit);self.assertIn('WantedBy=default.target',unit)
+            self.assertNotIn('\nk\n',unit,'the key itself never goes in the unit')
+            self.assertIn(['systemctl','--user','enable','--now','caminus-relay-deepinfra.service'],calls)
+            self.assertIn('enable-linger',out.getvalue())
+            out=_io.StringIO()
+            with contextlib.redirect_stdout(out):relay.service(['status'],run)
+            self.assertRegex(out.getvalue(),r'deepinfra\s+active\s+today \$');self.assertIn('not installed',out.getvalue())
+            with contextlib.redirect_stdout(_io.StringIO()):relay.service(['uninstall','--provider','deepinfra'],run)
+            self.assertFalse((cfgdir/'systemd/user/caminus-relay-deepinfra.service').exists())
+        finally:
+            if old is None:os.environ.pop('XDG_CONFIG_HOME',None)
+            else:os.environ['XDG_CONFIG_HOME']=old
 
     def test_the_anthropic_relay_serves_the_model_list_with_the_key(self):
         import urllib.request
@@ -1777,6 +1947,37 @@ for line in sys.stdin:
             self.assertIn('verified: the parser',json.dumps(compacted))
             self.assertIn('cut off at its length limit',json.dumps(compacted))
             self.assertTrue(any(e['kind']=='summary_cut' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_compaction_trims_old_tool_outputs_first_without_a_model_call(self):
+        calls=[]
+        class BoundedModel:
+            remote=False
+            def context_size(self):return 200000
+            def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                calls.append(1);return dict(role='assistant',content='summary of the work')
+        rt=Runtime(self.home,model=BoundedModel())
+        try:
+            gid=rt.store.enqueue('Read many logs.')
+            history=list(rt.store.goal(gid)['messages'])
+            for i in range(12):
+                msg=call('terminal',dict(command=f'cat log{i}'))
+                history+=[msg,dict(role='tool',tool_call_id=msg['tool_calls'][0]['id'],content=f'log {i} '+'x'*60000)]
+            history+=[dict(role='assistant',content=f'note {i}') for i in range(8)]   # the newest messages stay whole
+            out,done=rt._compact(gid,history)
+            self.assertTrue(done);self.assertEqual(calls,[],'old tool outputs alone made room: no summary, no model call')
+            stubs=[m for m in out if m.get('role')=='tool' and m['content'].startswith('[trimmed at compaction')]
+            self.assertEqual(len(stubs),12,'every tool output outside the newest 8 messages is a stub')
+            path=stubs[0]['content'].split(' saved to ')[1].split(';')[0]
+            self.assertTrue(Path(path).read_text().startswith('log 0 '),'the full output is kept in a file the stub names')
+            self.assertEqual(len(out),len(history),'nothing is dropped or reordered: tool calls keep their results')
+            ev=next(e for e in rt.store.events() if e['kind']=='compacted')['data']
+            self.assertEqual((ev['tier'],ev['trimmed']),('trim',12))
+            # history that is mostly the agent's own text still needs the summary
+            talk=list(rt.store.goal(gid)['messages'])+[dict(role='assistant',content='thinking '*9000) for _ in range(12)]
+            out,done=rt._compact(gid,talk)
+            self.assertTrue(done);self.assertTrue(calls,'no tool outputs to trim: the summary runs')
         finally:rt.mail.close();rt.store.close()
 
     def test_compaction_counts_the_trailing_context_message(self):

@@ -48,6 +48,10 @@ type residentChat struct {
 	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
 	goalsSel                                int
 	models                                  modelsState // the Models overlay (/model)
+	studio                                  studioState // the Studio overlay (/studio)
+	recap                                   string      // the "while you were away" card, until Esc
+	recapNow                                float64     // when the recap was taken: saved as seen on dismiss
+	recapAsked                              int         // recapNotAsked, recapAtOpen or recapOnDemand
 	page, pageTop                           int         // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
 	slashToken, slashText                   string
@@ -873,6 +877,10 @@ func (m envModel) renderChat() string {
 		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
 		return head + "\n" + m.modelsOverlay(w, h) + "\n" + foot
 	}
+	if m.chat.studio.open {
+		h := max(6, max(12, m.height)-2-lipgloss.Height(foot)+1)
+		return head + "\n" + m.studioOverlay(w, h) + "\n" + foot
+	}
 	if m.chat.page >= 0 {
 		// a typed prompt opened from the page (a new note) sits under the overlay
 		prompt := m.promptBox(max(18, w-2))
@@ -885,6 +893,9 @@ func (m envModel) renderChat() string {
 	body := []string{head, m.chat.transcript.View()}
 	if live := m.liveBlock(w); live != "" {
 		body = append(body, live)
+	}
+	if card := m.recapCard(w); card != "" {
+		body = append(body, card)
 	}
 	return strings.Join(append(body, m.chatBottom(), foot), "\n")
 }
@@ -906,7 +917,7 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open {
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.studio.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
 	}
@@ -923,6 +934,12 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.chat.models.open {
 		return m.modelsKey(msg)
+	}
+	if m.chat.studio.open {
+		return m.studioKey(msg)
+	}
+	if msg.String() == "esc" && m.chat.recap != "" && strings.TrimSpace(m.chat.compose.Value()) == "" {
+		return m.dismissRecap(), nil
 	}
 	if m.chat.page >= 0 {
 		return m.pageKey(msg)
@@ -1234,6 +1251,30 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	case "/effort":
 		clear()
 		return m, setEffort(m, strings.TrimSpace(arg))
+	case "/recap":
+		clear()
+		m.chat.recapAsked = recapOnDemand
+		return m, fetchRecap(m, 0)
+	case "/studio":
+		clear()
+		m.chat.studio = studioState{open: true, loading: true}
+		return m, fetchStudio(m)
+	case "/pause":
+		g := m.selectedResidentGoal()
+		if g == nil {
+			m.msg = "No selected goal to pause"
+			return m, nil
+		}
+		clear()
+		return m, residentAction(m, []string{"pause", m.agentName, g.ID, "--json"}, "")
+	case "/halt":
+		clear()
+		m.msg = "emergency stop…"
+		return m, emergencyStop(m, strings.TrimSpace(arg))
+	case "/update":
+		clear()
+		m.msg = "uploading the runtime…"
+		return m, updateResident(m, strings.TrimSpace(arg) == "now")
 	case "/compact":
 		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
 		// pass rather than writing history from here.
@@ -1333,6 +1374,9 @@ var slashCommands = []struct{ name, hint string }{
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
 	{"/model", "pick the brain: the models overlay; or /model ID"},
+	{"/pause", "pause the selected goal at its next step; /resume continues it"},
+	{"/halt", "emergency stop: every resident pauses after its step (/halt clear lifts it)"},
+	{"/update", "install this caminus's runtime between goals (now: at the next turn)"},
 	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "the goals overlay (Ctrl+G)"},
 	{"/help", "toggle the help footer"},
@@ -1354,6 +1398,8 @@ var slashCommands = []struct{ name, hint string }{
 	{"/context", "what the agent's context holds"},
 	{"/audit", "the audit log"},
 	{"/settings", "this session's settings"},
+	{"/recap", "while you were away: free time since your last goal"},
+	{"/studio", "what free time made: the shelf, the journal, the studio"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.

@@ -158,6 +158,21 @@ class Terminal:
                              stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
                              env=worker_env(job.parent.parent))
 
+    def signal_running(self, sig):
+        """Signal every running session's process group (the emergency stop). Returns the sessions signalled. A
+        process the agent detached into a session of its own (setsid, a daemon) is outside the group and not reached."""
+        hit = []
+        for job in self.jobs.iterdir() if self.jobs.is_dir() else []:
+            state = read_state(job)
+            pid = state.get('pid')
+            if state.get('phase') in ('starting', 'running') and isinstance(pid, int) and alive(pid):
+                try:
+                    os.killpg(pid, sig)
+                    hit.append(job.name)
+                except OSError:
+                    pass
+        return hit
+
     def call(self, action, args):
         session = args.get('session') or action
         if len(session) != 32 or any(c not in '0123456789abcdef' for c in session):

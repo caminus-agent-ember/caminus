@@ -70,3 +70,34 @@ def spill(home, name, action_id, result):
                    'terminal for the part you need')
     _prune(folder)
     return out
+
+
+TRIM_MIN_CHARS = 1500     # a tool result shorter than this stays whole at compaction: a stub would save little
+
+
+def trim(home, messages, keep_last, tag):
+    """Compaction's first tier, with no model call: every tool result older than the newest keep_last messages and
+    longer than TRIM_MIN_CHARS is saved to ~/outputs and replaced by a one-line stub naming the file. Returns
+    (messages, how many were trimmed, characters removed)."""
+    folder = Path(home) / 'outputs'
+    out, n, removed = list(messages), 0, 0
+    try:
+        folder.mkdir(exist_ok=True)
+    except OSError:
+        return out, 0, 0
+    for i in range(1, max(1, len(out) - keep_last)):
+        m = out[i]
+        body = m.get('content')
+        if m.get('role') != 'tool' or not isinstance(body, str) or len(body) < TRIM_MIN_CHARS \
+                or body.startswith('[trimmed at compaction'):
+            continue
+        f = folder / f'trim-{tag}-{i:05d}.txt'
+        try:
+            f.write_text(body)
+        except OSError:
+            continue
+        stub = f'[trimmed at compaction: {len(body):,} characters saved to {f}; read it with read if you need it]'
+        out[i] = dict(m, content=stub)
+        n, removed = n + 1, removed + len(body) - len(stub)
+    _prune(folder)
+    return out, n, removed

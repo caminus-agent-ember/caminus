@@ -19,8 +19,15 @@ Providers:
              start and every hour. A reply that reports no usage is charged a high estimate (its whole output budget).
 
 Run a separate relay (own port, key file, cap, ledger and log) for each provider and for an advisor.
+
+As a service that outlasts any session (a systemd --user unit for the owner; no sudo, survives logouts with lingering,
+restarts on failure, no expiry: the daily cap guards spend):
+  caminus env relay install --provider deepinfra --cap-usd 3
+  caminus env relay status            (every installed relay: active or not, today's spend)
+  caminus env relay uninstall --provider deepinfra
 """
 import argparse
+import subprocess
 import datetime
 import http.client
 import http.server
@@ -316,13 +323,89 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
     return Relay
 
 
+def unit_name(provider):
+    return f'caminus-relay-{provider}.service'
+
+
+def unit_dir():
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd' / 'user'
+
+
+def unit_text(provider, args):
+    """The service: this interpreter, this package, the relay's own flags; no --ttl (it runs until stopped)."""
+    pkg_root = Path(__file__).resolve().parents[2]      # the directory holding the caminus package
+    cmd = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); from caminus.env import relay; '
+           'relay.main(sys.argv[2:])', str(pkg_root), '--provider', provider, '--ttl', '0', *args]
+    quote = lambda a: '"' + a.replace('\\', '\\\\').replace('"', '\\"') + '"' if any(c in a for c in ' ";') else a
+    return ('[Unit]\nDescription=Caminus key relay (%s), spend-capped\nAfter=network-online.target\n\n'
+            '[Service]\nType=simple\nExecStart=%s\nRestart=on-failure\nRestartSec=10\n'
+            'NoNewPrivileges=yes\nPrivateTmp=yes\n\n[Install]\nWantedBy=default.target\n'
+            % (provider, ' '.join(quote(a) for a in cmd)))
+
+
+def service(argv, run=subprocess.run):
+    """install / uninstall / status of the relay services."""
+    op, rest = argv[0], argv[1:]
+    ap = argparse.ArgumentParser(prog=f'caminus env relay {op}')
+    ap.add_argument('--provider', choices=sorted(PROVIDERS), required=op != 'status')
+    ap.add_argument('--cap-usd', type=float)
+    ap.add_argument('--model', action='append')
+    ap.add_argument('--port', type=int)
+    ap.add_argument('--max-tokens', type=int)
+    ap.add_argument('--key-file')
+    a = ap.parse_args(rest)
+    ctl = lambda *x: run(['systemctl', '--user', *x], capture_output=True, text=True)
+    if op == 'install':
+        if a.cap_usd is None:
+            sys.exit('install needs --cap-usd: the daily cap is what guards the spend')
+        key_file = Path(os.path.expanduser(a.key_file or PROVIDERS[a.provider]['key_file']))
+        if not key_file.exists():
+            sys.exit(f'no key file at {key_file}: save the key there (mode 600) first')
+        args = ['--cap-usd', str(a.cap_usd)]
+        for flag, val in (('--port', a.port), ('--max-tokens', a.max_tokens), ('--key-file', a.key_file)):
+            if val is not None:
+                args += [flag, str(val)]
+        for m in a.model or []:
+            args += ['--model', m]
+        d = unit_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / unit_name(a.provider)).write_text(unit_text(a.provider, args))
+        ctl('daemon-reload')
+        r = ctl('enable', '--now', unit_name(a.provider))
+        if r.returncode:
+            sys.exit('systemctl --user enable failed: ' + (r.stderr or r.stdout).strip()[:300])
+        print(f'installed {unit_name(a.provider)}: cap ${a.cap_usd:.2f}/day, no expiry, restarts on failure. '
+              'For it to run while you are logged out: loginctl enable-linger')
+        return 0
+    if op == 'uninstall':
+        ctl('disable', '--now', unit_name(a.provider))
+        try:
+            (unit_dir() / unit_name(a.provider)).unlink()
+        except FileNotFoundError:
+            pass
+        ctl('daemon-reload')
+        print('removed ' + unit_name(a.provider))
+        return 0
+    state = Path.home() / '.local/state/caminus'
+    for prov in ([a.provider] if a.provider else sorted(PROVIDERS)):
+        installed = (unit_dir() / unit_name(prov)).exists()
+        active = ctl('is-active', unit_name(prov)).stdout.strip() if installed else 'not installed'
+        ledger = state / ('key-relay-ledger.json' if prov == 'anthropic' else f'{prov}-relay-ledger.json')
+        spent = Ledger(ledger, 0).spent() if ledger.exists() else 0.0
+        print(f'{prov:10s} {active:14s} today ${spent:.4f}')
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] and argv[0] in ('install', 'uninstall', 'status'):
+        return service(argv)
     ap = argparse.ArgumentParser(prog='caminus env relay', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--provider', choices=sorted(PROVIDERS), default='anthropic')
     ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra)')
     ap.add_argument('--cap-usd', type=float, default=1.0, help='daily spend cap in USD')
-    ap.add_argument('--ttl', type=float, default=1800, help='seconds before the relay exits on its own')
+    ap.add_argument('--ttl', type=float, default=1800, help='seconds before the relay exits on its own; 0 = never')
     ap.add_argument('--max-tokens', type=int, default=16000)
     ap.add_argument('--model', action='append', help='anthropic: allowed model (repeatable); default claude-haiku-5-5')
     ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key or ~/.config/caminus/deepinfra-key')
@@ -361,7 +444,8 @@ def main(argv=None):
     port = a.port or spec['port']
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', port),
                                           make_handler(a.provider, key, ledger, models, a.max_tokens, log, prices))
-    threading.Timer(a.ttl, srv.shutdown).start()
+    if a.ttl > 0:
+        threading.Timer(a.ttl, srv.shutdown).start()
     root = '/v1' if a.provider == 'anthropic' else '/v1/openai'
     log('start %s port %d cap $%.2f ttl %ds%s (spent today $%.4f)' % (
         a.provider, port, a.cap_usd, a.ttl, ' models %s' % sorted(models) if a.provider == 'anthropic' else '',

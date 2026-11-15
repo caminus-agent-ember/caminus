@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 import time
+import subprocess
+import sys
 import uuid
 
-from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices
+from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices, price
 from .store import log_failure, Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
@@ -34,6 +36,8 @@ LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type'
                                                                blockers={'type':'array','items':{'type':'string'}}),
                                required=[], additionalProperties=False)}
 PLAIN_TEXT_LIMIT = 3
+COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
+RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
 # target_ratio 0.20 of the threshold: on a 1M window it compacts at ~400K and keeps the newest ~80K).
 PAID_COMPACT = (.38, .38 * .20)
@@ -812,6 +816,21 @@ class Runtime:
         if not force and before_tokens < trigger_tokens and before_tokens + reserve < size:
             self.context_note(gid, before_tokens, size)
             return messages, False
+        if not force and len(messages) > 2:
+            # Tier one, no model call: old tool outputs become one-line stubs pointing at files. When that alone brings
+            # the request to the target, no summary is made: nothing is paraphrased and nothing is paid for. Otherwise
+            # the summary below works from the trimmed history (large recent outputs still go into it).
+            trimmed, count, removed = outputs.trim(self.home, messages, COMPACT_KEEP, gid[:8])
+            if count:
+                after = self.model.tokens([system, *trimmed, *tail], self.tools)
+                if after <= target_tokens and after + reserve < size:
+                    self.store.update(gid, messages=trimmed)
+                    self.store.event('compacted', dict(tier='trim', trimmed=count, chars=removed, before=len(messages),
+                                     after=len(trimmed), before_tokens=before_tokens, after_tokens=after,
+                                     trigger_tokens=trigger_tokens, target_tokens=target_tokens), gid)
+                    self.context_note(gid, after, size)
+                    return trimmed, True
+                messages = trimmed
         if len(messages) < 2:
             raise ModelContextError('goal/context exceeds the model window; send a smaller goal or shorten MEMORY.md')
         if force:
@@ -825,7 +844,7 @@ class Runtime:
             while start < len(messages) and messages[start]['role'] == 'tool':
                 start += 1
         else:
-            start = max(1, len(messages) - 8)
+            start = max(1, len(messages) - COMPACT_KEEP)
             while start > 1 and messages[start]['role'] == 'tool':
                 start -= 1
             if start == 1:
@@ -943,6 +962,30 @@ class Runtime:
             self.store.event('watchdog', dict(reason=reason or 'stopped', **(detail or {})), gid)
         return True
 
+    def _meter(self, gid):
+        """Every priced turn, whichever brain served it, into spend.json (per day and per goal): what the status line
+        shows. The budgets (free time, the fallback, the advisor) keep their own ledgers; this one only reports."""
+        usd = price((getattr(self.model, 'config', None) or {}).get('model') or self.config.get('model'),
+                    getattr(self.model, 'last_usage', None) or {},
+                    (getattr(self.model, 'last_call', None) or {}).get('served'))
+        if not usd:
+            return
+        import datetime
+        path = self.home / 'spend.json'
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        day = state.setdefault('days', {}).setdefault(datetime.date.today().isoformat(), dict(usd=0.0, turns=0))
+        day['usd'] = round(day['usd'] + usd, 6)
+        day['turns'] += 1
+        goals = state.setdefault('goals', {})
+        goals[gid] = round(goals.get(gid, 0.0) + usd, 6)
+        if len(goals) > 500:                  # bounded: the oldest goals' totals go first
+            for k in list(goals)[:len(goals) - 500]:
+                goals.pop(k)
+        atomic_json(path, state)
+
     def compaction_ratios(self):
         """(trigger, target) as fractions of the window. A paid brain resends its whole context every turn, so it
         compacts earlier: by default at 38 % of the window and down to 7.6 % (the owner's Hermes setting: on a 1M
@@ -953,6 +996,98 @@ class Runtime:
             return (float(self.config.get('paid_compact_threshold', PAID_COMPACT[0])),
                     float(self.config.get('paid_compact_target_ratio', PAID_COMPACT[1])))
         return float(self.config.get('compact_threshold', .85)), float(self.config.get('compact_target_ratio', .2))
+
+    def stop_reason(self):
+        """The emergency stop: a STOP file in the shared bridge folder (caminus env stop-all), for every resident. The
+        folder is sticky and the file the owner's, mode 640: an agent can read it but cannot delete, rename or rewrite
+        it, so only the owner lifts it. Its text, if any, is the reason."""
+        for f in (Path(self.config.get('bridge') or '/nonexistent').expanduser() / 'STOP',):
+            try:
+                if f.exists():
+                    return (f.read_text()[:300].strip() or 'emergency stop') + f' ({f})'
+            except OSError:
+                return f'emergency stop ({f})'
+        return ''
+
+    def _emergency_stop(self):
+        """While the stop is on, every active goal is paused after its current step and nothing new starts. Lifting it
+        resumes nothing on its own: a paused goal waits for /resume."""
+        reason = self.stop_reason()
+        if not reason:
+            self._stopped = False
+            return False
+        rows = [r['id'] for r in self.store.db.execute(
+            "SELECT id FROM goals WHERE state IN ('queued','working','waiting_model')")]
+        with self.store.transaction():
+            for gid in rows:
+                self.store.update(gid, state='paused', error='emergency stop: ' + reason)
+                self.store.event('emergency_stop', dict(reason=reason), gid)
+        import signal as _signal
+        if not getattr(self, '_stopped', False):
+            # Commands already running in the agent's terminals are ended too: TERM now, KILL ten seconds later for any
+            # that ignore it. (A process the agent detached into its own session is outside their process groups.)
+            ended = self.terminal.signal_running(_signal.SIGTERM) if hasattr(self.terminal, 'signal_running') else []
+            self.store.event('emergency_stop', dict(reason=reason, paused=len(rows), terminals_ended=ended))
+            self._stopped, self._stop_at, self._stop_killed = True, time.time(), False
+        elif not self._stop_killed and time.time() - self._stop_at >= 10:
+            self._stop_killed = True
+            left = self.terminal.signal_running(_signal.SIGKILL) if hasattr(self.terminal, 'signal_running') else []
+            if left:
+                self.store.event('emergency_stop', dict(reason=reason, terminals_killed=left))
+        return True
+
+    def _apply_pauses(self):
+        """/pause: queued like /compact and applied here, between steps, so a tool is never cut off mid-call."""
+        for gid in self.store.pending_requests('pause'):
+            req = self.store.pending_request(gid, 'pause')
+            if req is None:
+                continue
+            with self.store.transaction():
+                g = self.store.goal(gid)
+                if g['state'] in ('queued', 'working', 'waiting_model', 'waiting_user', 'waiting_root'):
+                    self.store.update(gid, state='paused', error='paused by your human')
+                    self.store.event('paused', dict(by='owner'), gid)
+                    self.store.settle_request(req['id'], 'done')
+                else:
+                    self.store.settle_request(req['id'], 'done', 'the goal was not running')
+
+    def _maybe_update(self):
+        """/update: a new runtime is installed between goals (or at the next turn boundary with now). The daemon
+        rewrites its own unit to the new program and asks systemd to restart it; the new daemon's heartbeat names
+        its runtime, which is how the update is confirmed."""
+        marker = self.home / 'update.json'
+        if not marker.exists():
+            return False
+        try:
+            req = json.loads(marker.read_text())
+        except (OSError, ValueError):
+            return False
+        busy = [r['id'] for r in self.store.db.execute(
+            "SELECT id,kind FROM goals WHERE state IN ('working','waiting_model')") if r['kind'] not in FREE_KINDS]
+        if busy and not req.get('now'):
+            return False                      # between goals only: the running goal finishes first
+        program = Path(str(req.get('program') or ''))
+        marker.unlink(missing_ok=True)
+        if not program.is_file():
+            self.store.event('update_failed', dict(reason=f'no runtime at {program}'))
+            return False
+        from .cli import unit_text
+        name = self.config.get('name')
+        unit = f'caminus-agent-{name}.service'
+        path = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd/user' / unit
+        if not path.exists():
+            self.store.event('update_failed', dict(reason='this resident is not a systemd service (start it with start)'))
+            return False
+        path.write_text(unit_text(name, self.home, str(program)))
+        self.store.event('updating', dict(from_runtime=RUNTIME, to_runtime=program.name, busy=busy))
+        env = dict(os.environ, XDG_RUNTIME_DIR='/run/user/' + str(os.getuid()))
+        run = getattr(self, 'systemctl', None) or subprocess.run
+        run(['systemctl', '--user', 'daemon-reload'], env=env, capture_output=True)
+        r = run(['systemctl', '--user', 'restart', '--no-block', unit], env=env, capture_output=True)
+        if getattr(r, 'returncode', 1):
+            self.store.event('update_failed', dict(reason='systemctl restart failed'))
+            return False
+        return True
 
     MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
                   'provider', 'provider_kind', 'api_key_env', 'temperature')
@@ -1085,6 +1220,7 @@ class Runtime:
             self._throughput_note(gid,getattr(self.model,'last_speed',None))
             self.free.account(gid)
             self.brains.account(gid)
+            self._meter(gid)
             if self.store.goal(gid)['state']=='cancelled':
                 return True
             self.retry.pop(gid,None)
@@ -1216,6 +1352,17 @@ class Runtime:
         """Same loop for daemon and oneshot; callers own the process lock."""
         last_heartbeat=0
         while stop is None or not stop():
+            if not target and self._maybe_update():
+                return None                   # systemd restarts the daemon on the new runtime
+            self._apply_pauses()
+            if self._emergency_stop():
+                if time.time()-last_heartbeat>=5:
+                    atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='stopped',runtime=RUNTIME))
+                    last_heartbeat=time.time()
+                if target:
+                    return self.store.goal(target)
+                time.sleep(max(.2,poll))
+                continue
             self.mail.receive(self.store)
             for gid in self.store.pending_requests('compact'):
                 self.compact_request(gid)
@@ -1226,7 +1373,7 @@ class Runtime:
             if goals and time.time()-last_heartbeat>=5:
                 # Say we are alive before a turn, not after it: a turn waiting on the model server can hold
                 # this loop for minutes, and a stale heartbeat makes a working daemon look dead to every UI.
-                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working'))
+                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working',runtime=RUNTIME))
                 last_heartbeat=time.time()
             for gid in goals:
                 progressed |= self.tick(gid)
@@ -1237,7 +1384,7 @@ class Runtime:
                     if state in PAUSED or state == 'waiting_model':
                         return self.store.goal(gid)
             if time.time()-last_heartbeat>=5:
-                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working' if progressed else 'listening'))
+                atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working' if progressed else 'listening',runtime=RUNTIME))
                 last_heartbeat=time.time()
             if not progressed:
                 time.sleep(max(.05,poll))
