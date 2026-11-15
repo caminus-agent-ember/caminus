@@ -41,6 +41,7 @@ type residentStatus struct {
 }
 type residentEvent struct {
 	Seq  int            `json:"seq"`
+	Ts   float64        `json:"ts"`
 	Goal string         `json:"goal"`
 	Kind string         `json:"kind"`
 	Data map[string]any `json:"data"`

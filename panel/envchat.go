@@ -882,37 +882,101 @@ func (m envModel) chatBottom() string {
 	return m.chatComposer()
 }
 
-// todoPinned is the selected goal's todo list (its newest todo event) as one line above the composer, while the goal
-// is open. bodyHeight measures chatBottom, so the line takes its row from the transcript.
+// todoPinned is the "now" line above the composer: the task the agent is on (its todo list's current item, as
+// "Task 2 of 5" with a dot per item) and what it is doing this moment (thinking, writing, running a command and for
+// how long, calling a tool, waiting for you, idle). It follows the goal the agent is actually on, not the selection.
 func (m envModel) todoPinned() string {
-	sel := m.selectedResidentGoal()
-	if sel == nil || sel.State == "completed" || sel.State == "cancelled" {
-		return ""
-	}
-	for i := len(m.residentEvents) - 1; i >= 0; i-- {
-		e := m.residentEvents[i]
-		if e.Goal != sel.ID || e.Kind != "todo" {
-			continue
-		}
-		raw, _ := e.Data["items"].([]any)
-		var items []todoItem
-		for _, r := range raw {
-			it, _ := r.(map[string]any)
-			text, _ := it["text"].(string)
-			state := map[string]string{"done": "done", "in_progress": "now"}[fmt.Sprint(it["state"])]
-			if state == "" {
-				state = "next"
-			}
-			if text != "" {
-				items = append(items, todoItem{residentText(text), state})
+	w := max(20, m.width)
+	var goal *residentGoal
+	for i := range m.resident.Goals {
+		switch m.resident.Goals[i].State {
+		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan":
+			if goal == nil {
+				goal = &m.resident.Goals[i]
 			}
 		}
-		if len(items) == 0 {
-			return ""
-		}
-		return todoLine(items, max(20, m.width))
 	}
-	return ""
+	if goal == nil {
+		if sel := m.selectedResidentGoal(); sel != nil && (sel.State == "queued" || sel.State == "paused") {
+			goal = sel
+		}
+	}
+	// the task: the current todo item, else the goal itself
+	task, dots := "", ""
+	if goal != nil {
+		task = oneLine(residentText(goal.Prompt))
+		for i := len(m.residentEvents) - 1; i >= 0; i-- {
+			e := m.residentEvents[i]
+			if e.Goal != goal.ID || e.Kind != "todo" {
+				continue
+			}
+			raw, _ := e.Data["items"].([]any)
+			cur, n := 0, 0
+			for _, r := range raw {
+				it, _ := r.(map[string]any)
+				text, _ := it["text"].(string)
+				if text == "" {
+					continue
+				}
+				n++
+				switch fmt.Sprint(it["state"]) {
+				case "done":
+					dots += envCtxOK.Render("●")
+				case "in_progress":
+					dots += envBusy.Render("◐")
+					if cur == 0 {
+						cur, task = n, oneLine(residentText(text))
+					}
+				default:
+					dots += envDim.Render("○")
+				}
+			}
+			if n > 0 {
+				label := fmt.Sprintf("Task %d of %d", max(cur, 1), n)
+				if cur == 0 {
+					label = fmt.Sprintf("Tasks (%d)", n)
+				}
+				dots = bold(cAccent).Render(label) + " " + dots
+			}
+			break
+		}
+	}
+	// now: what is happening this moment
+	now := "idle"
+	l := m.chat.live
+	switch {
+	case l.active && l.text != "":
+		now = "writing its reply"
+	case l.active && len(l.tools) > 0:
+		now = "calling " + residentText(l.tools[len(l.tools)-1])
+	case l.active:
+		now = "thinking"
+	case m.chat.group.running != "":
+		// the time first: a long command must not push it off the line
+		now = "running"
+		if since := m.chat.group.runningSince; since > 0 {
+			now += " " + (time.Duration(time.Since(time.Unix(int64(since), 0)).Seconds()) * time.Second).String()
+		}
+		now += "  " + ansi.Truncate(m.chat.group.running, 70, "…")
+	case goal == nil:
+		now = "idle (free time runs on its own schedule)"
+	default:
+		now = map[string]string{
+			"waiting_user": "waiting for your answer · Ctrl+A", "waiting_root": "waiting for a root approval · Ctrl+A",
+			"waiting_plan": "waiting for your OK on its plan · /plan approve", "waiting_model": "waiting for the model",
+			"paused": "paused · /resume", "queued": "queued, starts next", "working": "between steps",
+		}[goal.State]
+	}
+	parts := []string{}
+	if goal != nil {
+		if dots != "" {
+			parts = append(parts, dots+"  "+lipgloss.NewStyle().Foreground(cText).Render(task))
+		} else {
+			parts = append(parts, bold(cAccent).Render("Goal")+"  "+lipgloss.NewStyle().Foreground(cText).Render(task))
+		}
+	}
+	parts = append(parts, bold(cBlue).Render("Now")+"  "+envBusy.Render(now))
+	return ansi.Truncate(" "+strings.Join(parts, envDim.Render("   ·   ")), w, "…")
 }
 
 // contextBarSlots is the fixed width of the usage bar: readable at a glance,

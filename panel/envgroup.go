@@ -20,8 +20,9 @@ import (
 type toolGroup struct {
 	commands, reads, edits, failed int
 	other                          map[string]int
-	gate                           string // "", "passes", "fails": the latest gate run
-	running                        string // the command still running, if any
+	gate                           string  // "", "passes", "fails": the latest gate run
+	running                        string  // the command still running, if any
+	runningSince                   float64 // when it started (the call's event time)
 }
 
 func (t *toolGroup) empty() bool {
@@ -104,7 +105,7 @@ func (c *residentChat) fold(e residentEvent) bool {
 			case "terminal":
 				if cmd, _ := args["command"].(string); strings.TrimSpace(cmd) != "" {
 					g.commands++
-					g.running = oneLine(residentText(cmd))
+					g.running, g.runningSince = oneLine(residentText(cmd)), e.Ts
 				}
 			case "read":
 				g.reads++

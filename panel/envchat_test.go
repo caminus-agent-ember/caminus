@@ -1217,9 +1217,14 @@ func TestTodoIsPinnedAboveTheComposer(t *testing.T) {
 			map[string]any{"text": "run the gate", "state": "pending"}))
 	m.syncChat()
 	frame := ansi.Strip(m.render())
-	if !strings.Contains(frame, "todo") || !strings.Contains(frame, "fix the bounds") || strings.Contains(frame, "stale") {
-		t.Fatalf("the newest todo list is not pinned:\n%s", frame)
+	if !strings.Contains(frame, "Task 2 of 3 ●◐○  fix the bounds") || strings.Contains(frame, "stale") || !strings.Contains(frame, "Now") {
+		t.Fatalf("the current task and what is happening now are pinned:\n%s", frame)
 	}
+	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Add(-14*time.Second).Unix())
+	if f := ansi.Strip(m.render()); !strings.Contains(f, "Now  running 1") || !strings.Contains(f, "s  make test") {
+		t.Fatalf("a running command is named with how long it has run:\n%s", f)
+	}
+	m.chat.group.running = ""
 	if rows := strings.Split(frame, "\n"); len(rows) > m.height {
 		t.Fatalf("the pinned line pushed the frame past the terminal: %d rows", len(rows))
 	}
