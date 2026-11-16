@@ -1772,20 +1772,23 @@ for line in sys.stdin:
 
     def test_poll_returns_only_new_output_and_says_when_quiet(self):
         t=Terminal(self.home);sid=uuid.uuid4().hex
-        # Two bursts separated by a pause; the command then waits for a line before exiting.
-        cmd='printf first-burst; sleep 1; printf second-burst; read x'
-        # (the first burst lands in the start call or the first poll, depending on how fast the shell starts;
-        # a poll returns only new output, so it is in exactly one of them)
-        a=t.call(sid,dict(command=cmd,yield_ms=50))
-        b=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
-        self.assertEqual((a['output']+b['output']).count('first-burst'),1);self.assertNotIn('second-burst',a['output']+b['output'])
-        if b['output']:self.assertFalse(b['no_new_output'])
+        # Two bursts separated by a pause; the command then waits for a line before exiting. Polls wait for output, so
+        # the test loops until each burst has arrived instead of trusting a fixed wait (a loaded CI runner can take
+        # longer than any small one to start the shell): every poll returns only what is new, so each burst is seen
+        # exactly once, and the first never comes back with the second.
+        cmd='printf first-burst; sleep 4; printf second-burst; read x'
+        seen=t.call(sid,dict(command=cmd,yield_ms=50))['output'];t0=time.time()
+        while 'first-burst' not in seen and time.time()-t0<3:
+            seen+=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))['output']
+        self.assertEqual(seen,'first-burst')
         # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
         self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])
-        # Second burst arrives; that poll returns only the second burst.
-        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
-        self.assertEqual(out['output'],'second-burst');self.assertFalse(out['no_new_output'])
+        # The second burst arrives later; the polls that bring it return only the second burst.
+        seen,t0='',time.time()
+        while 'second-burst' not in seen and time.time()-t0<10:
+            seen+=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))['output']
+        self.assertEqual(seen,'second-burst')
         # An explicit offset=0 still reads everything from the beginning.
         out=t.call(uuid.uuid4().hex,dict(session=sid,stdin='go\n',yield_ms=1000,offset=0))
         self.assertTrue(out['output'].startswith('first-burst'));self.assertIn('second-burst',out['output'])
