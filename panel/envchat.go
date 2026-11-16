@@ -355,6 +355,9 @@ func (m *envModel) syncChat() {
 		if !m.chat.group.empty() {
 			body += "\n\n" + m.chat.group.line(w) // the work in progress, fixed when the next block arrives
 		}
+		if body != "" && m.height >= 24 && m.sideWidth() > 0 {
+			body += "\n" // the gap above the composer, in the transcript's column only (chatBottom)
+		}
 		if body == "" {
 			body = mascotBeside(0, "", envTitle.Render("CAMINUS")+envDim.Render(" env"),
 				"Your agent's conversation and commands will stay here.",
@@ -551,10 +554,22 @@ func (m envModel) sidePanel(sw, height int) string {
 	if command != "" {
 		rows = append(rows, wrap(command, 3, textSt, 8)...)
 	}
+	used := len(rows)
 	for len(rows) < height {
 		rows = append(rows, "")
 	}
 	rows = rows[:height]
+	// Ember sits in the panel's bottom-right corner, right above the composer, in rows nothing else needs (it gives
+	// way to tasks and a long command); it flickers while a reply is written
+	if art := mascot(m.tickN % 2); height-used > len(art) {
+		if !m.chat.live.active {
+			art = mascot(0)
+		}
+		aw := lipgloss.Width(art[0])
+		for i, a := range art {
+			rows[height-len(art)+i] = strings.Repeat(" ", max(0, sw-aw-1)) + a
+		}
+	}
 	for i, r := range rows {
 		rows[i] = ansi.Truncate(r, sw, "…")
 	}
@@ -1254,7 +1269,9 @@ func (m envModel) chatBottom() string {
 	}
 	// a blank line between the conversation and what sits under it, as Claude Code leaves: the composer read as part
 	// of the last block when it touched it
-	if m.height >= 24 { // (a small terminal keeps every row for the transcript)
+	// (a small terminal keeps every row for the transcript; with the side panel the gap is the transcript's own last
+	// line instead, so the panel, and Ember sitting at its foot, reach down to the composer)
+	if m.height >= 24 && m.sideWidth() == 0 {
 		out = "\n" + out
 	}
 	return out
