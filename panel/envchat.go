@@ -2694,6 +2694,9 @@ func (m envModel) chatFoot(w int) string {
 	// The status line: brain, context, speed and queue, then the keys that matter now (shell.go). Everything that is
 	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
 	keys := []string{"esc browse", "^P sessions", "/help"}
+	if m.chat.live.active && m.chat.live.hold {
+		keys = append([]string{"held · ^T follow"}, keys...)
+	}
 	if len(m.reqs) > 0 {
 		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
 	}
@@ -2715,13 +2718,8 @@ func (m envModel) chatFoot(w int) string {
 	if !m.chat.transcript.AtBottom() {
 		status = append(status, envDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
 	}
-	if m.chat.live.active {
-		hint := "live: Ctrl+T hold"
-		if m.chat.live.hold {
-			hint = "live: held · Ctrl+T follow"
-		}
-		status = append(status, envDim.Render(hint))
-	}
+	// (no "live: Ctrl+T hold" line: it came and went with every reply and the frame jumped a row each time; the key
+	// is in /help, and a held view says so among the status line's keys)
 	if m.chat.seq < m.resident.LastEvent {
 		status = append(status, envDim.Render("loading history"))
 	}
