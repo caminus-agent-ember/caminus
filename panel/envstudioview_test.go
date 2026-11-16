@@ -109,3 +109,9 @@ func keyPress(k string) tea.KeyPressMsg {
 	}
 	return tea.KeyPressMsg{Code: rune(k[0]), Text: k}
 }
+func TestMarkdownListsKeepTheirNumbersAndBullets(t *testing.T) {
+	out := ansi.Strip(strings.Join(formatText("markdown", "1. **Headless** sway\n2. Bridge\n\n- a bullet", 80), "\n"))
+	if !strings.Contains(out, "1. Headless") || !strings.Contains(out, "• a bullet") {
+		t.Fatal("list markers")
+	}
+}

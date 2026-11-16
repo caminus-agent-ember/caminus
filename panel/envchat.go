@@ -64,12 +64,12 @@ type residentChat struct {
 	recapAsked                              int           // recapNotAsked, recapAtOpen or recapOnDemand
 	page, pageTop                           int           // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
-	slashSel                                int    // the slash menu's highlighted row
-	btw                                     btwState // the /btw side answer, in its own section above the composer
+	slashSel                                int         // the slash menu's highlighted row
+	btw                                     btwState    // the /btw side answer, in its own section above the composer
 	themes                                  themeScreen // /theme: the theme screen
-	recallIdx                               int    // Up/Down history: 1 = your newest sent message; 0 = not recalling
-	recallText                              string // what the recall put in the draft (an edit ends the recall)
-	slashFor                                string // the draft slashSel belongs to (a new draft starts at the top)
+	recallIdx                               int         // Up/Down history: 1 = your newest sent message; 0 = not recalling
+	recallText                              string      // what the recall put in the draft (an edit ends the recall)
+	slashFor                                string      // the draft slashSel belongs to (a new draft starts at the top)
 	slashToken, slashText                   string
 	pathIdx                                 int
 	pathPrefix, pathPick                    string
@@ -582,13 +582,9 @@ func (m *envModel) scrollLive(delta int) {
 // liveEmberMin is the box width from which Ember sits beside the live reply; narrower, the text keeps every column.
 const liveEmberMin = 50
 
-// liveTextWidth is the live reply's text column: the box's inner width less Ember's column when it is shown.
-func liveTextWidth(inner int) int {
-	if inner >= liveEmberMin {
-		return inner - lipgloss.Width(mascot(0)[0]) - 2
-	}
-	return inner
-}
+// liveTextWidth is the live reply's text column. Ember is drawn only on the welcome screen of a new goal now (the
+// user's call): the thoughts take the whole width.
+func liveTextWidth(inner int) int { return inner }
 
 func (m envModel) liveBlock(w int) string {
 	if m.sideWidth() > 0 {
@@ -617,11 +613,7 @@ func (m envModel) emberBox(w, window int) string {
 		}
 	}
 	// One fixed size, generating or not (a box that grew and shrank was hard to read): only the text moves. The
-	// thoughts run downward, newest last; Ember flickers while a reply is written.
-	frame := 0
-	if l.active {
-		frame = m.tickN % 2
-	}
+	// thoughts run downward, newest last.
 	window = max(1, window)
 	top := max(0, len(body)-window)
 	if l.active && l.hold {
@@ -640,25 +632,11 @@ func (m envModel) emberBox(w, window int) string {
 		}
 		head = bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)
 	} else {
-		head = sectionHead(g.agent+" thoughts", cGreen, "newest last", max(18, w-1))
+		head = sectionHeadRight(g.agent+" thoughts", cGreen, "newest ↓", max(18, w-1))
 	}
 	shown := append([]string{}, body[top:min(top+window, len(body))]...)
 	for len(shown) < window {
 		shown = append(shown, "") // filled to its size from the first line, so it never grows as text arrives
-	}
-	if liveTextWidth(inner) < inner {
-		art := mascot(frame)
-		pad := strings.Repeat(" ", lipgloss.Width(art[0]))
-		for len(shown) < min(len(art), window) {
-			shown = append(shown, "")
-		}
-		for i, line := range shown {
-			col := pad
-			if i < len(art) {
-				col = art[i]
-			}
-			shown[i] = col + "  " + line
-		}
 	}
 	// a reading surface: a heading, no frame (sectionHead)
 	if !strings.Contains(head, "─") {
@@ -1262,9 +1240,7 @@ func (m envModel) btwSection(w int) string {
 	if !b.open {
 		return ""
 	}
-	art := mascotSmall(m.tickN % 2)
-	artW := lipgloss.Width(art[0]) + 2
-	textW := max(10, min(readingWidth, w-1-artW))
+	textW := max(10, min(readingWidth, w-1))
 	q := lipgloss.NewStyle().Foreground(cText).Render(envClip(residentText(b.question), textW-4))
 	body := []string{envBusy.Render("you ") + q}
 	rows := m.btwRows()
@@ -1287,12 +1263,8 @@ func (m envModel) btwSection(w int) string {
 		}
 	}
 	var out []string
-	for i, l := range body {
-		a := strings.Repeat(" ", artW)
-		if i < len(art) {
-			a = art[i] + "  "
-		}
-		out = append(out, a+l)
+	for _, l := range body {
+		out = append(out, " "+l)
 	}
 	// a reading surface: the shared heading, no frame; the keys ride on the heading's note
 	return sectionHead("by the way", cAccent, "not added to the goal · "+keys, w) + "\n" + strings.Join(out, "\n")

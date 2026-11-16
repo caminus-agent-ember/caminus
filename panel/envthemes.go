@@ -21,7 +21,8 @@ type themeScreen struct {
 	open  bool
 	names []string
 	sel   int
-	was   string // the theme in force when the screen opened (Esc restores it)
+	was   string            // the saved theme's name (marked "yours")
+	roles map[string]string // the colours in force when the screen opened: Esc restores exactly these
 }
 
 // themeInUse is the saved theme's name ("caminus" when none was chosen).
@@ -45,7 +46,11 @@ func (m envModel) openThemes() envModel {
 			sel = i
 		}
 	}
-	m.chat.themes = themeScreen{open: true, names: names, sel: sel, was: was}
+	roles := make(map[string]string, len(themeCurrent))
+	for k, v := range themeCurrent {
+		roles[k] = v
+	}
+	m.chat.themes = themeScreen{open: true, names: names, sel: sel, was: was, roles: roles}
 	m.chat.compose.Blur()
 	return m
 }
@@ -88,7 +93,13 @@ func (m envModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.themes = themeScreen{}
 		return m, m.chat.compose.Focus()
 	case "esc", "q":
-		m.previewTheme(t.was)
+		// back to exactly what was showing (the saved name can differ from it: a theme file edited since, a test)
+		themeCurrent = t.roles
+		applyThemeStyles()
+		m.chat.markdown = nil
+		m.chat.content, m.chat.rendered = "", 0
+		m.chatStyles()
+		m.syncChat()
 		m.chat.themes = themeScreen{}
 		return m, m.chat.compose.Focus()
 	case "ctrl+c":
@@ -157,7 +168,7 @@ func themePreview(name string, w int) string {
 	add(envThink.Render("  I should read the parser first and see which cases have no test."), "")
 	add(fgc("ok").Render(g.agent+" ")+fgc("text").Render("The parser has no test for empty input. I'll add one in ")+
 		envCode.Render("parser_test.go")+fgc("text").Render("."), "")
-	add("  "+envTool.Render(g.tool+" terminal")+"  "+fgc("muted").Render("go test ./parser/..."))
+	add("  " + envTool.Render(g.tool+" terminal") + "  " + fgc("muted").Render("go test ./parser/..."))
 	add("  "+fgc("muted").Render("ok   parser  0.41s"), "")
 	add(formatText("markdown", "```go\nfunc TestEmpty(t *testing.T) {\n\tif _, err := Parse(\"\"); err == nil {\n\t\tt.Fatal(\"want an error\")\n\t}\n}\n```", w)...)
 	add("")

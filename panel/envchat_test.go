@@ -1555,19 +1555,16 @@ func TestSeveralRootRequestsShareOneCard(t *testing.T) {
 	}
 }
 
-func TestEmberFlickersBesideTheLiveReply(t *testing.T) {
+func TestTheLiveReplyHasTheWholeWidth(t *testing.T) {
 	old := g
 	defer func() { g = old }()
 	g = glyphTiers["unicode"]
 	m := chatFixture(t)
 	m.chat.live = residentLive{active: true, turn: "t1", text: "writing the report now"}
 	a := m.liveBlock(100)
-	if !strings.Contains(ansi.Strip(a), "▀") || !strings.Contains(ansi.Strip(a), "writing the report now") {
-		t.Fatalf("Ember sits beside the live text:\n%s", ansi.Strip(a))
-	}
-	m.tickN++
-	if b := m.liveBlock(100); b == a {
-		t.Fatal("the next tick draws the other frame (the flame flickers)")
+	// Ember is drawn only on a new goal's welcome screen now (the user's call): the live text has the whole width
+	if strings.Contains(ansi.Strip(a), "▀") || !strings.Contains(ansi.Strip(a), "writing the report now") {
+		t.Fatalf("the live text, no Ember beside it:\n%s", ansi.Strip(a))
 	}
 	if n := m.liveBlock(40); strings.Contains(ansi.Strip(n), "▀") {
 		t.Fatalf("a narrow box leaves Ember out:\n%s", ansi.Strip(n))
@@ -1664,7 +1661,7 @@ func TestCompactTranscriptFoldsToolWorkIntoOneLine(t *testing.T) {
 	}
 }
 
-func TestEmberStaysUpWithTheLatestThoughts(t *testing.T) {
+func TestTheLatestThoughtsStayUp(t *testing.T) {
 	old := g
 	defer func() { g = old }()
 	g = glyphTiers["unicode"]
@@ -1674,8 +1671,8 @@ func TestEmberStaysUpWithTheLatestThoughts(t *testing.T) {
 		residentEvent{Seq: 600, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "first I check the CVE list"}},
 		residentEvent{Seq: 601, Goal: "original", Kind: "assistant", Data: map[string]any{"reasoning": "then the kernel source for the missing return"}})
 	idle := ansi.Strip(m.liveBlock(110))
-	if !strings.Contains(idle, "▀") || !strings.Contains(idle, "thoughts") || !strings.Contains(idle, "missing return") {
-		t.Fatalf("idle, Ember stays with the latest thoughts:\n%s", idle)
+	if strings.Contains(idle, "▀") || !strings.Contains(idle, "thoughts") || !strings.Contains(idle, "missing return") {
+		t.Fatalf("idle, the latest thoughts stay up (no Ember beside them):\n%s", idle)
 	}
 	if strings.Index(idle, "first I check") > strings.Index(idle, "missing return") {
 		t.Fatal("the thoughts run downward, newest last")

@@ -466,6 +466,13 @@ func sectionHead(label string, c color.Color, note string, w int) string {
 	return s + " " + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(2, w-lipgloss.Width(s)-1)))
 }
 
+// sectionHeadRight is sectionHead with its note at the right end of the rule, out of the way of the label.
+func sectionHeadRight(label string, c color.Color, note string, w int) string {
+	s := lipgloss.NewStyle().Foreground(c).Bold(true).Render(label)
+	n := envDim.Render(note)
+	return s + " " + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(2, w-lipgloss.Width(s)-lipgloss.Width(n)-2))) + " " + n
+}
+
 // overlayBox: every overlay is the same box with the same keys; Esc always closes.
 func overlayBox(title, body, keys string, w, h int) string {
 	// lower case and grey like every other box in the chat; the title stays the accent. The body passes onlySGR: a

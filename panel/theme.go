@@ -376,6 +376,13 @@ func envMarkdownStyle() ansi.StyleConfig {
 	st.HorizontalRule.Color = color(themeRole("dim"))
 	st.Item.Color = color(themeRole("accent"))
 	st.Enumeration.Color = color(themeRole("accent"))
+	// a numbered item printed "1Headless compositor": the number needs its separator (and a bullet its mark)
+	if st.Enumeration.BlockPrefix == "" {
+		st.Enumeration.BlockPrefix = ". "
+	}
+	if st.Item.BlockPrefix == "" {
+		st.Item.BlockPrefix = "• "
+	}
 	st.Table.Color = color(themeRole("chrome"))
 	st.Table.CenterSeparator = color("┼")
 	st.Table.ColumnSeparator = color("│")
