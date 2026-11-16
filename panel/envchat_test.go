@@ -1684,3 +1684,53 @@ func TestARecoveredCutOffIsANoteNotAnError(t *testing.T) {
 		t.Fatalf("a handled cut-off is a quiet note:\n%s", block)
 	}
 }
+
+func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.width, m.height = 220, 50
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 900, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "Checking the CVEs.", "reasoning": "first the NVD feed"}},
+		residentEvent{Seq: 901, Goal: "original", Kind: "todo", Data: map[string]any{"items": []any{
+			map[string]any{"text": "probe the API", "state": "done"}, map[string]any{"text": "write the CLI", "state": "in_progress"},
+			map[string]any{"text": "the web UI", "state": "pending"}}}})
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 902, Goal: "original", Kind: "assistant",
+		Data: map[string]any{"reasoning": "a\ttabbed\tthought"}})
+	m.syncChat()
+	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Unix())
+	frame := ansi.Strip(m.render())
+	rows := strings.Split(frame, "\n")
+	if len(rows) > m.height {
+		t.Fatalf("%d rows overflow %d", len(rows), m.height)
+	}
+	for _, r := range rows {
+		if ansi.StringWidth(r) > m.width {
+			t.Fatalf("row too wide (%d): %q", ansi.StringWidth(r), r)
+		}
+	}
+	for _, want := range []string{"first the NVD feed", "Tasks  1 of 3 done", "◐ write the CLI", "Now  running", "make test", "Checking the CVEs."} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("missing %q:\n%s", want, frame)
+		}
+	}
+	if strings.Contains(frame, "Task 2 of 3") || strings.Contains(frame, "\t") {
+		t.Fatal("the line above the composer moves into the side panel; tabs are expanded")
+	}
+	m.resident.Goals[0].State = "completed"
+	if f := ansi.Strip(m.render()); strings.Contains(f, "make test") {
+		t.Fatal("a command of a goal that ended is not running now")
+	}
+	m.resident.Goals[0].State = "working"
+	// the thoughts sit beside the transcript, on the same rows
+	for _, r := range rows {
+		if strings.Contains(r, "Checking the CVEs.") && !strings.Contains(r, "│") {
+			continue
+		}
+	}
+	m.width = 120
+	if f := ansi.Strip(m.render()); strings.Contains(f, "Tasks  1 of 3") || !strings.Contains(f, "Task 2 of 3") {
+		t.Fatalf("a narrow terminal keeps the line above the composer:\n%s", f)
+	}
+}
