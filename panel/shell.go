@@ -128,18 +128,18 @@ func shellHeader(agent, state, goal string, steps, w int) string {
 	if goal != "" {
 		detail = lipgloss.NewStyle().Foreground(cBlue).Render(goal)
 	}
-	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, envDim.Render(fmt.Sprintf("%d steps", steps)), w)
+	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, emberDim.Render(fmt.Sprintf("%d steps", steps)), w)
 }
 
 // screenHeader is every screen's first two lines (the env chat, caminus panel, caminus top): CAMINUS · what · its
 // state in its one colour · dim details, something on the right, and a chrome rule under it.
 func screenHeader(what, state string, st lipgloss.Style, detail, right string, w int) string {
-	left := envTitle.Render("CAMINUS") + envDim.Render(" · ") + lipgloss.NewStyle().Foreground(cText).Render(what)
+	left := emberTitle.Render("CAMINUS") + emberDim.Render(" · ") + lipgloss.NewStyle().Foreground(cText).Render(what)
 	if state != "" {
 		left += " " + st.Render(state)
 	}
 	if detail != "" {
-		left += envDim.Render(" · ") + detail
+		left += emberDim.Render(" · ") + detail
 	}
 	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -171,37 +171,37 @@ func shellMessage(who, text string, w int) string {
 
 // toolCard: one line per tool call (kind, what, result, time); expanded, its body under a dim rule.
 func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w int) string {
-	icon, st := g.tool, envTool
+	icon, st := g.tool, emberTool
 	switch kind {
 	case "edit":
 		icon, st = g.edit, lipgloss.NewStyle().Foreground(cPurple)
 	case "gate":
-		icon, st = g.gate, envCtxOK
+		icon, st = g.gate, emberCtxOK
 		if !ok {
-			icon, st = g.fail, envCtxHot
+			icon, st = g.fail, emberCtxHot
 		}
 	case "error":
-		icon, st = g.fail, envCtxHot
+		icon, st = g.fail, emberCtxHot
 	case "output", "result":
-		icon, st = "", envDim
+		icon, st = "", emberDim
 		if !ok {
-			icon, st = g.fail, envWarn
+			icon, st = g.fail, emberWarn
 		}
 	case "note":
-		icon, st = g.idle, envDim
+		icon, st = g.idle, emberDim
 	case "read":
-		icon, st = g.collapsed, envDim
+		icon, st = g.collapsed, emberDim
 	case "free", "dream":
-		icon, st = g.done, envCtxOK
+		icon, st = g.done, emberCtxOK
 	}
 	label := strings.TrimSpace(icon + " " + kind)
 	fold := g.collapsed
 	if expanded {
 		fold = g.expanded
 	}
-	line := envDim.Render(fold) + " " + st.Render(label) + "  " + lipgloss.NewStyle().Foreground(cText).Render(what)
+	line := emberDim.Render(fold) + " " + st.Render(label) + "  " + lipgloss.NewStyle().Foreground(cText).Render(what)
 	if meta != "" {
-		line += envDim.Render("  ·  " + meta)
+		line += emberDim.Render("  ·  " + meta)
 	}
 	line = ansi.Truncate(line, w, "…")
 	if !expanded || len(body) == 0 {
@@ -210,12 +210,12 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 	rule := lipgloss.NewStyle().Foreground(cGray).Render("│ ")
 	out := []string{line}
 	for _, b := range body {
-		st := envDim
+		st := emberDim
 		switch {
 		case strings.HasPrefix(b, "+"):
-			st = envCtxOK
+			st = emberCtxOK
 		case strings.HasPrefix(b, "-"):
-			st = envCtxHot
+			st = emberCtxHot
 		}
 		// an open card shows everything: long lines wrap under the rule, nothing is cut
 		for _, piece := range strings.Split(ansi.Hardwrap(b, max(4, w-6), true), "\n") {
@@ -237,19 +237,19 @@ func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	if kind == "question" {
 		title = "? QUESTION"
 	}
-	keys := envDim.Render("esc, then ") + envWarn.Render("a a") + envDim.Render(" approve  ") + envWarn.Render("g g") +
-		envDim.Render(" grant for the goal  ") + envWarn.Render("e") +
-		envDim.Render(" edit  ") + envWarn.Render("d") + envDim.Render(" deny  ·  ") + envWarn.Render("/deny TEXT") +
-		envDim.Render(" says what to do instead")
+	keys := emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" approve  ") + emberWarn.Render("g g") +
+		emberDim.Render(" grant for the goal  ") + emberWarn.Render("e") +
+		emberDim.Render(" edit  ") + emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
+		emberDim.Render(" says what to do instead")
 	if !inline {
-		keys = envDim.Render("decide in ") + envWarn.Render("/requests")
+		keys = emberDim.Render("decide in ") + emberWarn.Render("/requests")
 	}
 	inner := lipgloss.NewStyle().Foreground(cText).Bold(true).Render(cmd) + "\n" +
-		envDim.Render("why: "+why) + "\n" + keys
+		emberDim.Render("why: "+why) + "\n" + keys
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).
 		Width(min(w, 72)).Render(inner)
 	// the title rides on the top border
-	return borderTitle(box, title, envWarn.Bold(true))
+	return borderTitle(box, title, emberWarn.Bold(true))
 }
 
 // borderTitle writes a title into a rendered box's top border, replacing the rule there: "⚿ ROOT" on the approval
@@ -276,15 +276,15 @@ type todoItem struct {
 }
 
 func todoLine(items []todoItem, w int) string {
-	parts := []string{envDim.Render("todo ")}
+	parts := []string{emberDim.Render("todo ")}
 	for _, it := range items {
 		switch it.state {
 		case "done":
-			parts = append(parts, envCtxOK.Render(g.todoDone)+" "+envDim.Render(it.text))
+			parts = append(parts, emberCtxOK.Render(g.todoDone)+" "+emberDim.Render(it.text))
 		case "now":
-			parts = append(parts, envBusy.Render(g.todoNow)+" "+lipgloss.NewStyle().Foreground(cText).Render(it.text))
+			parts = append(parts, emberBusy.Render(g.todoNow)+" "+lipgloss.NewStyle().Foreground(cText).Render(it.text))
 		default:
-			parts = append(parts, envDim.Render(g.todoNext+" "+it.text))
+			parts = append(parts, emberDim.Render(g.todoNext+" "+it.text))
 		}
 	}
 	return ansi.Truncate(strings.Join(parts, "  "), w, "…")
@@ -293,17 +293,17 @@ func todoLine(items []todoItem, w int) string {
 // composer: where the human types. The target rides on the top border, the mark sits on the first line only, and the
 // hint says what Enter does now.
 func composer(draft, hint, title string, w int) string {
-	text := envDim.Render(hint)
+	text := emberDim.Render(hint)
 	if draft != "" {
 		text = lipgloss.NewStyle().Foreground(cText).Render(draft) + "█"
 	}
-	return composerBox(envBusy.Render(g.user)+" "+text, title, w)
+	return composerBox(emberBusy.Render(g.user)+" "+text, title, w)
 }
 
 // composerBox frames the editor's rendered lines as the composer: a rounded box in the chrome colour, with the target
 // on its top border. The caller draws the prompt mark (the editor's own, so a wrapped line keeps its indent).
 func composerBox(input, title string, w int) string {
-	return borderTitle(envBorder.Padding(0, 1).Width(w).Render(input), title, envDim)
+	return borderTitle(emberBorder.Padding(0, 1).Width(w).Render(input), title, emberDim)
 }
 
 // statusLine: brain, context, money and speed, then the keys that matter now. In the nerd tier the segments are
@@ -333,22 +333,22 @@ func statusLine(s status, w int) string {
 	if trigger <= 0 || trigger > 1 {
 		trigger = .85
 	}
-	barSt := envCtxOK
+	barSt := emberCtxOK
 	if frac >= trigger*.85 {
-		barSt = envWarn
+		barSt = emberWarn
 	}
 	if frac >= trigger {
-		barSt = envCtxHot
+		barSt = emberCtxHot
 	}
-	bar := barSt.Render(strings.Repeat(g.bar, full)) + envDim.Render(strings.Repeat(g.barEmpty, cells-full))
+	bar := barSt.Render(strings.Repeat(g.bar, full)) + emberDim.Render(strings.Repeat(g.barEmpty, cells-full))
 	segs := []string{
 		strings.TrimSpace(g.model + " " + s.brain),
-		envDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
+		emberDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
 	}
 	if s.usd >= 0 {
 		seg := strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd))
 		if s.usdDay > 0 {
-			seg += envDim.Render(fmt.Sprintf(" · %.2f today", s.usdDay))
+			seg += emberDim.Render(fmt.Sprintf(" · %.2f today", s.usdDay))
 		}
 		segs = append(segs, seg)
 	}
@@ -394,12 +394,12 @@ func footBar(segs, keyList []string, w int) string {
 			if strings.Contains(sg, "\x1b[") {
 				styled[i] = sg
 			} else {
-				styled[i] = envDim.Render(sg)
+				styled[i] = emberDim.Render(sg)
 			}
 		}
-		left = strings.Join(styled, envDim.Render(g.segR))
+		left = strings.Join(styled, emberDim.Render(g.segR))
 	}
-	keys := envDim.Render(strings.Join(keyList, "  "))
+	keys := emberDim.Render(strings.Join(keyList, "  "))
 	gap := w - lipgloss.Width(left) - lipgloss.Width(keys)
 	if gap < 2 && len(segs) > 2 && len(keyList) > 0 {
 		// short of room: the optional bubbles go, newest added first, before the keys do
@@ -485,7 +485,7 @@ func lowerLabel(title string) string {
 func sectionHead(label string, c color.Color, note string, w int) string {
 	s := lipgloss.NewStyle().Foreground(c).Bold(true).Render(label)
 	if note != "" {
-		s += envDim.Render("  " + note)
+		s += emberDim.Render("  " + note)
 	}
 	return s + " " + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(2, w-lipgloss.Width(s)-1)))
 }
@@ -493,7 +493,7 @@ func sectionHead(label string, c color.Color, note string, w int) string {
 // sectionHeadRight is sectionHead with its note at the right end of the rule, out of the way of the label.
 func sectionHeadRight(label string, c color.Color, note string, w int) string {
 	s := lipgloss.NewStyle().Foreground(c).Bold(true).Render(label)
-	n := envDim.Render(note)
+	n := emberDim.Render(note)
 	return s + " " + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(2, w-lipgloss.Width(s)-lipgloss.Width(n)-2))) + " " + n
 }
 
@@ -502,7 +502,7 @@ func overlayBox(title, body, keys string, w, h int) string {
 	// lower case and grey like every other box in the chat; the title stays the accent. The body passes onlySGR: a
 	// screen that forgot to sanitise some agent text can at worst recolour it, never move the cursor, clear the screen,
 	// set the title or the clipboard.
-	inner := envTitle.Render(lowerLabel(title)) + "\n" + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(4, w-4))) +
+	inner := emberTitle.Render(lowerLabel(title)) + "\n" + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(4, w-4))) +
 		"\n" + onlySGR(body)
 	lines := strings.Split(inner, "\n")
 	for len(lines) < h-4 {
@@ -511,7 +511,7 @@ func overlayBox(title, body, keys string, w, h int) string {
 	if len(lines) > h-4 {
 		lines = lines[:h-4]
 	}
-	lines = append(lines, envDim.Render(ansi.Truncate(keys+"  ·  esc close", max(8, w-4), "…")))
+	lines = append(lines, emberDim.Render(ansi.Truncate(keys+"  ·  esc close", max(8, w-4), "…")))
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray).Padding(0, 1).
 		Width(w).Render(strings.Join(lines, "\n"))
 }
@@ -556,12 +556,12 @@ func (v *streamView) liveLines() []string {
 	for _, raw := range strings.Split(v.live.String(), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(raw), "```") {
 			fence = !fence
-			out = append(out, envDim.Render(raw))
+			out = append(out, emberDim.Render(raw))
 			continue
 		}
 		st := lipgloss.NewStyle().Foreground(cText)
 		if fence {
-			st = envCode
+			st = emberCode
 		}
 		for _, l := range strings.Split(ansi.Wordwrap(raw, max(8, v.width-3), ""), "\n") {
 			out = append(out, st.Render(l))
@@ -574,7 +574,7 @@ func (v *streamView) liveLines() []string {
 func (v *streamView) View(h int) string {
 	live := v.liveLines()
 	if v.live.Len() > 0 {
-		label := lipgloss.NewStyle().Foreground(cGreen).Bold(true).Render(g.agent+" "+v.speaker) + " " + envBusy.Render(g.spinner[v.frame%len(g.spinner)])
+		label := lipgloss.NewStyle().Foreground(cGreen).Bold(true).Render(g.agent+" "+v.speaker) + " " + emberBusy.Render(g.spinner[v.frame%len(g.spinner)])
 		live = append([]string{label}, live...)
 	}
 	need := h - len(live)

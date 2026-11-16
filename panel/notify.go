@@ -63,7 +63,7 @@ func clip(s string, n int) string {
 }
 
 // notifyRequests: every bridge request not seen before.
-func (m *envModel) notifyRequests() {
+func (m *emberModel) notifyRequests() {
 	for _, r := range m.reqs {
 		title := "Caminus: a question from the agent"
 		body := r.Text
@@ -76,7 +76,7 @@ func (m *envModel) notifyRequests() {
 }
 
 // notifyResident: need_you reports and goals reaching a stop.
-func (m *envModel) notifyResident(events []residentEvent) {
+func (m *emberModel) notifyResident(events []residentEvent) {
 	agent := m.agentName
 	for _, e := range events {
 		if e.Kind == "report" && e.Data["level"] == "need_you" {

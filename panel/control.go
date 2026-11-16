@@ -810,7 +810,7 @@ func (m ctl) header(W int) string {
 	if m.advanced {
 		mode = fg(cPurple).Render("advanced")
 	}
-	right := envDim.Render(version)
+	right := emberDim.Render(version)
 	if m.busy != "" {
 		right = fg(cYellow).Render(spin[m.frame%len(spin)]+" "+m.busy) + "  " + right
 	}

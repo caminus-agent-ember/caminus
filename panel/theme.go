@@ -164,19 +164,19 @@ func themeColor(role string) color.Color {
 // ---------- the shared styles (rebuilt by applyThemeStyles) ----------
 
 var (
-	envTitle  lipgloss.Style
-	envSel    lipgloss.Style
-	envHead   lipgloss.Style
-	envDim    lipgloss.Style
-	envThink  lipgloss.Style
-	envWarn   lipgloss.Style
-	envTool   lipgloss.Style
-	envCode   lipgloss.Style
-	envCtxHot lipgloss.Style
-	envCtxOK  lipgloss.Style
-	envBusy   lipgloss.Style
-	envTabOn  lipgloss.Style
-	envBorder lipgloss.Style
+	emberTitle  lipgloss.Style
+	emberSel    lipgloss.Style
+	emberHead   lipgloss.Style
+	emberDim    lipgloss.Style
+	emberThink  lipgloss.Style
+	emberWarn   lipgloss.Style
+	emberTool   lipgloss.Style
+	emberCode   lipgloss.Style
+	emberCtxHot lipgloss.Style
+	emberCtxOK  lipgloss.Style
+	emberBusy   lipgloss.Style
+	emberTabOn  lipgloss.Style
+	emberBorder lipgloss.Style
 )
 
 // catColors (top_main.go) bakes a slice copy at its own init; the apply pass
@@ -203,19 +203,19 @@ func applyThemeStyles() {
 	// top_main.go bakes this slice at its own init; re-point it at the live palette.
 	catColors = [nCat]color.Color{cGray, cBlue, cGreen, cOrange, cYellow, cPurple, cTeal}
 
-	envTitle = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	envSel = lipgloss.NewStyle().Background(cGray).Foreground(cText)
-	envHead = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
-	envDim = lipgloss.NewStyle().Foreground(cMuted)
-	envThink = lipgloss.NewStyle().Foreground(cThink)
-	envWarn = lipgloss.NewStyle().Foreground(cYellow)
-	envTool = lipgloss.NewStyle().Foreground(cOrange)
-	envCode = lipgloss.NewStyle().Foreground(cTeal)
-	envCtxHot = lipgloss.NewStyle().Foreground(cRed)
-	envCtxOK = lipgloss.NewStyle().Foreground(cGreen)
-	envBusy = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
-	envTabOn = lipgloss.NewStyle().Bold(true).Background(cGray).Foreground(cText)
-	envBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray)
+	emberTitle = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
+	emberSel = lipgloss.NewStyle().Background(cGray).Foreground(cText)
+	emberHead = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
+	emberDim = lipgloss.NewStyle().Foreground(cMuted)
+	emberThink = lipgloss.NewStyle().Foreground(cThink)
+	emberWarn = lipgloss.NewStyle().Foreground(cYellow)
+	emberTool = lipgloss.NewStyle().Foreground(cOrange)
+	emberCode = lipgloss.NewStyle().Foreground(cTeal)
+	emberCtxHot = lipgloss.NewStyle().Foreground(cRed)
+	emberCtxOK = lipgloss.NewStyle().Foreground(cGreen)
+	emberBusy = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
+	emberTabOn = lipgloss.NewStyle().Bold(true).Background(cGray).Foreground(cText)
+	emberBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray)
 }
 
 // themeRestore applies the panel's saved theme at startup; the package's own
@@ -343,12 +343,12 @@ func themeNames() []string {
 
 // ---------- markdown ----------
 
-// envMarkdownStyle is the transcript's markdown in the same palette as the views: body text in the text
+// emberMarkdownStyle is the transcript's markdown in the same palette as the views: body text in the text
 // role, headings in the bright roles (accent, user, teal), inline code teal on a dark plate, links blue
 // and underlined, and fenced blocks through a bright chroma theme (theme key code_theme), so code in a
 // reply is colored rather than dimmed. Read per call: a switched theme restyles the transcript when the
 // renderer is rebuilt.
-func envMarkdownStyle() ansi.StyleConfig {
+func emberMarkdownStyle() ansi.StyleConfig {
 	color := func(s string) *string { return &s }
 	flag := func(b bool) *bool { return &b }
 	indent := func(u uint) *uint { return &u }

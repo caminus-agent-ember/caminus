@@ -535,7 +535,7 @@ func panel(title string, accent color.Color, w int, body []string) string {
 	// The env chat's boxes: grey chrome always, a quiet lowercase title. The focused box's title is bold in the accent;
 	// a warning box (hardware) keeps its colour.
 	b := fg(cGray)
-	ts := envDim
+	ts := emberDim
 	switch accent {
 	case cAccent, cYellow, cRed:
 		ts = lipgloss.NewStyle().Foreground(accent).Bold(true)

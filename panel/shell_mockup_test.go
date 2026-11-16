@@ -20,7 +20,7 @@ func mockHome(w int) string {
 	parts := []string{
 		shellHeader("resident", "working", "Make the parser tests pass", 14, w),
 		"",
-		envDim.Render("  while you were away (2 stretches): read about tide pools; built a haiku machine  ·  /recap"),
+		emberDim.Render("  while you were away (2 stretches): read about tide pools; built a haiku machine  ·  /recap"),
 		"",
 		shellMessage("you", "Make the parser tests pass and add one for empty input.", w),
 		"",
@@ -43,9 +43,9 @@ func mockHome(w int) string {
 
 func mockApprovals(w, h int) string {
 	row := func(sel bool, kind, text, age string) string {
-		l := lipgloss.NewStyle().Foreground(cText).Render(kind+"  "+text) + envDim.Render("  ·  "+age)
+		l := lipgloss.NewStyle().Foreground(cText).Render(kind+"  "+text) + emberDim.Render("  ·  "+age)
 		if sel {
-			return envSel.Render(" " + g.collapsed + " " + kind + "  " + text + "  ·  " + age + " ")
+			return emberSel.Render(" " + g.collapsed + " " + kind + "  " + text + "  ·  " + age + " ")
 		}
 		return "   " + l
 	}
@@ -53,26 +53,26 @@ func mockApprovals(w, h int) string {
 		row(true, g.root+" root", "apt-get install -y libcmocka-dev", "2 min"),
 		row(false, "? ask ", "Want to see the tide-pool sketch? (free time)", "40 min · AFK, withdrawn"),
 		"",
-		envDim.Render("Enter shows the full request  ·  a approve  ·  e edit  ·  d deny with an instruction"),
+		emberDim.Render("Enter shows the full request  ·  a approve  ·  e edit  ·  d deny with an instruction"),
 	}, "\n")
 	return overlayBox("APPROVALS  1 pending", body, "↑↓ move  ·  Enter open", w, h)
 }
 
 func mockStudio(w, h int) string {
 	body := strings.Join([]string{
-		envHead.Render("for you"),
-		"   " + g.collapsed + " haiku-machine/   a 5-7-5 generator; " + envDim.Render("\"strange but pleasant\""),
+		emberHead.Render("for you"),
+		"   " + g.collapsed + " haiku-machine/   a 5-7-5 generator; " + emberDim.Render("\"strange but pleasant\""),
 		"",
-		envHead.Render("projects") + envDim.Render("  2 of 3 active"),
-		"   " + envCtxOK.Render(g.working) + " haiku machine   " + envDim.Render("better syllable source next  ·  last 11-15"),
-		"   " + envCtxOK.Render(g.working) + " tide notes      " + envDim.Render("reading on intertidal zones  ·  last 11-15"),
-		"   " + envDim.Render(g.idle+" roguelike       paused"),
+		emberHead.Render("projects") + emberDim.Render("  2 of 3 active"),
+		"   " + emberCtxOK.Render(g.working) + " haiku machine   " + emberDim.Render("better syllable source next  ·  last 11-15"),
+		"   " + emberCtxOK.Render(g.working) + " tide notes      " + emberDim.Render("reading on intertidal zones  ·  last 11-15"),
+		"   " + emberDim.Render(g.idle+" roguelike       paused"),
 		"",
-		envHead.Render("journal"),
-		"   11-15 11:45  " + envDim.Render("settled in; disk at 92% worth watching; built the haiku machine"),
-		"   11-15 03:10  " + envDim.Render("dream: merged notes on the terminal cursor into the tools page"),
+		emberHead.Render("journal"),
+		"   11-15 11:45  " + emberDim.Render("settled in; disk at 92% worth watching; built the haiku machine"),
+		"   11-15 03:10  " + emberDim.Render("dream: merged notes on the terminal cursor into the tools page"),
 		"",
-		envDim.Render("free time: on  ·  $0.01 of $0.50 today  ·  next stretch in 52 min  ·  /heartbeat off"),
+		emberDim.Render("free time: on  ·  $0.01 of $0.50 today  ·  next stretch in 52 min  ·  /heartbeat off"),
 	}, "\n")
 	return overlayBox("STUDIO", body, "↑↓ move  ·  Enter open  ·  r recap", w, h)
 }

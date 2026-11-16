@@ -16,17 +16,17 @@ terminal under the account's normal permissions.
 
 ## Start and use a resident
 
-New here: [the quickstart](env-quickstart.md) goes from install to the first conversation, and [the guide](env.md)
-covers the security model, where things live and troubleshooting. This page is the reference. After `caminus env
+New here: [the quickstart](ember-quickstart.md) goes from install to the first conversation, and [the guide](ember.md)
+covers the security model, where things live and troubleshooting. This page is the reference. After `caminus ember
 setup` (one root script, then the command again):
 
 ```sh
-caminus env agent install
-caminus env agent init resident --model MY_MODEL --endpoint http://127.0.0.1:8092/v1
-caminus env agent start resident --json
-caminus env agent send resident --stdin --json < goal.txt
-caminus env agent status resident --json
-caminus env ui
+caminus ember agent install
+caminus ember agent init resident --model MY_MODEL --endpoint http://127.0.0.1:8092/v1
+caminus ember agent start resident --json
+caminus ember agent send resident --stdin --json < goal.txt
+caminus ember agent status resident --json
+caminus ember ui
 ```
 
 `install` uploads a stdlib-only, versioned zipapp over the existing SSH transport.
@@ -39,7 +39,7 @@ survive a resident restart, so long commands can be inspected rather than repeat
 
 ### The panel: one chat, with overlays
 
-`caminus env ui` opens the conversation; there are no pages to switch between.
+`caminus ember ui` opens the conversation; there are no pages to switch between.
 Everything else opens over it in the same bordered box (↑↓ move, Enter acts, Esc
 closes; `q` never quits inside an overlay). The header names the agent, its
 state and the goal; the footer shows the brain, the context in use against the
@@ -97,8 +97,8 @@ the rest of its goal, `e` edits, `d` denies, `/deny TEXT` denies with what to do
 instead. When several wait, one card lists them all and `[` `]` pick. A granted
 repeat (the same command in the same goal, within 12 hours of your approval, as
 your own audit log records it) runs with one `a`, still under your sudo; the
-resident never runs root, and `caminus env watch` honours grants the same way.
-`caminus env answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant`
+resident never runs root, and `caminus ember watch` honours grants the same way.
+`caminus ember answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant`
 do the same from the command line.
 
 Nothing waits on you. A pending request parks only the step that needs it: the
@@ -199,7 +199,7 @@ and a terminal command runs only when every part of it is a read-only program
 files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
 `agent plan NAME GOAL approve|reject [--note TEXT]`.
 
-The emergency stop: `caminus env stop-all [--reason TEXT]` (`/halt`) writes a
+The emergency stop: `caminus ember stop-all [--reason TEXT]` (`/halt`) writes a
 STOP file in the bridge folder that only you can remove (`stop-all --clear`).
 Every resident pauses its working goals after the current step, starts nothing
 new, and ends the commands running in its terminals and any process its account
@@ -249,7 +249,7 @@ notes, and follows what interests it (research, writing, making things in
 journal entry before it stops. It is never graded. Work preempts it at once; a
 nightly dream consolidates notes. On the local server it works in the full context
 window: before a stretch overwrites the human's conversation, the prompt cache
-parks it to disk and the human's next request restores it. `caminus env agent
+parks it to disk and the human's next request restores it. `caminus ember agent
 heartbeat NAME on|off|status|recap|now`; the recap is the "while you were away" line, and `now` (the panel's
 `/freetime`) starts a stretch at once. A stretch ends at `--stretch-minutes` (30 by default); `--stretch-steps N` adds a
 step limit (0, the default, means none); `--rest-minutes` sets the rest between stretches and `--budget-usd` the daily allowance.
@@ -274,20 +274,20 @@ A resident's brain is any model its providers serve. A provider is an endpoint t
 Caminus server, or a paid API through your key relay (the agent never holds the key):
 
 ```sh
-caminus env relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5   # http://127.0.0.1:8765/v1
-caminus env relay install --provider deepinfra --cap-usd 3                              # http://127.0.0.1:8766/v1/openai
-caminus env agent provider NAME add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
-caminus env agent provider NAME add deepinfra --kind deepinfra --endpoint http://127.0.0.1:8766/v1/openai --relay
-caminus env agent models NAME --refresh        # what each provider serves: window, output cap, effort levels, prices
-caminus env agent model NAME zai-org/GLM-5.2   # pick one (provider/id when two serve it)
-caminus env agent effort NAME high             # among the levels that model offers
+caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5   # http://127.0.0.1:8765/v1
+caminus ember relay install --provider deepinfra --cap-usd 3                              # http://127.0.0.1:8766/v1/openai
+caminus ember agent provider NAME add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
+caminus ember agent provider NAME add deepinfra --kind deepinfra --endpoint http://127.0.0.1:8766/v1/openai --relay
+caminus ember agent models NAME --refresh        # what each provider serves: window, output cap, effort levels, prices
+caminus ember agent model NAME zai-org/GLM-5.2   # pick one (provider/id when two serve it)
+caminus ember agent effort NAME high             # among the levels that model offers
 ```
 
 Each relay reads its key from a file only you can read (`~/.config/anthropic/api_key`,
 `~/.config/caminus/deepinfra-key`; it refuses one others can read) and keeps a daily dollar cap. `relay install`
 makes it a systemd user service with no expiry (the cap guards the spend) that runs a frozen copy of its code, so
 editing or moving a checkout cannot stop it; `relay status` shows each relay and today's spend, `relay uninstall`
-removes one. (`caminus env relay --provider P --cap-usd N --ttl SECS` runs one in the foreground instead.)
+removes one. (`caminus ember relay --provider P --cap-usd N --ttl SECS` runs one in the foreground instead.)
 The Anthropic relay allows the models you name; the DeepInfra relay allows any chat model DeepInfra publishes a price
 for, priced from its own list. The catalog is what the providers report: Anthropic's model list gives each model's
 window, output cap, thinking and effort levels; DeepInfra's gives window, prices and whether it takes
@@ -301,16 +301,16 @@ the window) in the resident's config to change it; the local server keeps `compa
 
 ## The advisor and two brains
 
-`caminus env agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the
+`caminus ember agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the
 agent an `advisor` tool on a model the owner picks, through the owner's own key
-relay, with a daily dollar cap and calls per goal. `caminus env agent fallback NAME
+relay, with a daily dollar cap and calls per goal. `caminus ember agent fallback NAME
 --model ... --endpoint ...` adds a second brain used only while the local server is
 down, with its own daily allowance. Every failed or refused remote call is recorded
 in the resident's `failures.jsonl`.
 
 ## MCP servers
 
-`caminus env agent mcp NAME add SERVER [--env KEY=VALUE] -- COMMAND ARGS...` adds a
+`caminus ember agent mcp NAME add SERVER [--env KEY=VALUE] -- COMMAND ARGS...` adds a
 Model Context Protocol server (stdio); `mcp NAME` lists them (environment values are
 never printed), `mcp NAME remove|off|on SERVER`. The client speaks the stateless
 2026-07-28 revision and falls back to the `initialize` handshake for older servers.
@@ -318,7 +318,7 @@ A server starts on first use and stops with the agent; its log is
 `~/mcp-logs/SERVER.log`. Example, a read-only GitHub server:
 
 ```sh
-caminus env agent mcp NAME add github --env GITHUB_PERSONAL_ACCESS_TOKEN=... -- \
+caminus ember agent mcp NAME add github --env GITHUB_PERSONAL_ACCESS_TOKEN=... -- \
   github-mcp-server stdio --read-only --toolsets=repos,issues,pull_requests
 ```
 
@@ -328,15 +328,15 @@ The resident prompt authorizes routine reversible work with the account's shell,
 web access, installed browsers, user-level software and scheduled jobs, subject
 to the human's goal. It explains the root and question bridges, persistent PTYs,
 memory and shared-resource rules. Read the authoritative prompt in
-`python/caminus/env/resident/prompt.py`, or print it with the current account and
+`python/caminus/ember/resident/prompt.py`, or print it with the current account and
 workspace values:
 
 ```sh
-caminus env agent prompt resident
-caminus env agent discover resident --json
-caminus env agent discover resident --topic commands --query pdf --json
-caminus env agent discover resident --topic packages --query tshark --json
-caminus env agent discover resident --topic containers --json
+caminus ember agent prompt resident
+caminus ember agent discover resident --json
+caminus ember agent discover resident --topic commands --query pdf --json
+caminus ember agent discover resident --topic packages --query tshark --json
+caminus ember agent discover resident --topic containers --json
 ```
 
 These commands work before initialization and also accept `--local` for the
@@ -370,13 +370,13 @@ that daemon. `--jsonl` streams goal events followed by a result record; `--json`
 returns a result object. Goal text can be positional, `--goal TEXT` or stdin.
 
 ```sh
-caminus env agent once resident --stdin --jsonl --max-steps 12 --max-seconds 120 < goal.txt
-caminus env agent events resident --after 0 --json
-caminus env agent once resident --goal-id GOAL_ID --json
-caminus env agent cancel resident GOAL_ID --json
+caminus ember agent once resident --stdin --jsonl --max-steps 12 --max-seconds 120 < goal.txt
+caminus ember agent events resident --after 0 --json
+caminus ember agent once resident --goal-id GOAL_ID --json
+caminus ember agent cancel resident GOAL_ID --json
 ```
 
-`caminus env agent stream resident` prints NDJSON for the reply being generated:
+`caminus ember agent stream resident` prints NDJSON for the reply being generated:
 one line per change, the first line of a turn carrying the whole text (`reset`)
 and later lines only the suffix, then a `done` line when the turn lands. It is
 what the panel's live tail reads; `--once` prints the current snapshots and
@@ -422,11 +422,11 @@ variable, not saved in config.json. The user service reads an optional
 Initialize each named resident, normally with the same local mail bus:
 
 ```sh
-caminus env agent init reviewer --model MY_MODEL --endpoint http://127.0.0.1:8092/v1
-caminus env agent start reviewer --json
-caminus env agent peers resident --json
-caminus env agent message resident reviewer --text 'Inspect the test results.' --json
-caminus env agent mail reviewer --after 0 --json
+caminus ember agent init reviewer --model MY_MODEL --endpoint http://127.0.0.1:8092/v1
+caminus ember agent start reviewer --json
+caminus ember agent peers resident --json
+caminus ember agent message resident reviewer --text 'Inspect the test results.' --json
+caminus ember agent mail reviewer --after 0 --json
 ```
 
 The model has `peers` and `send_message` tools. Mail records the sender, recipient,
@@ -512,9 +512,9 @@ The relay stops at its daily cap (HTTP 402) and refuses a model it cannot price;
 day or another brain. Every priced turn is metered per goal and per day, cached input at the provider's cache price
 (`agent status` reports `spend_today` and `spend_goals`; the panel's status line shows this goal's and today's).
 
-`caminus env agent update NAME` (`/update`) installs this caminus's runtime: the resident applies it between goals
+`caminus ember agent update NAME` (`/update`) installs this caminus's runtime: the resident applies it between goals
 (`--now`: at the next step), restarts its own service and reports the new version in its heartbeat (`--wait SECS`
 waits for it).
 
-`tools/env_demo.py` runs all of this on a scripted model in a scratch home (no agent account, GPU, server or key):
+`tools/ember_demo.py` runs all of this on a scripted model in a scratch home (no agent account, GPU, server or key):
 the quickest way to see the chat.

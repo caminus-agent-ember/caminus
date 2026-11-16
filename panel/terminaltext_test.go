@@ -21,7 +21,7 @@ func TestApprovalTextShowsControlsWithoutChangingRequest(t *testing.T) {
 			t.Fatalf("missing visible command/escape %q in %q", marker, safe)
 		}
 	}
-	m := envModel{mode: "edit", edit: command, reqs: []envReq{{ID: "review", Cmd: command,
+	m := emberModel{mode: "edit", edit: command, reqs: []emberReq{{ID: "review", Cmd: command,
 		User: "agent\x1b[2J", CWD: "work\rhidden", Reason: "why\x1b[2K"}}}
 	view := m.reqPane()
 	if strings.Contains(view, command) || strings.Contains(view, "work\rhidden") || !strings.Contains(view, "printf actual") {
