@@ -147,13 +147,32 @@ class DeepInfraPrices:
             return self.table.get(model)
 
 
+def _list_models(spec, key):
+    """The provider's model list (GET its catalog path with the key), for resolving a model's names."""
+    conn = http.client.HTTPSConnection(spec['host'], timeout=60, context=ssl.create_default_context())
+    try:
+        conn.request('GET', spec['get'][0], headers={'Authorization': 'Bearer ' + key, 'accept': 'application/json'})
+        up = conn.getresponse()
+        if up.status != 200:
+            raise OSError('model list status %d' % up.status)
+        return json.loads(up.read())
+    finally:
+        conn.close()
+
+
 class OwnerPrices:
     """Per-model prices the owner wrote (a provider that publishes none): {"model": [input, output]} or
     {"model": {"input": .., "output": .., "cache_read": ..}}, USD per million tokens, re-read when the file changes.
-    A model not in it, or a file that cannot be read, gets no price: the request is refused."""
+    A model not in it, or a file that cannot be read, gets no price: the request is refused.
 
-    def __init__(self, path, log):
+    A model has several names (a dated id and aliases such as mistral-large-latest): a price written under any of them
+    applies to all, resolved through the provider's own model list (fetch: () -> {data: [{id, aliases}]}, refreshed
+    hourly). A name that resolves to nothing priced is still refused, so a wrong name blocks a call, never meters it
+    wrongly."""
+
+    def __init__(self, path, log, fetch=None):
         self.path, self.log, self.table, self.mtime, self.lock = Path(os.path.expanduser(path)), log, {}, None, threading.Lock()
+        self.fetch, self.names, self.names_at = fetch, {}, 0.0
 
     def get(self, model):
         with self.lock:
@@ -172,7 +191,22 @@ class OwnerPrices:
                 if self.table or self.mtime is not None:
                     self.log('price file unreadable: %s' % type(e).__name__)
                 self.table, self.mtime = {}, None
-            return self.table.get(model)
+            if model in self.table or not self.fetch:
+                return self.table.get(model)
+            if time.time() - self.names_at > PRICE_REFRESH or (model not in self.names and time.time() - self.names_at > 60):
+                try:
+                    names = {}
+                    for m in self.fetch().get('data') or []:
+                        group = [m['id'], *(m.get('aliases') or [])]
+                        for n in group:
+                            names.setdefault(n, set()).update(group)
+                    self.names, self.names_at = names, time.time()
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    self.log('model list unavailable: %s' % type(e).__name__)
+            for other in sorted(self.names.get(model, ())):
+                if other in self.table:
+                    return self.table[other]
+            return None
 
 
 def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, connect=None):
@@ -511,7 +545,8 @@ def main(argv=None):
 
     ledger = Ledger(ledger_path, a.cap_usd)
     prices = (DeepInfraPrices(key, log) if a.provider == 'deepinfra' else
-              OwnerPrices(a.prices or spec['prices'], log) if a.provider == 'mistral' else None)
+              OwnerPrices(a.prices or spec['prices'], log, fetch=lambda: _list_models(spec, key))
+              if a.provider == 'mistral' else None)
     port = a.port or spec['port']
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', port),
                                           make_handler(a.provider, key, ledger, models, a.max_tokens, log, prices))

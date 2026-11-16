@@ -2062,6 +2062,11 @@ for line in sys.stdin:
             code,_=self._post(base+'/v1/chat/completions',dict(model='codestral-latest',messages=[]))
             self.assertEqual(code,200,'a price added to the file is picked up without a restart')
         finally:stop()
+        # a price under one name of a model applies to its other names (the provider's model list says which)
+        pf.write_text(json.dumps({'mistral-large-2512':[0.7,2.1]}))
+        listed=dict(data=[dict(id='mistral-large-2512',aliases=['mistral-large-latest']),dict(id='other',aliases=[])])
+        op=relay.OwnerPrices(str(pf),lambda m:None,fetch=lambda:listed)
+        self.assertEqual(op.get('mistral-large-latest'),(0.7,2.1,0.7));self.assertIsNone(op.get('other'));self.assertIsNone(op.get('nope'))
 
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog
