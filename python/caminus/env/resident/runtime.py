@@ -1000,6 +1000,7 @@ class Runtime:
         # ran one gate check ten times in 25 s until a person stopped the resident). Polls of a running command and
         # the waiting tools repeat by design and are not counted.
         same = self.__dict__.setdefault('_same', {})   # goal id -> (last signature, times in a row)
+        looped = 0
         if signature and not failure and action['name'] not in REPEAT_EXEMPT and 'session' not in args and not result.get('running'):
             last, count = same.get(action['goal'], ('', 0))
             count = count + 1 if last == signature else 1
@@ -1010,12 +1011,15 @@ class Runtime:
             # free time is the agent's own: the note only (its own budget caps what a loop can spend)
             if count >= SAME_CALL_LIMIT and self.store.goal(action['goal']).get('kind', 'work') not in FREE_KINDS:
                 same.pop(action['goal'], None)
-                self._watchdog(action['goal'], 'the same call %d times in a row' % count, dict(call=signature[:200]))
+                if self._watchdog(action['goal'], 'the same call %d times in a row' % count, dict(call=signature[:200])):
+                    looped = count
         if ignored and isinstance(result, dict):
             result['note'] = (result.get('note', '') + ' · ' if result.get('note') else '') + ignored
         # A result past about 8K tokens has its large text moved to ~/outputs: the model gets a preview and the path.
         result = outputs.spill(self.home, action['name'], action['id'], result)
         self.store.action_result(action, result)
+        if looped:
+            self._collapse_loop(action['goal'], signature, looped)
         if 'error' not in result:
             self.progress[action['goal']] = time.time()
         if action['name'] == 'finish' and 'error' not in result:
@@ -1303,6 +1307,32 @@ class Runtime:
             self.store.update(gid,messages=messages)
             self.store.event('plain_text_nudge',dict(replies=count),gid)
         return True
+
+    def _collapse_loop(self, gid, signature, count):
+        """After the same-call watchdog paused a goal: the run of identical calls at the end of its history becomes the
+        first of them, and a note says what happened. On resume the model saw seven identical calls as the newest
+        thing it had done and made seven more (a live goal, twice, after a compaction left it no plan in words)."""
+        msgs = list(self.store.goal(gid)['messages'])
+        def single(m):
+            calls = m.get('tool_calls') or [] if m.get('role') == 'assistant' else []
+            if len(calls) != 1:
+                return None
+            f = calls[0].get('function') or {}
+            try:
+                return self._signature(f.get('name'), json.loads(f.get('arguments') or '{}'))
+            except (TypeError, ValueError):
+                return None
+        i, pairs = len(msgs), 0
+        while i >= 2 and msgs[i - 1].get('role') == 'tool' and single(msgs[i - 2]) == signature:
+            i -= 2; pairs += 1
+        if pairs < 2:
+            return
+        kept = msgs[:i + 2]
+        note = ('[runtime] You made the call above %d times in a row and it returned the same each time (kept once '
+                'here). The watchdog paused you. When you continue, first say in a sentence what you are trying to find '
+                'out and what you will do differently, then take a different step.' % count)
+        self.store.update(gid, messages=[*kept, dict(role='user', content=note)])
+        self.store.event('loop_collapsed', dict(calls=pairs, kept=1), gid)
 
     def _watchdog(self, gid, reason=None, detail=None):
         """Pause a goal the watchdog caught, recording why. Returns True when it did."""

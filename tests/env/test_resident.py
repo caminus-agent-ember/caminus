@@ -1678,6 +1678,14 @@ for line in sys.stdin:
             self.assertIn('the same call 7 times in a row',g['error'])
             notes=[e['data']['result'].get('note','') for e in rt.store.events() if e['kind']=='tool_result']
             self.assertTrue(any('4 times in a row' in n for n in notes),'the fourth gets a note first')
+            # the loop is not left in the history for the model to copy on resume: one call, its result, a note
+            msgs=g['messages']
+            calls=[m for m in msgs if m.get('role')=='assistant' and m.get('tool_calls')]
+            self.assertEqual(len([c for c in calls if c['tool_calls'][0]['function']['name']=='read']),1,
+                             'the run of identical calls collapses to the first')
+            self.assertEqual(msgs[-1]['role'],'user');self.assertIn('7 times in a row',msgs[-1]['content'])
+            self.assertEqual(msgs[-2]['role'],'tool','the kept call keeps its result')
+            self.assertTrue(any(e['kind']=='loop_collapsed' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
     def test_a_repeated_failing_finish_is_stopped_by_the_watchdog(self):
