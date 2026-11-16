@@ -510,6 +510,31 @@ measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3
 | Mean KLD against the reference, 128 tokens | **4.66e-04**, top-1 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` (float64 reference) |
 | The same for the last 64 of 16,384 / 40,896 tokens | **8.80e-04**, 62 / 64; **6.64e-04**, 64 / 64 | 5.06e-03, 60 / 64; 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode) |
 
+### Qwen3-30B-A3B on two cards (engine level)
+
+A placeholder until the served rows are measured. `caminus serve --cards 2` (the `qwen3moe-tp` entry) runs the same file on
+an RX 7900 XTX + RX 7900 XT; one card stays the model's default. Each card holds 2 of the 4 kv heads with their query
+heads, and 512 (XTX) or 256 (XT) of each expert's 768 rows; the two cards add their partial results 96 times per token.
+Every number below is engine level (no server): the decode rows measured 2026-11-15, the prefill rows 2026-11-16.
+
+| Decode at depth (tok/s) | 8 | 4,096 | 16,384 | 32,768 | 40,900 |
+|---|---|---|---|---|---|
+| Two cards (XTX + XT) | 218 | 195 | 163 | 133 | 125 |
+| One XTX | 246 | 210 | 159 | 120 | 105 |
+
+- Decode, 2026-11-15: `benchmarks/q3moe_depth.py --cards 2` (under `tools/guard.sh`), one token per pass. The two-card
+  row is the run with the attention split cap at 128 per kv head (the two-card default; at that cap the XTX runs 96
+  splits per kv head and the XT 105), interleaved on the two cards with runs at the earlier cap of 64. The one-XTX row is
+  the same script without `--cards 2`, the median of three runs from an earlier session that day that alternated two
+  cards (at cap 64) and one card, three times each.
+- Prefill from empty, 2026-11-16 (`benchmarks/q3moe_prefill.py --cards 2` and the same script on one XTX, under
+  `tools/guard.sh`, separate processes interleaved, medians of three; the exchange overlapped with the next piece's
+  compute): 512 tokens 3,735 tok/s against 5,054 (0.74x: one piece, nothing overlaps), 4,096 tokens 7,041 against 6,503
+  (1.08x), 32,768 tokens 3,556 against 2,788 (1.28x). The one-XTX numbers here are the one-card side of this interleaved
+  A/B; the published one-card row above (6,432 at 4,096) is an earlier, separate measurement.
+- Served numbers (`tools/serve_smoke1.py --card 0,1 --cards 2`, decode and prompt reading through the server, against
+  the one-card served row above) are still to come.
+
 ## Two-card yardstick: stock llama.cpp, tensor and layer split
 
 Measured 2026-11-11 on an RX 7900 XTX + RX 7900 XT with stock llama.cpp (ggml-org master 7bcbc04, built for gfx1100):
@@ -523,7 +548,11 @@ each card whole layers.
 | ThinkingCap RCO 4.2 bpw | 65.4 / 936 | 46.0 / 978 | 36.3 / 1,509 |
 | Qwen3-Coder-Next UD-IQ3_S | 136.5 / ~135 (no batched prefill yet) | 72.5 / 2,046 (even split) | 80.8 / 3,625 |
 | The Coder (IQ1_M) | 104; 123-203 with its drafter / ~2,800 | 39.6 / 1,336 | 40.5 / 2,328 |
+| Qwen3-30B-A3B Q4_K_M | 218 (engine level) / no 2,048-token row (4,096: 7,041, engine level) | 112.4 / 2,909 | 126.2 / 5,780 |
 
+- Qwen3-30B-A3B's row was measured later, 2026-11-15, with the same build (7bcbc04) and command (`-ts 53/47 -fa 1`);
+  its Caminus column is the engine-level section above (not yet served). Both two-card modes decode below llama.cpp's
+  one-card row above (148 tok/s, measured on the ignite-llama fork).
 - Files larger than the host's page cache (Qwen3-Coder-Next, the Coder on a 29 GiB host) need `-lm dio`: with the
   default memory-mapped loading llama-bench stalls after loading the weights, both cards idle.
 - Qwen3-Coder-Next with `-sm tensor -ts 53/47` stops on `GGML_ASSERT(split_state.ne[j] % div == 0)`; the even split runs.
