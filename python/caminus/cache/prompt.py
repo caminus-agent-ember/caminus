@@ -119,6 +119,18 @@ DEFAULT_DIR = _config.kv_dir()   # ~/.cache/caminus/kv ($XDG_CACHE_HOME; CAMINUS
 DEFAULT_CAP_GB = 30.0
 DEFAULT_RETENTION_DAYS = 7.0
 DEFAULT_MIN_FREE_GB = 10.0           # never write an entry that would leave less free space on the disk
+# The cap covers the whole cache folder (config.kv_dir(): the root store and every model's store under it), not one store:
+# `caminus start NAME` gives each model its own store (kv/NAME) and a direct `caminus serve` uses kv/ itself, so per-store caps
+# of 30 / 64 GB added up (one machine: 20 park files, 113 GB, and the newest park refused for want of free space). A share of
+# the disk bounds it on a small one.
+DEFAULT_DISK_SHARE = 0.25
+# Park entries kept per conversation root: a long conversation whose later turns changed (compaction) left a 4-11 GB park
+# per branch, never superseded. The root is the model key, the system + tools block (up to the main line's root mark) and
+# the first ROOT_MSG_TOKENS tokens after it (the start of the first user message): a harness's chats share a long system
+# prompt, so the prompt alone would merge every chat into one root and keep only its newest few parks. A park with no root
+# mark has no root and only the cap bounds it: merging distinct chats loses their parks, splitting one is harmless.
+DEFAULT_KEEP_PER_ROOT = 3
+ROOT_MSG_TOKENS = 1024
 EVERY = 8192                         # a checkpoint every EVERY freshly prefilled tokens
 # the side slot's positions. 98,304 (0.2.2): a harness's background jobs must fit with their max_new (route(): prompt +
 # max_new + T <= side_rows). Measured 11-09 on Qwen Code 0.26.9: its memory extractor (29,555 tokens) and a fixed 35,582-token
@@ -533,15 +545,60 @@ def read_segments(stg, fd, segs):
 
 
 # ---- the disk store -----------------------------------------------------------------------------------------------------------
+def peek_header(path):
+    """an entry's header read with ordinary reads and no lock (`caminus kv-cache list` beside a running server); None when it
+    is not a readable entry. Not the integrity check: DiskStore.read_header is."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(32)
+            if len(head) < 32 or head[:16] != MAGIC: return None
+            hl, hc, fmt = struct.unpack('<QII', head[16:32])
+            if fmt != FORMAT or not 0 < hl <= HEADER_MAX: return None
+            f.seek(ALIGN); hb = f.read(hl)
+            if len(hb) < hl or zlib.crc32(hb) != hc: return None
+            h = json.loads(hb.decode())
+            st = os.fstat(f.fileno()); h['_mtime'], h['_bytes'] = st.st_mtime, st.st_size
+            return h
+    except (OSError, ValueError):
+        return None
+
+
+def stores(top=None):
+    """every store folder (a .lock inside) under the cache folder top: [(folder, held, [(name, header)])]; held = a running
+    server owns it (its .lock is locked)"""
+    top = os.path.abspath(os.path.expanduser(top or DEFAULT_DIR))
+    out = []
+    for d, _, files in os.walk(top):
+        if '.lock' not in files: continue
+        held = False
+        try:
+            fd = os.open(os.path.join(d, '.lock'), os.O_RDWR)
+            try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError: held = True
+            finally: os.close(fd)
+        except OSError: held = True
+        ents = [(f, peek_header(os.path.join(d, f))) for f in sorted(files) if f.endswith('.ckv') and not f.startswith('.')]
+        out.append((os.path.abspath(d), held, ents))
+    return out
+
+
 class DiskStore:
     """the disk tier's files (module notes). root: the directory (created 0700); cap_gb / retention_days / min_free_gb;
     clock: time.time (tests inject one: last-use stamps are set with it); protect: a callable giving the entry names the live
     slot still uses (never evicted by the cap or retention)"""
     def __init__(self, root=None, cap_gb=DEFAULT_CAP_GB, retention_days=DEFAULT_RETENTION_DAYS, min_free_gb=DEFAULT_MIN_FREE_GB,
-                 clock=time.time, staging=None, protect=None):
+                 clock=time.time, staging=None, protect=None, budget_root=None, keep_per_root=DEFAULT_KEEP_PER_ROOT,
+                 disk_share=DEFAULT_DISK_SHARE):
         self.root = os.path.abspath(os.path.expanduser(root or DEFAULT_DIR))
         os.makedirs(self.root, mode=0o700, exist_ok=True); os.chmod(self.root, 0o700)
         self.cap, self.retention, self.min_free = int(cap_gb * 1e9), float(retention_days) * 86400.0, int(min_free_gb * 1e9)
+        # the folder the cap covers: the cache folder when this store is in it (or is it), else this store alone
+        top = os.path.abspath(os.path.expanduser(DEFAULT_DIR))
+        self.budget_root = os.path.abspath(os.path.expanduser(budget_root)) if budget_root else (
+            top if (self.root == top or self.root.startswith(top + os.sep)) else self.root)
+        vfs = os.statvfs(self.root)
+        if disk_share: self.cap = min(self.cap, int(disk_share * vfs.f_blocks * vfs.f_frsize))
+        self.keep_per_root = int(keep_per_root or 0)
         self.clock, self.protect = clock, protect or (lambda: ())
         self._lockfd = os.open(os.path.join(self.root, '.lock'), os.O_RDWR | os.O_CREAT, 0o600)
         try: fcntl.flock(self._lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -620,16 +677,104 @@ class DiskStore:
         except FileNotFoundError: return
         if name in self.index: self.index[name]['_mtime'] = t
 
+    def _other_stores(self):
+        """the other stores under the budget root (folders holding a .lock), as [(folder, [(name, bytes, mtime)])]"""
+        out = []
+        if self.budget_root == self.root and not any(os.path.isdir(os.path.join(self.root, d)) for d in os.listdir(self.root)):
+            return out
+        for d, subdirs, files in os.walk(self.budget_root):
+            d = os.path.abspath(d)
+            if d == self.root or '.lock' not in files: continue
+            ents = []
+            for f in files:
+                if not f.endswith('.ckv') or f.startswith('.'): continue
+                try: st = os.stat(os.path.join(d, f))
+                except FileNotFoundError: continue
+                ents.append((f, st.st_size, st.st_mtime))
+            out.append((d, ents))
+        return out
+
+    def tree_bytes(self):
+        """the bytes the cap counts: this store's entries and every other store's under the budget root"""
+        return self.total_bytes() + sum(b for _, ents in self._other_stores() for _, b, _ in ents)
+
+    @contextlib.contextmanager
+    def _evictable(self):
+        """the entries that may be evicted, oldest last use first: this store's except the live slot's (protect()), and the
+        entries of other stores whose owner is not running (their .lock taken for the duration; a running server's store is
+        never touched). Yields [(mtime, bytes, folder or None, name)]."""
+        keep, locks, cands = set(self.protect()), [], []
+        for nm, h in self.index.items():
+            if nm not in keep: cands.append((h['_mtime'], h['file_bytes'], None, nm))
+        try:
+            for d, ents in self._other_stores():
+                try: fd = os.open(os.path.join(d, '.lock'), os.O_RDWR)
+                except OSError: continue
+                try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError: os.close(fd); continue              # (its server is running)
+                locks.append(fd)
+                cands += [(mt, b, d, nm) for nm, b, mt in ents]
+            yield sorted(cands)
+        finally:
+            for fd in locks:
+                try: fcntl.flock(fd, fcntl.LOCK_UN)
+                finally: os.close(fd)
+
+    def _evict(self, cand, what, why):
+        _, b, d, nm = cand
+        if d is None: self._unlink(nm, what, why)
+        else:
+            try: os.unlink(os.path.join(d, nm))
+            except FileNotFoundError: pass
+            self.events.append((what, os.path.relpath(os.path.join(d, nm), self.budget_root), why))
+
     def enforce(self, incoming=0):
-        """retention (last use older than retention_days), then the cap by LRU (the oldest last use first) so that the entries
-        plus `incoming` bytes fit; the live slot's entries (protect()) are kept"""
+        """retention (last use older than retention_days), then the cap over the whole budget root by LRU (the oldest last
+        use first, across this store and the stores of servers not running) so that the entries plus `incoming` bytes fit;
+        the live slot's entries (protect()) and a running server's store are kept"""
         now, keep = self.clock(), set(self.protect())
         for nm, h in list(self.index.items()):
             if nm not in keep and now - h['_mtime'] > self.retention:
                 self._unlink(nm, 'retention', f'last used {(now - h["_mtime"]) / 86400:.2f} days ago')
-        for nm, h in sorted(list(self.index.items()), key=lambda x: x[1]['_mtime']):
-            if self.total_bytes() + incoming <= self.cap: break
-            if nm not in keep: self._unlink(nm, 'lru', f'cap {self.cap / 1e9:.1f} GB')
+        total = self.tree_bytes()
+        if total + incoming <= self.cap: return
+        with self._evictable() as cands:
+            for c in cands:
+                if total + incoming <= self.cap: break
+                self._evict(c, 'lru', f'cap {self.cap / 1e9:.1f} GB over {self.budget_root}'); total -= c[1]
+
+    def make_room(self, need):
+        """free `need` more bytes on the disk by evicting the oldest evictable entries, but only when they can: if evicting all
+        of them would still leave too little, nothing is evicted (a pointless deletion). Returns whether the room is there."""
+        if need <= 0: return True
+        with self._evictable() as cands:
+            if sum(c[1] for c in cands) < need: return False
+            for c in cands:
+                if need <= 0: break
+                self._evict(c, 'room', f'making room for a new entry ({need / 1e9:.2f} GB short of the free-space floor)')
+                need -= c[1]
+        return True
+
+    def limit_roots(self, key_sha, root_sha, name=None):
+        """keep at most keep_per_root park entries of one conversation root (key_sha, root_sha), the most recently used ones;
+        the live slot's entries are never removed (they count toward the limit). Returns the removed names."""
+        if self.keep_per_root < 1 or not root_sha: return []
+        keep = set(self.protect()) | ({name} if name else set())
+        group = sorted(((h['_mtime'], nm) for nm, h in self.index.items()
+                        if h.get('kind') == 'park' and h.get('key_sha') == key_sha and self.root_of(nm, h) == root_sha), reverse=True)
+        # the live slot's entries and the new one always stay and count first; the rest of the places go to the newest
+        slots = max(0, self.keep_per_root - sum(1 for _, nm in group if nm in keep))
+        out = []
+        for _, nm in group:
+            if nm in keep: continue
+            if slots > 0: slots -= 1; continue
+            self._unlink(nm, 'per-root', f'more than {self.keep_per_root} parks of one conversation root'); out.append(nm)
+        return out
+
+    def root_of(self, name, h):
+        """a park's conversation root (its header's root_sha); None for an entry without one (written before roots, or with
+        no root mark): never grouped, only the cap bounds it"""
+        return h.get('root_sha')
 
     def write(self, name, header, segs):
         """an entry written atomically: the header and segments [(name, extents)] (O_DIRECT, every piece checksummed). Returns
@@ -644,7 +789,8 @@ class DiskStore:
         if total > self.cap: self.events.append(('refused-write', name, f'{total} B > the cap')); return None
         self.enforce(incoming=total)
         vfs = os.statvfs(self.root); free = vfs.f_bavail * vfs.f_frsize
-        if free - total < self.min_free:
+        if free - total < self.min_free and not self.make_room(self.min_free + total - free):
+            # (old entries are evicted before a new one is refused; this refusal means even that would not make room)
             self.events.append(('refused-write', name, f'{free / 1e9:.1f} GB free; {total / 1e9:.2f} GB more would leave less than {self.min_free / 1e9:.0f} GB'))
             return None
         tmp = f'.{name}.tmp-{os.getpid()}-{os.urandom(4).hex()}'
@@ -811,7 +957,7 @@ class PromptCache:
     it and the checkpoint below it (default every: the deep ones a long re-prefill would replace; the per-turn ones a few
     hundred tokens apart are dropped, since a spill writes ~160 MB in the request's path); clock: the disk tier's clock (tests)"""
     def __init__(self, m, pf, draft=None, cache_dir=None, cap_gb=DEFAULT_CAP_GB, retention_days=DEFAULT_RETENTION_DAYS,
-                 min_free_gb=DEFAULT_MIN_FREE_GB, disk=True, n_slots=None, max_slots=64, side_rows=SIDE_ROWS, reserve_mib=None,
+                 min_free_gb=DEFAULT_MIN_FREE_GB, disk=True, keep_per_root=DEFAULT_KEEP_PER_ROOT, n_slots=None, max_slots=64, side_rows=SIDE_ROWS, reserve_mib=None,
                  work_mib=None, vram_check=True, auto_park_min=AUTO_PARK_MIN, every=EVERY, spill_min_gap=None, clock=time.time, key=None):
         self.live = LiveState()      # the only copy of what the live slot holds (caminus.cache.livestate; self.log / self.st)
         # the request in flight (prompt(): the session's prompt phase): its prompt-end state (the bail recovery's checkpoint), its
@@ -888,7 +1034,8 @@ class PromptCache:
         self.ckpts, self.side, self.parked = [], None, None
         self.main_root = None        # the main line's root mark (the end of its system + tools block; route())
         self.export_error = None     # (export_checkpoint: why the last export wrote nothing)
-        self.store = DiskStore(cache_dir, cap_gb, retention_days, min_free_gb, clock=clock, protect=self._protected) if disk else None
+        self.store = DiskStore(cache_dir, cap_gb, retention_days, min_free_gb, clock=clock, protect=self._protected,
+                               keep_per_root=keep_per_root) if disk else None
         self._bg = None; self.park_error = None; self.refusal = None; self.last_skip = None
         self.stats = collections.Counter()
         self._cold()
@@ -1715,6 +1862,14 @@ class PromptCache:
         return out
 
     # -- the disk tier --------------------------------------------------------------------------------------------------
+    def _root_sha(self):
+        """the live line's conversation root (module notes): the system + tools block and the first ROOT_MSG_TOKENS tokens
+        after it (fewer when the conversation is shorter); None without a root mark"""
+        root = self.main_root if self.main_root is not None else max(
+            [ck.pos for ck in self.ckpts if ck.kind == 'root'], default=None)
+        if root is None or not 0 < root < len(self.log): return None
+        return tok_sha(self.log[:root + ROOT_MSG_TOKENS])
+
     def _park_entry(self):
         """the live slot as a 'park' entry: (header, segments, sources); the live state goes through the io slot unless a
         checkpoint holds it. sources: [(the line's Ckpt, or None for the live state saved through the io slot, its segment
@@ -1748,7 +1903,8 @@ class PromptCache:
             cks.append(dict(ck.meta(), kind=kd if ck.kind != 'root' else 'root', segs=names))
             out.append((None if ck is live else ck, names))
         hdr = dict(kind='park', key_sha=self.key_sha, key=self.key, layout=L.sig, n=len(self.log), rows_n=i0,
-                   pool_ok=int(getattr(m, '_pool_ok', 0)), tok_sha=tok_sha(self.log), ckpts=cks, created=self.store.clock())
+                   pool_ok=int(getattr(m, '_pool_ok', 0)), tok_sha=tok_sha(self.log), ckpts=cks, created=self.store.clock(),
+                   root_sha=self._root_sha())
         return hdr, segs, out
 
     def _adopt(self, nm, hdr, srcs):
@@ -1818,6 +1974,8 @@ class PromptCache:
                 self.last_park = dict(name=nm, bytes=h['file_bytes'], ms=(time.perf_counter() - t0) * 1e3)
                 self._adopt(nm, hdr, srcs)                 # (every restore point the entry holds stays in the line)
                 self._supersede(nm, hdr, toks)             # (an older park of a prefix of this log: removed only when nm holds its state)
+                if hdr.get('root_sha'):                    # (at most keep_per_root parks of this conversation root)
+                    self.stats['park_root_evicted'] += len(self.store.limit_roots(self.key_sha, hdr['root_sha'], nm))
             except BaseException as e:
                 self.park_error = f'{type(e).__name__}: {e}'; self.stats['park_failed'] += 1
         if background:

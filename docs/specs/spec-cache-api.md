@@ -183,8 +183,21 @@ every checkpoint, and the live state as the deepest checkpoint.
 - `background=True` returns at once. The next engine-touching call waits for the write, and an error lands in
   `pc.park_error`.
 - An unchanged slot is not written twice.
-- It is refused (returns `None`, reason in `pc.park_error` / `pc.store.events`) when the entry would not fit the cap or
-  would leave less than `min_free_gb` free.
+- The cap covers the whole cache folder (`config.kv_dir()`: the root store and every model's store under it, as
+  `caminus start NAME` makes `kv/NAME`), not one store; it is also at most a quarter of the disk. Before a write the
+  oldest entries by last use are evicted until it fits: this store's (never one the live slot or a checkpoint reads:
+  `protect()`) and those of stores whose server is not running (their `.lock` taken for the eviction; a running server's
+  store is never touched). Before, per-store caps added up (one machine: 20 park files, 113 GB, and the newest park
+  refused for want of free space). tests/cache/test_prompt_cache.py parkcap.
+- When the write would leave less than `min_free_gb` free, the same oldest-first eviction makes room first; it is refused
+  (returns `None`, reason in `pc.park_error` / `pc.store.events`) only when even evicting every evictable entry would not
+  make room, and then nothing is evicted. It is also refused when the entry alone is larger than the cap.
+- At most `keep_per_root` park entries (default 3, `--cache-keep-per-root`) of one conversation root are kept: the same
+  model key, the same system + tools block (up to the main line's root mark) and the same first 1,024 tokens after it, the
+  start of the first user message (`root_sha` in the header). A harness's chats share a long system prompt, so the prompt
+  alone would merge them all into one root; a park with no root mark has no root and only the cap bounds it. The live slot's entries and the new one always
+  stay and count first; the remaining places go to the most recently used. A long conversation whose prefix changes
+  (compaction, an edited system prompt) left a 4-11 GB park per branch, never superseded (`stats['park_root_evicted']`).
 - An older park whose tokens are a prefix of the new one is superseded and removed, but only when the new entry holds the
   older one's deepest state (final round 1, the lead's ruling of 11-06: a supersede must not lose a deeper restore point).
   A park's live state joins the line as a checkpoint backed by its entry (kind `park`, as an unpark's checkpoints do), so the
