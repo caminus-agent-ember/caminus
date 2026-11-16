@@ -70,7 +70,7 @@ jobs:
           python -m pip install numpy==2.5.4 jinja2==3.1.6 tokenizers==0.23.3
           python -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install transformers==5.20.2 anthropic==2.3.0
-          python -m pip install build==1.2.2.post1 twine==6.1.0 'pkginfo>=1.12' setuptools==84.2.1   # setuptools: tests/env/test_installed_wheel.py
+          python -m pip install build==1.2.2.post1 twine==6.1.0 'pkginfo>=1.12' setuptools==84.2.1   # setuptools: tests/ember/test_installed_wheel.py
 
       - name: Byte-compile every Python file
         run: python -I -m compileall -q python tools tests
@@ -92,7 +92,7 @@ jobs:
 
       - name: The CPU suites (each skipped when what it needs is missing; tests/ci_cpu.py --list says what)
         env:
-          # tests/env/test_setup_e2e.py: caminus env setup from a clean account (it creates a Unix account with sudo;
+          # tests/ember/test_setup_e2e.py: caminus ember setup from a clean account (it creates a Unix account with sudo;
           # only a throwaway runner opts in)
           CAMINUS_E2E_ROOT: '1'
         run: |
