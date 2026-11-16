@@ -353,6 +353,12 @@ func statusLine(s status, w int) string {
 	if s.queue > 0 {
 		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %d queued", g.queue, s.queue)))
 	}
+	return footBar(segs, s.keys, w)
+}
+
+// footBar is the status line every screen ends with (the env chat, caminus panel): the segments as pills on the left
+// (plain dim text with separators under the plain glyph set), the keys that matter now, dim, on the right.
+func footBar(segs, keyList []string, w int) string {
 	var left string
 	if g.name == "nerd" {
 		pill := lipgloss.NewStyle().Background(cGray).Foreground(cText)
@@ -372,7 +378,7 @@ func statusLine(s status, w int) string {
 		}
 		left = strings.Join(styled, envDim.Render(g.segR))
 	}
-	keys := envDim.Render(strings.Join(s.keys, "  "))
+	keys := envDim.Render(strings.Join(keyList, "  "))
 	gap := w - lipgloss.Width(left) - lipgloss.Width(keys)
 	if gap < 2 {
 		return ansi.Truncate(left, w, "…")

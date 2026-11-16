@@ -532,12 +532,16 @@ func oneLine(s string) string {
 func panel(title string, accent color.Color, w int, body []string) string {
 	// The env chat's box colours: chrome grey, and the accent on the one box that has the focus (the only one
 	// titled in the accent colour).
+	// The env chat's boxes: grey chrome always, a quiet lowercase title. The focused box's title is bold in the accent;
+	// a warning box (hardware) keeps its colour.
 	b := fg(cGray)
-	if accent == cAccent {
-		b = fg(cAccent)
+	ts := envDim
+	switch accent {
+	case cAccent, cYellow, cRed:
+		ts = lipgloss.NewStyle().Foreground(accent).Bold(true)
 	}
 	inner := w - 4
-	t := " " + ansi.Truncate(lipgloss.NewStyle().Foreground(accent).Bold(true).Render(title), max(0, w-5), "…") + " "
+	t := " " + ansi.Truncate(ts.Render(title), max(0, w-5), "…") + " "
 	top := b.Render("╭─") + t + b.Render(strings.Repeat("─", max(0, w-3-lipgloss.Width(t)))+"╮")
 	lines := []string{top}
 	for _, l := range body {

@@ -61,7 +61,7 @@ const (
 	paneOptions
 )
 
-var paneNames = []string{"MODELS", "SERVERS", "QWEN CODE", "OPTIONS"}
+var paneNames = []string{"models", "servers", "qwen code", "options"}
 
 // ctl is the control panel's Bubble Tea model.
 type ctl struct {
@@ -1046,8 +1046,8 @@ func (m ctl) optionRows(height int) []string {
 }
 
 func (m ctl) keysLine() string {
-	// the env chat's footer: the key in plain text, what it does dim, two spaces apart
-	k := func(key, what string) string { return fg(cText).Render(key) + envDim.Render(" "+what) }
+	// the env chat's status line (footBar): what the next start will run as pills, the keys dim on the right
+	k := func(key, what string) string { return key + " " + what }
 	var p []string
 	switch m.focus {
 	case paneModels:
@@ -1079,7 +1079,16 @@ func (m ctl) keysLine() string {
 		other = "basic"
 	}
 	p = append(p, k("tab", "next panel"), k("a", other), k("R", "refresh"), k("q", "quit"))
-	return strings.Join(p, "  ")
+	var segs []string
+	if mi := m.selModel(); mi != nil {
+		mode, _ := m.modelMode(*mi)
+		segs = append(segs, g.model+" "+mi.Name, fmt.Sprintf("%d card(s)", mode.Cards))
+	}
+	w := m.w
+	if w <= 0 {
+		w = 120
+	}
+	return footBar(segs, p, min(max(w, 60), 220))
 }
 
 func (m ctl) render() string {
@@ -1110,7 +1119,7 @@ func (m ctl) render() string {
 		if m.hwError() != "" {
 			c = cRed
 		}
-		out = append(out, panel("HARDWARE", c, W, hw), "")
+		out = append(out, panel("hardware", c, W, hw), "")
 	}
 	two := m.advanced && W >= 150
 	left := W
@@ -1122,7 +1131,7 @@ func (m ctl) render() string {
 		panel(title(paneServers), acc(paneServers, cGreen), left, m.serverRows()),
 	}
 	if m.advanced {
-		col = append(col, panel("CARDS", cOrange, left, m.cardRows()))
+		col = append(col, panel("cards", cOrange, left, m.cardRows()))
 	}
 	col = append(col, panel(title(paneHarness), acc(paneHarness, cPurple), left, m.harnessRows()))
 	body := strings.Join(col, "\n")
