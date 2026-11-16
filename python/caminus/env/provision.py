@@ -32,7 +32,8 @@ if [ -z "$DRY" ] && [ "$(id -u)" -ne 0 ]; then echo "run it with sudo: sudo sh $
 
 # 1. SSH: the owner reaches the agent account over localhost with one key.
 if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
-  say "installing openssh-server"; run apt-get install -y openssh-server
+  say "installing openssh-server"
+  run apt-get install -y openssh-server || {{ run apt-get update && run apt-get install -y openssh-server; }}
 fi
 if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet ssh 2>/dev/null; then
   say "starting ssh"; run systemctl enable --now ssh
