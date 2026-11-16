@@ -1280,6 +1280,17 @@ for line in sys.stdin:
             self.assertIsNone(rt.free.pulse(),'the rest interval starts when a stretch ends')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_rest_starts_when_the_humans_goal_ends_not_at_the_last_stretch(self):
+        rt=self.free_runtime(rest_seconds=1800)
+        try:
+            st=rt.free._state();st['last_end']=st['last_start']=time.time()-7200;rt.free._save(st)   # a stretch 2 h ago
+            work=rt.store.enqueue('Real work from the human.')
+            rt.store.update(work,state='completed')
+            self.assertIsNone(rt.free.pulse(),'a goal that just finished: the 30 minutes start now, not at the old stretch')
+            rt.store.db.execute('UPDATE goals SET updated=? WHERE id=?',(time.time()-1801,work))
+            self.assertIsNotNone(rt.free.pulse(),'30 minutes after the work ended, free time starts')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_failed_stretch_never_restarts_at_once_and_a_spend_refusal_waits_an_hour(self):
         from caminus.ember.resident import freetime
         rt=self.free_runtime(rest_seconds=60)

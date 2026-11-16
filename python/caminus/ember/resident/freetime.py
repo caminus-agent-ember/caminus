@@ -153,6 +153,10 @@ class FreeTime:
         # the rest counts from the last start too: a stretch that failed records no end, and the next one started at
         # once (a relay at its daily cap refused 1,184 stretches in a row)
         last = max(float(state.get('last_end', 0)), float(state.get('last_start', 0)))
+        # ...and from its human's last work: a goal that finished (or changed) counts, so the rest begins when the work
+        # ends (it counted from the last stretch only, and free time started the moment a goal finished)
+        worked = store.db.execute("SELECT MAX(updated) FROM goals WHERE COALESCE(kind,'work') NOT IN ('free','dream')").fetchone()[0]
+        last = max(last, float(worked or 0))
         if not asked and now - last < float(cfg['rest_seconds']):
             return None
         wait = self._failure_wait(state)
