@@ -1213,7 +1213,10 @@ func (m emberModel) chatComposer() string {
 			input = emberClip(input, max(18, m.width-6)) + "\n" + input
 		}
 	}
-	return composerBox(input, m.composerTitle(), max(18, m.width-2))
+	box := composerBox(input, m.composerTitle(), max(18, m.width-2))
+	// a message (delivered, queued, an error) sits on the frame for a few seconds instead of a line of its own under
+	// the status line, which appeared and went with every message
+	return borderNote(box, terminalText(m.msg, false), emberDim)
 }
 
 // composerTitle is what the composer's top border says: which goal a message goes to, or that it starts a new one.
@@ -2694,6 +2697,15 @@ func (m emberModel) chatFoot(w int) string {
 	// The status line: brain, context, speed and queue, then the keys that matter now (shell.go). Everything that is
 	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
 	keys := []string{"esc browse", "^P sessions", "/help"}
+	if m.chat.seq < m.resident.LastEvent {
+		keys = append([]string{"loading history"}, keys...)
+	}
+	if !m.chat.transcript.AtBottom() {
+		keys = append([]string{fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)}, keys...)
+	}
+	if !m.sshOK {
+		keys = append([]string{emberWarn.Render("SSH …")}, keys...)
+	}
 	if m.chat.live.active && m.chat.live.hold {
 		keys = append([]string{"held · ^T follow"}, keys...)
 	}
@@ -2711,26 +2723,10 @@ func (m emberModel) chatFoot(w int) string {
 	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
 		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
-	status := []string{}
-	if !m.sshOK {
-		status = append(status, emberWarn.Render("SSH …"))
-	}
-	if !m.chat.transcript.AtBottom() {
-		status = append(status, emberDim.Render(fmt.Sprintf("history %.0f%%", m.chat.transcript.ScrollPercent()*100)))
-	}
-	// (no "live: Ctrl+T hold" line: it came and went with every reply and the frame jumped a row each time; the key
-	// is in /help, and a held view says so among the status line's keys)
-	if m.chat.seq < m.resident.LastEvent {
-		status = append(status, emberDim.Render("loading history"))
-	}
-	if m.msg != "" {
-		status = append(status, emberDim.Render(terminalText(m.msg, false)))
-	}
-	foot := statusBar
-	if len(status) > 0 {
-		foot += "\n" + clip(strings.Join(status, emberDim.Render(" · ")))
-	}
-	return foot
+	_ = clip
+	// (no line under the status line: the occasional states ride among its keys and a message sits on the composer's
+	// frame, so nothing appears and goes below it)
+	return statusBar
 }
 
 // pendingRoots are the indexes in m.reqs of this resident's waiting root requests, oldest first.

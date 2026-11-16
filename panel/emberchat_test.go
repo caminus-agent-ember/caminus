@@ -2043,3 +2043,19 @@ func TestAWrittenThemeKeepsOnlyWhatValidates(t *testing.T) {
 		t.Fatalf("an answer missing roles is refused: %v", err)
 	}
 }
+
+func TestAMessageSitsOnTheComposerFrameAndNothingUnderTheStatusLine(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	m.msg = "Delivered to goal 579e81bc"
+	top := strings.Split(ansi.Strip(m.chatComposer()), "\n")[0]
+	if !strings.Contains(top, "Delivered to goal 579e81bc") {
+		t.Fatalf("the message rides on the composer's top border: %q", top)
+	}
+	if foot := m.chatFoot(100); strings.Contains(foot, "\n") || strings.Contains(ansi.Strip(foot), "Delivered") {
+		t.Fatalf("no line under the status line: %q", ansi.Strip(foot))
+	}
+	if w := lipgloss.Width(top); w != lipgloss.Width(strings.Split(ansi.Strip(m.chatComposer()), "\n")[1]) {
+		t.Fatalf("the border keeps its width: %d", w)
+	}
+}

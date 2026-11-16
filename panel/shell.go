@@ -269,6 +269,24 @@ func borderTitle(box, title string, st lipgloss.Style) string {
 	return strings.Join(lines, "\n")
 }
 
+// borderNote puts a short note on the right of a box's top border (the composer's transient messages: "delivered to
+// goal …"), clipped to leave the left title room; empty leaves the box as it is.
+func borderNote(box, note string, st lipgloss.Style) string {
+	if note == "" {
+		return box
+	}
+	lines := strings.Split(box, "\n")
+	w := lipgloss.Width(lines[0])
+	room := w/2 - 4
+	if room < 8 {
+		return box
+	}
+	label := st.Render(" " + ansi.Truncate(note, room, "…") + " ")
+	lw := lipgloss.Width(label)
+	lines[0] = ansi.Truncate(lines[0], w-lw-2, "") + label + ansi.TruncateLeft(lines[0], w-2, "")
+	return strings.Join(lines, "\n")
+}
+
 // todoLine: the agent's plan, pinned above the composer.
 type todoItem struct {
 	text  string

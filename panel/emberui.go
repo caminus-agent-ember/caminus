@@ -120,6 +120,8 @@ type emberModel struct {
 	newJob      string
 
 	msg    string
+	msgOf  string // the message msgAt dates: a message shows for a few seconds, then clears
+	msgAt  time.Time
 	sshOK  bool
 	sshN   int
 	tickN  int
@@ -530,6 +532,11 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case emberTickMsg:
 		m.tickN++
+		if m.msg != m.msgOf {
+			m.msgOf, m.msgAt = m.msg, time.Now()
+		} else if m.msg != "" && time.Since(m.msgAt) > 6*time.Second {
+			m.msg, m.msgOf = "", ""
+		}
 		m.refreshLocal()
 		cmds := []tea.Cmd{tickCmd()}
 		// The SSH probe is a liveness check, not data: every 10 s is enough (it ran every second).
