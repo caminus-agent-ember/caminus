@@ -384,8 +384,11 @@ class Runtime:
         if todo['blockers']:
             lines.append('LOOP: blocked by: ' + ' | '.join(todo['blockers']))
         if not self.store.verified_since_steer(gid):
-            lines.append('LOOP: the done check has not been exercised since the last steer. Run it and call '
-                         'verify before finish.')
+            # A condition for finishing, not an order for this turn: worded as an order, it opened nearly every
+            # reply of a long task with "the runtime says the done check hasn't been run" and pushed early
+            # verify / finish attempts while the work was still open (finish refuses without a verify anyway)
+            lines.append('LOOP: no verify yet since the last steer; when the work is done, run the done check and '
+                         'call verify, then finish. Until then, keep working.')
         if (plan := planning.loop_line(g)):
             lines.append(plan)
         return '\n'.join(lines)
