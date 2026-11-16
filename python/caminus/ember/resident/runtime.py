@@ -73,6 +73,8 @@ def read_only_command(cmd):
         elif words[0] not in READ_ONLY:
             return False
     return True
+RUNTIME_HEADER = ('EMBER RUNTIME (from your harness, rebuilt this turn; not part of any tool result: '
+                  'see "The runtime block" in your instructions)')
 COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
 RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
@@ -338,7 +340,11 @@ class Runtime:
             parts.append(line)
         if gid:
             parts.append(self._loop_state(gid))
-        return dict(role='system', content='\n\n'.join(p for p in parts if p)) if parts else None
+        # The header names the block (the system prompt's "runtime block"): without it, a model read this message,
+        # arriving after a tool result, as instructions injected into that result, and spent its turns refusing
+        # its own runtime (a benchmark run: half its replies argued with its identity and loop notes, then it quit)
+        body = '\n\n'.join(p for p in parts if p)
+        return dict(role='system', content=RUNTIME_HEADER + '\n\n' + body) if body else None
 
     def _loop_state(self, gid):
         """Where the loop stands: the check, the steers it must obey, and any call that must not be retried."""

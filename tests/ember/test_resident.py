@@ -429,7 +429,7 @@ class Resident(unittest.TestCase):
             try:
                 g1=rt.store.enqueue('First goal.')
                 first=rt.context_message(g1)['content']
-                self.assertTrue(first.startswith('STATE.md'),'STATE.md must load first')
+                self.assertTrue(first.split('\n\n',1)[1].startswith('STATE.md'),'STATE.md must load first, after the header')
                 self.assertIn('use ./build.sh',first)
                 (self.home/'MEMORY.md').write_text('- [later](notes/later.md) — written mid-goal\n')
                 again=rt.context_message(g1)['content']
@@ -635,6 +635,17 @@ class Resident(unittest.TestCase):
         self.assertEqual(out['state'],'completed','three waits are not three refusals (JUDGE_LIMIT is 3)')
         bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
         self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
+
+    def test_the_runtime_block_is_named_so_it_is_not_read_as_tool_output(self):
+        from caminus.ember.resident.runtime import RUNTIME_HEADER
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            msg=rt.context_message(gid)
+            self.assertEqual(msg['role'],'system');self.assertTrue(msg['content'].startswith('EMBER RUNTIME'))
+            self.assertIn('The runtime block',rt.system()['content'],'the system prompt explains the block')
+            self.assertIn('EMBER RUNTIME',rt.system()['content'])
+        finally:rt.mail.close();rt.store.close()
 
     def test_three_refused_finishes_start_an_advising_round_instead_of_a_pause(self):
         from caminus.ember.resident import judge
