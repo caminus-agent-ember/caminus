@@ -663,7 +663,9 @@ class Resident(unittest.TestCase):
                               dict(role='assistant',content='ok',reasoning_content='hidden')],None,None)
         self.assertNotIn('thinking',body,'adaptive: no thinking-off switch sent')
         self.assertNotIn('thinking',json.dumps(body['messages']),'no thinking block is replayed')
-        off=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',context=200000))
+        default=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',context=200000))
+        self.assertNotIn('thinking',default._to_anthropic([dict(role='user',content='hi')],None,None),'adaptive is the default')
+        off=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',thinking='disabled',context=200000))
         self.assertEqual(off._to_anthropic([dict(role='user',content='hi')],None,None)['thinking'],dict(type='disabled'))
 
     def test_the_runtime_block_is_named_so_it_is_not_read_as_tool_output(self):
@@ -3631,7 +3633,7 @@ class AnthropicTransport(unittest.TestCase):
         self.assertEqual(h['x-api-key'],'sk-fixture');self.assertNotIn('authorization',h)
         self.assertIn('anthropic-version',h)
         for banned in ('temperature','top_p','top_k'):self.assertNotIn(banned,body)
-        self.assertEqual(body['thinking'],dict(type='disabled'));self.assertEqual(body['output_config'],dict(effort='medium'))
+        self.assertNotIn('thinking',body,'adaptive by default: no switch-off sent');self.assertEqual(body['output_config'],dict(effort='medium'))
         self.assertTrue(body['stream']);self.assertEqual(body['max_tokens'],500)
         self.assertEqual(body['system'][0]['text'],'You are the resident.');self.assertIn('cache_control',body['system'][0])
         roles=[x['role'] for x in body['messages']]

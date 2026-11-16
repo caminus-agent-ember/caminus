@@ -440,12 +440,14 @@ class Model:
         if tools:
             body['tools'] = [dict(name=t['function']['name'], description=t['function'].get('description', ''),
                                   input_schema=t['function']['parameters']) for t in tools]
-        # Thinking off unless the config says adaptive ('disabled' is accepted up to effort high, so the effort is
-        # set rather than defaulted). Adaptive (the advisor, models that refuse thinking off, or init --thinking
-        # adaptive) leaves it to the model; the reply's thinking blocks are skipped and never replayed: the API
+        # Thinking 'disabled' is accepted up to effort high, so the effort is set rather than defaulted. Adaptive (the
+        # default) leaves it to the model; the reply's thinking blocks are skipped and never replayed: the API
         # accepts a history with all of them removed (only removing some from the middle is an edit), so the model
         # thinks afresh every turn and the history stays valid.
-        if self.config.get('thinking', 'disabled') == 'disabled':
+        # Adaptive by default (the switch-off is simply not sent: current models then think as they see fit, older ones
+        # do not think at all, so no model refuses it). On a CTF benchmark the same agent solved 10 of 14 tasks with
+        # thinking and 2 without; Qwen Code sends adaptive thinking too. thinking 'disabled' in the config turns it off.
+        if self.config.get('thinking', 'adaptive') == 'disabled':
             body['thinking'] = dict(type='disabled')
         body['output_config'] = dict(effort=self.config.get('effort', 'medium'))
         if self.config.get('fallbacks') and body['model'] in FALLBACK_MODELS:
@@ -458,7 +460,7 @@ class Model:
         body = self._to_anthropic(messages, tools, model)
         body['max_tokens'] = max_tokens
         body['stream'] = True
-        allowed = ('low', 'medium', 'high') if self.config.get('thinking', 'disabled') == 'disabled' else (
+        allowed = ('low', 'medium', 'high') if self.config.get('thinking', 'adaptive') == 'disabled' else (
             'low', 'medium', 'high', 'xhigh', 'max')
         if self.config.get('effort', 'medium') not in allowed:
             raise ValueError('effort must be one of %s here' % ', '.join(allowed))

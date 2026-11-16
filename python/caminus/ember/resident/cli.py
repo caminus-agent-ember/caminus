@@ -193,10 +193,10 @@ def parser():
             p.add_argument('--api',choices=('openai','anthropic'),default='openai',
                            help="wire format: OpenAI chat completions (the local server) or Anthropic's Messages API")
             p.add_argument('--effort',choices=('low','medium','high','xhigh','max'),
-                           help='Messages API effort (default medium; xhigh and max need --thinking adaptive)')
+                           help='Messages API effort (default medium; xhigh and max need thinking adaptive)')
             p.add_argument('--thinking',choices=('adaptive','disabled'),
-                           help='Messages API thinking: adaptive lets the model think before each reply (nothing is '
-                                'stored or replayed); default disabled, or adaptive where the model refuses it off')
+                           help='Messages API thinking (default adaptive: the model thinks before each reply as it sees '
+                                'fit; nothing is stored or replayed). disabled turns it off')
             p.add_argument('--max-model-retries',type=int,
                            help='failed model calls in a row before the goal stops (default: unbounded for a '
                                 'local endpoint, 8 for a remote one)')
