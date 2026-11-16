@@ -16,7 +16,9 @@ terminal under the account's normal permissions.
 
 ## Start and use a resident
 
-After `caminus env setup` and its human provisioning steps:
+New here: [the quickstart](env-quickstart.md) goes from install to the first conversation, and [the guide](env.md)
+covers the security model, where things live and troubleshooting. This page is the reference. After `caminus env
+setup` (one root script, then the command again):
 
 ```sh
 caminus env agent install
@@ -102,10 +104,8 @@ do the same from the command line.
 Nothing waits on you. A pending request parks only the step that needs it: the
 agent is told it is pending, works on what does not need the answer, and gets
 the answer as a message (`wait` with `until message` sleeps until it arrives);
-it cannot finish while a request is open. A question unanswered after 15 minutes
-(`question_timeout`) takes the agent's recommended option (or the advisor's
-pick); a permission question times out as no, and an unanswered root request is
-never run. Desktop notifications announce what needs you (`CAMINUS_PANEL_NOTIFY=0`
+it cannot finish while a request is open. Timeouts: see "When you are away".
+Desktop notifications announce what needs you (`CAMINUS_PANEL_NOTIFY=0`
 turns them off).
 
 Question tool arguments are rendered as the interactive question rather than raw
@@ -141,9 +141,29 @@ steer word for word, bounded at 8 KB with the newest steers kept whole.
 `define_done` states what done looks like as something checkable, and `verify`
 records what the check actually showed. `finish` is refused while the goal has
 no check, while a steer is waiting, or when the check has not been exercised
-since the last steer. `ledger` keeps the milestones and blockers, pinned into
-every turn so they survive compaction. `checkpoint` tars named paths before a
-destructive or milestone-crossing action and `rollback` puts them back.
+since the last steer. `todo` keeps the goal's checklist (pending, one item in
+progress, done) and what blocks it, pinned into every turn so it survives
+compaction and shown above the composer; `finish` wants every item done or what
+is left named. `checkpoint` tars named paths before a destructive or
+milestone-crossing action and `rollback` puts them back.
+
+Before a graded goal completes, `finish` runs two checks. The **gate** is an
+optional shell command given to `define_done` (`gate`), run in the agent's home;
+a non-zero exit refuses the finish and its output becomes the next prompt. The
+**judge** is a fresh model call with no tools that sees the goal, the done check,
+the human's steers and the recorded evidence, not the agent's reasoning, and
+answers met, not yet, wait or impossible. Not yet refuses the finish with what is
+missing (three in a row pause the goal); wait means the work is done but its proof
+is still running (a build, CI, a service starting): the agent is pointed at its
+`wait` tool, and six waits pause the goal; impossible pauses it and reports to the
+human; an unreadable reply is asked once more, then accepted unchecked. The judge runs on the
+agent's own model in a fresh context by default (free on the local server); set
+`judge_model` to `"advisor"` in the resident's config to use the advisor's model.
+
+A reply cut off at the output limit runs nothing; the agent is told at its next
+step and tries again in smaller pieces (three cut-offs in a row pause the goal).
+Every turn's context states the reply limit, which model answers, and the measured
+context use and distance to compaction.
 
 The goal's gate (the shell check `define_done` names) also runs after every turn
 that changed something (an edit, a write, a terminal command that is not
@@ -152,13 +172,6 @@ starting to fail, with its output, or passing again). A per-turn run gets two
 minutes: a gate that takes longer is off per turn for that goal (it still runs at
 finish), and one slower than 30 s runs per turn at most every ten minutes.
 `gate_each_turn false` turns it off.
-
-At `finish` the gate runs, then the judge: a fresh call that sees the goal, the
-done check, your steers and the recorded evidence, not the agent's reasoning. It
-answers met, not_yet (the finish is refused with what is missing), wait (the work
-is done but its proof is still running: the agent is pointed at its `wait` tool)
-or impossible (the goal pauses for you). Three not_yet in a row, or six waits,
-pause the goal.
 
 The failure ledger keys a call by tool and arguments: a call that has failed
 twice is refused before it runs and the model is told to change approach, and two
@@ -190,6 +203,118 @@ detached (TERM, then KILL ten seconds later); lifting the stop resumes nothing.
 
 `--no-loop-gates` records `loop_gates false` for fixture agents that predate the
 loop; real residents get the gates by default.
+
+## Tools
+
+Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
+`ask_root`), a resident has:
+
+| Tool | What it does |
+|---|---|
+| `read`, `edit`, `write` | Files without the terminal: numbered windows; exact, unique replacement (CRLF and mode kept, atomic); whole-file writes; edits return a diff |
+| `todo` | The goal's checklist (see the loop) |
+| `remember`, `history_search` | A one-fact note with its index line; full-text search over the agent's own past goals, results, journal and notes |
+| `wait` | Block without model calls until a time, a file, a port, a process, a terminal session or a message; a message, cancellation or new work ends it early |
+| `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
+| `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |
+| `report`, `budget`, `schedule` | fyi or need_you to the human; what the goal has used and has left; park the goal and wake it later |
+| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (installed in the agent's account: `python3 -m venv ~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs`); a page as readable text |
+| `advisor` | A stronger model's advice, within the owner's limits (below) |
+| `mcp__SERVER__TOOL` | Tools from the agent's MCP servers (below) |
+
+A tool result past about 8K tokens has its large text saved under `~/outputs/`;
+the model gets the head, the tail and the path. Web pages, search results and MCP
+results are marked as data, never instructions.
+
+## Memory
+
+`MEMORY.md` is a notes index: one line per note, capped at 4 KB, loaded into every
+turn and fixed for the length of a goal. Notes (`notes/NAME.md`, one fact each) are
+read on demand; `remember` writes a note and its index line together and is refused
+when the index is full. `STATE.md` (doing, verified, assumed, next) loads first on
+every turn and is asked for near compaction, so it is what the agent reads after a
+compaction or a restart. An older, longer `MEMORY.md` is copied whole into
+`notes/memory-before-index.md` the first time it is seen. Answers to questions stay
+in the goal's transcript; nothing is written to memory automatically.
+
+## Free time
+
+With no work queued, a resident has free time: it settles in, reads its journal and
+notes, and follows what interests it (research, writing, making things in
+`~/studio`, tending up to three projects), writing a short intention as a todo and a
+journal entry before it stops. It is never graded. Work preempts it at once; a
+nightly dream consolidates notes. On the local server it works in the full context
+window: before a stretch overwrites the human's conversation, the prompt cache
+parks it to disk and the human's next request restores it. `caminus env agent
+heartbeat NAME on|off|status|recap`; the recap is the "while you were away" line.
+On a remote model free time spends its own allowance (`free_time.budget_usd`,
+0.50 USD a day by default).
+
+## When you are away
+
+Nothing waits on you. A question you have not answered within `question_timeout`
+(900 seconds by default; free time uses its own shorter window) is withdrawn by the
+resident itself, never answered in your name, and the agent carries on: with the
+advisor's pick when an advisor is configured, else with the option it recommended,
+recording the choice in `STATE.md` and its finish. Silence is never approval: a
+permission request (an irreversible change, an action in your name, spending money;
+`ask_user` with `approval`) that times out is a no, and an unanswered root request
+is not run. Each one is recorded (`question_unanswered`, `root_unanswered`), and you
+can steer the goal when you are back.
+
+## Brains: providers, models and effort
+
+A resident's brain is any model its providers serve. A provider is an endpoint the agent can reach: the local
+Caminus server, or a paid API through your key relay (the agent never holds the key):
+
+```sh
+caminus env relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5   # http://127.0.0.1:8765/v1
+caminus env relay install --provider deepinfra --cap-usd 3                              # http://127.0.0.1:8766/v1/openai
+caminus env agent provider NAME add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
+caminus env agent provider NAME add deepinfra --kind deepinfra --endpoint http://127.0.0.1:8766/v1/openai --relay
+caminus env agent models NAME --refresh        # what each provider serves: window, output cap, effort levels, prices
+caminus env agent model NAME zai-org/GLM-5.2   # pick one (provider/id when two serve it)
+caminus env agent effort NAME high             # among the levels that model offers
+```
+
+Each relay reads its key from a file only you can read (`~/.config/anthropic/api_key`,
+`~/.config/caminus/deepinfra-key`; it refuses one others can read) and keeps a daily dollar cap. `relay install`
+makes it a systemd user service with no expiry (the cap guards the spend) that runs a frozen copy of its code, so
+editing or moving a checkout cannot stop it; `relay status` shows each relay and today's spend, `relay uninstall`
+removes one. (`caminus env relay --provider P --cap-usd N --ttl SECS` runs one in the foreground instead.)
+The Anthropic relay allows the models you name; the DeepInfra relay allows any chat model DeepInfra publishes a price
+for, priced from its own list. The catalog is what the providers report: Anthropic's model list gives each model's
+window, output cap, thinking and effort levels; DeepInfra's gives window, prices and whether it takes
+`reasoning_effort`. In the panel, `/model` opens the list (Enter picks) and `/effort LEVEL` sets the depth; a running
+resident takes either at its next turn.
+
+A paid brain resends its whole context every turn, so it compacts early: at 38 % of its window, keeping the newest
+7.6 % (on a 1M window about 400K and 80K). Set `paid_compact_threshold` and `paid_compact_target_ratio` (fractions of
+the window) in the resident's config to change it; the local server keeps `compact_threshold` / `compact_target_ratio`
+(85 % / 20 %).
+
+## The advisor and two brains
+
+`caminus env agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the
+agent an `advisor` tool on a model the owner picks, through the owner's own key
+relay, with a daily dollar cap and calls per goal. `caminus env agent fallback NAME
+--model ... --endpoint ...` adds a second brain used only while the local server is
+down, with its own daily allowance. Every failed or refused remote call is recorded
+in the resident's `failures.jsonl`.
+
+## MCP servers
+
+`caminus env agent mcp NAME add SERVER [--env KEY=VALUE] -- COMMAND ARGS...` adds a
+Model Context Protocol server (stdio); `mcp NAME` lists them (environment values are
+never printed), `mcp NAME remove|off|on SERVER`. The client speaks the stateless
+2026-07-28 revision and falls back to the `initialize` handshake for older servers.
+A server starts on first use and stops with the agent; its log is
+`~/mcp-logs/SERVER.log`. Example, a read-only GitHub server:
+
+```sh
+caminus env agent mcp NAME add github --env GITHUB_PERSONAL_ACCESS_TOKEN=... -- \
+  github-mcp-server stdio --read-only --toolsets=repos,issues,pull_requests
+```
 
 ## Discover before building
 
@@ -375,28 +500,15 @@ room against the model window.
 `--compaction-model` selects a summary alias on the same endpoint; a no-thinking
 alias can summarize without using the summary budget for hidden reasoning.
 
-## Paid brains, relays and updates
+## Spend, updates and the demo
 
-`agent provider add NAME --kind deepinfra|anthropic|openai|local --endpoint URL
-[--relay]` registers a provider; `agent models --refresh` reads every provider's
-models (window, output limit, reasoning levels, prices) into the agent's
-catalog; `agent model ID` and `agent effort LEVEL` switch the brain (a running
-resident takes it at its next turn). A paid provider goes through a key relay
-the owner runs, so the agent never sees the key:
+The relay stops at its daily cap (HTTP 402) and refuses a model it cannot price; the agent then waits for the next
+day or another brain. Every priced turn is metered per goal and per day, cached input at the provider's cache price
+(`agent status` reports `spend_today` and `spend_goals`; the panel's status line shows this goal's and today's).
 
-```sh
-caminus env relay install --provider deepinfra --cap-usd 3   # a systemd user service, no expiry
-caminus env relay status
-```
+`caminus env agent update NAME` (`/update`) installs this caminus's runtime: the resident applies it between goals
+(`--now`: at the next step), restarts its own service and reports the new version in its heartbeat (`--wait SECS`
+waits for it).
 
-The relay refuses models it cannot price and stops at its daily cap (HTTP 402);
-the agent then waits for the next day or another brain. Every priced turn is
-metered per goal and per day (`agent status` reports `spend_today` and
-`spend_goals`).
-
-`caminus env agent update NAME` (`/update`) installs this caminus's runtime: the
-resident applies it between goals (`--now`: at the next step), restarts its own
-service and reports the new version in its heartbeat (`--wait SECS` waits for it).
-
-`tools/env_demo.py` runs all of this on a scripted model in a scratch home (no
-agent account, GPU, server or key): the quickest way to see the chat.
+`tools/env_demo.py` runs all of this on a scripted model in a scratch home (no agent account, GPU, server or key):
+the quickest way to see the chat.

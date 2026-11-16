@@ -39,6 +39,7 @@ CLAUDE.md imports this file.
 | Outside RDNA3 kernels (FlyDSL, rocKE, CK, AITER) measured at our shapes: yardsticks and borrow sources, never dependencies | docs/dev/yardsticks.md |
 | The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
+| The agent environment (`caminus env`): its module map, rules and tests | docs/dev/env.md (users: docs/env.md, docs/env-quickstart.md) |
 | Agent skills: after a kernel edit (`kernel-change-evidence`), before calling a pull request ready (`pr-ready`) | .agents/skills/*/SKILL.md (linked from .claude/skills) |
 
 ## Layout (the parts that need a reason)
