@@ -1246,6 +1246,11 @@ func (m envModel) chatBottom() string {
 	if menu := m.slashMenu(max(18, m.width-2)); menu != "" {
 		out = menu + "\n" + out
 	}
+	// a blank line between the conversation and what sits under it, as Claude Code leaves: the composer read as part
+	// of the last block when it touched it
+	if m.height >= 24 { // (a small terminal keeps every row for the transcript)
+		out = "\n" + out
+	}
 	return out
 }
 
