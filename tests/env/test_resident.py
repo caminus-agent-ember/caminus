@@ -1404,10 +1404,12 @@ for line in sys.stdin:
         t=Terminal(self.home);sid=uuid.uuid4().hex
         # Two bursts separated by a pause; the command then waits for a line before exiting.
         cmd='printf first-burst; sleep 1; printf second-burst; read x'
-        out=t.call(sid,dict(command=cmd,yield_ms=50))
-        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
-        self.assertIn('first-burst',out['output']);self.assertNotIn('second-burst',out['output'])
-        self.assertFalse(out['no_new_output'])
+        # (the first burst lands in the start call or the first poll, depending on how fast the shell starts;
+        # a poll returns only new output, so it is in exactly one of them)
+        a=t.call(sid,dict(command=cmd,yield_ms=50))
+        b=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
+        self.assertEqual((a['output']+b['output']).count('first-burst'),1);self.assertNotIn('second-burst',a['output']+b['output'])
+        if b['output']:self.assertFalse(b['no_new_output'])
         # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
         self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])
