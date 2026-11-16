@@ -243,6 +243,11 @@ class Store:
             '(SELECT MAX(seq) FROM events WHERE goal=? AND kind=?),0) LIMIT 1',
             (gid, 'verified', gid, 'steers_applied')).fetchone())
 
+    def clear_precondition_failures(self, gid, text):
+        """Forget the failures that were only a precondition's refusal (text: in its error, also when the watchdog
+        quoted it), once the precondition is met: retrying the same call is then the right move, not a loop."""
+        self.db.execute("DELETE FROM failures WHERE goal=? AND instr(last_error, ?) > 0", (gid, text))
+
     def clear_failures(self, gid):
         self.db.execute('DELETE FROM failures WHERE goal=?', (gid,))
 

@@ -636,6 +636,21 @@ class Resident(unittest.TestCase):
         bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
         self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
 
+    def test_first_looks_are_read_only_and_a_refusal_before_the_done_check_does_not_trip_the_watchdog(self):
+        from caminus.ember.resident.runtime import read_only_command as ro
+        for c in ('cd /ctf && ls -la && unzip -l handout.zip','strings a.out | grep flag','xxd f | head','tar -tf x.tar',
+                  '7z l x.7z','readelf -h bin','sha256sum f','sort a | uniq -c'):
+            self.assertTrue(ro(c),c)
+        for c in ('unzip handout.zip','tar -xf x.tar','7z x x.7z','unzip -l x.zip -d out','cd /ctf && rm f','sort a > b'):
+            self.assertFalse(ro(c),c)
+        self.gates_on()
+        self.verdicts(dict(verdict='met',reason='x exists'))
+        self.replies(call('terminal',dict(command='python3 -c "print(1)"')),call('terminal',dict(command='python3 -c "print(1)"')),
+                     call('define_done',dict(check='x exists')),call('terminal',dict(command='python3 -c "print(1)"')),
+                     call('write',dict(path='x',content='1')),call('verify',dict(evidence='x written')),call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal','Make x.'])
+        self.assertEqual(out['state'],'completed','the same call runs once the done check exists')
+
     def test_init_thinking_adaptive_lets_the_model_think_and_replays_no_thinking(self):
         from caminus.ember.resident.model import Model
         home=self.home.parent/'thinker';home.mkdir(exist_ok=True)

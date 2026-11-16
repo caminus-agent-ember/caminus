@@ -47,7 +47,13 @@ INTERRUPT_HOLD = 120     # after an Esc, how long a goal waits for the message t
 # a file through a flag is left out: env, less, tree -o, xargs, timeout, nice ...).
 READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf', 'which',
                        'type', 'ps', 'df', 'du', 'stat', 'file', 'date', 'id', 'whoami', 'uname', 'rocm-smi', 'amd-smi',
-                       'free', 'uptime', 'sleep', 'true', 'diff'))
+                       'free', 'uptime', 'sleep', 'true', 'diff',
+                       # cd only moves this shell; the rest only print what they read (a CTF's first look at a binary
+                       # or an archive was refused as a change before the done check)
+                       'cd', 'strings', 'xxd', 'od', 'hexdump', 'readelf', 'objdump', 'nm', 'sha256sum', 'sha1sum',
+                       'md5sum', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath'))
+# Archive tools in their listing-only forms (any other form extracts or writes)
+LISTING = {'unzip': ('-l', '-v', '-Z', '-Z1'), '7z': ('l',), 'tar': ('-t', '-tf', '-tvf', '-tzf', '-tjf', '-tJf', 't', 'tf', 'tvf')}
 READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files'))
 # Arguments that make a read-only program act: find's -exec / -execdir / -ok / -okdir / -delete / -fprint* / -fls,
 # git's --output, rg's --pre (it runs a command on each file), and any redirection, substitution or tee.
@@ -69,6 +75,11 @@ def read_only_command(cmd):
             if sub == ['branch'] and all(w in ('-a', '-r', '-v', '-vv', '--list', '--show-current') for w in words[2:]):
                 continue                  # listing branches; with any other argument it creates or deletes one
             if not sub or sub[0] not in READ_ONLY_GIT:
+                return False
+        elif words[0] in LISTING:
+            if not any(w in LISTING[words[0]] for w in words[1:]) or any(
+                    w in ('-x', 'x', '-d', '-o', 'e', 'a', 'u', 'd') or w.startswith(('-x', '-c', '-r', '-u', '-A'))
+                    for w in words[1:]):
                 return False
         elif words[0] not in READ_ONLY:
             return False
@@ -602,6 +613,9 @@ class Runtime:
             raise ValueError('the done check must say something checkable')
         self.store.update(gid, done_check=check, gate=gate or None)
         self.store.event('done_check', dict(check=check, gate=gate), gid)
+        # calls refused only because there was no done check may now run: their failures must not trip the repeat
+        # watchdog (a CTF goal paused in four steps: a listing refused twice, then blocked once the check existed)
+        self.store.clear_precondition_failures(gid, 'no done check yet')
         return dict(done_check=check, gate=gate or None)
 
     def _todo(self, gid, items, blockers):
