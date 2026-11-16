@@ -23,9 +23,12 @@ is open, and each tool is something the harness hands them. `caminus env` turns 
   small allowance.
 - **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra) through a key relay you run.
 
-Compared with Qwen Code and similar harnesses: in a measured head-to-head on the same task, model and budget, the
-resident finished in a median 16 s for 0.005 USD against Qwen Code's 20 s for 0.006 USD, both passing with the tests
-untouched. The difference that matters more is what a harness cannot do: keep working when you close the window.
+Compared with Qwen Code and similar harnesses, the difference that matters most is what a harness cannot do: keep
+working when you close the window. On speed and cost there is one small measurement so far: a single bug-fix task (a
+buggy library, ten unit tests, the tests not to be edited), three alternating runs each, both harnesses on the same
+model (DeepSeek-V4.1-Flash on DeepInfra) with the same relay and budget. All six runs passed; the medians were 16 s and
+0.005 USD for the resident against 20 s and 0.006 USD for Qwen Code. That is too few runs on too small a task to call
+either faster.
 
 ## The security model
 
