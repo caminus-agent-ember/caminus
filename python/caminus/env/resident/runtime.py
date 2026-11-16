@@ -234,6 +234,11 @@ class Live:
         self.path.unlink(missing_ok=True)
 
 
+# The same successful call this many times in a row gets a note, then pauses the goal (a loop). Tools that wait or
+# record state repeat legitimately.
+SAME_CALL_NOTE, SAME_CALL_LIMIT = 4, 7
+REPEAT_EXEMPT = {'wait', 'todo', 'note', 'remember', 'heartbeat', 'machine', 'mail', 'peers'}
+
 class Runtime:
     def __init__(self, home, model=None, terminal=None):
         self.store = Store(home)
@@ -967,6 +972,20 @@ class Runtime:
                                    dict(call=signature, error=failure[:200]))
             except Exception:
                 pass
+        # The same call again and again, succeeding each time, is a loop the failure ledger never sees (a live goal
+        # ran one gate check ten times in 25 s until a person stopped the resident). Polls of a running command and
+        # the waiting tools repeat by design and are not counted.
+        same = self.__dict__.setdefault('_same', {})   # goal id -> (last signature, times in a row)
+        if signature and not failure and action['name'] not in REPEAT_EXEMPT and 'session' not in args and not result.get('running'):
+            last, count = same.get(action['goal'], ('', 0))
+            count = count + 1 if last == signature else 1
+            same[action['goal']] = (signature, count)
+            if count >= SAME_CALL_NOTE:
+                result['note'] = ('you have made this exact call %d times in a row; its answer will not change: '
+                                  'use what it told you and change approach' % count)
+            if count >= SAME_CALL_LIMIT:
+                same.pop(action['goal'], None)
+                self._watchdog(action['goal'], 'the same call %d times in a row' % count, dict(call=signature[:200]))
         # A result past about 8K tokens has its large text moved to ~/outputs: the model gets a preview and the path.
         result = outputs.spill(self.home, action['name'], action['id'], result)
         self.store.action_result(action, result)

@@ -1561,6 +1561,29 @@ for line in sys.stdin:
             self.assertIn('retried 2 times after failing twice',g['error'])
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_resident_unit_restarts_after_any_exit_it_did_not_ask_for(self):
+        from caminus.env.resident.cli import unit_text
+        unit=unit_text('resident',str(self.home))
+        # systemctl stop still keeps it down; any other exit (a clean one included) brings it back
+        self.assertIn('Restart=always',unit);self.assertNotIn('Restart=on-failure',unit)
+
+    def test_the_same_successful_call_in_a_loop_is_noted_then_paused(self):
+        (self.home/'notes.txt').write_text('hello')
+        same=call('read',dict(path='notes.txt'))
+        self.replies(*[dict(same,tool_calls=[dict(same['tool_calls'][0],id=f's{i}')]) for i in range(10)])
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Read the notes.')
+            for _ in range(20):
+                if rt.store.goal(gid)['state']=='paused':break
+                rt.tick(gid)
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'paused','seven identical successful calls in a row pause the goal')
+            self.assertIn('the same call 7 times in a row',g['error'])
+            notes=[e['data']['result'].get('note','') for e in rt.store.events() if e['kind']=='tool_result']
+            self.assertTrue(any('4 times in a row' in n for n in notes),'the fourth gets a note first')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_repeated_failing_finish_is_stopped_by_the_watchdog(self):
         # finish is never refused up front, so its own failures must reach the watchdog (they did not: the result's
         # recording set the goal back to working)

@@ -602,7 +602,10 @@ func (m envModel) emberBox(w, window int) string {
 		if m.activeGoal() == nil && !l.active {
 			return "" // between goals with nothing to show: the transcript takes the rows
 		}
-		body = []string{envDim.Render("no thoughts on this goal yet (a model that does not show its reasoning leaves this empty)")}
+		msg := "no thinking on this goal yet: the model is answering without reasoning (/effort turns it on, at a token cost)"
+		for _, ln := range strings.Split(ansi.Wordwrap(msg, max(8, text), " "), "\n") {
+			body = append(body, envDim.Render(ln)) // wrapped like the thoughts: unwrapped it ran under Ember
+		}
 	}
 	// One fixed size, generating or not (a box that grew and shrank was hard to read): only the text moves. The
 	// thoughts run downward, newest last; Ember flickers while a reply is written.

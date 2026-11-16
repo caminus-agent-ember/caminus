@@ -184,10 +184,23 @@ func residentRefresh(m envModel) tea.Cmd {
 	}
 }
 
+// auditedOps are the panel's resident controls the owner audit log records.
+var auditedOps = map[string]bool{"start": true, "stop": true, "cancel": true, "pause": true, "resume": true,
+	"update": true, "rewind": true, "interrupt": true, "model": true}
+
 func residentAction(m envModel, args []string, input string) tea.Cmd {
 	return func() tea.Msg {
 		if len(m.cli) == 0 {
 			return residentActionMsg{"resident controls need the caminus CLI (--cli)"}
+		}
+		// The owner's controls go in the audit log: a resident stopped from the panel left no trace of who stopped
+		// it. Only the operation and its target, never message text.
+		if len(args) > 0 && auditedOps[args[0]] && m.auditPath != "" {
+			ev := map[string]any{"event": "resident_" + args[0], "agent": m.agentName}
+			if len(args) > 2 && !strings.HasPrefix(args[2], "-") {
+				ev["target"] = args[2]
+			}
+			_ = appendAudit(m.auditPath, ev)
 		}
 		out, err := residentCommand(m, args, input).CombinedOutput()
 		text := strings.TrimSpace(string(out))

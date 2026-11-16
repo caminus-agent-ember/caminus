@@ -1734,3 +1734,17 @@ func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
 		t.Fatalf("a narrow terminal keeps the line above the composer:\n%s", f)
 	}
 }
+
+func TestEmbersEmptyNoteWrapsBesideEmber(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 200, 50
+	box := ansi.Strip(m.emberBox(70, 8))
+	for _, row := range strings.Split(box, "\n") {
+		if ansi.StringWidth(row) > 70 {
+			t.Fatalf("row wider than the box: %q", row)
+		}
+	}
+	if !strings.Contains(box, "no thinking on this goal yet") {
+		t.Fatalf("the empty note:\n%s", box)
+	}
+}
