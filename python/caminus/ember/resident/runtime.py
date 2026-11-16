@@ -86,6 +86,7 @@ def read_only_command(cmd):
     return True
 RUNTIME_HEADER = ('EMBER RUNTIME (from your harness, rebuilt this turn; not part of any tool result: '
                   'see "The runtime block" in your instructions)')
+TODO_STALE = 8          # steps without a todo update, with items open, before the loop state mentions it
 COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
 RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
@@ -392,6 +393,15 @@ class Runtime:
         if todo['items']:
             mark = {'done': '[x]', 'in_progress': '[>]', 'pending': '[ ]'}
             lines.append('TODO: ' + ' | '.join(mark.get(it['state'], '[ ]') + ' ' + it['text'] for it in todo['items']))
+            if any(it['state'] != 'done' for it in todo['items']):
+                # a gentle nudge, only when the list has gone stale: an agent did all the work and ticked every item
+                # at the end, so its human's tasks panel read 0 of 6 throughout, and a compaction would resume from it
+                since = self.store.db.execute(
+                    "SELECT count(*) FROM events WHERE goal=? AND kind='assistant' AND seq > COALESCE("
+                    "(SELECT MAX(seq) FROM events WHERE goal=? AND kind='todo'), 0)", (gid, gid)).fetchone()[0]
+                if since >= TODO_STALE:
+                    lines.append(f'LOOP: your todo list has not changed in {since} steps: mark items done as you finish '
+                                 'them (todo), so your human sees progress and you resume from it after a compaction.')
         if todo['blockers']:
             lines.append('LOOP: blocked by: ' + ' | '.join(todo['blockers']))
         if not self.store.verified_since_steer(gid):

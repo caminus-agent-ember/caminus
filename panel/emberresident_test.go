@@ -111,3 +111,13 @@ func TestPanelCallsAreBoundedSoAStallCannotHangTheComposer(t *testing.T) {
 		t.Fatal("an SSH poll must carry a deadline")
 	}
 }
+
+func TestACrashShowsItsExceptionNotTheTracebackHeader(t *testing.T) {
+	out := []byte("Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\n    import y\nModuleNotFoundError: No module named 'y'\n")
+	if got := cliError(out); got != "agent runtime error: ModuleNotFoundError: No module named 'y'" {
+		t.Fatalf("the exception, not the header: %q", got)
+	}
+	if got := cliError([]byte("error: no agent named x\n")); got != "error: no agent named x" {
+		t.Fatalf("plain errors pass as they are: %q", got)
+	}
+}

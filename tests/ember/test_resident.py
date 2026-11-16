@@ -668,6 +668,23 @@ class Resident(unittest.TestCase):
         off=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',thinking='disabled',context=200000))
         self.assertEqual(off._to_anthropic([dict(role='user',content='hi')],None,None)['thinking'],dict(type='disabled'))
 
+    def test_a_stale_todo_list_gets_a_gentle_reminder(self):
+        from caminus.ember.resident.runtime import TODO_STALE
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            rt._todo(gid,[dict(text='one',state='in_progress'),dict(text='two',state='pending')],[])
+            self.assertNotIn('todo list has not changed',rt.context_message(gid)['content'])
+            for _ in range(TODO_STALE):rt.store.event('assistant',dict(role='assistant',content='working'),gid)
+            self.assertIn('todo list has not changed in %d steps' % TODO_STALE,rt.context_message(gid)['content'])
+            rt._todo(gid,[dict(text='one',state='done'),dict(text='two',state='in_progress')],[])
+            self.assertNotIn('todo list has not changed',rt.context_message(gid)['content'],'an update clears it')
+            for _ in range(TODO_STALE):rt.store.event('assistant',dict(role='assistant',content='working'),gid)
+            rt._todo(gid,[dict(text='one',state='done'),dict(text='two',state='done')],[])
+            for _ in range(TODO_STALE):rt.store.event('assistant',dict(role='assistant',content='working'),gid)
+            self.assertNotIn('todo list has not changed',rt.context_message(gid)['content'],'all done: nothing to nudge')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_runtime_block_is_named_so_it_is_not_read_as_tool_output(self):
         from caminus.ember.resident.runtime import RUNTIME_HEADER
         rt=Runtime(self.home)

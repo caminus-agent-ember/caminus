@@ -83,6 +83,22 @@ type streamState struct {
 	sc     *bufio.Scanner
 }
 
+// cliError is a failed agent command's output as one useful line: for a Python traceback the exception (its last
+// line), not "Traceback (most recent call last):", which was all the status line showed of a crash.
+func cliError(out []byte) string {
+	text := strings.TrimSpace(string(out))
+	if !strings.Contains(text, "Traceback (most recent call last)") {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return "agent runtime error: " + l
+		}
+	}
+	return text
+}
+
 func residentCommand(m emberModel, args []string, input string) *exec.Cmd {
 	if len(m.cli) == 0 {
 		return nil // the panel can run without --cli; callers report the missing CLI instead of panicking
@@ -158,7 +174,7 @@ func residentRefresh(m emberModel) tea.Cmd {
 		}
 		out, err := residentCommand(m, []string{"status", name, "--json"}, "").CombinedOutput()
 		if err != nil {
-			return residentMsg{agent: name, epoch: epoch, err: strings.TrimSpace(string(out))}
+			return residentMsg{agent: name, epoch: epoch, err: cliError(out)}
 		}
 		var status residentStatus
 		if err = json.Unmarshal(out, &status); err != nil {
@@ -178,7 +194,7 @@ func residentRefresh(m emberModel) tea.Cmd {
 		for page := 0; page < pages && after < status.LastEvent; page++ {
 			out, err = residentCommand(m, []string{"events", name, "--after", fmt.Sprint(after), "--json"}, "").CombinedOutput()
 			if err != nil {
-				return residentMsg{agent: name, epoch: epoch, err: strings.TrimSpace(string(out))}
+				return residentMsg{agent: name, epoch: epoch, err: cliError(out)}
 			}
 			var batch []residentEvent
 			if err = json.Unmarshal(out, &batch); err != nil {
@@ -215,7 +231,7 @@ func residentAction(m emberModel, args []string, input string) tea.Cmd {
 		out, err := residentCommand(m, args, input).CombinedOutput()
 		text := strings.TrimSpace(string(out))
 		if err != nil {
-			text = err.Error() + ": " + text
+			text = err.Error() + ": " + cliError(out)
 		}
 		return residentActionMsg{text}
 	}
