@@ -233,13 +233,31 @@ class Resident(unittest.TestCase):
         goal=self.cmd('once',['--goal','Create the file.'])
         self.assertEqual(goal['state'],'completed')
         self.cmd('send',['so what could we do next?','--goal-id',goal['id'],'--continue'])
-        self.replies(dict(role='assistant',content='Next we could add a test for it.'))
+        self.replies(dict(role='assistant',content='Next we could add a test for it.'),
+                     dict(role='assistant',content='Next we could add a test for it.'))
         again=self.cmd('once',['--goal-id',goal['id']])
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('If that is all they needed, call finish',body,'one gentle prompt first: the agent decides')
         self.assertEqual(again['state'],'completed','the answer ends the turn; it is not nudged back to work')
         kinds=[e['kind'] for e in self.cmd('events')]
         self.assertIn('answered',kinds);self.assertNotIn('plain_text_nudge',kinds)
         finished=[e for e in self.cmd('events') if e['kind']=='finished']
         self.assertEqual(finished[-1]['data']['summary'],'Next we could add a test for it.')
+
+    def test_new_work_asked_on_a_reopened_goal_is_not_closed_by_a_plain_promise(self):
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),call('verify',dict(evidence='ls showed it')),
+                     call('finish',dict(summary='Done.')))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.cmd('send',['now add a second file','--goal-id',goal['id'],'--continue'])
+        self.replies(dict(role='assistant',content="Sure, I'll start on that."),
+                     call('write',dict(path='b.txt',content='two')),
+                     call('verify',dict(evidence='b.txt written')),call('finish',dict(summary='Added b.txt.')))
+        again=self.cmd('once',['--goal-id',goal['id']])
+        self.assertEqual(again['state'],'completed')
+        finished=[e for e in self.cmd('events') if e['kind']=='finished']
+        self.assertEqual(finished[-1]['data']['summary'],'Added b.txt.','the promise did not close it; the work did')
+        self.assertTrue((self.home/'b.txt').exists())
 
     def test_an_unknown_extra_argument_is_dropped_with_a_note_not_refused(self):
         self.gates_on()
