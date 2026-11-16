@@ -61,7 +61,7 @@ const (
 	paneOptions
 )
 
-var paneNames = []string{"MODELS", "SERVERS", "QWEN CODE", "OPTIONS"}
+var paneNames = []string{"models", "servers", "qwen code", "options"}
 
 // ctl is the control panel's Bubble Tea model.
 type ctl struct {
@@ -74,6 +74,7 @@ type ctl struct {
 	models  []camModel
 	ps      psInfo
 	hs      harnessInfo
+	ember   emberMsg // the harness pane's Ember row: set up or not
 	opts    []option
 	loaded  map[string]bool      // which reads answered at least once
 	vals    map[string]string    // advanced: option values for the next start (dest -> text); absent = the default
@@ -112,7 +113,9 @@ type (
 		v   harnessInfo
 		err error
 	}
-	optsMsg struct {
+	// emberMsg: whether Ember, the agent environment, is set up (caminus ember status --json)
+	emberMsg struct{ ok, known bool }
+	optsMsg  struct {
 		v   []option
 		err error
 	}
@@ -373,6 +376,17 @@ func (m ctl) loadHarness() tea.Cmd {
 	}
 }
 
+// loadEmber reads whether Ember is set up; any failure reads as not set up (the row then says how).
+func (m ctl) loadEmber() tea.Cmd {
+	return func() tea.Msg {
+		var v struct {
+			OK bool `json:"ok"`
+		}
+		err := m.be.call(&v, 20*time.Second, "ember", "status", "--json")
+		return emberMsg{ok: err == nil && v.OK, known: true}
+	}
+}
+
 func (m ctl) loadOpts() tea.Cmd {
 	return func() tea.Msg {
 		var v []option
@@ -405,7 +419,7 @@ func (m ctl) interactive(what string, args ...string) tea.Cmd {
 }
 
 func (m ctl) Init() tea.Cmd {
-	return tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts(), ctlTickCmd(), ctlPollCmd())
+	return tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadEmber(), m.loadOpts(), ctlTickCmd(), ctlPollCmd())
 }
 
 func (m *ctl) panes() []int {
@@ -641,6 +655,8 @@ func (m ctl) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.busy == "" {
 			m.setNote(msg.err.Error(), true)
 		}
+	case emberMsg:
+		m.ember = msg
 	case harnessMsg:
 		m.loaded["harness"] = true
 		if msg.err == nil {
@@ -843,6 +859,12 @@ func (m ctl) harnessKey(s string) (tea.Model, tea.Cmd) {
 		}
 		m.confirm = &pending{q: fmt.Sprintf("install Qwen Code %s into Caminus's own npm prefix (your own installs stay as they are)? y / n", v),
 			run: m.action("Qwen Code install", 20*time.Minute, "qwen-code", "setup", "--install")}
+	case "e":
+		if !m.ember.ok {
+			m.setNote("Ember is not set up: run caminus ember setup (docs/ember-quickstart.md walks through it)", true)
+			return m, m.loadEmber()
+		}
+		return m, m.interactive("Ember", "ember", "ui")
 	}
 	return m, nil
 }
@@ -1034,28 +1056,26 @@ func stateColor(s string) color.Color {
 }
 
 func (m ctl) header(W int) string {
-	title := bold(cAccent).Render("◆ caminus") + fg(cMuted).Render(" control panel "+version)
-	mode := pill(cTeal, "BASIC")
-	if m.advanced {
-		mode = pill(cPurple, "ADVANCED")
-	}
-	state, c := "NO SERVER", cGray
-	for _, s := range m.ps.Servers {
+	state, st := g.idle+" no server", lipgloss.NewStyle().Foreground(cMuted)
+	for _, sv := range m.ps.Servers {
 		switch {
-		case s.State == "ready":
-			state, c = "READY", cGreen
-		case s.State == "loading" && state != "READY":
-			state, c = "LOADING", cYellow
-		case s.State == "failed" && state == "NO SERVER":
-			state, c = "FAILED", cRed
+		case sv.State == "ready":
+			state, st = g.done+" ready", lipgloss.NewStyle().Foreground(cGreen)
+		case sv.State == "loading" && !strings.HasSuffix(state, "ready"):
+			state, st = g.waiting+" loading", lipgloss.NewStyle().Foreground(cYellow)
+		case sv.State == "failed" && strings.HasSuffix(state, "no server"):
+			state, st = g.failed+" failed", lipgloss.NewStyle().Foreground(cRed)
 		}
 	}
-	right := ""
-	if m.busy != "" {
-		right = fg(cYellow).Render(spin[m.frame%len(spin)] + " " + m.busy)
+	mode := fg(cTeal).Render("basic")
+	if m.advanced {
+		mode = fg(cPurple).Render("advanced")
 	}
-	l := title + "  " + mode + " " + pill(c, state)
-	return l + strings.Repeat(" ", max(1, W-lipgloss.Width(l)-lipgloss.Width(right))) + right
+	right := emberDim.Render(version)
+	if m.busy != "" {
+		right = fg(cYellow).Render(spin[m.frame%len(spin)]+" "+m.busy) + "  " + right
+	}
+	return screenHeader("panel", state, st, mode, right, W)
 }
 
 func (m ctl) cursor(pane, i, cur int) string {
@@ -1250,6 +1270,15 @@ func (m ctl) harnessRows() []string {
 	} else {
 		rows = append(rows, fg(cMuted).Render("not set up yet: u writes Caminus's tested config into its own home"))
 	}
+	// Ember, the agent environment: an agent in its own account working toward goals you set (e opens its chat)
+	switch {
+	case !m.ember.known:
+		rows = append(rows, fg(cMuted).Render("Ember: checking…"))
+	case m.ember.ok:
+		rows = append(rows, fg(cGreen).Render("✓ Ember")+fg(cMuted).Render(" set up · e opens the agent chat (caminus ember ui)"))
+	default:
+		rows = append(rows, fg(cYellow).Render("Ember not set up")+fg(cMuted).Render(" · run caminus ember setup (docs/ember-quickstart.md)"))
+	}
 	return rows
 }
 
@@ -1290,7 +1319,8 @@ func (m ctl) optionRows(height int) []string {
 }
 
 func (m ctl) keysLine() string {
-	k := func(key, what string) string { return bold(cAccent).Render(key) + fg(cMuted).Render(" "+what) }
+	// the env chat's status line (footBar): what the next start will run as pills, the keys dim on the right
+	k := func(key, what string) string { return key + " " + what }
 	var p []string
 	switch m.focus {
 	case paneModels:
@@ -1310,7 +1340,7 @@ func (m ctl) keysLine() string {
 	case paneServers:
 		p = []string{k("enter", "Qwen Code on it"), k("x", "stop"), k("t", "restart"), k("l", "log"), k("m", "monitor")}
 	case paneHarness:
-		p = []string{k("enter", "launch"), k("u", "set up"), k("i", "install")}
+		p = []string{k("enter", "launch"), k("u", "set up"), k("i", "install"), k("e", "Ember")}
 	case paneOptions:
 		p = []string{k("enter", "edit / toggle"), k("d", "default")}
 		if m.editing {
@@ -1322,7 +1352,16 @@ func (m ctl) keysLine() string {
 		other = "basic"
 	}
 	p = append(p, k("tab", "next panel"), k("a", other), k("R", "refresh"), k("q", "quit"))
-	return strings.Join(p, fg(cDim).Render(" · "))
+	var segs []string
+	if mi := m.selModel(); mi != nil {
+		mode, _ := m.modelMode(*mi)
+		segs = append(segs, g.model+" "+mi.Name, fmt.Sprintf("%d card(s)", mode.Cards))
+	}
+	w := m.w
+	if w <= 0 {
+		w = 120
+	}
+	return footBar(segs, p, min(max(w, 60), 220))
 }
 
 func (m ctl) render() string {
@@ -1347,13 +1386,13 @@ func (m ctl) render() string {
 		}
 		return c
 	}
-	out := []string{m.header(W), ""}
+	out := []string{m.header(W)}
 	if hw := m.hwRows(); len(hw) > 0 && (m.advanced || m.hwError() != "" || m.hwWarn()) {
 		c := cYellow
 		if m.hwError() != "" {
 			c = cRed
 		}
-		out = append(out, panel("HARDWARE", c, W, hw), "")
+		out = append(out, panel("hardware", c, W, hw), "")
 	}
 	two := m.advanced && W >= 150
 	left := W
@@ -1365,7 +1404,7 @@ func (m ctl) render() string {
 		panel(title(paneServers), acc(paneServers, cGreen), left, m.serverRows()),
 	}
 	if m.advanced {
-		col = append(col, panel("CARDS", cOrange, left, m.cardRows()))
+		col = append(col, panel("cards", cOrange, left, m.cardRows()))
 	}
 	col = append(col, panel(title(paneHarness), acc(paneHarness, cPurple), left, m.harnessRows()))
 	body := strings.Join(col, "\n")
