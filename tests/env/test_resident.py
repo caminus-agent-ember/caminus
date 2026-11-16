@@ -2510,6 +2510,32 @@ for line in sys.stdin:
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_paid_brain_summarises_in_one_call_when_it_fits_and_a_local_one_in_pieces(self):
+        calls={}
+        for remote in (True,False):
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('a long goal')
+                history=[dict(role='user',content='a long goal')]
+                for i in range(60):
+                    history+=[dict(role='assistant',content=f'step {i}: '+'x'*6000),dict(role='user',content=f'note {i}')]
+                rt.model.remote=remote
+                rt.model.context_size=lambda:200000
+                rt.model.tokens=lambda msgs,tools=None:len(json.dumps(msgs))//4
+                rt.config['compact_threshold']=.3
+                n=[0]
+                def complete(req,max_tokens=None,**kw):
+                    n[0]+=1;return dict(content='summary so far')
+                rt.model.complete=complete
+                compacted,done=rt._compact(gid,history,force=False)
+                self.assertTrue(done)
+                calls[remote]=n[0]
+                parts=[e['data'] for e in rt.store.events() if e['kind']=='compacting' and e.get('goal')==gid]
+                self.assertEqual(len(parts),n[0],'a compacting event before each summary call')
+            finally:rt.mail.close();rt.store.close()
+        self.assertEqual(calls[True],1,'a cloud brain: the history fits half its window, one call')
+        self.assertGreater(calls[False],2,'a local brain: bounded pieces, one after another')
+
     def test_forced_compaction_takes_a_bounded_fragment_and_keeps_the_newest(self):
         class MeasuringModel:
             def __init__(self):self.sizes=[]
