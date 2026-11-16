@@ -10,6 +10,9 @@ from . import settings
 
 def ssh_base():
     """the ssh argv up to and including the destination; the agent user's key is pinned to localhost in authorized_keys"""
+    # ssh does not make the ControlPath's folder: on a fresh account (no Caminus state yet) every login failed with
+    # "unix_listener: cannot bind to path" until something else had made it. The end-to-end test found it.
+    os.makedirs(os.path.dirname(settings.control_path()), mode=0o700, exist_ok=True)
     return ['ssh', '-i', settings.key_path(),
             '-o', 'BatchMode=yes',
             '-o', 'ConnectTimeout=5',
