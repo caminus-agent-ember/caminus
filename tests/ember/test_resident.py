@@ -1972,7 +1972,7 @@ for line in sys.stdin:
         chat=[b for b in sent if b and 'max_tokens' in b]
         self.assertNotIn('reasoning_effort',chat[1],'no effort set: nothing sent (the local server)')
 
-    def _relay(self, provider, upstream, cap=1.0, models=None):
+    def _relay(self, provider, upstream, cap=1.0, models=None, prices=None):
         """A relay on an ephemeral port in front of a fake upstream; returns (base url, calls, ledger, log, stop)."""
         import http.server, threading
         from caminus.ember import relay
@@ -1987,7 +1987,7 @@ for line in sys.stdin:
             def getresponse(s):return Resp(*upstream(calls[-1]))
             def close(s):pass
         ledger=relay.Ledger(self.home/'ledger.json',cap)
-        prices=relay.DeepInfraPrices('KEY',lines.append,fetch=lambda:dict(data=[
+        prices=prices or relay.DeepInfraPrices('KEY',lines.append,fetch=lambda:dict(data=[
             dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2,cache_read_tokens=0.11)))]))
         handler=relay.make_handler(provider,'SECRET-KEY',ledger,models or {'claude-haiku-5-5'},4096,lines.append,prices,Conn)
         srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
@@ -2040,6 +2040,41 @@ for line in sys.stdin:
             code,body=self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[]))
             self.assertEqual(code,402);self.assertEqual(calls,[])
         finally:stop()
+
+    def test_the_mistral_relay_meters_from_the_owners_prices_and_sends_no_stream_options(self):
+        from caminus.ember import relay
+        pf=self.home/'mistral-prices.json';pf.write_text(json.dumps({'mistral-medium-latest':[0.4,2.0]}))
+        prices=relay.OwnerPrices(str(pf),lambda m:None)
+        sse=(b'data: '+json.dumps(dict(choices=[dict(delta=dict(content='a'))])).encode()+b'\n\n'
+             +b'data: '+json.dumps(dict(choices=[dict(delta={},finish_reason='stop')],usage=dict(prompt_tokens=1000,completion_tokens=100))).encode()
+             +b'\n\ndata: [DONE]\n\n')
+        base,calls,ledger,log,stop=self._relay('mistral',lambda c:(200,sse,'text/event-stream'),cap=5.0,prices=prices)
+        try:
+            code,body=self._post(base+'/v1/chat/completions',dict(model='codestral-latest',messages=[]))
+            self.assertEqual(code,403);self.assertIn(b'--prices',body);self.assertEqual(calls,[],'an unpriced model goes nowhere')
+            code,_=self._post(base+'/v1/chat/completions',dict(model='mistral-medium-latest',messages=[],stream=True))
+            self.assertEqual(code,200);sent=calls[-1]
+            self.assertEqual(sent['path'],'/v1/chat/completions');self.assertEqual(sent['headers']['Authorization'],'Bearer SECRET-KEY')
+            self.assertNotIn('stream_options',sent['body'],'Mistral refuses fields it does not know')
+            self.assertAlmostEqual(ledger.spent(),(1000*0.4+100*2.0)/1e6,places=9)
+            pf.write_text(json.dumps({'mistral-medium-latest':{'input':0.4,'output':2.0},'codestral-latest':[0.3,0.9]}))
+            os.utime(pf,(time.time()+5,time.time()+5))
+            code,_=self._post(base+'/v1/chat/completions',dict(model='codestral-latest',messages=[]))
+            self.assertEqual(code,200,'a price added to the file is picked up without a restart')
+        finally:stop()
+
+    def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
+        from caminus.ember.resident import catalog
+        data=dict(data=[dict(id='mistral-medium-2508',aliases=['mistral-medium-latest'],max_context_length=131072,
+                             capabilities=dict(completion_chat=True,function_calling=True,vision=True)),
+                        dict(id='mistral-medium-latest',aliases=['mistral-medium-2508'],max_context_length=131072,
+                             capabilities=dict(completion_chat=True,function_calling=True,vision=True)),
+                        dict(id='mistral-embed',capabilities=dict(completion_chat=False)),
+                        dict(id='old-model',capabilities=dict(completion_chat=True,function_calling=True),deprecation='2026-01-01'),
+                        dict(id='mistral-ocr',capabilities=dict(completion_chat=True,function_calling=False))])
+        rows=catalog.mistral_entries(data,'mistral')
+        self.assertEqual([r['id'] for r in rows],['mistral-medium-2508'],'tools-capable chat models only, aliases once')
+        self.assertEqual((rows[0]['context'],rows[0]['vision'],rows[0]['prices']),(131072,True,None))
 
     def test_a_relay_installs_as_an_owner_service_without_expiry(self):
         from caminus.ember import relay

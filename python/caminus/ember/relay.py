@@ -17,6 +17,10 @@ Providers:
   deepinfra  api.deepinfra.com: POST /v1/openai/chat/completions; GET /v1/openai/models (the catalog). Any chat model
              DeepInfra publishes a price for is allowed (the cap is the guard): prices are read from its model list at
              start and every hour. A reply that reports no usage is charged a high estimate (its whole output budget).
+  mistral    api.mistral.ai (Mistral AI Studio): POST /v1/chat/completions; GET /v1/models (the catalog). Mistral's
+             model list carries no prices, so the owner gives them: a JSON file (--prices, default
+             ~/.config/caminus/mistral-prices.json) of {"model-id": [input, output]} in USD per million tokens, re-read
+             when it changes. A model without a price there is refused (it cannot be metered).
 
 Run a separate relay (own port, key file, cap, ledger and log) for each provider and for an advisor.
 
@@ -46,6 +50,8 @@ PROVIDERS = {
                       get=('/v1/models',), port=8765, key_file='~/.config/anthropic/api_key'),
     'deepinfra': dict(host='api.deepinfra.com', post=('/v1/openai/chat/completions',),
                       get=('/v1/openai/models',), port=8766, key_file='~/.config/caminus/deepinfra-key'),
+    'mistral': dict(host='api.mistral.ai', post=('/v1/chat/completions',), get=('/v1/models',), port=8767,
+                    key_file='~/.config/caminus/mistral-key', prices='~/.config/caminus/mistral-prices.json'),
 }
 PRICE_REFRESH = 3600
 
@@ -141,6 +147,34 @@ class DeepInfraPrices:
             return self.table.get(model)
 
 
+class OwnerPrices:
+    """Per-model prices the owner wrote (a provider that publishes none): {"model": [input, output]} or
+    {"model": {"input": .., "output": .., "cache_read": ..}}, USD per million tokens, re-read when the file changes.
+    A model not in it, or a file that cannot be read, gets no price: the request is refused."""
+
+    def __init__(self, path, log):
+        self.path, self.log, self.table, self.mtime, self.lock = Path(os.path.expanduser(path)), log, {}, None, threading.Lock()
+
+    def get(self, model):
+        with self.lock:
+            try:
+                mt = self.path.stat().st_mtime
+                if mt != self.mtime:
+                    table = {}
+                    for k, v in json.loads(self.path.read_text()).items():
+                        if isinstance(v, dict):
+                            table[k] = (float(v['input']), float(v['output']), float(v.get('cache_read', v['input'])))
+                        else:
+                            table[k] = (float(v[0]), float(v[1]), float(v[2] if len(v) > 2 else v[0]))
+                    self.table, self.mtime = table, mt
+                    self.log('prices: %d models from %s' % (len(table), self.path))
+            except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
+                if self.table or self.mtime is not None:
+                    self.log('price file unreadable: %s' % type(e).__name__)
+                self.table, self.mtime = {}, None
+            return self.table.get(model)
+
+
 def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, connect=None):
     spec = PROVIDERS[provider]
     connect = connect or (lambda: http.client.HTTPSConnection(spec['host'], timeout=900,
@@ -208,7 +242,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             else:
                 rates = prices.get(model) if isinstance(model, str) else None
                 if rates is None:
-                    return self.refuse(403, 'permission_error', 'no published price for %r: it cannot be metered' % model)
+                    return self.refuse(403, 'permission_error', 'no price for %r: it cannot be metered%s' % (
+                        model, ' (add it to the relay\'s --prices file)' if provider == 'mistral' else ''))
             spent = ledger.spent()
             if spent >= ledger.cap:
                 return self.refuse(402, 'billing_error', 'daily cap $%.2f reached ($%.4f spent today)' % (ledger.cap, spent))
@@ -225,8 +260,9 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     beta = FALLBACK_BETA if 'fallbacks' in body and FALLBACK_BETA in (self.headers.get('anthropic-beta') or '') else None
                     if 'fallbacks' in body and not beta:
                         body.pop('fallbacks')
-                elif body.get('stream'):
-                    body['stream_options'] = dict(include_usage=True)   # the only way a stream reports its usage
+                elif body.get('stream') and provider == 'deepinfra':
+                    body['stream_options'] = dict(include_usage=True)   # the only way its stream reports usage
+                    # (Mistral sends usage in its last stream chunk and refuses fields it does not know)
             raw = json.dumps(body).encode()
             conn = connect()
             try:
@@ -379,6 +415,7 @@ def service(argv, run=subprocess.run):
     ap.add_argument('--port', type=int)
     ap.add_argument('--max-tokens', type=int)
     ap.add_argument('--key-file')
+    ap.add_argument('--prices', help='mistral: the price file')
     a = ap.parse_args(rest)
     ctl = lambda *x: run(['systemctl', '--user', *x], capture_output=True, text=True)
     if op == 'install':
@@ -388,7 +425,8 @@ def service(argv, run=subprocess.run):
         if not key_file.exists():
             sys.exit(f'no key file at {key_file}: save the key there (mode 600) first')
         args = ['--cap-usd', str(a.cap_usd)]
-        for flag, val in (('--port', a.port), ('--max-tokens', a.max_tokens), ('--key-file', a.key_file)):
+        for flag, val in (('--port', a.port), ('--max-tokens', a.max_tokens), ('--key-file', a.key_file),
+                          ('--prices', a.prices)):
             if val is not None:
                 args += [flag, str(val)]
         for m in a.model or []:
@@ -432,13 +470,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog='caminus ember relay', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--provider', choices=sorted(PROVIDERS), default='anthropic')
-    ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra)')
+    ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra), 8767 (mistral)')
+    ap.add_argument('--prices', help='mistral: the owner\'s price file (default ~/.config/caminus/mistral-prices.json)')
     ap.add_argument('--cap-usd', type=float, default=1.0, help='daily spend cap in USD')
     ap.add_argument('--ttl', type=float, default=1800, help='seconds before the relay exits on its own; 0 = never')
     # a request's output cap; billing is per token written and the dollar caps hold, so 64K costs nothing unused
     ap.add_argument('--max-tokens', type=int, default=65536)
     ap.add_argument('--model', action='append', help='anthropic: allowed model (repeatable); default claude-haiku-5-5')
-    ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key or ~/.config/caminus/deepinfra-key')
+    ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key, ~/.config/caminus/deepinfra-key or '
+                                       '~/.config/caminus/mistral-key')
     ap.add_argument('--ledger', help='default ~/.local/state/caminus/<provider>-relay-ledger.json')
     ap.add_argument('--log', help='default ~/.local/state/caminus/<provider>-relay.log')
     a = ap.parse_args(argv)
@@ -453,7 +493,7 @@ def main(argv=None):
         if unknown:
             sys.exit('no price for %s: add it to PRICES first' % ', '.join(sorted(unknown)))
     elif a.model:
-        sys.exit('--model is for anthropic: deepinfra allows every model it publishes a price for (the cap is the guard)')
+        sys.exit('--model is for anthropic: deepinfra and mistral allow every model with a price (the cap is the guard)')
     key_file = Path(os.path.expanduser(a.key_file or spec['key_file']))
     try:
         if key_file.stat().st_mode & 0o077:
@@ -470,13 +510,14 @@ def main(argv=None):
         logf.write('%s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg))
 
     ledger = Ledger(ledger_path, a.cap_usd)
-    prices = DeepInfraPrices(key, log) if a.provider == 'deepinfra' else None
+    prices = (DeepInfraPrices(key, log) if a.provider == 'deepinfra' else
+              OwnerPrices(a.prices or spec['prices'], log) if a.provider == 'mistral' else None)
     port = a.port or spec['port']
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', port),
                                           make_handler(a.provider, key, ledger, models, a.max_tokens, log, prices))
     if a.ttl > 0:
         threading.Timer(a.ttl, srv.shutdown).start()
-    root = '/v1' if a.provider == 'anthropic' else '/v1/openai'
+    root = '/v1/openai' if a.provider == 'deepinfra' else '/v1'
     log('start %s port %d cap $%.2f ttl %ds%s (spent today $%.4f)' % (
         a.provider, port, a.cap_usd, a.ttl, ' models %s' % sorted(models) if a.provider == 'anthropic' else '',
         ledger.spent()))

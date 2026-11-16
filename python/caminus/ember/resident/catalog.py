@@ -8,6 +8,9 @@ A provider is one endpoint the resident can reach (directly, or through the owne
 - deepinfra  OpenAI-compatible at https://api.deepinfra.com/v1/openai: GET {base}/models gives metadata.context_length,
              max_tokens, pricing ($ per 1M input / output / cache-read tokens) and tags (chat, vision, reasoning,
              reasoning_effort, prompt_cache). Reasoning is set with reasoning_effort (none, low, medium, high).
+- mistral    Mistral AI Studio, OpenAI-compatible at https://api.mistral.ai/v1 (through the owner's relay): GET
+             {base}/models gives capabilities (completion_chat, function_calling, vision), max_context_length and
+             aliases. No prices (the relay meters from the owner's price file) and no output cap.
 - openai     any other OpenAI-compatible server: GET {base}/models, ids only.
 
 Every model is normalized to one entry: id, provider, context, max_output, efforts (the levels /effort offers, empty
@@ -21,7 +24,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-KINDS = ('local', 'anthropic', 'deepinfra', 'openai')
+KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'openai')
 TIMEOUT = 20
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
@@ -82,6 +85,21 @@ def deepinfra_entries(data, provider):
     return out
 
 
+def mistral_entries(data, provider):
+    """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out."""
+    out, seen = [], set()
+    for m in data.get('data') or []:
+        caps = m.get('capabilities') or {}
+        if not (caps.get('completion_chat') and caps.get('function_calling')) or m.get('deprecation'):
+            continue
+        if m['id'] in seen:
+            continue
+        seen.update([m['id'], *(m.get('aliases') or [])])
+        out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=m.get('max_context_length'),
+                        max_output=None, efforts=[], thinking='', vision=bool(caps.get('vision')), prices=None))
+    return out
+
+
 def openai_entries(data, provider, context=None):
     return [dict(id=m['id'], name=m['id'], provider=provider, context=context, max_output=None, efforts=[],
                  thinking='', vision=False, prices=None) for m in data.get('data') or []]
@@ -100,6 +118,8 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
     data = _get(base + '/models', headers, opener)
     if kind == 'deepinfra':
         return deepinfra_entries(data, name)
+    if kind == 'mistral':
+        return mistral_entries(data, name)
     context = None
     if kind == 'local':
         try:
