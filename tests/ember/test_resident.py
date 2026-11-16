@@ -639,7 +639,7 @@ class Resident(unittest.TestCase):
     def test_init_thinking_adaptive_lets_the_model_think_and_replays_no_thinking(self):
         from caminus.ember.resident.model import Model
         home=self.home.parent/'thinker';home.mkdir(exist_ok=True)
-        argv=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init','thinker','--home',str(home),
+        argv=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init','thinker','--home',str(home),'--bus',str(home/'bus.sqlite3'),
               '--model','m','--endpoint','http://127.0.0.1:9/v1','--api','anthropic','--context','200000','--thinking','adaptive','--json']
         r=subprocess.run(argv,capture_output=True,text=True,timeout=15);self.assertEqual(r.returncode,0,r.stdout+r.stderr)
         self.assertEqual(json.loads((home/'config.json').read_text())['thinking'],'adaptive')
