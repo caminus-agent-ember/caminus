@@ -407,6 +407,14 @@ class Resident(unittest.TestCase):
             self.assertAlmostEqual(out['cache_hit'],0.7)
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_theme_op_asks_the_brain_once_with_the_roles_and_the_description(self):
+        self.replies(dict(role='assistant',content='name = autumn\naccent = #ff8800'))
+        out=self.cmd('theme',['warm autumn forest'])
+        self.assertIn('accent = #ff8800',out['text'])
+        sent=[b for k,b in Endpoint.seen if k==self.key][-1]
+        self.assertIn('warm autumn forest',json.dumps(sent));self.assertIn('codeblock_bg',json.dumps(sent))
+        self.assertFalse(sent.get('tools'),'no tools: one plain call')
+
     def test_boolean_arguments_reach_the_tool(self):
         (self.home/'t.txt').write_text('a a\n')
         self.replies(call('edit',dict(path='t.txt',old='a',new='b',replace_all=True)),call('finish',dict(summary='Done.')))

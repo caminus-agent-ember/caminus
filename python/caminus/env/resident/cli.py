@@ -167,7 +167,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus env agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','export','diff','rewind'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -304,6 +304,9 @@ def parser():
             p.add_argument('goal_id',help='the goal the side question is about')
             p.add_argument('text',nargs='?',help='the question (or --stdin)')
             p.add_argument('--stdin',action='store_true',help='read the question from stdin')
+        if op=='theme':
+            p.add_argument('text',nargs='?',help='what the theme should look like (or --stdin)')
+            p.add_argument('--stdin',action='store_true',help='read the description from stdin')
         if op=='export':
             p.add_argument('goal_id',help='the goal to export')
             p.add_argument('--out',help='write here (default: exports/<goal8>-<date>.md in the agent home)')
@@ -702,6 +705,17 @@ def main(argv=None,stdin=None):
             try:answer=btw.ask(rt,gid,question.strip())
             finally:rt.mail.close();rt.store.close()
             emit(dict(goal=gid,answer=answer),a.json);return 0
+        if a.op=='theme':
+            # the panel's theme screen: the brain writes a colour theme from a description (one call, no tools, no
+            # goal context); the panel validates every line before it keeps any of it
+            store.close()
+            desc=((stdin or sys.stdin).read() if a.stdin else a.text or '').strip()
+            if not desc:raise ValueError('theme needs a description (TEXT or --stdin)')
+            from . import themegen
+            rt=Runtime(home)
+            try:text=themegen.write(rt,desc[:2000])
+            finally:rt.mail.close();rt.store.close()
+            emit(dict(text=text),a.json);return 0
         if a.op=='interrupt':
             gid=store.resolve(a.goal_id)
             store.request(gid,'interrupt')

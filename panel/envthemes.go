@@ -9,7 +9,10 @@ package main
 // one you had.
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +26,169 @@ type themeScreen struct {
 	sel   int
 	was   string            // the saved theme's name (marked "yours")
 	roles map[string]string // the colours in force when the screen opened: Esc restores exactly these
+
+	describing bool   // n: typing a description for the brain to write a theme from
+	draft      string // the description typed so far
+	busy       string // the description being written (a spinner shows); "" when idle
+	err        string // why the last one was refused
+}
+
+// themeGenMsg is the brain's answer for a described theme.
+type themeGenMsg struct {
+	desc, text, err string
+}
+
+// askTheme has the resident's brain write a theme from a description (the resident's theme op: one call, no tools).
+func askTheme(m envModel, desc string) tea.Cmd {
+	return func() tea.Msg {
+		var out struct {
+			Text string `json:"text"`
+		}
+		if err := residentJSON(m, []string{"theme", m.agentName, "--stdin", "--json"}, &out, desc); err != nil {
+			return themeGenMsg{desc: desc, err: err.Error()}
+		}
+		return themeGenMsg{desc: desc, text: out.Text}
+	}
+}
+
+// genCodeThemes are the code styles a written theme may name (bundled chroma styles).
+var genCodeThemes = map[string]bool{"dracula": true, "monokai": true, "nord": true, "onedark": true, "github-dark": true,
+	"gruvbox": true, "catppuccin-mocha": true, "rose-pine": true, "solarized-dark": true, "tokyonight-night": true,
+	"doom-one": true, "native": true, "vulcan": true, "paraiso-dark": true, "hrdark": true}
+
+// themeFromAnswer keeps what can be validated from the brain's answer (it is untrusted text): role = #rrggbb lines
+// for the panel's known roles, a known code style, and a name made safe for a file. Every colour role must be there.
+func themeFromAnswer(answer, desc string) (name, file string, err error) {
+	vals := map[string]string{}
+	for _, line := range strings.Split(answer, "\n") {
+		k, v, ok := strings.Cut(strings.Trim(strings.TrimSpace(line), "`"), "=")
+		if !ok {
+			continue
+		}
+		k, v = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(v)
+		if i := strings.IndexAny(v, " \t#("); i > 0 && !strings.HasPrefix(v, "#") {
+			v = v[:i]
+		}
+		if f := strings.Fields(v); len(f) > 0 {
+			v = f[0]
+		}
+		switch {
+		case k == "name":
+			name = v
+		case k == "code_theme":
+			if genCodeThemes[v] {
+				vals[k] = v
+			}
+		default:
+			if _, known := defaultTheme()[k]; known && len(v) == 7 && validThemeValue(k, v) {
+				vals[k] = strings.ToLower(v)
+			}
+		}
+	}
+	var missing []string
+	for role := range defaultTheme() {
+		if role != "code_theme" && vals[role] == "" {
+			missing = append(missing, role)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return "", "", fmt.Errorf("the answer missed %s", strings.Join(missing, ", "))
+	}
+	if vals["code_theme"] == "" {
+		vals["code_theme"] = "dracula"
+	}
+	name = safeThemeName(name, desc)
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s: written by the brain from the description: %s\n", name, strings.Join(strings.Fields(residentText(desc)), " "))
+	b.WriteString("# btop-syntax theme: key = value, full-line # comments, #rrggbb colours.\n\n")
+	roles := make([]string, 0, len(vals))
+	for k := range vals {
+		roles = append(roles, k)
+	}
+	sort.Strings(roles)
+	for _, k := range roles {
+		fmt.Fprintf(&b, "%s = %s\n", k, vals[k])
+	}
+	return name, b.String(), nil
+}
+
+// safeThemeName: lower-case letters, digits and dashes, at most 32; from the description when the answer gave none;
+// never a built-in's or an existing file's name (a -2, -3 … suffix).
+func safeThemeName(name, desc string) string {
+	clean := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+				b.WriteRune(r)
+			case r == ' ' || r == '-' || r == '_':
+				if b.Len() > 0 && !strings.HasSuffix(b.String(), "-") {
+					b.WriteByte('-')
+				}
+			}
+		}
+		return strings.Trim(b.String(), "-")
+	}
+	n := clean(name)
+	if n == "" {
+		n = clean(desc)
+	}
+	if len(n) > 32 {
+		n = strings.Trim(n[:32], "-")
+	}
+	if n == "" {
+		n = "my-theme"
+	}
+	taken := map[string]bool{}
+	for _, t := range themeNames() {
+		taken[t] = true
+	}
+	base := n
+	for i := 2; taken[n]; i++ {
+		n = fmt.Sprintf("%s-%d", base, i)
+	}
+	return n
+}
+
+// receiveThemeGen saves a written theme to the owner's themes folder and selects it for preview.
+func (m envModel) receiveThemeGen(msg themeGenMsg) envModel {
+	t := &m.chat.themes
+	if !t.open || t.busy != msg.desc {
+		return m
+	}
+	t.busy = ""
+	if msg.err != "" {
+		t.err = "could not write it: " + msg.err
+		return m
+	}
+	name, file, err := themeFromAnswer(msg.text, msg.desc)
+	if err != nil {
+		t.err = "refused: " + err.Error()
+		return m
+	}
+	dir, derr := os.UserConfigDir()
+	if derr != nil {
+		t.err = "no config folder: " + derr.Error()
+		return m
+	}
+	dir = filepath.Join(dir, "caminus", "themes")
+	if err := os.MkdirAll(dir, 0o755); err == nil {
+		err = os.WriteFile(filepath.Join(dir, name+".theme"), []byte(file), 0o644)
+	}
+	if err != nil {
+		t.err = "could not save it: " + err.Error()
+		return m
+	}
+	t.names, t.err = themeNames(), ""
+	for i, n := range t.names {
+		if n == name {
+			t.sel = i
+		}
+	}
+	m.previewTheme(name)
+	m.msg = "theme " + name + " written · Enter keeps it"
+	return m
 }
 
 // themeInUse is the saved theme's name ("caminus" when none was chosen).
@@ -69,7 +235,34 @@ func (m *envModel) previewTheme(name string) {
 func (m envModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	t := &m.chat.themes
 	n := len(t.names)
+	if t.describing {
+		switch k := msg.String(); k {
+		case "esc":
+			t.describing, t.draft = false, ""
+		case "enter":
+			if d := strings.TrimSpace(t.draft); d != "" && t.busy == "" {
+				t.describing, t.draft, t.busy, t.err = false, "", d, ""
+				return m, askTheme(m, d)
+			}
+		case "backspace":
+			if r := []rune(t.draft); len(r) > 0 {
+				t.draft = string(r[:len(r)-1])
+			}
+		case "ctrl+u":
+			t.draft = ""
+		case "ctrl+c":
+			return m, tea.Quit
+		default:
+			if txt := msg.Key().Text; txt != "" && len([]rune(t.draft)) < 300 {
+				t.draft += txt
+			}
+		}
+		return m, nil
+	}
 	switch msg.String() {
+	case "n", "/":
+		t.describing, t.err = true, ""
+		return m, nil
 	case "up", "k", "shift+tab":
 		if n > 0 {
 			t.sel = (t.sel - 1 + n) % n
@@ -107,6 +300,8 @@ func (m envModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+func fgTheme(role string) lipgloss.Style { return lipgloss.NewStyle().Foreground(themeColor(role)) }
 
 // themeSwatch is a strip of a theme's colours, read from its file without putting it in force.
 func themeSwatch(name string) string {
@@ -150,11 +345,24 @@ func (m envModel) themesOverlay(w, h int) string {
 		top = t.sel - room + 1
 	}
 	list = list[top:min(len(list), top+room)]
+	// the describe line: what you type, the brain writing it, or why the last one was refused
+	switch {
+	case t.describing:
+		list = append(list, "", fgTheme("accent").Render("describe a theme"), fgTheme("text").Render(t.draft)+"█",
+			envDim.Render("Enter: the brain writes it · Esc"))
+	case t.busy != "":
+		list = append(list, "", envWarn.Render(g.spinner[m.tickN%len(g.spinner)]+" writing a theme…"),
+			envDim.Render(ansi.Truncate(t.busy, listW-2, "…")))
+	case t.err != "":
+		list = append(list, "", envCtxHot.Render(ansi.Truncate(t.err, listW-2, "…")), envDim.Render("n  try again"))
+	default:
+		list = append(list, "", envDim.Render("n  describe a new theme"))
+	}
 	pw := max(30, w-listW-8)
 	preview := themePreview(current, pw)
 	left := lipgloss.NewStyle().Width(listW).Render(strings.Join(list, "\n"))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", preview)
-	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · Esc back", w, h)
+	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · n describe a new one · Esc back", w, h)
 }
 
 // themePreview draws one of every element the chat uses, in the theme in force.

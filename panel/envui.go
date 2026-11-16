@@ -650,6 +650,8 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.rewind.sel = max(0, len(msg.steps)-1)
 		}
 		return m, nil
+	case themeGenMsg:
+		return m.receiveThemeGen(msg), nil
 	case btwMsg:
 		b := &m.chat.btw
 		if !b.open || b.question != msg.question {

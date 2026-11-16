@@ -1337,7 +1337,12 @@ func (m envModel) btwSection(w int) string {
 	if !b.open {
 		return ""
 	}
-	textW := max(10, min(readingWidth, w-1))
+	art := mascotSmall(m.tickN % 2) // the answer's own small Ember (it blinks while it thinks)
+	if !b.loading {
+		art = mascotSmall(0)
+	}
+	artW := lipgloss.Width(art[0]) + 2
+	textW := max(10, min(readingWidth, w-1-artW))
 	q := lipgloss.NewStyle().Foreground(cText).Render(envClip(residentText(b.question), textW-4))
 	body := []string{envBusy.Render("you ") + q}
 	rows := m.btwRows()
@@ -1360,8 +1365,12 @@ func (m envModel) btwSection(w int) string {
 		}
 	}
 	var out []string
-	for _, l := range body {
-		out = append(out, " "+l)
+	for i, l := range body {
+		a := strings.Repeat(" ", artW)
+		if i < len(art) {
+			a = art[i] + "  "
+		}
+		out = append(out, " "+a+l)
 	}
 	// a reading surface: the shared heading, no frame; the keys ride on the heading's note
 	return sectionHead("by the way", cAccent, "not added to the goal · "+keys, w) + "\n" + strings.Join(out, "\n")

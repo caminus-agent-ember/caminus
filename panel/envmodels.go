@@ -59,11 +59,15 @@ type modelsState struct {
 	err           string
 }
 
-func residentJSON(m envModel, args []string, into any) error {
+func residentJSON(m envModel, args []string, into any, input ...string) error {
 	if len(m.cli) == 0 {
 		return fmt.Errorf("resident controls need the caminus CLI (--cli)")
 	}
-	out, err := residentCommand(m, args, "").CombinedOutput()
+	stdin := ""
+	if len(input) > 0 {
+		stdin = input[0] // (a description or a question, kept off the command line)
+	}
+	out, err := residentCommand(m, args, stdin).CombinedOutput()
 	if err != nil {
 		text := strings.TrimSpace(string(out))
 		if i := strings.LastIndex(text, "\n"); i >= 0 {

@@ -2017,3 +2017,29 @@ func TestCompactingShowsUntilItEndsAndTheStatusLineCountsIt(t *testing.T) {
 		t.Fatalf("the keys stay on a narrow status line: %q", foot)
 	}
 }
+
+func TestAWrittenThemeKeepsOnlyWhatValidates(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ok := "Here you go!\n```\nname = Nord!!\n"
+	for _, r := range []string{"text", "muted", "think", "dim", "accent", "ok", "warn", "action", "hot", "purple", "user", "teal", "chrome", "code_bg", "codeblock_bg"} {
+		ok += r + " = #A1B2C3   (why)\n"
+	}
+	ok += "code_theme = rm -rf\nevil = \x1b[2J\nmain_fg = #ffffff\n```\n"
+	name, file, err := themeFromAnswer(ok, "a cool nordic night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name == "nord" || !strings.HasPrefix(name, "nord") || strings.ContainsAny(name, "! ") {
+		t.Fatalf("the name is safe and never a built-in's: %q", name)
+	}
+	if !strings.Contains(file, "accent = #a1b2c3") || !strings.Contains(file, "code_theme = dracula") ||
+		strings.Contains(file, "evil") || strings.Contains(file, "\x1b") || strings.Contains(file, "rm -rf") || strings.Contains(file, "main_fg") {
+		t.Fatalf("only known roles, #rrggbb colours and a known code style survive:\n%s", file)
+	}
+	if roles, _ := parseTheme([]byte(file)); roles["accent"] != "#a1b2c3" {
+		t.Fatalf("the file loads as a theme: %v", roles)
+	}
+	if _, _, err := themeFromAnswer("text = #ffffff\naccent = #00ff00", "half a theme"); err == nil || !strings.Contains(err.Error(), "missed") {
+		t.Fatalf("an answer missing roles is refused: %v", err)
+	}
+}
