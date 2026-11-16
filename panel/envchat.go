@@ -47,21 +47,22 @@ type residentChat struct {
 	approvalDetail                          bool // Enter opened the selected request in full
 	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
 	goalsSel                                int
-	models                                  modelsState // the Models overlay (/model)
-	studio                                  studioState // the Studio overlay (/studio)
-	recap                                   string      // the "while you were away" card, until Esc
-	chordAt                                 time.Time   // Ctrl+X pressed: Ctrl+E within 2 s opens $EDITOR
-	histQuery                               string      // Ctrl+R: the draft it searches for
-	histIdx                                 int         // Ctrl+R: how far back it is
-	full                                    bool        // Ctrl+O: cards show every line
-	rootSel                                 string      // the root request the decision keys act on (shared card)
-	group                                   toolGroup   // compact view: the tool work since the last drawn block
-	cards                                   bool        // Ctrl+E: every tool card instead of the compact line
-	view                                    textView    // /btw's answer, /diff
-	rewind                                  rewindState // the /rewind step picker
-	recapNow                                float64     // when the recap was taken: saved as seen on dismiss
-	recapAsked                              int         // recapNotAsked, recapAtOpen or recapOnDemand
-	page, pageTop                           int         // an old page shown as an overlay (-1: none), and its scroll
+	models                                  modelsState   // the Models overlay (/model)
+	studio                                  studioState   // the Studio overlay (/studio)
+	recap                                   string        // the "while you were away" card, until Esc
+	chordAt                                 time.Time     // Ctrl+X pressed: Ctrl+E within 2 s opens $EDITOR
+	histQuery                               string        // Ctrl+R: the draft it searches for
+	histIdx                                 int           // Ctrl+R: how far back it is
+	full                                    bool          // Ctrl+O: cards show every line
+	rootSel                                 string        // the root request the decision keys act on (shared card)
+	group                                   toolGroup     // compact view: the tool work since the last drawn block
+	cards                                   bool          // Ctrl+E: every tool card instead of the compact line
+	sel                                     chatSelection // select to copy (envselect.go)
+	view                                    textView      // /btw's answer, /diff
+	rewind                                  rewindState   // the /rewind step picker
+	recapNow                                float64       // when the recap was taken: saved as seen on dismiss
+	recapAsked                              int           // recapNotAsked, recapAtOpen or recapOnDemand
+	page, pageTop                           int           // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
 	slashToken, slashText                   string
 	pathIdx                                 int
@@ -315,7 +316,8 @@ func (m *envModel) syncChat() {
 	}
 	changed := m.chat.rendered != len(m.residentEvents)
 	if m.chat.rendered == 0 {
-		m.chat.group = toolGroup{} // drawing from the start (a resize, Ctrl+E): the group starts over too
+		m.chat.group = toolGroup{}   // drawing from the start (a resize, Ctrl+E): the group starts over too
+		m.chat.sel = chatSelection{} // and the lines a selection pointed at are gone
 	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		// Compact (the default): tool work folds into one line between the agent's words; Ctrl+E draws every card.
@@ -1345,7 +1347,7 @@ func (m envModel) renderChat() string {
 		}
 		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
-	view := m.chat.transcript.View()
+	view := m.highlightSelection(m.chat.transcript.View())
 	if sw := m.sideWidth(); sw > 0 {
 		tw := w - sw - 1
 		view = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(tw).Render(view), " ",
@@ -1370,6 +1372,11 @@ func (m envModel) renderChat() string {
 func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
+	if next, c, ok := m.selectMouse(msg); ok {
+		return next, c
+	} else {
+		m = next
+	}
 	if wheel, ok := msg.(tea.MouseWheelMsg); ok {
 		if m.chat.live.active {
 			if wheel.Button == tea.MouseWheelUp {

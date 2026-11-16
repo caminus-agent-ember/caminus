@@ -1748,3 +1748,55 @@ func TestEmbersEmptyNoteWrapsBesideEmber(t *testing.T) {
 		t.Fatalf("the empty note:\n%s", box)
 	}
 }
+
+func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	m.chat.cards = false
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 950, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "First reply about the kernel."}},
+		residentEvent{Seq: 951, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "Second reply with a path /etc/hosts."}})
+	m.syncChat()
+	m.chat.transcript.GotoTop()
+	lines := strings.Split(ansi.Strip(m.chat.transcript.GetContent()), "\n")
+	first, second := -1, -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "First reply") {
+			first = i
+		}
+		if strings.Contains(ln, "Second reply") {
+			second = i
+		}
+	}
+	if first < 0 || second < 0 {
+		t.Fatalf("fixture: replies not in the transcript:\n%s", strings.Join(lines, "\n"))
+	}
+	top := lipgloss.Height(m.chatHead(m.width))
+	y := func(line int) int { return top + line - m.chat.transcript.YOffset() }
+	cell := func(line, word string) int { return ansi.StringWidth(line[:strings.Index(line, word)]) } // cells, not bytes
+	x1 := cell(lines[first], "First")
+	x2 := cell(lines[second], "hosts") + len("hosts") - 1
+	next, _ := m.chatUpdate(tea.MouseClickMsg{X: x1, Y: y(first), Button: tea.MouseLeft})
+	m = next.(envModel)
+	next, _ = m.chatUpdate(tea.MouseMotionMsg{X: x2, Y: y(second), Button: tea.MouseLeft})
+	m = next.(envModel)
+	if !strings.Contains(m.highlightSelection(m.chat.transcript.View()), "\x1b[7m") {
+		t.Fatal("the drag is highlighted while it goes on")
+	}
+	next, cmd := m.chatUpdate(tea.MouseReleaseMsg{X: x2, Y: y(second), Button: tea.MouseLeft})
+	m = next.(envModel)
+	got := m.selectedText()
+	if !strings.HasPrefix(got, "First reply about the kernel.") || !strings.HasSuffix(got, "Second reply with a path /etc/hosts") {
+		t.Fatalf("selected text:\n%q", got)
+	}
+	if cmd == nil || !strings.Contains(m.msg, "copied") {
+		t.Fatalf("the release copies (msg %q)", m.msg)
+	}
+	next, _ = m.chatUpdate(tea.MouseClickMsg{X: x1, Y: y(first), Button: tea.MouseLeft})
+	m = next.(envModel)
+	next, _ = m.chatUpdate(tea.MouseReleaseMsg{X: x1, Y: y(first), Button: tea.MouseLeft})
+	m = next.(envModel)
+	if m.chat.sel.shown || m.chat.sel.dragging {
+		t.Fatal("a click without a drag clears the selection")
+	}
+}
