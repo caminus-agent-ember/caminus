@@ -435,7 +435,8 @@ def main(argv=None):
     ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra)')
     ap.add_argument('--cap-usd', type=float, default=1.0, help='daily spend cap in USD')
     ap.add_argument('--ttl', type=float, default=1800, help='seconds before the relay exits on its own; 0 = never')
-    ap.add_argument('--max-tokens', type=int, default=16000)
+    # a request's output cap; billing is per token written and the dollar caps hold, so 64K costs nothing unused
+    ap.add_argument('--max-tokens', type=int, default=65536)
     ap.add_argument('--model', action='append', help='anthropic: allowed model (repeatable); default claude-haiku-5-5')
     ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key or ~/.config/caminus/deepinfra-key')
     ap.add_argument('--ledger', help='default ~/.local/state/caminus/<provider>-relay-ledger.json')

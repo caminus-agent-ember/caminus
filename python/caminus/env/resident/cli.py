@@ -136,7 +136,8 @@ def model_ops(a,home):
         if entry.get('prices'):cfg['prices']=entry['prices']
         if entry.get('context'):cfg['context']=int(entry['context'])
         if entry.get('max_output'):
-            cfg['max_tokens']=min(int(entry['max_output']),32768)
+            # a paid brain bills what it writes: its catalog maximum (up to 64K), not a local server's limit
+            cfg['max_tokens']=min(int(entry['max_output']),65536)
         if spec['kind']=='anthropic' and entry.get('thinking')=='adaptive':
             cfg['thinking']='adaptive'        # current Opus and Sonnet refuse thinking off; the store keeps none anyway
         levels=entry.get('efforts') or []

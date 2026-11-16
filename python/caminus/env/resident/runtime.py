@@ -97,6 +97,7 @@ def tool(name, description, properties, required=()):
 # that freezes the agent for minutes.
 COMPACT_FRAGMENT_CHARS = 131072
 COMPACT_CHUNK_CHARS = 32768
+OUTPUT_BOOST_MAX = 65536    # a paid brain's cut-off reply is retried once with up to this many output tokens
 
 TOOLS = [
     tool('discover', 'Inspect available system capabilities before building or installing a helper. Overview reads metadata only; containers and packages query local catalogs. Presence is not a smoke test.',
@@ -277,6 +278,7 @@ class Runtime:
         self.progress = {}
         self.plain_replies = {}
         self.truncations = {}    # goal -> replies in a row cut off at the output limit
+        self._out_boost = {}     # goal -> a larger output limit for the retry of a cut-off reply (paid brains)
         self._gate_dirty, self._gate_last = set(), {}   # goals whose files changed this turn; the last gate result
         self._gate_slow = {}
         self._held = {}          # goal -> when an Esc interrupted its turn: it waits for the human's message     # goal -> when a slow per-turn gate last ran, or 'off' after a timeout
@@ -1677,7 +1679,8 @@ class Runtime:
                 if (budget := self.context_message(gid)):
                     request.append(budget)
                 reply = self.model.complete(request,self.tools,
-                                            max_tokens=min(int(self.config.get('max_tokens',4096)),self.model.context_size()//4),
+                                            max_tokens=min(self._out_boost.get(gid) or int(self.config.get('max_tokens',4096)),
+                                                           self.model.context_size()//4),
                                             on_delta=live.on_delta)
             finally:
                 live.clear()
@@ -1706,6 +1709,7 @@ class Runtime:
                 self.plain_replies.pop(gid,None)
                 self.__dict__.setdefault('_reopen_prompted',set()).discard(gid)   # work started: a fresh episode
             self.truncations.pop(gid,None)        # a whole reply arrived: the cut-off streak is over
+            self._out_boost.pop(gid,None)         # (and a boosted limit was for that one retry)
             return True
         except Cancelled:
             # Cancelled between two streamed pieces: the model was closed, nothing was stored. After an Esc the goal
@@ -1731,9 +1735,21 @@ class Runtime:
                     self.store.update(gid,state='waiting_model',error=str(e))
                     self.store.event('model_cut',dict(error=str(e),attempt=attempt),gid)
                     return False
+                limit=self._out_boost.get(gid) or int(self.config.get('max_tokens',4096))
+                boost=min(OUTPUT_BOOST_MAX,limit*2,max(1,self.model.context_size()//4))
+                if isinstance(e,ModelTruncated) and getattr(self.model,'remote',False) and gid not in self._out_boost \
+                        and boost>limit:
+                    # A paid brain bills the tokens it wrote, and a larger limit costs nothing unless used: the cut-off
+                    # reply (nothing in it ran) is asked again once with twice the room, before the agent is told
+                    # to split its work. A local limit was sized for the server's memory and stays.
+                    self._out_boost[gid]=boost
+                    self.store.update(gid,state='working',error='')
+                    self.store.event('model_truncated',dict(error=str(e),recovered=True,boost=boost,limit=limit),gid)
+                    return True
                 if isinstance(e,ModelTruncated):
                     # The reply hit the output limit, so nothing in it ran. That is usually one oversized write:
                     # tell the agent and let it try again in smaller pieces; only a repeated cut pauses the goal.
+                    self._out_boost.pop(gid,None)
                     count=self.truncations.get(gid,0)+1
                     self.truncations[gid]=count
                     if count<TRUNCATION_LIMIT:

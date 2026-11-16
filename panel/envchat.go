@@ -1100,6 +1100,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "cancelled":
 		return toolCard("note", "goal "+shortGoal(e.Goal)+" cancelled", "", true, false, nil, w)
 	case "model_unavailable", "model_truncated", "context_refused", "model_refused", "model_gave_up":
+		if boost, _ := e.Data["boost"].(float64); boost > 0 && e.Kind == "model_truncated" {
+			limit, _ := e.Data["limit"].(float64)
+			return toolCard("note", "a reply hit the output limit",
+				fmt.Sprintf("asked again with room for %s tokens (was %s); nothing in it had run", short(int(boost)), short(int(limit))),
+				true, false, nil, w)
+		}
 		if rec, _ := e.Data["recovered"].(bool); rec && e.Kind == "model_truncated" {
 			// handled: the agent was told and retries in smaller pieces; only a third cut-off in a row pauses the goal
 			streak, _ := e.Data["streak"].(float64)

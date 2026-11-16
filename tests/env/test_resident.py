@@ -2690,6 +2690,34 @@ for line in sys.stdin:
         retry=[b for k,b in Endpoint.seen if k==self.key][-1]
         self.assertIn('hit the output limit',json.dumps(retry),'the agent is told why and how to recover')
 
+    def test_a_paid_brain_asks_a_cut_off_reply_again_with_twice_the_room_before_nudging(self):
+        from caminus.env.resident.model import ModelTruncated
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Write a long report.')
+            rt.config['max_tokens']=16384
+            rt.model.remote=True
+            rt.model.context_size=lambda:1048576
+            seen=[]
+            real=rt.model.complete
+            def complete(messages,tools=None,max_tokens=None,**kw):
+                if tools is None:return real(messages,tools,max_tokens=max_tokens,**kw)   # (the judge, a summary)
+                seen.append(max_tokens)
+                if len(seen)==1:raise ModelTruncated(dict(content='half a report'))
+                return dict(role='assistant',content='',tool_calls=[dict(id='c1',type='function',
+                            function=dict(name='finish',arguments=json.dumps(dict(summary='Done.'))))])
+            rt.model.complete=complete
+            for _ in range(6):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            self.assertEqual(seen[:2],[16384,32768],'the retry has twice the room')
+            inbox=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertFalse(any('hit the output limit' in t for t in inbox),'no split-your-work nudge after a boosted retry')
+            ev=[e['data'] for e in rt.store.events() if e['kind']=='model_truncated']
+            self.assertEqual(ev[0].get('boost'),32768)
+            self.assertNotIn(gid,rt._out_boost,'the boost ends with the whole reply')
+        finally:rt.mail.close();rt.store.close()
+
     def test_three_cut_off_replies_in_a_row_pause_the_goal(self):
         cut=lambda:dict(call('write',dict(path='big.txt',content='x')),_finish_reason='length')
         self.replies(cut(),cut(),cut(),call('finish',dict(summary='never reached')))
