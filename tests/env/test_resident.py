@@ -636,15 +636,23 @@ class Resident(unittest.TestCase):
         bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
         self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
 
-    def test_an_impossible_verdict_pauses_the_goal_for_the_human(self):
+    def test_the_judge_never_declares_a_goal_impossible_the_agent_keeps_working(self):
+        # (the owner's rule: an impossible verdict paused solvable work; it reads as not yet done)
         self.gates_on()
-        self.verdicts(dict(verdict='impossible',reason='writing /etc needs root and none was approved'))
-        self.replies(call('define_done',dict(check='/etc/x exists')),call('verify',dict(evidence='tried')),call('finish',dict(summary='Done.')))
-        out=self.cmd('once',['--goal','Write /etc/x.'],code=22)
-        self.assertEqual(out['state'],'paused');self.assertIn('impossible',out['error'])
+        self.verdicts(dict(verdict='impossible',reason='the flag was not found'),dict(verdict='met',reason='x exists'))
+        self.replies(call('define_done',dict(check='x exists')),call('verify',dict(evidence='tried')),
+                     call('finish',dict(summary='I give up, it cannot be done.')),
+                     call('write',dict(path='x',content='1')),call('verify',dict(evidence='x written')),
+                     call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal','Make x.'])
+        self.assertEqual(out['state'],'completed','the agent kept working after the judge refused, and finished')
         store=Store(self.home)
-        try:self.assertTrue(any(e['kind']=='report' and e['data']['level']=='need_you' for e in store.events(limit=500)))
+        try:
+            judged=[e['data']['verdict'] for e in store.events(limit=500) if e['kind']=='judged']
+            self.assertEqual(judged[:2],['not_yet','met'],'impossible is read as not yet done')
         finally:store.close()
+        sent=json.dumps([b for k,b in Endpoint.seen if k==self.key])
+        self.assertNotIn('"verdict": "met" | "not_yet" | "wait" | "impossible"',sent,'the judge is not offered impossible')
 
     def test_an_unreadable_judge_reply_does_not_trap_the_goal(self):
         from caminus.env.resident import judge

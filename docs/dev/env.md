@@ -45,7 +45,7 @@ caminus env relay (systemd --user) ◀── HTTP ───   the brain calls (p
 | `store.py` | SQLite: goals, the conversation, actions, the inbox, the event stream the panel reads |
 | `prompt.py` | the system prompt (what the agent is told; keep it true to what `runtime.py` enforces) |
 | `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
-| `judge.py`, `planning.py` | the finish judge (met / not yet / wait / impossible), plan-first goals |
+| `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / edit / write, the web tools, MCP servers |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |

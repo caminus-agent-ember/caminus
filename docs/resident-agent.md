@@ -152,11 +152,13 @@ optional shell command given to `define_done` (`gate`), run in the agent's home;
 a non-zero exit refuses the finish and its output becomes the next prompt. The
 **judge** is a fresh model call with no tools that sees the goal, the done check,
 the human's steers and the recorded evidence, not the agent's reasoning, and
-answers met, not yet, wait or impossible. Not yet refuses the finish with what is
-missing (three in a row pause the goal); wait means the work is done but its proof
-is still running (a build, CI, a service starting): the agent is pointed at its
-`wait` tool, and six waits pause the goal; impossible pauses it and reports to the
-human; an unreadable reply is asked once more, then accepted unchecked. The judge runs on the
+answers met, not yet or wait. Not yet refuses the finish with what is missing
+(three in a row pause the goal); wait means the work is done but its proof is still
+running (a build, CI, a service starting): the agent is pointed at its `wait` tool,
+and six waits pause the goal. The judge never declares a goal impossible: whether to
+stop is the agent's call, and a blocked agent asks its human; a model that answers
+"impossible" is read as not yet. An unreadable reply is asked once more, then
+accepted unchecked. The judge runs on the
 agent's own model in a fresh context by default (free on the local server); set
 `judge_model` to `"advisor"` in the resident's config to use the advisor's model.
 
