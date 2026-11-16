@@ -13,7 +13,9 @@ Checks, each printed PASS / FAIL, then RESULT PASS / RESULT FAIL (exit 0 / 1):
 - gates: a change under kernels/ or to code that builds a tape names its GPU gates and the cards in the body
   (AGENTS.md, Code Review Rules; CONTRIBUTING.md);
 - title: the pull request title and every authored commit headline read `<area> : <what>` (a merge of `testing` is not authored);
-- trailers: each authored commit carries exactly one `Assisted-by:` trailer and no `Co-Authored-By:`;
+- trailers: each authored commit carries exactly one `Assisted-by:` trailer and no `Co-Authored-By:`, or, when the body
+  says `AI assistance: none`, no `Assisted-by:` at all;
+- exempt: a Dependabot pull request has no title or trailer rule (its bumps are made by the bot);
 - text: the title, body and commit messages carry no decision id, machine path or session link.
 
 --metadata checks only base, title, trailers, gates and text (no CI, review or thread wait): what CI runs on each pull
@@ -37,6 +39,8 @@ TITLE = re.compile(r'[a-z][a-z0-9-]* : \S')                 # <area> : <what>, a
 MERGE = re.compile(r'Merge ')                               # merges are not authored: no title or trailer rules
 TRAILER = re.compile(r'^Assisted-by:\s*\S', re.M)
 COAUTHOR = re.compile(r'^Co-Authored-By:', re.I | re.M)
+NO_AI = re.compile(r'^AI assistance: none\s*$', re.M)      # the body's declaration for a pull request with no AI-assisted commit
+BOTS = ('app/dependabot', 'dependabot[bot]', 'dependabot')  # gh reports the bot as app/dependabot, the REST API as dependabot[bot]
 METADATA = ('base', 'title', 'trailers', 'gates', 'text')   # what --metadata checks: the pull request's text, not CI or review
 THREADS = '''query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){
   reviewThreads(first:100){nodes{isResolved isOutdated path comments(first:1){nodes{author{login} body}}}}}}}'''
@@ -69,7 +73,7 @@ def bot_reviews(pr, login):
 def look(a):
     """({check: (ok, text)}, the checks that are only pending)"""
     pr = gh('pr', 'view', str(a.n), '-R', a.repo, '--json',
-            'baseRefName,headRefOid,state,isDraft,mergeable,title,body,files,commits,comments,reviews,statusCheckRollup')
+            'baseRefName,headRefOid,state,isDraft,mergeable,title,body,author,files,commits,comments,reviews,statusCheckRollup')
     head, res, pending = pr['headRefOid'], {}, set()
     bad = [w for w, ok in (('base is ' + pr['baseRefName'], pr['baseRefName'] == 'testing'), ('state ' + pr['state'], pr['state'] in ('OPEN', 'MERGED')),
                            ('a draft', not pr['isDraft']), ('merge conflict', pr['mergeable'] != 'CONFLICTING')) if not ok]
@@ -120,16 +124,23 @@ def content(pr, res):
     res['gates'] = (not miss, (f'{len(tape)} kernel / tape files' if tape else 'no kernel or tape file changed') + (': ' + ', '.join(miss) if miss else ''))
 
     authored = [c for c in pr['commits'] if not MERGE.match(c['messageHeadline'])]   # (merges of testing are not authored)
-    bad = [] if TITLE.match(pr['title']) else ['pull request title']
-    bad += [f'commit {c["oid"][:10]}' for c in authored if not TITLE.match(c['messageHeadline'])]
-    res['title'] = (not bad, f'pull request title and {len(authored)} commit headlines are <area> : <what>' + (': ' + ', '.join(bad) if bad else ''))
+    if ((pr.get('author') or {}).get('login') or '') in BOTS:   # Dependabot's bumps carry neither a title nor a trailer
+        res['title'] = (True, f'exempt: a Dependabot pull request ({len(authored)} commits)')
+        res['trailers'] = (True, 'exempt: a Dependabot pull request')
+    else:
+        bad = [] if TITLE.match(pr['title']) else ['pull request title']
+        bad += [f'commit {c["oid"][:10]}' for c in authored if not TITLE.match(c['messageHeadline'])]
+        res['title'] = (not bad, f'pull request title and {len(authored)} commit headlines are <area> : <what>' + (': ' + ', '.join(bad) if bad else ''))
 
-    bad = []
-    for c in authored:
-        n = len(TRAILER.findall(c['messageBody']))
-        if n != 1: bad.append(f'commit {c["oid"][:10]} has {n} Assisted-by trailers')
-        if COAUTHOR.search(c['messageBody']): bad.append(f'commit {c["oid"][:10]} has Co-Authored-By')
-    res['trailers'] = (not bad, f'exactly one Assisted-by and no Co-Authored-By in {len(authored)} commits' + (': ' + '; '.join(bad) if bad else ''))
+        none = NO_AI.search(body) is not None   # a commit written without AI help has no trailer, and the body says so
+        bad = []
+        for c in authored:
+            n = len(TRAILER.findall(c['messageBody']))
+            if n > 1: bad.append(f'commit {c["oid"][:10]} has {n} Assisted-by trailers')
+            elif n == 0 and not none: bad.append(f'commit {c["oid"][:10]} has no Assisted-by trailer')
+            elif n == 1 and none: bad.append(f'commit {c["oid"][:10]} has an Assisted-by trailer, but the body says AI assistance: none')
+            if COAUTHOR.search(c['messageBody']): bad.append(f'commit {c["oid"][:10]} has Co-Authored-By')
+        res['trailers'] = (not bad, f'one Assisted-by per commit (none when the body says AI assistance: none), no Co-Authored-By, {len(authored)} commits' + (': ' + '; '.join(bad) if bad else ''))
 
     texts = [('title', pr['title']), ('body', body)] + [(c['oid'][:10], c['messageHeadline'] + '\n' + c['messageBody']) for c in pr['commits']]
     hits = sorted({f'{what} in {where}' for where, t in texts for what, rx in PRIVATE if rx.search(t)})
