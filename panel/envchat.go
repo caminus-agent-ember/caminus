@@ -604,7 +604,7 @@ func (m envModel) emberBox(w, window int) string {
 		if m.activeGoal() == nil && !l.active {
 			return "" // between goals with nothing to show: the transcript takes the rows
 		}
-		msg := "no thinking on this goal yet: the model is answering without reasoning (/effort turns it on, at a token cost)"
+		msg := "no thoughts yet: they appear with the agent's first reply (its reasoning when the model shows it, else its words and the tools it calls)"
 		for _, ln := range strings.Split(ansi.Wordwrap(msg, max(8, text), " "), "\n") {
 			body = append(body, envDim.Render(ln)) // wrapped like the thoughts: unwrapped it ran under Ember
 		}
@@ -701,36 +701,35 @@ func (m envModel) activeGoal() *residentGoal {
 // thoughtRows is the number of lines of thoughts Ember's box shows, generating or not.
 const thoughtRows = 8
 
-// thoughts is the stream Ember's box shows: the reasoning of the last few replies, oldest first, then the reply
-// being written (its thinking, tools and text). Each past reply is its tail, so a long one cannot fill the box.
+// thoughts is the stream Ember's box shows: the last few replies' thought chains, oldest first, then the reply being
+// written. A chain is the reply's reasoning when the model shows it, else its own words and the tools it called (a
+// model that answers without reasoning, as DeepSeek on DeepInfra does, left the box saying "no thinking"). It keeps
+// the current goal's chains; with none yet it keeps the latest from any goal, so the box never empties.
 func (m envModel) thoughts(width int) []string {
-	var past []string
 	gid := ""
 	if g := m.activeGoal(); g != nil {
-		gid = g.ID // while on a goal, its own thoughts only (an older goal's read as current)
+		gid = g.ID
 	}
-	for i := len(m.residentEvents) - 1; i >= 0 && len(past) < 6; i-- {
-		e := m.residentEvents[i]
-		if e.Kind != "assistant" || (gid != "" && e.Goal != gid) {
-			continue
-		}
-		r, _ := e.Data["reasoning"].(string)
-		if strings.TrimSpace(r) == "" {
-			continue
-		}
-		if len(r) > 3000 {
-			r = "…" + r[len(r)-3000:]
-		}
-		past = append([]string{r}, past...)
+	chains := m.thoughtChains(gid)
+	if len(chains) == 0 && gid != "" {
+		chains = m.thoughtChains("")
 	}
 	var out []string
-	for _, r := range past {
+	wrap := func(text string, st lipgloss.Style) {
+		text = strings.ReplaceAll(text, "\t", "    ") // a tab is one cell to the wrapper and up to eight on screen
+		for _, ln := range strings.Split(ansi.Wordwrap(residentText(strings.TrimSpace(text)), max(8, width), " "), "\n") {
+			out = append(out, st.Render(ln))
+		}
+	}
+	for _, c := range chains {
 		if len(out) > 0 {
 			out = append(out, "")
 		}
-		r = strings.ReplaceAll(r, "\t", "    ") // a tab is one cell to the wrapper and up to eight on screen: it broke the border
-		for _, ln := range strings.Split(ansi.Wordwrap(residentText(strings.TrimSpace(r)), max(8, width), " "), "\n") {
-			out = append(out, envThink.Render(ln))
+		if c.text != "" {
+			wrap(c.text, envThink)
+		}
+		for _, t := range c.tools {
+			out = append(out, ansi.Truncate(envDim.Render("→ ")+envTool.Render(t), max(8, width), "…"))
 		}
 	}
 	if m.chat.live.active {
@@ -740,6 +739,54 @@ func (m envModel) thoughts(width int) []string {
 		out = append(out, m.chat.live.body(width)...)
 	}
 	return out
+}
+
+type thoughtChain struct {
+	text  string
+	tools []string
+}
+
+// thoughtChains is the last six replies of a goal ("" = any) that carry a thought: their reasoning, else their words,
+// with the tools each called. A long one keeps its tail.
+func (m envModel) thoughtChains(gid string) []thoughtChain {
+	var chains []thoughtChain
+	for i := len(m.residentEvents) - 1; i >= 0 && len(chains) < 6; i-- {
+		e := m.residentEvents[i]
+		if e.Kind != "assistant" || (gid != "" && e.Goal != gid) {
+			continue
+		}
+		text, _ := e.Data["reasoning"].(string)
+		if strings.TrimSpace(text) == "" {
+			text, _ = e.Data["content"].(string)
+		}
+		if len(text) > 3000 {
+			text = "…" + text[len(text)-3000:]
+		}
+		var tools []string
+		calls, _ := e.Data["tool_calls"].([]any)
+		for _, raw := range calls {
+			call, _ := raw.(map[string]any)
+			f, _ := call["function"].(map[string]any)
+			name, _ := f["name"].(string)
+			var args map[string]any
+			if s, _ := f["arguments"].(string); s != "" {
+				_ = json.Unmarshal([]byte(s), &args)
+			}
+			what := name
+			for _, k := range []string{"command", "path", "query", "url", "check", "evidence", "summary", "question"} {
+				if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
+					what += "  " + oneLine(residentText(v))
+					break
+				}
+			}
+			tools = append(tools, what)
+		}
+		if strings.TrimSpace(text) == "" && len(tools) == 0 {
+			continue
+		}
+		chains = append([]thoughtChain{{strings.TrimSpace(text), tools}}, chains...)
+	}
+	return chains
 }
 
 // envTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.
@@ -1796,6 +1843,11 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	case "/effort":
 		clear()
 		return m, setEffort(m, strings.TrimSpace(arg))
+	case "/freetime":
+		// a free-time stretch now: after any running work, within the day's free-time budget
+		clear()
+		m.msg = "free time asked: it starts at the agent's next pass (after any running work)"
+		return m, residentAction(m, []string{"heartbeat", m.agentName, "now", "--json"}, "")
 	case "/recap":
 		clear()
 		m.chat.recapAsked = recapOnDemand
@@ -1960,6 +2012,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/plan", "approve or revise a waiting plan (/goal --plan TEXT starts one)"},
 	{"/servers", "the model servers and their windows"},
 	{"/agents", "every resident on this machine (advanced)"},
+	{"/freetime", "start a free-time stretch now (after any running work)"},
 	{"/recap", "while you were away: free time since your last goal"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
 }

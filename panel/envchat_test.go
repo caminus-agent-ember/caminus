@@ -343,7 +343,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /freetime /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -1744,7 +1744,7 @@ func TestEmbersEmptyNoteWrapsBesideEmber(t *testing.T) {
 			t.Fatalf("row wider than the box: %q", row)
 		}
 	}
-	if !strings.Contains(box, "no thinking on this goal yet") {
+	if !strings.Contains(box, "no thoughts yet") {
 		t.Fatalf("the empty note:\n%s", box)
 	}
 }
@@ -1798,5 +1798,30 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 	m = next.(envModel)
 	if m.chat.sel.shown || m.chat.sel.dragging {
 		t.Fatal("a click without a drag clears the selection")
+	}
+}
+
+
+func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 200, 50
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 990, Goal: "original", Kind: "assistant", Data: map[string]any{
+			"content": "Let me check the BL density first.",
+			"tool_calls": []any{map[string]any{"id": "c1", "type": "function", "function": map[string]any{
+				"name": "terminal", "arguments": `{"command":"python3 density.py xbl.img"}`}}}}},
+		residentEvent{Seq: 991, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": "0.0256"}}})
+	box := ansi.Strip(m.emberBox(90, 8))
+	if !strings.Contains(box, "Let me check the BL density first.") || !strings.Contains(box, "→ terminal  python3 density.py xbl.img") {
+		t.Fatalf("without reasoning, the words and the tool calls are the chain:\n%s", box)
+	}
+	if strings.Contains(box, "no thoughts yet") {
+		t.Fatal("the note shows only before any reply")
+	}
+	// a goal with no replies yet keeps the latest chain from any goal: the box never empties
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "fresh", State: "working", Prompt: "new"})
+	m.resident.Goals[0].State = "completed"
+	if box := ansi.Strip(m.emberBox(90, 8)); !strings.Contains(box, "BL density") {
+		t.Fatalf("a fresh goal keeps the latest chain:\n%s", box)
 	}
 }
