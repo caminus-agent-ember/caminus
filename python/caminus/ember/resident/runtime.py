@@ -86,6 +86,7 @@ def read_only_command(cmd):
     return True
 RUNTIME_HEADER = ('EMBER RUNTIME (from your harness, rebuilt this turn; not part of any tool result: '
                   'see "The runtime block" in your instructions)')
+BUSY_WAIT_S = 3600      # how long a goal waits out a provider's capacity errors (429 / 503 / 529) before it stops
 TODO_STALE = 8          # steps without a todo update, with items open, before the loop state mentions it
 COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
 RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
@@ -280,6 +281,7 @@ class Runtime:
         self.terminal = terminal or Terminal(self.home)
         self.mail = Mail(self.config)
         self.retry = {}
+        self.busy_since = {}      # goal -> when the provider's capacity errors began (see _schedule_retry)
         self.base_timeout = float(self.config.get('timeout', 900))
         # The loop's gates: a goal states what done looks like before it can complete, and cannot finish
         # without exercising that check. Fixture agents that predate the loop record loop_gates false.
@@ -1724,6 +1726,7 @@ class Runtime:
             if self.store.goal(gid)['state']=='cancelled':
                 return True
             self.retry.pop(gid,None)
+            self.busy_since.pop(gid,None)
             reasoning = reply.pop('reasoning_content','')
             if not self.store.model_reply(gid,reply,reasoning=reasoning):
                 return True
@@ -1837,7 +1840,23 @@ class Runtime:
         limit=self.config.get('max_model_retries')
         if limit is None and getattr(self.model,'remote',False):
             limit=8
-        if limit is not None and attempt>int(limit):
+        busy_since = self.__dict__.setdefault('busy_since', {})
+        busy = getattr(e,'status',None) in (429, 503, 529) or 'capacity' in str(e).lower() or 'overloaded' in str(e).lower()
+        if busy:
+            # The provider is out of capacity (Mistral: 429 backend_out_of_capacity): a refused call is not billed, so
+            # it does not spend the retry budget; wait longer instead (up to 5 minutes apart), for up to an hour
+            first = busy_since.setdefault(gid, time.time())
+            if time.time() - first < BUSY_WAIT_S:
+                delay = min(300.0, 15.0 * 2 ** min(attempt - 1, 5))
+                after = getattr(e,'retry_after',None)
+                if after:
+                    delay = max(delay, min(float(after), 300.0))
+                self.retry[gid] = (time.time() + delay, attempt)
+                self.store.event('model_busy', dict(error=str(e)[:300], retry_in=round(delay), waited=round(time.time() - first)), gid)
+                return attempt
+        else:
+            busy_since.pop(gid, None)
+        if busy or (limit is not None and attempt>int(limit)):
             self.retry.pop(gid,None)
             self.store.update(gid,state='error',error='model failed %d times in a row: %s' % (attempt,e))
             self.store.event('model_gave_up',dict(error=str(e),attempts=attempt),gid)

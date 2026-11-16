@@ -668,6 +668,27 @@ class Resident(unittest.TestCase):
         off=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',thinking='disabled',context=200000))
         self.assertEqual(off._to_anthropic([dict(role='user',content='hi')],None,None)['thinking'],dict(type='disabled'))
 
+    def test_a_providers_capacity_errors_are_waited_out_not_counted(self):
+        from caminus.ember.resident import runtime as R
+        from caminus.ember.resident.model import ModelError
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            rt.model.remote=True
+            busy=ModelError('HTTP Error 429: Too Many Requests: {"type":"backend_out_of_capacity"}');busy.status=429
+            for i in range(20):
+                self.assertIsNotNone(rt._schedule_retry(gid,busy),'capacity errors do not spend the 8 retries')
+            self.assertNotEqual(rt.store.goal(gid)['state'],'error')
+            self.assertLessEqual(rt.retry[gid][0]-time.time(),301,'at most 5 minutes apart')
+            rt.busy_since[gid]=time.time()-R.BUSY_WAIT_S-1
+            self.assertIsNone(rt._schedule_retry(gid,busy),'after an hour of it the goal stops')
+            self.assertEqual(rt.store.goal(gid)['state'],'error')
+            gid2=rt.store.enqueue('Make y.');rt.retry.pop(gid2,None)
+            broken=ModelError('HTTP Error 500: boom');broken.status=500
+            for i in range(8):rt._schedule_retry(gid2,broken)
+            self.assertIsNone(rt._schedule_retry(gid2,broken),'other failures keep the 8-attempt limit')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_stale_todo_list_gets_a_gentle_reminder(self):
         from caminus.ember.resident.runtime import TODO_STALE
         rt=Runtime(self.home)
