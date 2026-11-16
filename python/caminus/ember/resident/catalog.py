@@ -10,7 +10,8 @@ A provider is one endpoint the resident can reach (directly, or through the owne
              reasoning_effort, prompt_cache). Reasoning is set with reasoning_effort (none, low, medium, high).
 - mistral    Mistral AI Studio, OpenAI-compatible at https://api.mistral.ai/v1 (through the owner's relay): GET
              {base}/models gives capabilities (completion_chat, function_calling, vision), max_context_length and
-             aliases. No prices (the relay meters from the owner's price file) and no output cap.
+             aliases, and no prices: the owner's relay adds each priced model's `pricing` from its price file (the
+             agent's spend meter needs them). No output cap.
 - openai     any other OpenAI-compatible server: GET {base}/models, ids only.
 
 Every model is normalized to one entry: id, provider, context, max_output, efforts (the levels /effort offers, empty
@@ -95,8 +96,11 @@ def mistral_entries(data, provider):
         if m['id'] in seen:
             continue
         seen.update([m['id'], *(m.get('aliases') or [])])
+        p = m.get('pricing') or {}          # (added by the owner's relay from its price file; Mistral lists none)
+        prices = dict(input=float(p['input']), output=float(p['output']),
+                      cache_read=float(p.get('cache_read', p['input']))) if 'input' in p and 'output' in p else None
         out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=m.get('max_context_length'),
-                        max_output=None, efforts=[], thinking='', vision=bool(caps.get('vision')), prices=None))
+                        max_output=None, efforts=[], thinking='', vision=bool(caps.get('vision')), prices=prices))
     return out
 
 

@@ -247,6 +247,18 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 conn.request('GET', self.path, None, headers)
                 up = conn.getresponse()
                 data = up.read()
+                if provider == 'mistral' and up.status == 200 and prices is not None:
+                    # the owner's prices ride along in the list (the agent cannot read the price file; without them
+                    # its spend meter priced every turn as unknown and counted $0)
+                    try:
+                        listed = json.loads(data)
+                        for m in listed.get('data') or []:
+                            r = prices.get(m.get('id'))
+                            if r:
+                                m['pricing'] = dict(input=r[0], output=r[1], cache_read=r[2])
+                        data = json.dumps(listed).encode()
+                    except (ValueError, AttributeError, TypeError):
+                        pass
                 self.send_response(up.status)
                 self.send_header('Content-Type', up.getheader('Content-Type') or 'application/json')
                 self.send_header('Content-Length', str(len(data)))

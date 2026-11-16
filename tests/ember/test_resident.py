@@ -2062,6 +2062,14 @@ for line in sys.stdin:
             code,_=self._post(base+'/v1/chat/completions',dict(model='codestral-latest',messages=[]))
             self.assertEqual(code,200,'a price added to the file is picked up without a restart')
         finally:stop()
+        # the model list passed through the relay carries the owner's prices
+        import urllib.request
+        lst=json.dumps(dict(data=[dict(id='mistral-medium-latest'),dict(id='unpriced')])).encode()
+        base,calls,ledger,log,stop=self._relay('mistral',lambda c:(200,lst,'application/json'),prices=prices)
+        try:
+            with urllib.request.urlopen(base+'/v1/models',timeout=10) as r:got=json.loads(r.read())['data']
+            self.assertEqual(got[0]['pricing'],dict(input=0.4,output=2.0,cache_read=0.4));self.assertNotIn('pricing',got[1])
+        finally:stop()
         # a price under one name of a model applies to its other names (the provider's model list says which)
         pf.write_text(json.dumps({'mistral-large-2512':[0.7,2.1]}))
         listed=dict(data=[dict(id='mistral-large-2512',aliases=['mistral-large-latest']),dict(id='other',aliases=[])])
@@ -2103,6 +2111,9 @@ for line in sys.stdin:
         rows=catalog.mistral_entries(data,'mistral')
         self.assertEqual([r['id'] for r in rows],['mistral-medium-2508'],'tools-capable chat models only, aliases once')
         self.assertEqual((rows[0]['context'],rows[0]['vision'],rows[0]['prices']),(131072,True,None))
+        data['data'][0]['pricing']=dict(input=0.15,output=0.5,cache_read=0.03)
+        self.assertEqual(catalog.mistral_entries(data,'mistral')[0]['prices'],dict(input=0.15,output=0.5,cache_read=0.03),
+                         'the prices the owner\'s relay adds reach the catalog (the spend meter needs them)')
 
     def test_a_relay_installs_as_an_owner_service_without_expiry(self):
         from caminus.ember import relay
