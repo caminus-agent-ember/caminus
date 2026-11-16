@@ -1163,6 +1163,24 @@ for line in sys.stdin:
             self.assertIsNone(rt.free.pulse(),'the rest interval starts when a stretch ends')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_failed_stretch_never_restarts_at_once_and_a_spend_refusal_waits_an_hour(self):
+        from caminus.env.resident import freetime
+        rt=self.free_runtime(rest_seconds=60)
+        try:
+            gid=rt.free.pulse()
+            rt.store.update(gid,state='error',error='HTTP Error 402: Payment Required: relay: daily cap $3.00 reached')
+            self.assertIsNone(rt.free.pulse(),'a spend refusal: no new stretch at once (1,184 started in a row before)')
+            st=rt.free._state();st['last_start']-=3601;rt.free._save(st)
+            again=rt.free.pulse()
+            self.assertIsNotNone(again,'an hour later it tries again (a raised cap resumes it)')
+            rt.store.update(again,state='error',error='connection refused')
+            self.assertEqual(rt.free._failure_wait(rt.free._state()),60*4,'other failures: the rest doubled per failure in a row')
+            for i in range(5):
+                g=rt.store.enqueue('x',kind='free');rt.store.update(g,state='error',error='HTTP Error 402: cap reached')
+            text=freetime.recap(rt.store,since=0)
+            self.assertIn('×5',text);self.assertLess(len(text.splitlines()),8,'identical outcomes in a row are one line')
+        finally:rt.mail.close();rt.store.close()
+
     def test_free_time_off_by_default_and_heartbeat_command(self):
         rt=Runtime(self.home)
         try:self.assertIsNone(rt.free.pulse())

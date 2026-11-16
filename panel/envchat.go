@@ -567,7 +567,7 @@ func (m envModel) sidePanel(sw, height int) string {
 		}
 		aw := lipgloss.Width(art[0])
 		for i, a := range art {
-			rows[height-len(art)+i] = strings.Repeat(" ", max(0, sw-aw-1)) + a
+			rows[height-len(art)+i] = strings.Repeat(" ", max(0, sw-aw-4)) + a // (a few columns in from the edge)
 		}
 	}
 	for i, r := range rows {

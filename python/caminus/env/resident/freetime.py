@@ -150,7 +150,13 @@ class FreeTime:
             return None
         state = self._state()
         now = time.time()
-        if not asked and now - float(state.get('last_end', 0)) < float(cfg['rest_seconds']):
+        # the rest counts from the last start too: a stretch that failed records no end, and the next one started at
+        # once (a relay at its daily cap refused 1,184 stretches in a row)
+        last = max(float(state.get('last_end', 0)), float(state.get('last_start', 0)))
+        if not asked and now - last < float(cfg['rest_seconds']):
+            return None
+        wait = self._failure_wait(state)
+        if wait and now < float(state.get('last_start', 0)) + wait:
             return None
         if self.rt.brains.next_is_remote():
             if self._price_unknown():
@@ -164,6 +170,26 @@ class FreeTime:
         if asked:
             self.rt.store.event('free_time_asked', {}, gid)
         return gid
+
+    def _failure_wait(self, state):
+        """seconds to wait after stretches that failed (state error), counted from the last start: an hour after a
+        relay or provider refused for spend (HTTP 402, a cap: raising it resumes within the hour), else the rest
+        interval doubled per failure in a row, at most six hours; 0 when the last stretch did not fail"""
+        rows = list(self.rt.store.db.execute(
+            "SELECT state,error FROM goals WHERE kind IN ('free','dream') ORDER BY created DESC LIMIT 8"))
+        fails = 0
+        for r in rows:
+            if r['state'] != 'error':
+                break
+            fails += 1
+        if not fails:
+            return 0
+        err = (rows[0]['error'] or '').lower()
+        if '402' in err or 'cap' in err or 'billing' in err or 'payment' in err:
+            self._note_once(state, 'spend_refused', 'the brain refused for spend (a daily cap): free time waits an '
+                            'hour, then tries again')
+            return 3600
+        return min(6 * 3600, float(self.cfg['rest_seconds']) * 2 ** fails)
 
     def _price_unknown(self):
         return price(self.rt.brains.next_model_name(), {}) is None
@@ -319,10 +345,23 @@ def recap(store, since=None):
     if not rows:
         return ''
     lines = ['While you were away (%d stretch%s):' % (len(rows), '' if len(rows) == 1 else 'es')]
+    # stretches in a row with the same outcome are one line with a count and their time span (a refused relay made
+    # 1,184 identical error lines)
+    runs = []
     for r in rows:
-        when = time.strftime('%H:%M', time.localtime(r['created']))
+        kind = 'dream' if r['kind'] == 'dream' else 'free time'
         what = first_sentences(r['summary'] or r['error'] or r['state'], 300)
-        lines.append('- %s %s: %s' % (when, 'dream' if r['kind'] == 'dream' else 'free time', what))
+        if runs and runs[-1][1] == kind and runs[-1][2] == what:
+            runs[-1][3] = r['created']
+            runs[-1][4] += 1
+        else:
+            runs.append([r['created'], kind, what, r['created'], 1])
+    for start, kind, what, end, n in runs:
+        when = time.strftime('%H:%M', time.localtime(start))
+        if n > 1:
+            when += '-' + time.strftime('%H:%M', time.localtime(end))
+            kind = '%s ×%d' % (kind, n)
+        lines.append('- %s %s: %s' % (when, kind, what))
     unanswered = [e for e in store.events() if e['kind'] == 'question_unanswered' and e['ts'] > since]
     if unanswered:
         lines.append('Questions it left for you: ' + '; '.join(str(e['data'].get('text', ''))[:120] for e in unanswered))
