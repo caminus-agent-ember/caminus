@@ -400,6 +400,9 @@ def service(argv, run=subprocess.run):
         r = ctl('enable', '--now', unit_name(a.provider))
         if r.returncode:
             sys.exit('systemctl --user enable failed: ' + (r.stderr or r.stdout).strip()[:300])
+        # enable --now leaves a running relay on its old settings: rerunning install to change the cap did nothing
+        # until the next restart. Restart it (today's spend is in the ledger file and carries over).
+        ctl('restart', unit_name(a.provider))
         print(f'installed {unit_name(a.provider)}: cap ${a.cap_usd:.2f}/day, no expiry, restarts on failure. '
               'For it to run while you are logged out: loginctl enable-linger')
         return 0

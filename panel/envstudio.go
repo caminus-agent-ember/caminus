@@ -11,6 +11,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -45,6 +46,7 @@ type studioMsg struct {
 
 type studioTextMsg struct {
 	path, text, err string
+	binary          bool
 }
 
 type studioState struct {
@@ -55,6 +57,9 @@ type studioState struct {
 	reading       string // the path being read; its text below
 	text          []string
 	err           string
+	img           image.Image // an image being shown (envstudioview.go)
+	imgInfo       string
+	armed         string // a file the owner pressed o on once that needs a second press (activeFormat)
 }
 
 func seenPath(agent string) string {
@@ -130,12 +135,13 @@ func fetchStudio(m envModel) tea.Cmd {
 func readStudio(m envModel, path string) tea.Cmd {
 	return func() tea.Msg {
 		var out struct {
-			Text string `json:"text"`
+			Text   string `json:"text"`
+			Binary bool   `json:"binary"`
 		}
 		if err := residentJSON(m, []string{"studio", m.agentName, "--read", path, "--json"}, &out); err != nil {
 			return studioTextMsg{path: path, err: err.Error()}
 		}
-		return studioTextMsg{path: path, text: out.Text}
+		return studioTextMsg{path: path, text: out.Text, binary: out.Binary}
 	}
 }
 
@@ -167,6 +173,12 @@ func (m envModel) recapCard(w int) string {
 func (m envModel) studioOverlay(w, h int) string {
 	st := m.chat.studio
 	inner := max(10, w-6)
+	if st.reading != "" && st.img != nil && st.err == "" {
+		bodyH := max(2, h-7)
+		rows := append([]string{envDim.Render(st.imgInfo)}, halfBlocks(st.img, inner, bodyH)...)
+		return overlayBox("STUDIO  "+filepath.Base(st.reading), strings.Join(rows, "\n"),
+			"o open full size on your desktop  ·  Esc back", w, h)
+	}
 	if st.reading != "" {
 		bodyH := max(1, h-6)
 		top := max(0, min(st.top, max(0, len(st.text)-bodyH)))
@@ -177,7 +189,7 @@ func (m envModel) studioOverlay(w, h int) string {
 		if st.err != "" {
 			rows = []string{envWarn.Render(st.err)}
 		}
-		return overlayBox("STUDIO  "+filepath.Base(st.reading), strings.Join(rows, "\n"), "↑↓ / PgUp PgDn scroll  ·  Esc back", w, h)
+		return overlayBox("STUDIO  "+filepath.Base(st.reading), strings.Join(rows, "\n"), "↑↓ / PgUp PgDn scroll  ·  o open on your desktop  ·  Esc back", w, h)
 	}
 	listH := max(1, h-6)
 	sel := max(0, min(st.sel, len(st.list)-1))
@@ -207,7 +219,22 @@ func (m envModel) studioOverlay(w, h int) string {
 			rows = append(rows, ansi.Truncate("   "+envDim.Render(label), inner, "…"))
 		}
 	}
-	return overlayBox(fmt.Sprintf("STUDIO  %d", len(st.list)), strings.Join(rows, "\n"), "↑↓ move  ·  Enter read", w, h)
+	return overlayBox(fmt.Sprintf("STUDIO  %d", len(st.list)), strings.Join(rows, "\n"), "↑↓ move  ·  Enter view  ·  o open on your desktop", w, h)
+}
+
+// studioOpen opens a studio file on the owner's desktop: at once for an image, text or media; for a format that can
+// run code there (activeFormat), only on a second press after a warning.
+func (m envModel) studioOpen(path string) (tea.Model, tea.Cmd) {
+	st := &m.chat.studio
+	if activeFormat(path) && st.armed != path {
+		st.armed = path
+		m.msg = filepath.Base(path) + ": opening it runs your desktop app on a file the agent made, and this format " +
+			"can carry scripts that would run as you, outside its account. Press o again to open it anyway."
+		return m, nil
+	}
+	st.armed = ""
+	m.msg = "copying " + filepath.Base(path) + " to open it…"
+	return m, readStudioRaw(m, path, true)
 }
 
 func (m envModel) studioKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -216,10 +243,15 @@ func (m envModel) studioKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if k == "ctrl+c" {
 		return m, tea.Quit
 	}
+	if k != "o" {
+		st.armed = "" // the second press must come right after the warning
+	}
 	if st.reading != "" {
 		switch k {
 		case "esc", "q", "left":
-			st.reading, st.text, st.err, st.top = "", nil, "", 0
+			st.reading, st.text, st.err, st.top, st.img, st.imgInfo = "", nil, "", 0, nil, ""
+		case "o":
+			return m.studioOpen(st.reading)
 		case "up", "k":
 			st.top = max(0, st.top-1)
 		case "down", "j":
@@ -242,12 +274,27 @@ func (m envModel) studioKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		st.loading = true
 		return m, fetchStudio(m)
+	case "o":
+		if len(st.list) == 0 {
+			return m, nil
+		}
+		return m.studioOpen(st.list[max(0, min(st.sel, len(st.list)-1))].Path)
 	case "enter":
 		if len(st.list) == 0 {
 			return m, nil
 		}
 		e := st.list[max(0, min(st.sel, len(st.list)-1))]
-		st.reading, st.text, st.err, st.top = e.Path, []string{"reading…"}, "", 0
+		st.reading, st.text, st.err, st.top, st.img, st.imgInfo = e.Path, []string{"reading…"}, "", 0, nil, ""
+		switch studioKind(e.Path) {
+		case "image":
+			st.text = []string{"drawing the image…"}
+			return m, readStudioRaw(m, e.Path, false)
+		case "external":
+			st.text = []string{fmt.Sprintf("%s  ·  %s", strings.TrimPrefix(filepath.Ext(e.Path), "."), humanBytes(int(e.Size))), "",
+				"The panel cannot draw this format. Press o to open it in your desktop's viewer (a copy goes to",
+				studioOpenDir(m.agentName) + ")."}
+			return m, nil
+		}
 		return m, readStudio(m, e.Path)
 	}
 	return m, nil

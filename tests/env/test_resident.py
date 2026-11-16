@@ -285,6 +285,43 @@ class Resident(unittest.TestCase):
             self.assertIsNone(rt.free.pulse(),'and not again')
         finally:rt.mail.close();rt.store.close()
 
+    def test_heartbeat_sets_the_stretch_steps(self):
+        out=self.cmd('heartbeat',['on','--stretch-steps','120'])
+        self.assertEqual(out['free_time']['stretch_steps'],120)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.free.pulse()
+            self.assertEqual(rt.store.goal(gid).get('max_steps') or rt.store.goal(gid).get('step_limit'),120,
+                             'a stretch takes the configured steps')
+        finally:rt.mail.close();rt.store.close()
+        # 0 (the default): no step limit, the stretch's time ends it
+        out=self.cmd('heartbeat',['--stretch-steps','0'])
+        self.assertEqual(out['free_time']['stretch_steps'],0)
+        rt=Runtime(self.home)
+        try:
+            rt.store.update(gid,state='completed')
+            rt.free.cfg['rest_seconds']=0
+            (self.home/'free_time_now').write_text('1')
+            g2=rt.free.pulse();goal=rt.store.goal(g2)
+            self.assertFalse(goal.get('max_steps') or goal.get('step_limit'),'no step limit')
+            self.assertTrue(goal.get('deadline') or goal.get('max_seconds'),'the time still ends it')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_studio_reads_raw_bytes_and_skips_binary_headlines(self):
+        import base64
+        (self.home/'studio').mkdir(exist_ok=True)
+        png=bytes([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a])+b'\0'*40
+        (self.home/'studio'/'sheet.png').write_bytes(png)
+        listing=self.cmd('studio',[])
+        e=[x for x in listing['studio'] if x['name']=='sheet.png'][0]
+        self.assertEqual(e['head'],'','no text headline from an image')
+        raw=self.cmd('studio',['--read',str(self.home/'studio'/'sheet.png'),'--raw'])
+        self.assertEqual(base64.b64decode(raw['data']),png)
+        txt=self.cmd('studio',['--read',str(self.home/'studio'/'sheet.png')])
+        self.assertTrue(txt['binary'],'a text read says it is binary')
+        with self.assertRaises(AssertionError):
+            self.cmd('studio',['--read',str(self.home/'config.json'),'--raw'])      # only the journal and the studio
+
     def test_three_plain_text_replies_pause_the_goal(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),
@@ -1874,6 +1911,8 @@ for line in sys.stdin:
             self.assertIn('Restart=on-failure',unit);self.assertIn('WantedBy=default.target',unit)
             self.assertNotIn('\nk\n',unit,'the key itself never goes in the unit')
             self.assertIn(['systemctl','--user','enable','--now','caminus-relay-deepinfra.service'],calls)
+            # a reinstall (a new cap) restarts the running relay so the new settings apply now
+            self.assertIn(['systemctl','--user','restart','caminus-relay-deepinfra.service'],calls)
             self.assertIn('enable-linger',out.getvalue())
             # it runs a frozen copy, never the source tree: editing or moving a checkout cannot stop the relay
             import re as _re;frozen=_re.search(r'/xdg-data/caminus/relay-code/[0-9a-f]{12}',unit)
@@ -2136,16 +2175,19 @@ for line in sys.stdin:
     def test_poll_returns_only_new_output_and_says_when_quiet(self):
         t=Terminal(self.home);sid=uuid.uuid4().hex
         # Two bursts separated by a pause; the command then waits for a line before exiting.
-        cmd='printf first-burst; sleep 1; printf second-burst; read x'
-        out=t.call(sid,dict(command=cmd,yield_ms=50))
+        # (the pause is long so a slow runner still polls inside it; the first burst may come back with the start or
+        # with the first poll, depending on the machine's speed, but exactly once)
+        cmd='printf first-burst; sleep 4; printf second-burst; read x'
+        start=t.call(sid,dict(command=cmd,yield_ms=50))
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
-        self.assertIn('first-burst',out['output']);self.assertNotIn('second-burst',out['output'])
-        self.assertFalse(out['no_new_output'])
+        both=start['output']+out['output']
+        self.assertEqual(both.count('first-burst'),1,both);self.assertNotIn('second-burst',both)
+        self.assertTrue(out['no_new_output'] if start['output'] else not out['no_new_output'])
         # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
         self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])
         # Second burst arrives; that poll returns only the second burst.
-        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=6000))
         self.assertEqual(out['output'],'second-burst');self.assertFalse(out['no_new_output'])
         # An explicit offset=0 still reads everything from the beginning.
         out=t.call(uuid.uuid4().hex,dict(session=sid,stdin='go\n',yield_ms=1000,offset=0))
