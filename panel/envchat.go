@@ -285,9 +285,14 @@ func (m *envModel) syncChat() {
 	oldBottom := m.chat.transcript.AtBottom()
 	// A viewport re-wraps its whole content on a size change, and this runs on every live snapshot, so a
 	// 1 MB history would be re-read ten times a second while a reply streams. Only resize when it moved.
-	if m.chat.transcript.Width() != w {
-		m.chat.transcript.SetWidth(w)
+	tw := w
+	if sw := m.sideWidth(); sw > 0 {
+		tw = w - sw - 1 // the side panel takes the right column
 	}
+	if m.chat.transcript.Width() != tw {
+		m.chat.transcript.SetWidth(tw)
+	}
+	w = tw // the transcript's content (cards, wrapping, the group line) fits its column
 	// One header line and one footer line surround the transcript; the live tail sits between it and the
 	// composer, so a generating reply never rewrites the durable content.
 	// Half the body is the live window while a reply is written; the transcript keeps the other half.
@@ -412,7 +417,8 @@ func (m envModel) windowTitle() string {
 		now = "writing"
 	case l.active:
 		now = "thinking"
-	case m.chat.group.running != "":
+	case m.chat.group.running != "" && state == "working" && m.activeGoal() != nil &&
+		(m.chat.group.runningGoal == "" || m.chat.group.runningGoal == m.activeGoal().ID):
 		now = "running"
 		if since := m.chat.group.runningSince; since > 0 {
 			now += " " + (time.Duration(time.Since(time.Unix(int64(since), 0)).Seconds()) * time.Second).String()
@@ -428,7 +434,115 @@ func (m envModel) windowTitle() string {
 func (m envModel) liveHeight() int { return max(3, m.bodyHeight()/2-3) }
 
 // liveWindow is the number of body lines the live box shows: its content height less the label line.
-func (m envModel) liveWindow() int { return max(1, m.liveHeight()-1) }
+func (m envModel) liveWindow() int {
+	if sw := m.sideWidth(); sw > 0 {
+		return m.sideEmberRows()
+	}
+	return max(1, min(m.liveHeight(), thoughtRows+1)-1)
+}
+
+// sideWidth is the side panel's width on a wide terminal (0: none). The transcript's prose wraps at readingWidth, so
+// past about 160 columns the right part of the screen was empty; the panel takes it.
+func (m envModel) sideWidth() int {
+	if m.width < sideMinTerminal {
+		return 0
+	}
+	return min(sideMax, m.width-readingWidth-8)
+}
+
+const sideMinTerminal, sideMax = 160, 90
+
+// sideEmberRows is the thoughts' window in the side panel: about 60 % of the body, the rest for tasks and now.
+func (m envModel) sideEmberRows() int { return max(3, m.bodyHeight()*6/10-3) }
+
+// sidePanel is the right column: Ember's box on top (one size), then the goal's whole todo list and what runs now.
+func (m envModel) sidePanel(sw, height int) string {
+	box := m.emberBox(sw, m.sideEmberRows())
+	rows := []string{}
+	if box != "" {
+		rows = strings.Split(box, "\n")
+	}
+	goal := m.activeGoal()
+	if goal == nil {
+		if sel := m.selectedResidentGoal(); sel != nil && (sel.State == "queued" || sel.State == "paused") {
+			goal = sel
+		}
+	}
+	textSt := lipgloss.NewStyle().Foreground(cText)
+	wrap := func(text string, indent int, st lipgloss.Style, limit int) []string {
+		lines := strings.Split(ansi.Wordwrap(text, max(8, sw-indent-1), " "), "\n")
+		if len(lines) > limit {
+			lines = append(lines[:limit-1], ansi.Truncate(lines[limit-1], max(8, sw-indent-2), "")+"…")
+		}
+		for i, ln := range lines {
+			lines[i] = strings.Repeat(" ", indent) + st.Render(ln)
+		}
+		return lines
+	}
+	if goal != nil {
+		if items := m.todoItems(goal.ID); len(items) > 0 {
+			done := 0
+			for _, it := range items {
+				if it.state == "done" {
+					done++
+				}
+			}
+			rows = append(rows, "", " "+bold(cAccent).Render("Tasks")+envDim.Render(fmt.Sprintf("  %d of %d done", done, len(items))))
+			for _, it := range items {
+				mark, st := envDim.Render("○"), envDim
+				switch it.state {
+				case "done":
+					mark, st = envCtxOK.Render("●"), envDim
+				case "now":
+					mark, st = envBusy.Render("◐"), textSt.Bold(true)
+				default:
+					st = textSt
+				}
+				lines := wrap(residentText(it.text), 4, st, 2)
+				lines[0] = " " + mark + " " + strings.TrimPrefix(lines[0], "    ")
+				rows = append(rows, lines...)
+			}
+		}
+	}
+	now, command := m.nowState(goal)
+	rows = append(rows, "", " "+bold(cBlue).Render("Now")+"  "+envBusy.Render(now))
+	if command != "" {
+		rows = append(rows, wrap(command, 3, textSt, 8)...)
+	}
+	for len(rows) < height {
+		rows = append(rows, "")
+	}
+	rows = rows[:height]
+	for i, r := range rows {
+		rows[i] = ansi.Truncate(r, sw, "…")
+	}
+	return strings.Join(rows, "\n")
+}
+
+// todoItems is a goal's newest todo list (state done, now or next).
+func (m envModel) todoItems(gid string) []todoItem {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != gid || e.Kind != "todo" {
+			continue
+		}
+		raw, _ := e.Data["items"].([]any)
+		var items []todoItem
+		for _, r := range raw {
+			it, _ := r.(map[string]any)
+			text, _ := it["text"].(string)
+			state := map[string]string{"done": "done", "in_progress": "now"}[fmt.Sprint(it["state"])]
+			if state == "" {
+				state = "next"
+			}
+			if text != "" {
+				items = append(items, todoItem{text, state})
+			}
+		}
+		return items
+	}
+	return nil
+}
 
 // liveTop is the first visible line: the tail while following, the held position otherwise.
 func (m envModel) liveTop(body int) int {
@@ -468,10 +582,19 @@ func liveTextWidth(inner int) int {
 }
 
 func (m envModel) liveBlock(w int) string {
+	if m.sideWidth() > 0 {
+		return "" // a wide terminal shows Ember in the side panel
+	}
+	return m.emberBox(w, min(m.liveHeight(), thoughtRows+1)-1)
+}
+
+// emberBox is Ember and the thoughts, window lines of them, w cells wide: under the transcript on a narrow terminal,
+// at the top of the side panel on a wide one.
+func (m envModel) emberBox(w, window int) string {
 	l := m.chat.live
 	inner := max(10, w-4)
 	text := min(liveTextWidth(inner), readingWidth)
-	if !l.active && m.bodyHeight() < 2*(thoughtRows+3) {
+	if !l.active && m.sideWidth() == 0 && m.bodyHeight() < 2*(thoughtRows+3) {
 		return "" // a small terminal keeps its rows for the transcript between replies
 	}
 	body := m.thoughts(text)
@@ -481,15 +604,13 @@ func (m envModel) liveBlock(w int) string {
 		}
 		body = []string{envDim.Render("no thoughts on this goal yet (a model that does not show its reasoning leaves this empty)")}
 	}
-	// Ember's box stays on screen: while a reply is written it takes about half the page and Ember flickers; idle
-	// it keeps the latest thoughts in a smaller box with Ember still. The thoughts run downward, newest last.
-	// One fixed size, generating or not (a box that grew and shrank was hard to read): only the text moves.
-	height := min(m.liveHeight(), thoughtRows+1)
+	// One fixed size, generating or not (a box that grew and shrank was hard to read): only the text moves. The
+	// thoughts run downward, newest last; Ember flickers while a reply is written.
 	frame := 0
 	if l.active {
 		frame = m.tickN % 2
 	}
-	window := max(1, height-1)
+	window = max(1, window)
 	top := max(0, len(body)-window)
 	if l.active && l.hold {
 		top = m.liveTop(len(body))
@@ -528,6 +649,37 @@ func (m envModel) liveBlock(w int) string {
 		}
 	}
 	return envBorder.Width(max(18, w-2)).Render(strings.Join(append([]string{head}, shown...), "\n"))
+}
+
+// nowState is what the agent is doing this moment, and the command when one runs (the time first in now).
+func (m envModel) nowState(goal *residentGoal) (string, string) {
+	now, command := "idle", ""
+	l := m.chat.live
+	switch {
+	case l.active && l.text != "":
+		now = "writing its reply"
+	case l.active && len(l.tools) > 0:
+		now = "calling " + residentText(l.tools[len(l.tools)-1])
+	case l.active:
+		now = "thinking"
+	case m.chat.group.running != "" && goal != nil && goal.State == "working" &&
+		(m.chat.group.runningGoal == "" || m.chat.group.runningGoal == goal.ID):
+		// the time first; the whole command follows, wrapped under it (three lines at most)
+		now = "running"
+		if since := m.chat.group.runningSince; since > 0 {
+			now += " " + (time.Duration(time.Since(time.Unix(int64(since), 0)).Seconds()) * time.Second).String()
+		}
+		command = m.chat.group.running
+	case goal == nil:
+		now = "idle (free time runs on its own schedule)"
+	default:
+		now = map[string]string{
+			"waiting_user": "waiting for your answer · Ctrl+A", "waiting_root": "waiting for a root approval · Ctrl+A",
+			"waiting_plan": "waiting for your OK on its plan · /plan approve", "waiting_model": "waiting for the model",
+			"paused": "paused · /resume", "queued": "queued, starts next", "working": "between steps",
+		}[goal.State]
+	}
+	return now, command
 }
 
 // activeGoal is the goal the agent is on now (working or waiting on something), nil between goals.
@@ -571,6 +723,7 @@ func (m envModel) thoughts(width int) []string {
 		if len(out) > 0 {
 			out = append(out, "")
 		}
+		r = strings.ReplaceAll(r, "\t", "    ") // a tab is one cell to the wrapper and up to eight on screen: it broke the border
 		for _, ln := range strings.Split(ansi.Wordwrap(residentText(strings.TrimSpace(r)), max(8, width), " "), "\n") {
 			out = append(out, envThink.Render(ln))
 		}
@@ -978,8 +1131,8 @@ func (m envModel) chatBottom() string {
 // how long, calling a tool, waiting for you, idle). It follows the goal the agent is actually on, not the selection.
 func (m envModel) todoPinned() string {
 	w := max(20, m.width)
-	if m.chat.question != nil {
-		return "" // the question's own box says the agent waits for you, and the frame needs the rows
+	if m.chat.question != nil || m.sideWidth() > 0 {
+		return "" // the question's own box says the agent waits for you; a wide terminal shows it in the side panel
 	}
 	goal := m.activeGoal()
 	if goal == nil {
@@ -1028,31 +1181,8 @@ func (m envModel) todoPinned() string {
 		}
 	}
 	// now: what is happening this moment
-	now, command := "idle", ""
+	now, command := m.nowState(goal)
 	l := m.chat.live
-	switch {
-	case l.active && l.text != "":
-		now = "writing its reply"
-	case l.active && len(l.tools) > 0:
-		now = "calling " + residentText(l.tools[len(l.tools)-1])
-	case l.active:
-		now = "thinking"
-	case m.chat.group.running != "":
-		// the time first; the whole command follows, wrapped under it (three lines at most)
-		now = "running"
-		if since := m.chat.group.runningSince; since > 0 {
-			now += " " + (time.Duration(time.Since(time.Unix(int64(since), 0)).Seconds()) * time.Second).String()
-		}
-		command = m.chat.group.running
-	case goal == nil:
-		now = "idle (free time runs on its own schedule)"
-	default:
-		now = map[string]string{
-			"waiting_user": "waiting for your answer · Ctrl+A", "waiting_root": "waiting for a root approval · Ctrl+A",
-			"waiting_plan": "waiting for your OK on its plan · /plan approve", "waiting_model": "waiting for the model",
-			"paused": "paused · /resume", "queued": "queued, starts next", "working": "between steps",
-		}[goal.State]
-	}
 	if goal == nil && !l.active && command == "" {
 		return "" // nothing running and no goal: no line
 	}
@@ -1212,7 +1342,13 @@ func (m envModel) renderChat() string {
 		}
 		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
-	body := []string{head, m.chat.transcript.View()}
+	view := m.chat.transcript.View()
+	if sw := m.sideWidth(); sw > 0 {
+		tw := w - sw - 1
+		view = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(tw).Render(view), " ",
+			m.sidePanel(sw, lipgloss.Height(view)))
+	}
+	body := []string{head, view}
 	if live := m.liveBlock(w); live != "" {
 		body = append(body, live)
 	}

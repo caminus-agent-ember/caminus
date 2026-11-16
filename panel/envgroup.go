@@ -23,6 +23,7 @@ type toolGroup struct {
 	gate                           string  // "", "passes", "fails": the latest gate run
 	running                        string  // the command still running, if any
 	runningSince                   float64 // when it started (the call's event time)
+	runningGoal                    string  // the goal it runs for: Now names it only while the agent is on that goal
 }
 
 func (t *toolGroup) empty() bool {
@@ -105,7 +106,7 @@ func (c *residentChat) fold(e residentEvent) bool {
 			case "terminal":
 				if cmd, _ := args["command"].(string); strings.TrimSpace(cmd) != "" {
 					g.commands++
-					g.running, g.runningSince = oneLine(residentText(cmd)), e.Ts
+					g.running, g.runningSince, g.runningGoal = oneLine(residentText(cmd)), e.Ts, e.Goal
 				}
 			case "read":
 				g.reads++
