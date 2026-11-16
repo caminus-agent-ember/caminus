@@ -240,6 +240,11 @@ class Live:
 SAME_CALL_NOTE, SAME_CALL_LIMIT = 4, 7
 REPEAT_EXEMPT = {'wait', 'todo', 'note', 'remember', 'heartbeat', 'machine', 'mail', 'peers'}
 
+# Before define_done a goal may look but not change: these tools, and terminal commands the per-turn gate's
+# classifier calls read-only (or polls of a running one).
+PRE_DONE_ALLOWED = {'read', 'discover', 'history_search', 'web_search', 'web_fetch', 'machine', 'todo', 'ask_user',
+                    'advisor', 'peers', 'mail', 'remember', 'note', 'wait'}
+
 class Runtime:
     def __init__(self, home, model=None, terminal=None):
         self.store = Store(home)
@@ -344,7 +349,8 @@ class Runtime:
             # Free time is not graded: no done check, no verify, no steer bookkeeping in the loop state.
             return 'FREE TIME: this stretch is yours; finish (or reply in plain text) whenever you want to stop.'
         if not g.get('done_check'):
-            lines.append('LOOP: no done check yet. Call define_done first, before any other work.')
+            lines.append('LOOP: no done check yet. Look around as you need, then call define_done before changing '
+                         'anything.')
         else:
             lines.append('LOOP: done = ' + g['done_check'])
         steers = self.store.steers(gid)
@@ -847,11 +853,17 @@ class Runtime:
             # the transaction so a long command cannot block a human decision.
             with self.store.transaction():
                 if self.store.goal(action['goal'])['state']=='cancelled':return True
-                # Goal start: what done looks like comes first, and nothing else runs until it exists.
+                # Goal start: what done looks like comes before any change. Looking is not a change: a done check
+                # written before reading anything is a guess, and the prompt itself says to gather context first,
+                # yet every read was refused. Reads, searches, read-only commands and questions run; changes wait.
                 if (self.loop_gates and name != 'define_done' and not self.store.goal(action['goal']).get('done_check')
-                        and self.store.goal(action['goal']).get('kind','work') not in FREE_KINDS):
-                    raise ValueError('no done check yet: call define_done with what done looks like, '
-                                     'as something you can check, before any other work')
+                        and self.store.goal(action['goal']).get('kind','work') not in FREE_KINDS
+                        and not (name in PRE_DONE_ALLOWED or
+                                 (name == 'terminal' and args.get('stdin') is None and
+                                  (args.get('session') or read_only_command(args.get('command')))))):
+                    raise ValueError('no done check yet: look around as much as you need (read, read-only commands, '
+                                     'search, ask your human), then call define_done with what done looks like, as '
+                                     'something you can check, before changing anything')
                 if name == 'define_done':
                     result = self._define_done(action['goal'], args['check'], args.get('gate', ''))
                 elif name == 'verify':

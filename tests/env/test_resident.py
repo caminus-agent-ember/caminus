@@ -138,15 +138,19 @@ class Resident(unittest.TestCase):
 
     def test_a_goal_cannot_work_before_it_states_what_done_looks_like(self):
         self.gates_on()
-        self.replies(call('terminal',dict(command='echo hi')),
+        # looking is allowed before the check (a check written before reading anything is a guess); changing is not
+        self.replies(call('terminal',dict(command='ls')),
+                     call('terminal',dict(command='touch made.txt')),
                      call('define_done',dict(check='the file exists')),
                      call('verify',dict(evidence='ls showed the file')),
                      call('finish',dict(summary='Done.')))
         goal=self.cmd('once',['--goal','Create the file.'])
         self.assertEqual(goal['state'],'completed')
         results=[e['data'] for e in self.cmd('events') if e['kind']=='tool_result']
-        refused=[r for r in results if r['name']=='terminal'][0]['result']
-        self.assertIn('define_done',refused['error'])
+        terminals=[r['result'] for r in results if r['name']=='terminal']
+        self.assertNotIn('error',terminals[0],'a read-only command runs before define_done')
+        self.assertIn('define_done',terminals[1]['error'],'a change waits for the done check')
+        self.assertFalse((self.home/'made.txt').exists())
 
     def test_finish_needs_the_check_exercised_since_the_last_steer(self):
         self.gates_on()
