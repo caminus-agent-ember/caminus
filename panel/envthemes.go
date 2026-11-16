@@ -54,7 +54,9 @@ func askTheme(m envModel, desc string) tea.Cmd {
 // genCodeThemes are the code styles a written theme may name (bundled chroma styles).
 var genCodeThemes = map[string]bool{"dracula": true, "monokai": true, "nord": true, "onedark": true, "github-dark": true,
 	"gruvbox": true, "catppuccin-mocha": true, "rose-pine": true, "solarized-dark": true, "tokyonight-night": true,
-	"doom-one": true, "native": true, "vulcan": true, "paraiso-dark": true, "hrdark": true}
+	"doom-one": true, "native": true, "vulcan": true, "paraiso-dark": true, "hrdark": true,
+	// light backgrounds
+	"github": true, "solarized-light": true, "catppuccin-latte": true, "rose-pine-dawn": true, "tokyonight-day": true}
 
 // themeFromAnswer keeps what can be validated from the brain's answer (it is untrusted text): role = #rrggbb lines
 // for the panel's known roles, a known code style, and a name made safe for a file. Every colour role must be there.
@@ -78,6 +80,14 @@ func themeFromAnswer(answer, desc string) (name, file string, err error) {
 		case k == "code_theme":
 			if genCodeThemes[v] {
 				vals[k] = v
+			}
+		case k == "bg_pattern":
+			if bgPatterns[v] {
+				vals[k] = v
+			}
+		case k == "bg" || k == "bg2" || k == "pattern":
+			if len(v) == 7 && validThemeValue(k, v) {
+				vals[k] = strings.ToLower(v)
 			}
 		default:
 			if _, known := defaultTheme()[k]; known && len(v) == 7 && validThemeValue(k, v) {
@@ -311,6 +321,11 @@ func themeSwatch(name string) string {
 		return ""
 	}
 	var b strings.Builder
+	if bg := themeRole("bg"); bg != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(themeColor("bg")).Render("▐"))
+	} else {
+		b.WriteString(" ")
+	}
 	for _, role := range []string{"accent", "ok", "warn", "action", "hot", "purple", "user", "teal"} {
 		b.WriteString(lipgloss.NewStyle().Foreground(themeColor(role)).Render("█"))
 	}
@@ -387,4 +402,11 @@ func themePreview(name string, w int) string {
 	add(borderTitle(envBorder.Render(fgc("muted").Render("a framed box: menus, the composer, Ember's thoughts")), "a title", envDim))
 	add(footBar([]string{g.model + " " + name, "120K/1M", "$0.42"}, []string{"esc browse", "/help"}, w))
 	return strings.Join(out, "\n")
+}
+
+// overlayOpen: an overlay or the session picker covers the conversation (the background pattern is not drawn then).
+func (m envModel) overlayOpen() bool {
+	c := m.chat
+	return c.approvals || c.goals || c.models.open || c.themes.open || c.studio.open || c.view.open || c.rewind.open ||
+		c.page >= 0 || c.picker
 }

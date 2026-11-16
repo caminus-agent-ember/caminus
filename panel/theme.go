@@ -55,6 +55,15 @@ func defaultTheme() map[string]string {
 	}
 }
 
+// optionalRoles are a theme's background, all optional: none of them keeps the terminal's own background (every theme
+// before them). bg is the background (and makes light themes possible: the text roles are read against it), bg2 a
+// second colour for a gradient, pattern the ink of a background pattern, bg_pattern the pattern itself.
+var optionalRoles = map[string]bool{"bg": true, "bg2": true, "pattern": true, "bg_pattern": true}
+
+// bgPatterns are the background patterns a theme may name (drawn in the empty cells behind the text, bgpaint.go).
+var bgPatterns = map[string]bool{"none": true, "dots": true, "grid": true, "diagonal": true, "waves": true,
+	"gradient": true, "stars": true}
+
 // aliasRole maps a theme-file key onto a role. Our own names pass through;
 // a few btop keys ride along so a stock theme at least gets the loud parts right.
 func aliasRole(key string) (string, bool) {
@@ -67,7 +76,7 @@ func aliasRole(key string) (string, bool) {
 		return "teal", true
 	}
 	_, known := defaultTheme()[key]
-	return key, known
+	return key, known || optionalRoles[key]
 }
 
 // validThemeValue accepts the colors btop themes carry, or, for the non-color
@@ -78,6 +87,9 @@ func validThemeValue(key, v string) bool {
 	}
 	if key == "code_theme" {
 		return true
+	}
+	if key == "bg_pattern" {
+		return bgPatterns[v]
 	}
 	if strings.HasPrefix(v, "#") {
 		switch len(v) {

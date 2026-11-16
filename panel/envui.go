@@ -1336,7 +1336,19 @@ func (m envModel) auditPane() string {
 }
 
 func (m envModel) View() tea.View {
-	v := tea.NewView(m.render())
+	frame := m.render()
+	bg := themeBackground()
+	if bg != nil && m.tab == 6 && !m.overlayOpen() {
+		// a theme's gradient or pattern, behind the conversation only (not over the composer and status line, nor
+		// under an overlay)
+		w := max(20, m.width)
+		frame = paintBackground(frame, max(0, m.height-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w))))
+	}
+	v := tea.NewView(frame)
+	if bg != nil {
+		// the theme's own background (light, pink, any colour) and its text as the default foreground
+		v.BackgroundColor, v.ForegroundColor = bg, themeColor("text")
+	}
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = m.windowTitle()

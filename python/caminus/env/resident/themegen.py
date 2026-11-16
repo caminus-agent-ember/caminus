@@ -20,24 +20,39 @@ ROLES = [
     ('codeblock_bg', 'the plate under fenced code blocks: near the background'),
 ]
 CODE_THEMES = ['dracula', 'monokai', 'nord', 'onedark', 'github-dark', 'gruvbox', 'catppuccin-mocha', 'rose-pine',
-               'solarized-dark', 'tokyonight-night', 'doom-one', 'native', 'vulcan', 'paraiso-dark', 'hrdark']
+               'solarized-dark', 'tokyonight-night', 'doom-one', 'native', 'vulcan', 'paraiso-dark', 'hrdark',
+               # for light backgrounds
+               'github', 'solarized-light', 'catppuccin-latte', 'rose-pine-dawn', 'tokyonight-day']
+BACKGROUND = [
+    ('bg', 'the background: ANY colour that fits the description (dark, light, pink, cream, deep green...)'),
+    ('bg2', 'optional: a second background colour, for bg_pattern = gradient (top bg, bottom bg2)'),
+    ('pattern', 'optional: the ink of a background pattern, a faint shade near bg'),
+]
+PATTERNS = ['none', 'dots', 'grid', 'diagonal', 'waves', 'stars', 'gradient']
 
-PROMPT = """You design colour themes for a terminal app (a chat with an AI agent, shown on a dark terminal background).
+PROMPT = """You design colour themes for a terminal app: a chat with an AI agent, with a side panel and a status line.
+The theme sets the whole terminal's background too, so be creative: any background colour (light, dark, pink, cream,
+deep green, a gradient...), and optionally a faint pattern behind the text.
 Write one theme matching the owner's description. Reply with ONLY these lines, nothing else:
 
 name = a-short-kebab-case-name
+{background}
+bg_pattern = one of: {patterns}
 {roles}
-code_theme = one of: {themes}
+code_theme = one of: {themes} (a light one on a light background)
 
-Every colour is #rrggbb. Keep text readable against a dark background (contrast at least 7:1 for text, 4.5:1 for
-muted), keep the semantic roles recognisable (ok green-ish, warn yellow-ish, hot red-ish) unless the description asks
-otherwise, and make accent the signature colour of the description."""
+Every colour is #rrggbb. Read every text role against YOUR bg: contrast at least 7:1 for text, 4.5:1 for muted and
+the semantic roles (dark text on a light background, light text on a dark one). Keep the semantic roles recognisable
+(ok green-ish, warn yellow-ish, hot red-ish) unless the description asks otherwise, make accent the signature colour,
+and keep a pattern subtle (its ink close to bg) so it never competes with the text."""
 
 
 def write(rt, description):
     """the brain's theme text for a description (validated by the panel, not here)"""
     roles = '\n'.join(f'{k} = #rrggbb   ({why})' for k, why in ROLES)
-    request = [dict(role='system', content=PROMPT.format(roles=roles, themes=', '.join(CODE_THEMES))),
+    background = '\n'.join(f'{k} = #rrggbb   ({why})' for k, why in BACKGROUND)
+    request = [dict(role='system', content=PROMPT.format(roles=roles, background=background,
+                                                        patterns=', '.join(PATTERNS), themes=', '.join(CODE_THEMES))),
                dict(role='user', content='The theme: ' + description)]
     answer = rt.model.complete(request, None, max_tokens=min(2048, int(rt.config.get('max_tokens', 4096)))).get('content') or ''
     try:
