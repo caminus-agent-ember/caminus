@@ -79,7 +79,8 @@ RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the run
 # target_ratio 0.20 of the threshold: on a 1M window it compacts at ~400K and keeps the newest ~80K).
 PAID_COMPACT = (.38, .38 * .20)
 QUESTION_TIMEOUT = 900   # seconds a question or root request waits before the resident carries on without it
-SUMMARY_TOKENS = 2048    # a compaction summary's output allowance
+SUMMARY_TOKENS = 2048    # a compaction summary's output allowance: the floor (it grows with the window)
+SUMMARY_TOKENS_MAX = 16384
 TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
 PAUSED = {'completed', 'cancelled', 'waiting_user', 'waiting_root', 'paused', 'error', 'waiting_plan'}
 EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'cancelled': 23, 'error': 1, 'waiting_model': 24,
@@ -774,6 +775,7 @@ class Runtime:
 
     def _action(self, action):
         refused = False
+        ignored = ''          # the note naming unknown arguments that were dropped
         signature = None
         try:
             args = json.loads(action['args'])
@@ -788,8 +790,18 @@ class Runtime:
                 schema = MCP_SCHEMA         # the MCP server validates its own arguments
             if schema is None:
                 raise ValueError('unknown tool '+name)
-            if schema is not MCP_SCHEMA and (set(schema['required'])-set(args) or set(args)-set(schema['properties'])):
-                raise ValueError('missing required or unknown tool arguments')
+            if schema is not MCP_SCHEMA:
+                # Name what is wrong: a bare "missing or unknown" left the model guessing, and it sent the same
+                # finish (with an extra choices argument) again. An unknown extra is dropped with a note, not refused.
+                missing = sorted(set(schema['required']) - set(args))
+                extra = sorted(set(args) - set(schema['properties']))
+                if missing:
+                    raise ValueError('missing required argument(s) %s; %s takes: %s' % (
+                        ', '.join(missing), name, ', '.join(sorted(schema['properties']))))
+                if extra:
+                    args = {k: v for k, v in args.items() if k not in extra}
+                    ignored = 'ignored unknown argument(s) %s; %s takes: %s' % (
+                        ', '.join(extra), name, ', '.join(sorted(schema['properties'])))
             types = dict(string=str,integer=int,array=list,boolean=bool,object=dict)
             for key,value in (args.items() if schema is not MCP_SCHEMA else ()):
                 prop = schema['properties'][key]
@@ -983,9 +995,12 @@ class Runtime:
             if count >= SAME_CALL_NOTE:
                 result['note'] = ('you have made this exact call %d times in a row; its answer will not change: '
                                   'use what it told you and change approach' % count)
-            if count >= SAME_CALL_LIMIT:
+            # free time is the agent's own: the note only (its own budget caps what a loop can spend)
+            if count >= SAME_CALL_LIMIT and self.store.goal(action['goal']).get('kind', 'work') not in FREE_KINDS:
                 same.pop(action['goal'], None)
                 self._watchdog(action['goal'], 'the same call %d times in a row' % count, dict(call=signature[:200]))
+        if ignored and isinstance(result, dict):
+            result['note'] = (result.get('note', '') + ' · ' if result.get('note') else '') + ignored
         # A result past about 8K tokens has its large text moved to ~/outputs: the model gets a preview and the path.
         result = outputs.spill(self.home, action['name'], action['id'], result)
         self.store.action_result(action, result)
@@ -1119,8 +1134,11 @@ class Runtime:
         # the head allows rather than refusing to compact at all.
         # The summary keeps its full SUMMARY_TOKENS too: with many tool schemas (an MCP server's) the head alone can
         # fill a 20 % target, which left the summary a few hundred tokens and cut it off on every compaction.
-        target_tokens = max(target_tokens, min(pinned_tokens + SUMMARY_TOKENS + 512, size - reserve - 256))
-        summary_limit = min(SUMMARY_TOKENS, reserve, target_tokens - pinned_tokens - 512)
+        # The summary's allowance grows with the window: a fixed 2048 tokens squeezed ~400K tokens of work on a 1M
+        # window into a summary that was cut at its limit (twice on one live goal). size/64: 4K on 262K, 16K on 1M.
+        summary_tokens = max(SUMMARY_TOKENS, min(SUMMARY_TOKENS_MAX, size // 64))
+        target_tokens = max(target_tokens, min(pinned_tokens + summary_tokens + 512, size - reserve - 256))
+        summary_limit = min(summary_tokens, reserve, target_tokens - pinned_tokens - 512)
         if summary_limit < 1:
             raise ModelContextError('goal and persistent memory cannot fit the compaction target')
         # Retain complete assistant/tool groups only while they leave room for
@@ -1205,8 +1223,42 @@ class Runtime:
                 self.store.event('runtime_error', dict(error=error), gid)
             return True
 
+    def _answering(self, gid):
+        """How a plain reply relates to the human: 'reopened' when the goal had finished and a message of theirs
+        reopened it (tool calls since then are the agent finding the answer), 'asked' when one of their messages
+        arrived since the agent's previous reply, else ''. The reply being handled is already stored."""
+        kinds=[r['kind'] for r in self.store.db.execute(
+            "SELECT kind FROM events WHERE goal=? AND kind IN ('finished','goal_continued','steers_applied','assistant') "
+            "ORDER BY seq DESC LIMIT 200",(gid,))]            # newest first; kinds[0] is this reply
+        if 'goal_continued' in kinds and 'finished' in kinds and kinds.index('goal_continued')<kinds.index('finished'):
+            return 'reopened'
+        for k in kinds[1:]:
+            if k=='steers_applied':return 'asked'
+            if k=='assistant':break
+        return ''
+
     def _plain_reply(self, gid):
-        """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal."""
+        """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal. A reply to the
+        human is not that: on a finished goal they reopened with a message, the answer ends the turn and the goal is
+        complete again (it was nudged back to work instead, and with nothing left to do it re-ran its done check in a
+        loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted."""
+        how=self._answering(gid)
+        if how=='reopened':
+            reply=self.store.goal(gid)['messages'][-1]
+            self.plain_replies.pop(gid,None)
+            self.store.event('answered',dict(reason='a plain answer to the human on a reopened goal'),gid)
+            self._finish(gid,(reply.get('content') or '').strip() or 'answered the human')
+            return True
+        if how=='asked':
+            self.plain_replies.pop(gid,None)
+            with self.store.transaction():
+                if self.store.goal(gid)['state']=='cancelled':return True
+                messages=self.store.goal(gid)['messages']+[dict(role='user',content=(
+                    '[harness] Your human has your answer. Carry on with the goal, or call finish if its check has '
+                    'passed.'))]
+                self.store.update(gid,messages=messages)
+                self.store.event('plain_answer',{},gid)
+            return True
         count=self.plain_replies.get(gid,0)+1
         self.plain_replies[gid]=count
         with self.store.transaction():
