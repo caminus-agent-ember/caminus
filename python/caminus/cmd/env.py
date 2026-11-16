@@ -49,8 +49,11 @@ def _parser():
     ap = argparse.ArgumentParser(prog='caminus env', description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest='sub', required=True)
 
-    p = sub.add_parser('setup', help='print the provisioning commands, then check status')
-    p.add_argument('--agent-side', action='store_true', help='also install ask-root into the agent user over SSH')
+    p = sub.add_parser('setup', help='set up the agent account: writes the one root script (run it with sudo), '
+                                     'then installs the agent side and checks; safe to rerun')
+    p.add_argument('--agent-side', action='store_true', help=argparse.SUPPRESS)   # the default now; kept for old scripts
+    p.add_argument('--print', dest='print_script', action='store_true', help='print the root script and exit')
+    p.add_argument('--json', action='store_true', help='the final check as JSON')
 
     p = sub.add_parser('status', help='check user, key, ssh login, bridge, ask-root, leases')
     p.add_argument('--json', action='store_true')
@@ -305,56 +308,56 @@ def main(rest, transport=None):
     return 2
 
 
-PROVISION = """\
-# run these as your own user (sudo asks for your password); they create the agent user, SSH, the bridge and the key:
-sudo apt-get install -y openssh-server && sudo systemctl enable --now ssh
-sudo useradd -m -s /bin/bash {user}
-sudo passwd -l {user}
-sudo groupadd -f {group}
-sudo usermod -aG render,video,{group} {user}          # GPU access for the agent work; {you} joins the bridge group
-sudo usermod -aG {group} {you}
-sudo mkdir -p {bridge}/req {bridge}/res {bridge}/notes
-sudo chown root:{group} {bridge} {bridge}/req {bridge}/res {bridge}/notes
-sudo chmod 770 {bridge} {bridge}/req {bridge}/res {bridge}/notes
-sudo mkdir -p {bridge}/leases
-sudo chown root:{group} {bridge}/leases
-sudo chmod 2770 {bridge}/leases                      # setgid: lease files stay group-only, never world-writable
-sudo loginctl enable-linger {user}                   # its long-running servers survive logout
-# optional inference runtime: choose explicit sources for this installation before running these commented commands.
-# runtime_source=/absolute/path/to/python-prefix       # contains bin/python and its dependencies
-# package_source=/absolute/path/to/package-root       # contains the caminus package
-# models_source=/absolute/path/to/model-directory
-# test -x "$runtime_source/bin/python" && test -d "$package_source/caminus" && test -d "$models_source"
-# sudo mkdir -p /opt/caminus-runtime/python /opt/caminus-runtime/package /opt/caminus-runtime/models
-# sudo mount --bind "$runtime_source" /opt/caminus-runtime/python && sudo mount -o remount,bind,ro /opt/caminus-runtime/python
-# sudo mount --bind "$package_source" /opt/caminus-runtime/package && sudo mount -o remount,bind,ro /opt/caminus-runtime/package
-# sudo mount --bind "$models_source" /opt/caminus-runtime/models && sudo mount -o remount,bind,ro /opt/caminus-runtime/models
-# then: export CAMINUS_ENV_PYTHON='/opt/caminus-runtime/python/bin/python -I'
-#       export CAMINUS_ENV_PKG=/opt/caminus-runtime/package
-#       export CAMINUS_ENV_MODELS=/opt/caminus-runtime/models
-ssh-keygen -t ed25519 -f {key} -N '' -C caminus-env   # if {key} does not exist yet
-# then add this line to {user_home}/.ssh/authorized_keys (dir 700, file 600, owned by {user}):
-from="127.0.0.1,::1",no-agent-forwarding,no-X11-forwarding,no-port-forwarding {pubkey}
-# finally: caminus env setup --agent-side   (installs ~/bin/ask-root + env-ask, ~/ROBOTS.md, ~/MEMORY.md)
-"""
+def setup_script_path():
+    base = os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share')
+    return os.path.join(base, 'caminus', 'env-setup.sh')
 
 
 def _setup(a, tr):
+    """One command, safe to rerun: the owner's key (made if missing, no root), the root script (written, run by the
+    owner with sudo), then the agent side over SSH and the check. Each run does what is still missing."""
+    from ..env import provision
     key = settings.key_path()
-    pub = key + '.pub'
-    print(PROVISION.format(user=settings.user(), group=settings.BRIDGE_GROUP, you=getpass.getuser(),
-                           bridge=settings.bridge_dir(), key=key,
-                           pubkey=(open(pub).read().strip() if os.path.exists(pub) else '<contents of ' + pub + '>'),
-                           user_home=f"/home/{settings.user()}"))
-    if a.agent_side and os.path.exists(key):
-        from ..env import prompt
-        r = runner.run_shell(agent_side.install_command(settings.bridge_dir(), settings.agent_bin(), prompt.text(),
-                                                        settings.robots_path(), prompt.MEMORY_TEMPLATE,
-                                                        settings.memory_path()), transport=tr)
-        print(f'agent-side files installed as {settings.user()} ({settings.agent_bin()}, {settings.robots_path()}, '
-              f'{settings.memory_path()}): exit {r.returncode}'
-              + ('' if r.returncode == 0 else f' ({(r.stderr or "").strip()})'), file=sys.stderr)
-    return _status(tr)
+    if not os.path.exists(key):
+        os.makedirs(os.path.dirname(key), mode=0o700, exist_ok=True)
+        r = subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-f', key, '-N', '', '-C', 'caminus-env'],
+                           capture_output=True, text=True)
+        if r.returncode:
+            print(f'caminus env setup: ssh-keygen failed: {r.stderr.strip()}', file=sys.stderr)
+            return 1
+        print(f'made your key for the agent account: {key}')
+    path = setup_script_path()
+    text = provision.script(settings.user(), settings.BRIDGE_GROUP, getpass.getuser(), settings.bridge_dir(),
+                            open(key + '.pub').read(), path)
+    if a.print_script:
+        print(text, end='')
+        return 0
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+    with os.fdopen(fd, 'w') as f:
+        f.write(text)
+    os.replace(tmp, path)
+    ok, _ = runner.probe(transport=tr)
+    leases = _leases_status()
+    if not (ok and os.path.isdir(settings.bridge_dir()) and leases['ok']):
+        print(f'the privileged step is still to do. Run it (sudo asks for your password; safe to rerun):\n\n'
+              f'    sudo sh {path}\n\nthen run `caminus env setup` again. (Read it first: it only creates the agent '
+              f'account, the bridge folders and its SSH login.)')
+        if not json_mode_quiet(a):
+            _status(tr)
+        return 1
+    from ..env import prompt
+    r = runner.run_shell(agent_side.install_command(settings.bridge_dir(), settings.agent_bin(), prompt.text(),
+                                                    settings.robots_path(), prompt.MEMORY_TEMPLATE,
+                                                    settings.memory_path()), transport=tr)
+    if r.returncode:
+        print(f'installing the agent side failed: {(r.stderr or "").strip()}', file=sys.stderr)
+    return _status(tr, json_mode=a.json)
+
+
+def json_mode_quiet(a):
+    return bool(getattr(a, 'json', False))
 
 
 def leases_report(path,group,gid):
@@ -410,7 +413,8 @@ def _status(tr,json_mode=False):
     check(f'leases {leases["path"]}', leases['ok'], leases['fix'])
     if json_mode:
         print(json.dumps(dict(ok=all(c['ok'] for c in checks),checks=checks,leases=leases)))
-    return 0 if all(ok for _, ok, _ in checks) else 1
+    # (each check is a dict: unpacking one as a tuple read its keys, so every status passed)
+    return 0 if all(c['ok'] for c in checks) else 1
 
 
 def _ui():

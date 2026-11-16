@@ -3266,12 +3266,11 @@ for line in sys.stdin:
         import contextlib,io
         from unittest.mock import patch
         from caminus.cmd import env as cmd_env
-        # the printed provisioning commands create the folder: shared group, setgid 2770, idempotent
-        text=cmd_env.PROVISION.format(user='agent',group='caminus-env',you='owner',bridge='/srv/b',
-                                      key='/k',pubkey='PUB',user_home='/home/agent')
-        self.assertIn('sudo mkdir -p /srv/b/leases',text)
-        self.assertIn('sudo chown root:caminus-env /srv/b/leases',text)
-        self.assertIn('sudo chmod 2770 /srv/b/leases',text)
+        # the root script creates the folder: shared group, setgid 2770, looked at before it is changed
+        from caminus.env import provision
+        text=provision.script('agent','caminus-env','owner','/srv/b','ssh-ed25519 AAAA owner','/x/env-setup.sh')
+        self.assertIn("for d in req res notes leases; do fix_dir \"$BRIDGE/$d\" 2770",text)
+        self.assertIn('BRIDGE=/srv/b',text)
         # the report: missing, wrong mode, wrong group, and right
         path=str(self.bridge/'leases')
         miss=cmd_env.leases_report(path,'caminus-env',os.getgid())

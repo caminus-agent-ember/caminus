@@ -53,15 +53,26 @@ def main():
     from caminus.env import agent_side, audit, bridge, jobs, prompt, runner, serve, sessions, settings
     from caminus.cmd import env as cmd_env
 
-    # Optional runtime sharing is operator-selected, portable and fail-visible.
-    plan=cmd_env.PROVISION
-    check(all(value not in plan for value in ('miniforge3','envs/drafter','src/caminus/public','2>/dev/null || true')),
-          'setup: no workstation-specific runtime sources or suppressed mount failures')
-    check(all(value in plan for value in ('runtime_source=','package_source=','models_source=',
-                                         '/opt/caminus-runtime/python/bin/python -I','remount,bind,ro')),
-          'setup: explicit runtime sources and read-only mount examples')
-    check(all(line.startswith('#') for line in plan.splitlines() if 'sudo mount' in line),
-          'setup: optional inference mounts require a separate operator choice')
+    # The root script: portable (no workstation paths), quoted, safe to rerun, checks itself; a dry run changes nothing.
+    from caminus.env import provision
+    import subprocess as _sp
+    owner = __import__('getpass').getuser()
+    dry_bridge = os.path.join(S, 'dry-bridge')
+    plan = provision.script('test-agent', 'caminus-env', owner, dry_bridge, 'ssh-ed25519 AAAA owner@host',
+                            os.path.join(S, 'env-setup.sh'))
+    neutral = provision.script('agent', 'caminus-env', 'owner', '/srv/b', 'ssh-ed25519 AAAA o', '/x/env-setup.sh')
+    check(all(value not in neutral for value in ('miniforge3', os.path.expanduser('~'), 'src/caminus', '2>/dev/null || true')),
+          'setup: no workstation-specific paths or suppressed failures')
+    check(_sp.run(['sh', '-n'], input=plan, text=True).returncode == 0, 'setup: the script parses (sh -n)')
+    check(all(k in plan for k in ('id "$AGENT"', 'getent group', 'grep -qxF "$LINE"', 'FAIL', 'set -eu')),
+          'setup: every step looks before it changes, and the end checks every item')
+    dry = _sp.run(['sh', '-s'], input=plan, text=True, capture_output=True, env=dict(os.environ, DRY_RUN='1'))
+    check(dry.returncode == 0 and 'would run: useradd' in dry.stdout and 'dry run: nothing changed' in dry.stdout
+          and not os.path.exists(dry_bridge), 'setup: DRY_RUN lists the changes and makes none')
+    try:
+        provision.script('a', 'g', 'o', '/b', 'two\nlines', '/p'); check(False, 'setup: a multi-line key is refused')
+    except ValueError:
+        check(True, 'setup: a multi-line key is refused')
 
     # settings: environment first
     check(settings.user() == 'test-agent', 'settings.user from the environment')
