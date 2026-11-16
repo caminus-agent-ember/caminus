@@ -192,8 +192,8 @@ func TestModelPickerFitRowFromServeProjection(t *testing.T) {
 	mi := pickerModel()
 	m.models, m.loaded["models"] = []camModel{mi}, true
 	key, args := m.fitArgs(mi)
-	if key != "dense|1|auto" {
-		t.Fatalf("fit key: %s", key)
+	if key != "fit --model  --cards 1" {
+		t.Fatalf("fit key is the whole query: %q", key)
 	}
 	if got := strings.Join(args, " "); got != "fit --model  --cards 1 --json" {
 		t.Fatalf("fit args (auto drafter: serve's default): %q", got)
