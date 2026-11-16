@@ -162,10 +162,17 @@ func residentRefresh(m envModel) tea.Cmd {
 			return residentMsg{agent: name, epoch: epoch, err: err.Error()}
 		}
 		var events []residentEvent
-		// Catch up from the durable cursor, including history predating launch.
-		// Bound each refresh; another tick continues a large backlog without
+		// Catch up from the durable cursor. Bound each refresh; another tick continues a large backlog without
 		// replacing older entries or skipping a page while the agent works.
-		for page := 0; page < 4 && after < status.LastEvent; page++ {
+		pages := 4
+		if after == 0 && status.LastEvent > maxResidentEvents/2 {
+			// A fresh open starts at the newest events the panel would keep anyway, in one refresh: it read a long
+			// resident's whole history from the first event, 800 a tick, drawing each batch (the chat appeared to
+			// replay the entire session on every open) and then dropped all but the newest.
+			after = status.LastEvent - maxResidentEvents/2
+			pages = 8
+		}
+		for page := 0; page < pages && after < status.LastEvent; page++ {
 			out, err = residentCommand(m, []string{"events", name, "--after", fmt.Sprint(after), "--json"}, "").CombinedOutput()
 			if err != nil {
 				return residentMsg{agent: name, epoch: epoch, err: strings.TrimSpace(string(out))}

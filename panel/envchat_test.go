@@ -209,13 +209,22 @@ func TestChatLoadsHistoryAcrossMoreThanOnePageAndRejectsOldAgent(t *testing.T) {
 	}
 	m := envModel{cli: []string{cli}, agentName: "resident", width: 80, height: 24}
 	m.initChat()
+	// a fresh open: the newest maxResidentEvents/2 in one refresh, not the whole history from event 1
 	m.receiveResident(residentRefresh(m)().(residentMsg))
-	if m.chat.seq != 800 {
-		t.Fatalf("bounded catch-up cursor=%d", m.chat.seq)
+	if m.chat.seq != 1201 || len(m.residentEvents) != maxResidentEvents/2 || m.residentEvents[0].Seq != 1201-maxResidentEvents/2+1 {
+		t.Fatalf("fresh open: cursor=%d count=%d first=%d", m.chat.seq, len(m.residentEvents), m.residentEvents[0].Seq)
 	}
-	m.receiveResident(residentRefresh(m)().(residentMsg))
-	if m.chat.seq != 1201 || len(m.residentEvents) != 1201 {
-		t.Fatalf("history missing: cursor=%d count=%d", m.chat.seq, len(m.residentEvents))
+	// a session behind its resident (it was open, the agent ran on) catches up 800 a refresh, nothing skipped
+	b := envModel{cli: []string{cli}, agentName: "resident", width: 80, height: 24}
+	b.initChat()
+	b.chat.seq = 1
+	b.receiveResident(residentRefresh(b)().(residentMsg))
+	if b.chat.seq != 801 {
+		t.Fatalf("bounded catch-up cursor=%d", b.chat.seq)
+	}
+	b.receiveResident(residentRefresh(b)().(residentMsg))
+	if b.chat.seq != 1201 || len(b.residentEvents) != 1200 {
+		t.Fatalf("history missing: cursor=%d count=%d", b.chat.seq, len(b.residentEvents))
 	}
 	next, _ := m.Update(residentMsg{agent: "another", status: residentStatus{LastEvent: 9000}})
 	if next.(envModel).resident.LastEvent != 1201 {
