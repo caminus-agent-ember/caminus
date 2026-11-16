@@ -42,6 +42,40 @@ var emberFrames = [2][10]string{
 }
 
 // emberASCII is the ascii tier's mascot: no block characters, the same shape.
+// emberSmall is Ember at 8x6 pixels (three rows): the /btw side answer's own, smaller Ember.
+var emberSmall = [2][6]string{
+	{"...o....", "..kkkk..", ".kwkkwk.", ".kkkkkk.", "..k..k..", "........"},
+	{"....o...", "..kkkk..", ".kwkkwk.", ".kkkkkk.", "..k..k..", "........"},
+}
+
+// mascotSmall is the small Ember as three rows of half blocks (a plain face with the ascii glyphs).
+func mascotSmall(frame int) []string {
+	if g.name == "ascii" {
+		return []string{" ,^. ", "(o o)", " ' ' "}
+	}
+	px := emberSmall[frame%2]
+	var rows []string
+	for y := 0; y < len(px); y += 2 {
+		var b strings.Builder
+		for x := 0; x < len(px[y]); x++ {
+			top, okT := emberColor(px[y][x])
+			bot, okB := emberColor(px[y+1][x])
+			switch {
+			case !okT && !okB:
+				b.WriteString(" ")
+			case okT && !okB:
+				b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(top)).Render("▀"))
+			case !okT && okB:
+				b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(bot)).Render("▄"))
+			default:
+				b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(top)).Background(lipgloss.Color(bot)).Render("▀"))
+			}
+		}
+		rows = append(rows, b.String())
+	}
+	return rows
+}
+
 var emberASCII = []string{"   ,^.  ", " .----. ", " |o  o| ", " '----' ", "  '  '  "}
 
 // emberColor maps a pixel to its colour. The tones are fixed, so the mascot looks the same in every theme; the coal is

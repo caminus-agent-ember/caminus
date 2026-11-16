@@ -63,12 +63,17 @@ func (m envModel) pageOverlay(w, h int) string {
 	content := m.pane()
 	m.tab = saved
 	inner := max(10, w-6)
-	lines := strings.Split(ansi.Hardwrap(residentText(content), inner, true), "\n")
+	// Every pane sanitises what came from the agent and styles the rest; escaping the whole page here printed its
+	// colours as text (\x1b[…m on every line). Its first line is its title, which the box already carries.
+	if _, rest, ok := strings.Cut(content, "\n"); ok {
+		content = strings.TrimLeft(rest, "\n")
+	}
+	lines := strings.Split(ansi.Hardwrap(content, inner, true), "\n")
 	room := max(1, h-6)
 	top := max(0, min(m.chat.pageTop, len(lines)-room))
 	body := strings.Join(lines[top:min(top+room, len(lines))], "\n")
 	keys := "↑↓ PgUp PgDn scroll"
-	return overlayBox(pageTitle(m.chat.page), body, keys, w, h)
+	return overlayBox(pageTitle(m.chat.page)+envDim.Render(" · "+residentText(m.agentName)), body, keys, w, h)
 }
 
 func (m envModel) pageKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

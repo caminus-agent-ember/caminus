@@ -396,10 +396,71 @@ func short(n int) string {
 	return fmt.Sprint(n)
 }
 
+// onlySGR keeps colour and style sequences (ESC [ digits ; m) and removes every other escape sequence (cursor moves,
+// screen clears, OSC titles / clipboard / hyperlinks, DCS) and control character except newline and tab.
+func onlySGR(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == 0x1b && i+1 < len(s) && s[i+1] == '[':
+			j := i + 2
+			for j < len(s) && s[j] >= 0x30 && s[j] <= 0x3f {
+				j++
+			}
+			for j < len(s) && s[j] >= 0x20 && s[j] <= 0x2f {
+				j++
+			}
+			if j < len(s) && s[j] == 'm' && strings.Trim(s[i+2:j], "0123456789;:") == "" {
+				b.WriteString(s[i : j+1])
+			}
+			if j < len(s) {
+				i = j
+			} else {
+				i = len(s)
+			}
+		case c == 0x1b && i+1 < len(s) && (s[i+1] == ']' || s[i+1] == 'P' || s[i+1] == '_' || s[i+1] == '^' || s[i+1] == 'X'):
+			// a string sequence: up to BEL or ST (ESC \)
+			j := i + 2
+			for j < len(s) && s[j] != 0x07 && !(s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\') {
+				j++
+			}
+			if j < len(s) && s[j] == 0x1b {
+				j++
+			}
+			i = j
+		case c == 0x1b:
+			i++ // a two-byte escape: dropped with its final byte
+		case c == 0xc2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9f:
+			i++ // a C1 control (U+0080-U+009F, CSI and OSC among them), as UTF-8 encodes it: both bytes dropped
+		case (c < 0x20 && c != '\n' && c != '\t') || c == 0x7f:
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// lowerLabel lower-cases a title's leading all-caps label ("GOALS  1 open of 2" -> "goals  1 open of 2") and leaves
+// the rest as it is: a model ID or a path in a title keeps its case.
+func lowerLabel(title string) string {
+	end := 0
+	for i, r := range title {
+		if !(r >= 'A' && r <= 'Z' || r == ' ' || r == '&') {
+			break
+		}
+		end = i + 1
+	}
+	return strings.ToLower(title[:end]) + title[end:]
+}
+
 // overlayBox: every overlay is the same box with the same keys; Esc always closes.
 func overlayBox(title, body, keys string, w, h int) string {
-	inner := envTitle.Render(title) + "\n" + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(4, w-4))) +
-		"\n" + body
+	// lower case and grey like every other box in the chat; the title stays the accent. The body passes onlySGR: a
+	// screen that forgot to sanitise some agent text can at worst recolour it, never move the cursor, clear the screen,
+	// set the title or the clipboard.
+	inner := envTitle.Render(lowerLabel(title)) + "\n" + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(4, w-4))) +
+		"\n" + onlySGR(body)
 	lines := strings.Split(inner, "\n")
 	for len(lines) < h-4 {
 		lines = append(lines, "")
@@ -408,7 +469,7 @@ func overlayBox(title, body, keys string, w, h int) string {
 		lines = lines[:h-4]
 	}
 	lines = append(lines, envDim.Render(ansi.Truncate(keys+"  ·  esc close", max(8, w-4), "…")))
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).Padding(0, 1).
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray).Padding(0, 1).
 		Width(w).Render(strings.Join(lines, "\n"))
 }
 

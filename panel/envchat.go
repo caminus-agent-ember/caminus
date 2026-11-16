@@ -65,6 +65,7 @@ type residentChat struct {
 	page, pageTop                           int           // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
 	slashSel                                int    // the slash menu's highlighted row
+	btw                                     btwState // the /btw side answer, in its own section above the composer
 	recallIdx                               int    // Up/Down history: 1 = your newest sent message; 0 = not recalling
 	recallText                              string // what the recall put in the draft (an edit ends the recall)
 	slashFor                                string // the draft slashSel belongs to (a new draft starts at the top)
@@ -204,6 +205,8 @@ func (m *envModel) chatStyles() {
 	s := m.chat.compose.Styles()
 	s.Focused.Prompt, s.Blurred.Prompt = envBusy, envBusy
 	s.Focused.Placeholder, s.Blurred.Placeholder = envDim, envDim
+	// the editor's default cursor line has a grey background: the placeholder sat under a highlight bar
+	s.Focused.CursorLine, s.Blurred.CursorLine = lipgloss.NewStyle(), lipgloss.NewStyle()
 	m.chat.compose.SetStyles(s)
 }
 
@@ -1184,6 +1187,9 @@ func (m envModel) chatBottom() string {
 	if line := m.todoPinned(); line != "" {
 		out = line + "\n" + out
 	}
+	if side := m.btwSection(max(18, m.width-2)); side != "" {
+		out = side + "\n" + out
+	}
 	if menu := m.slashMenu(max(18, m.width-2)); menu != "" {
 		out = menu + "\n" + out
 	}
@@ -1236,6 +1242,90 @@ func (m envModel) recallStep(k string, asked bool) (envModel, bool) {
 	}
 	m.syncChat()
 	return m, true
+}
+
+// btwRows is the most answer lines the /btw section shows at once: a third of the terminal.
+func (m envModel) btwRows() int { return max(3, min(14, m.height/3)) }
+
+// btwSection is the /btw side answer in its own box above the composer: a small Ember on the left (still while it
+// thinks, it blinks), the answer on the right, scrolled with Shift+Up / Shift+Down; Esc on an empty draft closes it.
+// The goal keeps nothing of it.
+func (m envModel) btwSection(w int) string {
+	b := m.chat.btw
+	if !b.open {
+		return ""
+	}
+	art := mascotSmall(m.tickN % 2)
+	artW := lipgloss.Width(art[0]) + 2
+	textW := max(10, w-4-artW)
+	q := lipgloss.NewStyle().Foreground(cText).Render(envClip(residentText(b.question), textW-4))
+	body := []string{envBusy.Render("you ") + q}
+	rows := m.btwRows()
+	keys := "esc closes"
+	switch {
+	case b.loading:
+		body = append(body, envDim.Render(spin[m.tickN%len(spin)]+" thinking… (no tools; nothing enters the goal)"))
+	case b.err != "":
+		body = append(body, envCtxHot.Render(envClip("could not ask: "+b.err, textW)))
+	default:
+		var lines []string
+		for _, l := range b.lines {
+			lines = append(lines, strings.Split(ansi.Hardwrap(l, textW, true), "\n")...)
+		}
+		top := max(0, min(b.top, len(lines)-rows))
+		end := min(len(lines), top+rows)
+		body = append(body, lines[top:end]...)
+		if len(lines) > rows {
+			keys = fmt.Sprintf("shift+↑↓ scroll (%d-%d of %d) · esc closes", top+1, end, len(lines))
+		}
+	}
+	var out []string
+	for i, l := range body {
+		a := strings.Repeat(" ", artW)
+		if i < len(art) {
+			a = art[i] + "  "
+		}
+		out = append(out, a+l)
+	}
+	box := envBorder.Render(strings.Join(out, "\n"))
+	box = borderTitle(box, "by the way · not added to the goal", envDim)
+	return box + "\n" + envDim.Render("  "+keys)
+}
+
+// helpLines: every command with what it does (the slash menu's two columns), then the keys.
+func helpLines() []string {
+	names := make([]string, 0, len(slashCommands))
+	for _, c := range slashCommands {
+		names = append(names, c.name)
+	}
+	slices.Sort(names)
+	row := func(k, v string, w int) string {
+		return lipgloss.NewStyle().Foreground(cText).Bold(true).Render(k) + strings.Repeat(" ", max(1, w-ansi.StringWidth(k))) + envDim.Render(v)
+	}
+	out := []string{envTitle.Render("commands"), ""}
+	for _, n := range names {
+		out = append(out, row(n, slashHint(n), 16))
+	}
+	out = append(out, "", envTitle.Render("keys"), "")
+	for _, kv := range [][2]string{
+		{"Enter", "send · Alt+Enter adds a line"},
+		{"↑ ↓", "your sent messages (an unread one is pulled back first)"},
+		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
+		{"Esc", "browse the history; while a reply is written, interrupt that turn"},
+		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
+		{"Ctrl+N", "a new goal"},
+		{"Ctrl+P", "sessions"},
+		{"Ctrl+G", "goals"},
+		{"Ctrl+A", "approvals"},
+		{"Ctrl+R", "search what you sent"},
+		{"Ctrl+E", "cards: compact, folded, open"},
+		{"Ctrl+O", "cards show every line"},
+		{"Ctrl+T", "hold the live view"},
+		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
+	} {
+		out = append(out, row(kv[0], kv[1], 16))
+	}
+	return out
 }
 
 // slashMenuRows is how many commands the slash menu shows at once.
@@ -1652,6 +1742,20 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" && m.chat.recap != "" && strings.TrimSpace(m.chat.compose.Value()) == "" {
 		return m.dismissRecap(), nil
 	}
+	if m.chat.btw.open {
+		switch k := msg.String(); {
+		case k == "esc" && strings.TrimSpace(m.chat.compose.Value()) == "":
+			m.chat.btw = btwState{}
+			m.syncChat()
+			return m, nil
+		case k == "shift+up":
+			m.chat.btw.top = max(0, m.chat.btw.top-1)
+			return m, nil
+		case k == "shift+down":
+			m.chat.btw.top++
+			return m, nil
+		}
+	}
 	if m.chat.page >= 0 {
 		return m.pageKey(msg)
 	}
@@ -1935,7 +2039,8 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	switch command {
 	case "/help":
 		clear()
-		m.chat.help = !m.chat.help
+		m.chat.view = textView{open: true, title: "help", lines: helpLines()}
+		m.chat.compose.Blur()
 	case "/quit":
 		return m, tea.Quit
 	case "/new":

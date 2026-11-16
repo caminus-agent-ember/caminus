@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -144,20 +145,21 @@ func TestViewShowsQueueAndAudit(t *testing.T) {
 		t.Fatalf("approvals overlay missing the request:\n%s", v)
 	}
 	next, _ = m.chatSlash("/audit")
-	if v = next.(envModel).render(); !strings.Contains(v, `"event":"run"`) {
+	// a table row (when, event, detail), not the raw JSON record
+	if v = ansi.Strip(next.(envModel).render()); !strings.Contains(v, "run") || !strings.Contains(v, "id") || strings.Contains(v, `"event"`) {
 		t.Fatalf("audit overlay missing the event:\n%s", ansi.Strip(v))
 	}
 	next, _ = m.chatSlash("/servers")
-	if !strings.Contains(ansi.Strip(next.(envModel).render()), "SERVERS") {
+	if !strings.Contains(ansi.Strip(next.(envModel).render()), "servers · ") {
 		t.Fatal("servers overlay missing")
 	}
 	m.resident.Context, m.resident.ContextUsed, m.resident.CompactThreshold = 1000000, 250000, .38
 	next, _ = m.chatSlash("/context")
-	if v := ansi.Strip(next.(envModel).render()); !strings.Contains(v, "CONTEXT") || !strings.Contains(v, "25.0 %") || !strings.Contains(v, "38.0 %") {
+	if v := ansi.Strip(next.(envModel).render()); !strings.Contains(v, "context · ") || !strings.Contains(v, "25.0 %") || !strings.Contains(v, "38.0 %") {
 		t.Fatalf("context overlay shows the agent's own window:\n%s", v)
 	}
 	next, _ = m.chatSlash("/jobs")
-	if !strings.Contains(ansi.Strip(next.(envModel).render()), "JOBS & PROCESSES") {
+	if !strings.Contains(ansi.Strip(next.(envModel).render()), "jobs & processes") {
 		t.Fatal("jobs overlay missing")
 	}
 }
@@ -313,4 +315,48 @@ func TestTabsAndJobKeys(t *testing.T) {
 		t.Fatal("K on a job should return the kill command")
 	}
 	_ = mm
+}
+
+// TestOverlaysPassNoControlSequencesFromTheAgent: the agent is not trusted, and its text reaches the overlays (memory,
+// jobs, processes, logs, servers, the audit, diffs, /btw). Only colour codes may reach the terminal: nothing that moves
+// the cursor, clears the screen, sets the title or the clipboard, or recolours the agent's text with codes of its own.
+func TestOverlaysPassNoControlSequencesFromTheAgent(t *testing.T) {
+	evil := "EVIL\x1b[2J\x1b[H\x1b]0;pwned\x07\x1b]52;c;Zm9v\x1b\\\x1b[31mRED\x1bPdcs\x1b\\\u009b2J\u009d0;t\x07\x07\x08END"
+	bad := []string{"\x1b[2J", "\x1b[H", "\x1b]", "\x1bP", "\x1b[31mRED", "\u009b", "\u009d", "\x07", "\x08"}
+	audit := filepath.Join(t.TempDir(), "a.jsonl")
+	if err := appendAudit(audit, map[string]any{"event": "run" + evil, "cmd": evil}); err != nil {
+		t.Fatal(err)
+	}
+	m := chatFixture(t)
+	m.width, m.height, m.auditPath = 120, 40, audit
+	m.refreshLocal()
+	m.sessionMemory = "# memory\n" + evil
+	m.jobs = []job{{Name: evil, Pid: evil, State: evil, Log: evil}}
+	m.procs = []string{evil}
+	m.logName, m.logView = evil, evil
+	m.servers = []server{{Port: 8092, Model: evil}}
+	m.resident.Model = evil
+	check := func(what, out string, skip ...string) {
+		t.Helper()
+		for _, b := range bad {
+			if slices.Contains(skip, b) {
+				continue
+			}
+			if strings.Contains(out, b) {
+				t.Errorf("%s: %q reached the terminal", what, b)
+			}
+		}
+	}
+	for name := range pageOverlays {
+		next, _ := m.chatSlash(name)
+		check(name, next.(envModel).render())
+	}
+	m.chat.view = textView{open: true, title: "diff", lines: []string{residentText(evil), evil}, colourDiff: true}
+	// a producer that forgot to sanitise: the overlay's own filter still stops everything but colour (at worst the
+	// agent recolours its own text there)
+	check("a text view (a producer that forgot to sanitise)", m.render(), "\x1b[31mRED")
+	m.chat.view = textView{}
+	m.chat.btw = btwState{open: true, question: evil}
+	next, _ := m.Update(btwMsg{question: evil, answer: evil})
+	check("/btw", next.(envModel).render())
 }

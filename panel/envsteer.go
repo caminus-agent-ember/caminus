@@ -25,6 +25,21 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// btwState is the /btw side answer: a section of its own above the composer (with a small Ember), not an overlay.
+type btwState struct {
+	open, loading bool
+	question      string
+	lines         []string // the answer rendered (Markdown), sanitised
+	err           string
+	top           int // scrolled with Shift+Up / Shift+Down
+}
+
+type btwMsg struct {
+	question string
+	answer   string
+	err      string
+}
+
 // textView is a read-only overlay of lines (the /btw answer, the /diff).
 type textView struct {
 	open        bool
@@ -115,11 +130,9 @@ func askBtw(m envModel, goal, question string) tea.Cmd {
 			}
 		}
 		if err != nil {
-			return textViewMsg{err: "btw: " + strings.TrimSpace(string(raw))}
+			return btwMsg{question: question, err: strings.TrimSpace(string(raw))}
 		}
-		lines := []string{envBusy.Render("you  ") + residentText(question), ""}
-		lines = append(lines, strings.Split(residentText(out.Answer), "\n")...)
-		return textViewMsg{title: "BY THE WAY  (not added to the goal)", lines: lines}
+		return btwMsg{question: question, answer: out.Answer}
 	}
 }
 
@@ -154,7 +167,10 @@ func fetchDiff(m envModel, goal string) tea.Cmd {
 		if len(out.Repos) == 0 {
 			lines = []string{"no changes in a git repository this goal touched"}
 		}
-		return textViewMsg{title: "DIFF", lines: lines, diff: true}
+		for i, l := range lines { // (the agent's files: sanitised here, the overlay draws lines as they are)
+			lines[i] = residentText(l)
+		}
+		return textViewMsg{title: "diff", lines: lines, diff: true}
 	}
 }
 
@@ -298,7 +314,8 @@ func (m envModel) textOverlay(w, h int) string {
 	room := max(1, h-6)
 	var lines []string
 	for _, l := range tv.lines {
-		lines = append(lines, strings.Split(ansi.Hardwrap(residentText(l), inner, true), "\n")...)
+		// (every producer sanitises what came from the agent; the lines carry their own styling)
+		lines = append(lines, strings.Split(ansi.Hardwrap(l, inner, true), "\n")...)
 	}
 	top := max(0, min(tv.top, max(0, len(lines)-room)))
 	var rows []string
@@ -306,7 +323,7 @@ func (m envModel) textOverlay(w, h int) string {
 		if tv.colourDiff {
 			rows = append(rows, colourDiffLine(l))
 		} else {
-			rows = append(rows, lipgloss.NewStyle().Foreground(cText).Render(l))
+			rows = append(rows, l)
 		}
 	}
 	return overlayBox(tv.title, strings.Join(rows, "\n"), "↑↓ PgUp PgDn scroll", w, h)
@@ -411,7 +428,8 @@ func (m envModel) steerSlash(command, arg string) (envModel, tea.Cmd, bool) {
 			}
 			return m, nil, true
 		}
-		m.msg = "asking…"
+		m.chat.btw = btwState{open: true, loading: true, question: arg}
+		m.syncChat()
 		return m, askBtw(m, goal, arg), true
 	case "/diff":
 		m.msg = "reading the changes…"

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"charm.land/lipgloss/v2"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -249,13 +250,21 @@ func (m envModel) sessionsPane() string {
 }
 
 func (m envModel) residentSettingsPane() string {
-	return strings.Join([]string{envHead.Render("SESSION SETTINGS · " + residentText(m.agentName)),
-		"Model: " + residentText(m.resident.Model), fmt.Sprintf("Context capacity: %d tokens", m.resident.Context),
-		fmt.Sprintf("Compaction: %.0f%% trigger → %.0f%% target", m.resident.CompactThreshold*100, m.resident.CompactTarget*100),
-		"", "Settings shown here are read-only; new sessions inherit the selected session's model settings.",
-		"Root approval happens in /requests; credentials and passwords are never displayed here.",
-		"", "Conversation: Enter sends · Alt+Enter adds a line · Escape browses history · Ctrl+P switches session",
-		"Scrollback: Page Up/Down or mouse wheel · Ctrl+L follows new activity",
-		"Session commands: /new, /goals, /goal ID, /newsession NAME, /session NAME",
-		"Controls: /start, /stop, /cancel, /resume, /requests, /remember TEXT, /help"}, "\n")
+	lines := []string{envHead.Render("SESSION SETTINGS · " + residentText(m.agentName))}
+	add := func(k, v string) {
+		lines = append(lines, envDim.Render(fmt.Sprintf("  %-14s", k))+lipgloss.NewStyle().Foreground(cText).Render(v))
+	}
+	add("brain", residentText(m.resident.Model))
+	add("window", fmt.Sprintf("%s tokens", short(m.resident.Context)))
+	add("compaction", fmt.Sprintf("at %.0f %%, down to %.0f %%", m.resident.CompactThreshold*100, m.resident.CompactTarget*100))
+	lines = append(lines, "", envDim.Render("  Read-only here: /model picks the brain, /effort its depth. New sessions take this one's settings."),
+		envDim.Render("  Root approvals are in /requests; credentials are never shown."), "")
+	key := func(k, v string) {
+		lines = append(lines, "  "+envTitle.Render(fmt.Sprintf("%-12s", k))+envDim.Render(v))
+	}
+	key("Enter", "send · Alt+Enter a new line · ↑ ↓ your sent messages")
+	key("Esc", "browse the history · PgUp PgDn scroll · Ctrl+L follow")
+	key("/", "commands, with what each does")
+	key("Ctrl+P", "sessions · Ctrl+G goals · Ctrl+A approvals")
+	return strings.Join(lines, "\n")
 }

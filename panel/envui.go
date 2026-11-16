@@ -22,10 +22,12 @@ package main
 
 import (
 	"bytes"
+	"charm.land/lipgloss/v2"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/charmbracelet/x/ansi"
 	"io"
 	"os"
 	"os/exec"
@@ -647,6 +649,18 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.rewind.sel = max(0, len(msg.steps)-1)
 		}
 		return m, nil
+	case btwMsg:
+		b := &m.chat.btw
+		if !b.open || b.question != msg.question {
+			return m, nil // closed, or a newer question replaced it
+		}
+		b.loading, b.err, b.top = false, msg.err, 0
+		if msg.err == "" {
+			// the agent's words, sanitised, then rendered as Markdown at the section's width
+			b.lines = formatText("markdown", residentText(msg.answer), max(30, min(readingWidth+2, m.width-20)))
+		}
+		m.syncChat()
+		return m, nil
 	case unsendMsg:
 		switch {
 		case msg.err != "":
@@ -1192,10 +1206,11 @@ func (m envModel) pane() string {
 	case 1:
 		return m.jobsPane()
 	case 2:
-		return strings.Join(m.procs, "\n")
+		return envHead.Render("PROCESSES") + "\n" + sanitizedLines(m.procs)
 	case 3:
 		// Read-only: steering goes through /steer, so the old bridge notes are not shown or written from here.
-		return envHead.Render("SESSION MEMORY · "+residentText(m.agentName)) + "\n" + residentText(m.sessionMemory)
+		return envHead.Render("SESSION MEMORY · "+residentText(m.agentName)) + "\n" +
+			strings.Join(formatText("markdown", residentText(m.sessionMemory), max(40, m.width-8)), "\n")
 	case 4:
 		return m.ctxPane()
 	case 7:
@@ -1203,7 +1218,7 @@ func (m envModel) pane() string {
 	case 8:
 		return m.residentSettingsPane()
 	case 9:
-		return m.jobsPane() + "\n\n" + envHead.Render("PROCESSES") + "\n" + strings.Join(m.procs, "\n")
+		return m.jobsPane() + "\n\n" + envHead.Render("PROCESSES") + "\n" + sanitizedLines(m.procs)
 	case 10:
 		return m.contextPane()
 	default:
@@ -1242,14 +1257,14 @@ func (m envModel) jobsPane() string {
 		lines = append(lines, envDim.Render("  none"))
 	}
 	for i, j := range m.jobs {
-		line := fmt.Sprintf("  %-16s pid=%-8s %s  log=%s", j.Name, j.Pid, j.State, j.Log)
+		line := fmt.Sprintf("  %-16s pid=%-8s %s  log=%s", residentText(j.Name), residentText(j.Pid), residentText(j.State), residentText(j.Log))
 		if i == m.jobSel {
 			line = envSel.Render(line)
 		}
 		lines = append(lines, line)
 	}
 	if m.logName != "" {
-		lines = append(lines, "", envHead.Render("log tail: "+m.logName), envDim.Render(m.logView))
+		lines = append(lines, "", envHead.Render("log tail: "+residentText(m.logName)), envDim.Render(residentText(m.logView)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1260,21 +1275,59 @@ func (m envModel) ctxPane() string {
 		lines = append(lines, envDim.Render("  none running on 127.0.0.1:8092-8101"))
 	}
 	for _, s := range m.servers {
-		lines = append(lines, fmt.Sprintf("  127.0.0.1:%d  %s  context %s", s.Port, s.Model, s.Nctx))
+		lines = append(lines, fmt.Sprintf("  127.0.0.1:%d  %s  context %s", s.Port, residentText(s.Model), residentText(s.Nctx)))
 	}
 	return strings.Join(lines, "\n")
 }
 
+func sanitizedLines(ls []string) string {
+	out := make([]string, len(ls))
+	for i, l := range ls {
+		out[i] = residentText(l)
+	}
+	return strings.Join(out, "\n")
+}
+
+// auditPane: the owner's audit log as a table, newest last: when, what happened, and its detail on one line (the
+// command, the decision, the target), instead of each raw JSON record.
 func (m envModel) auditPane() string {
 	lines := []string{envHead.Render("AUDIT (tail of " + m.auditPath + ")")}
 	if len(m.events) == 0 {
 		lines = append(lines, envDim.Render("  empty"))
 	}
+	w := max(40, m.width-8)
 	for _, e := range m.events {
-		if len(e) > m.width-6 {
-			e = e[:m.width-6]
+		var rec map[string]any
+		if json.Unmarshal([]byte(e), &rec) != nil {
+			lines = append(lines, envDim.Render(ansi.Truncate(residentText(e), w, "…")))
+			continue
 		}
-		lines = append(lines, envDim.Render("  "+e))
+		when := ""
+		if ts, ok := rec["ts"].(float64); ok {
+			when = time.Unix(int64(ts), 0).Format("01-02 15:04")
+		}
+		event, _ := rec["event"].(string)
+		var detail []string
+		for _, k := range []string{"decision", "agent", "target", "user", "rc"} {
+			if v, ok := rec[k]; ok && fmt.Sprint(v) != "" {
+				detail = append(detail, k+" "+fmt.Sprint(v))
+			}
+		}
+		for _, k := range []string{"cmd", "answer", "reason"} {
+			if v, ok := rec[k].(string); ok && v != "" {
+				detail = append(detail, strings.Join(strings.Fields(v), " "))
+			}
+		}
+		evSt := lipgloss.NewStyle().Foreground(cText)
+		switch {
+		case strings.Contains(event, "root") || strings.Contains(event, "decision"):
+			evSt = lipgloss.NewStyle().Foreground(cYellow)
+		case strings.Contains(event, "stop") || strings.Contains(event, "cancel") || strings.Contains(event, "halt"):
+			evSt = lipgloss.NewStyle().Foreground(cRed)
+		}
+		row := envDim.Render(fmt.Sprintf("%-11s ", when)) + evSt.Render(fmt.Sprintf("%-16s ", residentText(event))) +
+			envDim.Render(residentText(strings.Join(detail, " · ")))
+		lines = append(lines, ansi.Truncate(row, w, "…"))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -271,7 +271,7 @@ func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
 		m.events = append(m.events, fmt.Sprintf("audit entry %d with a long but readable message", i))
 	}
 	frame := m.render()
-	if m.tab != 6 || m.chat.page != 5 || !strings.Contains(ansi.Strip(frame), "AUDIT") {
+	if m.tab != 6 || m.chat.page != 5 || !strings.Contains(ansi.Strip(frame), "audit · ") {
 		t.Fatalf("/audit did not open the overlay:\n%s", ansi.Strip(frame))
 	}
 	if len(strings.Split(frame, "\n")) > m.height {
@@ -1322,7 +1322,7 @@ func TestModelsOverlayListsTheCatalogAndPicks(t *testing.T) {
 		t.Fatalf("the selection starts on the current model, got %d", m.chat.models.sel)
 	}
 	view := ansi.Strip(m.renderChat())
-	for _, want := range []string{"MODELS  2", "now zai-org/GLM-5.2", "claude-opus-5-5", "anthropic · 1M · effort low/medium/high/xhigh/max · vision",
+	for _, want := range []string{"models  2", "now zai-org/GLM-5.2", "claude-opus-5-5", "anthropic · 1M · effort low/medium/high/xhigh/max · vision",
 		"deepinfra · 203K · effort none/low/medium/high · $0.6/$2.2"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overlay misses %q:\n%s", want, view)
@@ -1363,7 +1363,7 @@ func TestRecapCardAndStudioOverlay(t *testing.T) {
 	m.chat.studio.list = []studioEntry{{Path: "/h/studio/for-you/sketch.svg", Name: "sketch.svg", Mtime: 1794780000, group: "for you"},
 		{Path: "/h/journal/2026-11-15.md", Name: "2026-11-15.md", Head: "Tide pools", Mtime: 1794770000, group: "journal"}}
 	view = ansi.Strip(m.renderChat())
-	for _, want := range []string{"STUDIO  2", "for you", "sketch.svg", "journal", "Tide pools"} {
+	for _, want := range []string{"studio  2", "for you", "sketch.svg", "journal", "Tide pools"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("studio misses %q:\n%s", want, view)
 		}
@@ -1470,7 +1470,7 @@ func TestSteeringViews(t *testing.T) {
 	// /diff opens a coloured view
 	m.chat.view = textView{open: true, title: "DIFF", colourDiff: true, lines: []string{"### /work/repo", "+added line", "-removed line", "@@ -1 +1 @@"}}
 	view := ansi.Strip(m.renderChat())
-	for _, want := range []string{"DIFF", "+added line", "-removed line"} {
+	for _, want := range []string{"diff", "+added line", "-removed line"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("diff view misses %q:\n%s", want, view)
 		}
@@ -1898,5 +1898,32 @@ func TestUpDownRecallSentMessagesLikeAShell(t *testing.T) {
 	next, _ = m.Update(unsendMsg{})
 	if next.(envModel).chat.compose.Value() != "second message" {
 		t.Fatalf("nothing to pull back: ↑ recalls: %q", next.(envModel).chat.compose.Value())
+	}
+}
+
+func TestBtwAnswerIsASectionAboveTheComposerNotAnOverlay(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+		events: []residentEvent{{Seq: 2, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "the transcript stays in view"}}}})
+	m.chat.btw = btwState{open: true, loading: true, question: "what is left?"}
+	m.syncChat()
+	if v := ansi.Strip(m.render()); !strings.Contains(v, "thinking…") || !strings.Contains(v, "the transcript stays in view") {
+		t.Fatalf("while it thinks: the section and the transcript both show:\n%s", v)
+	}
+	next, _ := m.Update(btwMsg{question: "what is left?", answer: "**Two** steps remain."})
+	m = next.(envModel)
+	v := m.render()
+	plain := ansi.Strip(v)
+	if !strings.Contains(plain, "Two steps remain") || strings.Contains(plain, "**") || !strings.Contains(plain, "by the way") ||
+		!strings.Contains(plain, "the transcript stays in view") || strings.Contains(v, `\x1b`) {
+		t.Fatalf("the answer renders as Markdown in its own section, the transcript still visible:\n%s", plain)
+	}
+	if lines := strings.Split(plain, "\n"); len(lines) > m.height {
+		t.Fatalf("%d lines overflow a %d-line terminal", len(lines), m.height)
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if next.(envModel).chat.btw.open {
+		t.Fatal("Esc on an empty draft closes the section")
 	}
 }

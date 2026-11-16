@@ -66,7 +66,7 @@ func TestApprovalsOverlayOpensListsAndCloses(t *testing.T) {
 			t.Fatalf("%s: the overlay did not take the conversation (%v)", open, m.chat.approvals)
 		}
 		frame := ansi.Strip(m.render())
-		for _, want := range []string{"APPROVALS  2 pending", g.root + " root", "? ask", "apt-get install -y libcmocka-dev",
+		for _, want := range []string{"approvals  2 pending", g.root + " root", "? ask", "apt-get install -y libcmocka-dev",
 			"Which parser should the empty-input test use?", "esc close", "CAMINUS", "^P sessions"} {
 			if !strings.Contains(frame, want) {
 				t.Fatalf("%s: the overlay is missing %q:\n%s", open, want, frame)
@@ -104,7 +104,7 @@ func TestApprovalsOverlayOpensListsAndCloses(t *testing.T) {
 		if m.chat.approvals || !m.chat.compose.Focused() {
 			t.Fatalf("%s: Esc did not close the overlay", open)
 		}
-		if frame := ansi.Strip(m.render()); strings.Contains(frame, "APPROVALS") {
+		if frame := ansi.Strip(m.render()); strings.Contains(frame, "approvals  ") {
 			t.Fatalf("%s: the overlay outlived Esc:\n%s", open, frame)
 		}
 	}
@@ -125,7 +125,7 @@ func TestApprovalsOverlayDeniesThroughTheBridge(t *testing.T) {
 	if m.pendingRoot() != -1 {
 		t.Fatal("a denied request still shows as waiting")
 	}
-	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "APPROVALS  1 pending") {
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "approvals  1 pending") {
 		t.Fatalf("the overlay lost the remaining request:\n%s", frame)
 	}
 }

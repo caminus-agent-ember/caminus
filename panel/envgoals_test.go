@@ -28,7 +28,7 @@ func TestGoalsOverlayOpensListsAndTargets(t *testing.T) {
 	m := goalsFixture(t)
 	m, _ = key(m, tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	frame := ansi.Strip(m.render())
-	if !m.chat.goals || !strings.Contains(frame, "GOALS  1 open of 2") {
+	if !m.chat.goals || !strings.Contains(frame, "goals  1 open of 2") {
 		t.Fatalf("Ctrl+G did not open the overlay:\n%s", frame)
 	}
 	if strings.Index(frame, "bbb222") > strings.Index(frame, "aaa111") {
