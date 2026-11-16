@@ -91,6 +91,10 @@ jobs:
           echo "CODER=$RUNNER_TEMP/coder-vocab.gguf" >> "$GITHUB_ENV"
 
       - name: The CPU suites (each skipped when what it needs is missing; tests/ci_cpu.py --list says what)
+        env:
+          # tests/env/test_setup_e2e.py: caminus env setup from a clean account (it creates a Unix account with sudo;
+          # only a throwaway runner opts in)
+          CAMINUS_E2E_ROOT: '1'
         run: |
           python -I tests/ci_cpu.py --list
           python -I tests/ci_cpu.py --scratch "$RUNNER_TEMP/ci"
