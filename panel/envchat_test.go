@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -792,8 +793,8 @@ func TestEmbersBoxKeepsOneSizeGeneratingOrNot(t *testing.T) {
 	next, _ = m.Update(residentLiveMsg{agent: "resident", turn: "t1", reasoning: strings.Repeat("thinking about it ", 60)})
 	m = next.(envModel)
 	long := lipgloss.Height(m.liveBlock(m.width))
-	if idle != short || short != long || long != thoughtRows+3 {
-		t.Fatalf("one size: idle %d, a short thought %d, a long one %d (want %d)", idle, short, long, thoughtRows+3)
+	if idle != short || short != long || long != thoughtRows+1 { // (a heading and the rows: no frame)
+		t.Fatalf("one size: idle %d, a short thought %d, a long one %d (want %d)", idle, short, long, thoughtRows+1)
 	}
 	body, transcript := m.bodyHeight(), m.chat.transcript.Height()
 	if transcript < body-long-2 || transcript > body-long+2 {
@@ -950,8 +951,8 @@ func TestThemeSetPersistsAndTheSlashCommandSwitches(t *testing.T) {
 	m := chatFixture(t)
 	tm, _ := m.chatSlash("/theme")
 	list := tm.(envModel)
-	if !strings.Contains(list.msg, "caminus") || !strings.Contains(list.msg, "nord") {
-		t.Fatalf("/theme does not list themes: %q", list.msg)
+	if !list.chat.themes.open || !slices.Contains(list.chat.themes.names, "caminus") || !slices.Contains(list.chat.themes.names, "nord") {
+		t.Fatalf("/theme opens the theme screen with the themes: %v", list.chat.themes.names)
 	}
 	tn, _ := m.chatSlash("/theme nope")
 	nope := tn.(envModel)
@@ -1721,7 +1722,7 @@ func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
 			t.Fatalf("row too wide (%d): %q", ansi.StringWidth(r), r)
 		}
 	}
-	for _, want := range []string{"first the NVD feed", "Tasks  1 of 3 done", "◐ write the CLI", "Now  running", "make test", "Checking the CVEs."} {
+	for _, want := range []string{"first the NVD feed", "tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("missing %q:\n%s", want, frame)
 		}
@@ -1925,5 +1926,61 @@ func TestBtwAnswerIsASectionAboveTheComposerNotAnOverlay(t *testing.T) {
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if next.(envModel).chat.btw.open {
 		t.Fatal("Esc on an empty draft closes the section")
+	}
+}
+
+func TestThemeScreenPreviewsKeepsAndRestores(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := chatFixture(t)
+	m.width, m.height = 140, 44
+	before := themeRole("accent")
+	next, _ := m.chatSlash("/theme")
+	m = next.(envModel)
+	if !m.chat.themes.open || len(m.chat.themes.names) < 20 {
+		t.Fatalf("the screen opens with every theme (%d)", len(m.chat.themes.names))
+	}
+	frame := m.render()
+	plain := ansi.Strip(frame)
+	for _, want := range []string{"themes  ", "add tests for the parser", "the gate fails", "a framed box", "esc browse", "↑↓ preview"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("the screen misses %q:\n%s", want, plain)
+		}
+	}
+	if len(strings.Split(plain, "\n")) > m.height || strings.Contains(frame, `\x1b`) {
+		t.Fatal("the screen overflows the terminal or prints escape codes as text")
+	}
+	next, _ = m.themesKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = next.(envModel)
+	moved := m.chat.themes.names[m.chat.themes.sel]
+	if _, err := os.Stat(themeSavePath()); err == nil {
+		t.Fatal("previewing must not save")
+	}
+	next, _ = m.themesKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(envModel)
+	if m.chat.themes.open || themeRole("accent") != before {
+		t.Fatal("Esc closes the screen and puts the old theme back")
+	}
+	next, _ = m.chatSlash("/theme")
+	m = next.(envModel)
+	next, _ = m.themesKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = next.(envModel)
+	next, _ = m.themesKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if b, _ := os.ReadFile(themeSavePath()); strings.TrimSpace(string(b)) != moved {
+		t.Fatalf("Enter keeps the previewed theme: saved %q, want %q", b, moved)
+	}
+	_ = themeLoad("caminus")
+}
+
+func TestEveryBundledThemeSetsEveryRole(t *testing.T) {
+	for _, n := range themeNames() {
+		data, err := themeFS.ReadFile("themes/" + n + ".theme")
+		if err != nil {
+			continue // a user's own file
+		}
+		for role := range defaultTheme() {
+			if !strings.Contains(string(data), "\n"+role+" = ") {
+				t.Errorf("%s does not set %s", n, role)
+			}
+		}
 	}
 }

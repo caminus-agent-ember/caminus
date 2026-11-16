@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -452,6 +453,17 @@ func lowerLabel(title string) string {
 		end = i + 1
 	}
 	return strings.ToLower(title[:end]) + title[end:]
+}
+
+// sectionHead is how a reading surface starts (Ember's thoughts, tasks, now, the /btw answer): its label bold in its
+// colour, a dim note, and a thin rule to the edge. The chat's rule for frames: a frame means you can type or act
+// there (the composer, the / menu, overlays); what you only read gets this heading instead.
+func sectionHead(label string, c color.Color, note string, w int) string {
+	s := lipgloss.NewStyle().Foreground(c).Bold(true).Render(label)
+	if note != "" {
+		s += envDim.Render("  " + note)
+	}
+	return s + " " + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(2, w-lipgloss.Width(s)-1)))
 }
 
 // overlayBox: every overlay is the same box with the same keys; Esc always closes.

@@ -66,6 +66,7 @@ type residentChat struct {
 	slashIdx                                int
 	slashSel                                int    // the slash menu's highlighted row
 	btw                                     btwState // the /btw side answer, in its own section above the composer
+	themes                                  themeScreen // /theme: the theme screen
 	recallIdx                               int    // Up/Down history: 1 = your newest sent message; 0 = not recalling
 	recallText                              string // what the recall put in the draft (an edit ends the recall)
 	slashFor                                string // the draft slashSel belongs to (a new draft starts at the top)
@@ -496,7 +497,7 @@ func (m envModel) sidePanel(sw, height int) string {
 					done++
 				}
 			}
-			rows = append(rows, "", " "+bold(cAccent).Render("Tasks")+envDim.Render(fmt.Sprintf("  %d of %d done", done, len(items))))
+			rows = append(rows, "", sectionHead("tasks", cAccent, fmt.Sprintf("%d of %d done", done, len(items)), sw))
 			for _, it := range items {
 				mark, st := envDim.Render("○"), envDim
 				switch it.state {
@@ -507,14 +508,13 @@ func (m envModel) sidePanel(sw, height int) string {
 				default:
 					st = textSt
 				}
-				lines := wrap(residentText(it.text), 4, st, 2)
-				lines[0] = " " + mark + " " + strings.TrimPrefix(lines[0], "    ")
-				rows = append(rows, lines...)
+				// one line each, cut with … (wrapped tasks made a ragged block)
+				rows = append(rows, " "+mark+" "+st.Render(ansi.Truncate(strings.Join(strings.Fields(residentText(it.text)), " "), max(8, sw-4), "…")))
 			}
 		}
 	}
 	now, command := m.nowState(goal)
-	rows = append(rows, "", " "+bold(cBlue).Render("Now")+"  "+envBusy.Render(now))
+	rows = append(rows, "", sectionHead("now", cBlue, "", sw), " "+envBusy.Render(now))
 	if command != "" {
 		rows = append(rows, wrap(command, 3, textSt, 8)...)
 	}
@@ -640,7 +640,7 @@ func (m envModel) emberBox(w, window int) string {
 		}
 		head = bold(cGreen).Render(who) + " " + envBusy.Render(spin) + envDim.Render(hint)
 	} else {
-		head = bold(cGreen).Render(g.agent+" thoughts") + envDim.Render("  the latest, newest last")
+		head = sectionHead(g.agent+" thoughts", cGreen, "newest last", max(18, w-1))
 	}
 	shown := append([]string{}, body[top:min(top+window, len(body))]...)
 	for len(shown) < window {
@@ -660,7 +660,14 @@ func (m envModel) emberBox(w, window int) string {
 			shown[i] = col + "  " + line
 		}
 	}
-	return envBorder.Width(max(18, w-2)).Render(strings.Join(append([]string{head}, shown...), "\n"))
+	// a reading surface: a heading, no frame (sectionHead)
+	if !strings.Contains(head, "─") {
+		head += " " + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", max(2, w-1-lipgloss.Width(head)-1)))
+	}
+	for i := range shown {
+		shown[i] = " " + shown[i]
+	}
+	return strings.Join(append([]string{head}, shown...), "\n")
 }
 
 // nowState is what the agent is doing this moment, and the command when one runs (the time first in now).
@@ -1257,7 +1264,7 @@ func (m envModel) btwSection(w int) string {
 	}
 	art := mascotSmall(m.tickN % 2)
 	artW := lipgloss.Width(art[0]) + 2
-	textW := max(10, w-4-artW)
+	textW := max(10, min(readingWidth, w-1-artW))
 	q := lipgloss.NewStyle().Foreground(cText).Render(envClip(residentText(b.question), textW-4))
 	body := []string{envBusy.Render("you ") + q}
 	rows := m.btwRows()
@@ -1287,9 +1294,8 @@ func (m envModel) btwSection(w int) string {
 		}
 		out = append(out, a+l)
 	}
-	box := envBorder.Render(strings.Join(out, "\n"))
-	box = borderTitle(box, "by the way · not added to the goal", envDim)
-	return box + "\n" + envDim.Render("  "+keys)
+	// a reading surface: the shared heading, no frame; the keys ride on the heading's note
+	return sectionHead("by the way", cAccent, "not added to the goal · "+keys, w) + "\n" + strings.Join(out, "\n")
 }
 
 // helpLines: every command with what it does (the slash menu's two columns), then the keys.
@@ -1646,6 +1652,10 @@ func (m envModel) renderChat() string {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.modelsOverlay(w, h) + "\n" + foot
 	}
+	if m.chat.themes.open && len(m.chat.themes.names) > 0 {
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
+		return head + "\n" + m.themesOverlay(w, h) + "\n" + foot
+	}
 	if m.chat.studio.open {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.studioOverlay(w, h) + "\n" + foot
@@ -1711,7 +1721,7 @@ func (m envModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.studio.open &&
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.themes.open && !m.chat.studio.open &&
 		!m.chat.view.open && !m.chat.rewind.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
@@ -1729,6 +1739,9 @@ func (m envModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.chat.models.open {
 		return m.modelsKey(msg)
+	}
+	if m.chat.themes.open {
+		return m.themesKey(msg)
 	}
 	if m.chat.studio.open {
 		return m.studioKey(msg)
@@ -2207,8 +2220,7 @@ func (m envModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		// up the new roles. Nothing else in the session changes.
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			m.msg = "themes: " + strings.Join(themeNames(), ", ") + " · /theme NAME"
-			return m, nil
+			return m.openThemes(), nil // the theme screen: every theme, previewed on every element
 		}
 		if err := themeSet(name); err != nil {
 			m.msg = "no such theme: " + name + " · /theme lists"
@@ -2302,7 +2314,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/start", "run this session's loop"},
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/stop", "stop this session's loop"},
-	{"/theme", "switch panel colors NAME; /theme lists"},
+	{"/theme", "the theme screen: preview and pick (or /theme NAME)"},
 	{"/glyphs", "symbols: nerd, unicode or ascii; alone, the next one"},
 	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
 	{"/memory", "memory and notes"},
