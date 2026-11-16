@@ -689,6 +689,17 @@ class Resident(unittest.TestCase):
             self.assertIsNone(rt._schedule_retry(gid2,broken),'other failures keep the 8-attempt limit')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_runtime_block_leaves_out_the_shell_agents_robots_md(self):
+        with self.hermetic_home():
+            (Path(os.environ['HOME'])/'ROBOTS.md').write_text('# ROBOTS.md\nask with ~/bin/env-ask; root with ~/bin/ask-root\n')
+            (self.home/'IDENTITY.md').write_text('I am the resident.\n')
+            rt=Runtime(self.home)
+            try:
+                c=rt.context_message(rt.store.enqueue('Make x.'))['content']
+                self.assertNotIn('env-ask',c,'the shell agents\' guide conflicts with the resident\'s own tools');self.assertIn('I am the resident.',c)
+                self.assertNotIn('ROBOTS.md',rt.system()['content'])
+            finally:rt.mail.close();rt.store.close()
+
     def test_a_stale_todo_list_gets_a_gentle_reminder(self):
         from caminus.ember.resident.runtime import TODO_STALE
         rt=Runtime(self.home)

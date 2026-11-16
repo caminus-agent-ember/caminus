@@ -317,7 +317,7 @@ class Runtime:
         """The stable prefix, and nothing else.
 
         An inference server caches the longest common prefix of the prompt. Everything that changes while the
-        agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, ROBOTS.md, and the measured
+        agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, and the measured
         budget - therefore rides after the history instead (see :meth:`context_message`). A memory write used
         to invalidate the cache at the first token and force a full re-read of the whole transcript."""
         return dict(role='system', content=render_prompt(self.home))
@@ -329,7 +329,10 @@ class Runtime:
         own notes. Position is what keeps that affordable."""
         # STATE.md first: after a compaction or a restart it is the agent's own account of where it stands.
         parts = [self.memory.state()]
-        for p in (Path.home() / 'ROBOTS.md', self.home / 'IDENTITY.md'):
+        # (not the account's ROBOTS.md: it is the shell agents' guide, with ~/bin/env-ask and ~/bin/ask-root where the
+        # resident has its ask_user and ask_root tools; carried here, it read as a second, conflicting set of
+        # instructions, and a model took it for an injection. The resident's own instructions are its system prompt.)
+        for p in (self.home / 'IDENTITY.md',):
             if not p.is_file():
                 continue
             text = p.read_text()
@@ -1136,7 +1139,7 @@ class Runtime:
         model's own words about the work, never a substitute for what the human asked for."""
         system = self.system(gid)
         # Every check below measures the request as it is sent: the stable prefix, the history and the trailing
-        # context message (ROBOTS.md, IDENTITY.md, MEMORY.md, the loop state). Leaving the tail out let a full
+        # context message (IDENTITY.md, MEMORY.md, the loop state). Leaving the tail out let a full
         # MEMORY.md push the real request past the window while the probe still saw room, and the goal then
         # paused on a context error instead of compacting.
         tail = [c] if (c := self.context_message(gid)) else []
