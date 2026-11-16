@@ -226,6 +226,30 @@ class Resident(unittest.TestCase):
         self.assertEqual(len(finished),1)
         self.assertEqual(finished[0]['data']['summary'],'Done.')
 
+    def test_a_plain_answer_on_a_reopened_goal_completes_it_again(self):
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),call('verify',dict(evidence='ls showed it')),
+                     call('finish',dict(summary='Done.')))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        self.cmd('send',['so what could we do next?','--goal-id',goal['id'],'--continue'])
+        self.replies(dict(role='assistant',content='Next we could add a test for it.'))
+        again=self.cmd('once',['--goal-id',goal['id']])
+        self.assertEqual(again['state'],'completed','the answer ends the turn; it is not nudged back to work')
+        kinds=[e['kind'] for e in self.cmd('events')]
+        self.assertIn('answered',kinds);self.assertNotIn('plain_text_nudge',kinds)
+        finished=[e for e in self.cmd('events') if e['kind']=='finished']
+        self.assertEqual(finished[-1]['data']['summary'],'Next we could add a test for it.')
+
+    def test_an_unknown_extra_argument_is_dropped_with_a_note_not_refused(self):
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),call('verify',dict(evidence='ls showed it')),
+                     call('finish',dict(summary='Done.',choices=['ship it','wait'])))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        res=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='finish'][-1]
+        self.assertIn('ignored unknown argument(s) choices',res.get('note',''))
+
     def test_three_plain_text_replies_pause_the_goal(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),
