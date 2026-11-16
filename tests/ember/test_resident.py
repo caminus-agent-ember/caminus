@@ -700,6 +700,22 @@ class Resident(unittest.TestCase):
                 self.assertNotIn('ROBOTS.md',rt.system()['content'])
             finally:rt.mail.close();rt.store.close()
 
+    def test_only_a_steer_asks_for_a_fresh_verify_not_a_nudge_or_question(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            rt.store.event('verified',dict(evidence='x exists'),gid)
+            self.assertTrue(rt.store.verified_since_steer(gid))
+            rt.store.event('steers_applied',dict(ids=[1],redirect=False),gid)
+            self.assertTrue(rt.store.verified_since_steer(gid),'a question or nudge keeps the verify')
+            self.assertNotIn('no verify yet',rt.context_message(gid)['content'])
+            rt.store.event('steers_applied',dict(ids=[2],redirect=True),gid)
+            self.assertFalse(rt.store.verified_since_steer(gid),'a steer may move done: verify again')
+            rt.store.event('verified',dict(evidence='x exists'),gid)
+            rt.store.event('steers_applied',dict(ids=[3]),gid)
+            self.assertFalse(rt.store.verified_since_steer(gid),'an older record without the field counts as a steer')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_stale_todo_list_gets_a_gentle_reminder(self):
         from caminus.ember.resident.runtime import TODO_STALE
         rt=Runtime(self.home)

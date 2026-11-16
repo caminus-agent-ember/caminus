@@ -1684,7 +1684,10 @@ class Runtime:
                 if rows:
                     self.store.update(gid, messages=messages, steer_seq=rows[-1]['id'])
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])
-                    self.store.event('steers_applied', dict(ids=[r['id'] for r in rows]), gid)
+                    # redirect: whether a steer (not only nudges / questions) was among them; only a steer asks for a
+                    # fresh verify (a question on a finished goal made the agent think it had to redo its proof)
+                    self.store.event('steers_applied', dict(ids=[r['id'] for r in rows],
+                                                            redirect=any((r['kind'] or 'nudge') == 'steer' for r in rows)), gid)
                 if not g['steps'] and not self.store.db.execute(
                         "SELECT 1 FROM events WHERE goal=? AND kind='startup_discovery' LIMIT 1",(gid,)).fetchone():
                     snapshot=discovery.discover(self.home)

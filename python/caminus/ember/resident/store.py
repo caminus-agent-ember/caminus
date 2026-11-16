@@ -237,11 +237,13 @@ class Store:
         return dict(r) if r else None
 
     def verified_since_steer(self, gid):
-        """Whether the done check has been exercised since the last steer arrived."""
+        """Whether the done check has been exercised since the last steer (a redirect) arrived. Nudges and questions
+        do not count: they do not move what done means, and the finish judge still checks every one of them. (A batch
+        recorded before the field existed counts as a steer.)"""
         return bool(self.db.execute(
             'SELECT 1 FROM events WHERE goal=? AND kind=? AND seq > COALESCE('
-            '(SELECT MAX(seq) FROM events WHERE goal=? AND kind=?),0) LIMIT 1',
-            (gid, 'verified', gid, 'steers_applied')).fetchone())
+            '(SELECT MAX(seq) FROM events WHERE goal=? AND kind=? AND data NOT LIKE ?),0) LIMIT 1',
+            (gid, 'verified', gid, 'steers_applied', '%"redirect": false%')).fetchone())
 
     def clear_precondition_failures(self, gid, text):
         """Forget the failures that were only a precondition's refusal (text: in its error, also when the watchdog
