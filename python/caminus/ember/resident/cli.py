@@ -192,8 +192,11 @@ def parser():
             p.add_argument('--api-key-env',default='CAMINUS_AGENT_API_KEY')
             p.add_argument('--api',choices=('openai','anthropic'),default='openai',
                            help="wire format: OpenAI chat completions (the local server) or Anthropic's Messages API")
-            p.add_argument('--effort',choices=('low','medium','high'),
-                           help='Messages API effort (thinking stays off; default medium)')
+            p.add_argument('--effort',choices=('low','medium','high','xhigh','max'),
+                           help='Messages API effort (default medium; xhigh and max need --thinking adaptive)')
+            p.add_argument('--thinking',choices=('adaptive','disabled'),
+                           help='Messages API thinking: adaptive lets the model think before each reply (nothing is '
+                                'stored or replayed); default disabled, or adaptive where the model refuses it off')
             p.add_argument('--max-model-retries',type=int,
                            help='failed model calls in a row before the goal stops (default: unbounded for a '
                                 'local endpoint, 8 for a remote one)')
@@ -421,6 +424,7 @@ def main(argv=None,stdin=None):
                      idle_timeout=a.idle_timeout,token_budget=a.token_budget)
             if a.api!='openai':cfg['api']=a.api
             if a.effort:cfg['effort']=a.effort
+            if getattr(a,'thinking',None):cfg['thinking']=a.thinking
             if a.max_model_retries is not None:
                 if a.max_model_retries<0:raise ValueError('--max-model-retries must be 0 or more')
                 cfg['max_model_retries']=a.max_model_retries

@@ -636,6 +636,21 @@ class Resident(unittest.TestCase):
         bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
         self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
 
+    def test_init_thinking_adaptive_lets_the_model_think_and_replays_no_thinking(self):
+        from caminus.ember.resident.model import Model
+        home=self.home.parent/'thinker';home.mkdir(exist_ok=True)
+        argv=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init','thinker','--home',str(home),
+              '--model','m','--endpoint','http://127.0.0.1:9/v1','--api','anthropic','--context','200000','--thinking','adaptive','--json']
+        r=subprocess.run(argv,capture_output=True,text=True,timeout=15);self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+        self.assertEqual(json.loads((home/'config.json').read_text())['thinking'],'adaptive')
+        m=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',thinking='adaptive',context=200000))
+        body=m._to_anthropic([dict(role='system',content='s'),dict(role='user',content='hi'),
+                              dict(role='assistant',content='ok',reasoning_content='hidden')],None,None)
+        self.assertNotIn('thinking',body,'adaptive: no thinking-off switch sent')
+        self.assertNotIn('thinking',json.dumps(body['messages']),'no thinking block is replayed')
+        off=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',context=200000))
+        self.assertEqual(off._to_anthropic([dict(role='user',content='hi')],None,None)['thinking'],dict(type='disabled'))
+
     def test_the_runtime_block_is_named_so_it_is_not_read_as_tool_output(self):
         from caminus.ember.resident.runtime import RUNTIME_HEADER
         rt=Runtime(self.home)

@@ -440,10 +440,11 @@ class Model:
         if tools:
             body['tools'] = [dict(name=t['function']['name'], description=t['function'].get('description', ''),
                                   input_schema=t['function']['parameters']) for t in tools]
-        # Thinking stays off: the store keeps no thinking blocks, and replaying a turn without them is a
-        # history edit. 'disabled' is accepted up to effort high, so the effort is set rather than defaulted.
-        # thinking 'adaptive' (the advisor: current Opus and Sonnet refuse thinking off) leaves it to the model;
-        # thinking blocks in the reply are skipped, since nothing replays them.
+        # Thinking off unless the config says adaptive ('disabled' is accepted up to effort high, so the effort is
+        # set rather than defaulted). Adaptive (the advisor, models that refuse thinking off, or init --thinking
+        # adaptive) leaves it to the model; the reply's thinking blocks are skipped and never replayed: the API
+        # accepts a history with all of them removed (only removing some from the middle is an edit), so the model
+        # thinks afresh every turn and the history stays valid.
         if self.config.get('thinking', 'disabled') == 'disabled':
             body['thinking'] = dict(type='disabled')
         body['output_config'] = dict(effort=self.config.get('effort', 'medium'))
