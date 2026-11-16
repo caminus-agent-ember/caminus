@@ -64,6 +64,10 @@ type residentChat struct {
 	recapAsked                              int           // recapNotAsked, recapAtOpen or recapOnDemand
 	page, pageTop                           int           // an old page shown as an overlay (-1: none), and its scroll
 	slashIdx                                int
+	slashSel                                int    // the slash menu's highlighted row
+	recallIdx                               int    // Up/Down history: 1 = your newest sent message; 0 = not recalling
+	recallText                              string // what the recall put in the draft (an edit ends the recall)
+	slashFor                                string // the draft slashSel belongs to (a new draft starts at the top)
 	slashToken, slashText                   string
 	pathIdx                                 int
 	pathPrefix, pathPick                    string
@@ -1094,12 +1098,16 @@ func (m envModel) chatComposer() string {
 	input := m.chat.compose.View()
 	if (m.mode == "" || m.mode == "normal") && !m.chat.sending {
 		value := strings.TrimRight(m.chat.compose.Value(), " ")
-		if matches := slashMatches(value); !(len(matches) == 1 && matches[0] == value) && len(matches) > 0 {
-			lines := matches
-			if len(lines) > 4 {
-				lines = lines[:4]
+		if m.slashMenuOpen() {
+			// the slash menu is its own box above the composer (slashMenu); a terminal too short for it gets the
+			// names on one line inside the composer instead
+			if m.slashMenu(max(18, m.width-2)) == "" {
+				lines := slashMatches(value)
+				if len(lines) > 4 {
+					lines = lines[:4]
+				}
+				input = envDim.Render(envClip("Tab completes · "+strings.Join(lines, "  "), max(18, m.width-6))) + "\n" + input
 			}
-			input = envDim.Render(envClip("Tab completes · "+strings.Join(lines, "  "), max(18, m.width-6))) + "\n" + input
 		} else if token, ok := pathToken(value); ok {
 			// The path so far is rendered in the inline-code role, then what Tab
 			// can offer: directories in the navigation accent, files resting, and
@@ -1172,10 +1180,185 @@ func (m envModel) chatBottom() string {
 	if m.chat.picker {
 		return m.pickerBox()
 	}
+	out := m.chatComposer()
 	if line := m.todoPinned(); line != "" {
-		return line + "\n" + m.chatComposer()
+		out = line + "\n" + out
 	}
-	return m.chatComposer()
+	if menu := m.slashMenu(max(18, m.width-2)); menu != "" {
+		out = menu + "\n" + out
+	}
+	return out
+}
+
+// recall is the shell's Up / Down history over what you sent (pastPrompts, newest first): Up on an empty draft brings
+// back your last message, Up again goes further back, Down comes forward and past the newest leaves the draft empty.
+// An edited draft is yours: the arrows then move the cursor. The first Up on an empty draft still pulls back a newest
+// message the agent has not read yet (unsendLast); with none waiting it recalls.
+func (m envModel) recall(k string) (envModel, bool) { return m.recallStep(k, false) }
+
+// recallStep is recall; asked says the resident already answered that nothing is waiting to pull back.
+func (m envModel) recallStep(k string, asked bool) (envModel, bool) {
+	value := m.chat.compose.Value()
+	recalling := m.chat.recallIdx > 0 && value == m.chat.recallText
+	if !recalling {
+		m.chat.recallIdx = 0
+		if k == "down" || strings.TrimSpace(value) != "" {
+			return m, false
+		}
+		if k == "up" && !asked && !m.chat.newGoal && m.chat.target != "" {
+			// the resident knows whether your newest message is still unread: ask it to pull that back first; with
+			// nothing waiting its answer recalls instead (unsendMsg)
+			return m, false
+		}
+	}
+	past := m.pastPrompts()
+	i := m.chat.recallIdx
+	if k == "up" {
+		i++
+	} else {
+		i--
+	}
+	switch {
+	case i < 1:
+		m.chat.compose.SetValue("")
+		m.chat.recallIdx, m.chat.recallText = 0, ""
+		m.msg = ""
+	case i > len(past):
+		if len(past) == 0 {
+			m.msg = "nothing sent yet"
+		}
+		return m, true
+	default:
+		m.chat.compose.SetValue(past[i-1])
+		m.chat.compose.CursorEnd()
+		m.chat.recallIdx, m.chat.recallText = i, past[i-1]
+		m.msg = fmt.Sprintf("sent message %d of %d · ↑ older · ↓ newer · edit or Enter to send", i, len(past))
+	}
+	m.syncChat()
+	return m, true
+}
+
+// slashMenuRows is how many commands the slash menu shows at once.
+const slashMenuRows = 10
+
+// slashMenuOpen: the draft is a command still being typed (a "/" token with more than one way to go on).
+func (m envModel) slashMenuOpen() bool {
+	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker {
+		return false
+	}
+	value := strings.TrimRight(m.chat.compose.Value(), " ")
+	matches := slashMatches(value)
+	return len(matches) > 0 && !(len(matches) == 1 && matches[0] == value)
+}
+
+// slashPick is the highlighted command for the current draft.
+func (m envModel) slashPick() (string, []string, int) {
+	value := strings.TrimRight(m.chat.compose.Value(), " ")
+	matches := slashMatches(value)
+	if len(matches) == 0 {
+		return "", nil, 0
+	}
+	sel := 0
+	if m.chat.slashFor == value {
+		sel = ((m.chat.slashSel % len(matches)) + len(matches)) % len(matches)
+	}
+	return matches[sel], matches, sel
+}
+
+// slashHint is a command's one-line description.
+func slashHint(name string) string {
+	for _, c := range slashCommands {
+		if c.name == name {
+			return c.hint
+		}
+	}
+	return "custom command"
+}
+
+// slashMenu: the commands the draft can become, as a framed list above the composer: the name bold in a fixed
+// column, what it does dim beside it, the highlighted row in the accent, a scrollbar when the list is longer than
+// the box. Up / Down move, Tab or Enter takes the highlighted one.
+func (m envModel) slashMenu(w int) string {
+	if !m.slashMenuOpen() {
+		return ""
+	}
+	_, matches, sel := m.slashPick()
+	// the box takes at most a third of the terminal; on a terminal too small for two rows it stays shut (Tab still
+	// cycles the names)
+	rows := min(slashMenuRows, len(matches), max(0, (m.height-18)/2))
+	if rows < 2 {
+		return ""
+	}
+	top := 0
+	if sel >= rows {
+		top = sel - rows + 1
+	}
+	nameW := 0
+	for _, n := range matches {
+		nameW = max(nameW, ansi.StringWidth(n))
+	}
+	nameW = min(nameW+4, 26)
+	inner := w - 4 // the border, and one space each side of the text
+	scroll := len(matches) > rows
+	textW := inner
+	if scroll {
+		textW = inner - 2
+	}
+	thumbAt, thumbLen := 0, rows
+	if scroll {
+		thumbLen = max(1, rows*rows/len(matches))
+		thumbAt = (rows - thumbLen) * top / max(1, len(matches)-rows)
+	}
+	var lines []string
+	for i := 0; i < rows; i++ {
+		n := matches[top+i]
+		name := lipgloss.NewStyle().Foreground(cText).Bold(true)
+		desc := envDim
+		if top+i == sel {
+			name = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
+			desc = lipgloss.NewStyle().Foreground(cText)
+		}
+		line := name.Render(n) + strings.Repeat(" ", max(1, nameW-ansi.StringWidth(n))) +
+			desc.Render(envClip(slashHint(n), max(1, textW-nameW)))
+		line = envClip(line, textW)
+		line += strings.Repeat(" ", max(0, textW-ansi.StringWidth(line)))
+		if scroll {
+			bar := envDim.Render("│")
+			if i >= thumbAt && i < thumbAt+thumbLen {
+				bar = lipgloss.NewStyle().Foreground(cAccent).Render("┃")
+			}
+			line += " " + bar
+		}
+		lines = append(lines, " "+line+" ")
+	}
+	return envBorder.Render(strings.Join(lines, "\n"))
+}
+
+// slashMenuKey moves the menu's highlight or takes the highlighted command; false when the key is not the menu's.
+func (m envModel) slashMenuKey(k string) (envModel, bool) {
+	if !m.slashMenuOpen() {
+		return m, false
+	}
+	value := strings.TrimRight(m.chat.compose.Value(), " ")
+	pick, matches, sel := m.slashPick()
+	switch k {
+	case "up", "down":
+		d := 1
+		if k == "up" {
+			d = -1
+		}
+		m.chat.slashFor, m.chat.slashSel = value, (sel+d+len(matches))%len(matches)
+		return m, true
+	case "tab", "enter":
+		if k == "enter" && slices.Contains(matches, value) && pick == value {
+			return m, false // a complete command runs
+		}
+		m.chat.compose.SetValue(pick + " ")
+		m.chat.compose.CursorEnd()
+		m.chat.slashFor, m.chat.slashSel = "", 0
+		return m, true
+	}
+	return m, false
 }
 
 // todoPinned is the "now" line above the composer: the task the agent is on (its todo list's current item, as
@@ -1505,6 +1688,10 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.compose.Blur()
 		return m, nil
 	case "tab", "shift+tab":
+		if next, done := m.slashMenuKey("tab"); done && k == "tab" {
+			next.syncChat()
+			return next, nil
+		}
 		if next, done := m.cycleSlash(); done {
 			return next, nil
 		}
@@ -1570,7 +1757,16 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.compose.Blur()
 		return m, nil
-	case "up":
+	case "up", "down":
+		if next, done := m.slashMenuKey(k); done {
+			return next, nil
+		}
+		if next, done := m.recall(k); done {
+			return next, nil
+		}
+		if k == "down" {
+			break
+		}
 		if strings.TrimSpace(m.chat.compose.Value()) == "" && !m.chat.newGoal && m.chat.target != "" {
 			// ↑ on an empty composer pulls back your newest message the agent has not read yet
 			return m, unsendLast(m, m.chat.target)
@@ -1658,6 +1854,10 @@ func (m envModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch k {
 	case "enter":
+		if next, done := m.slashMenuKey("enter"); done {
+			next.syncChat()
+			return next, nil
+		}
 		return m.submitCompose()
 	case "alt+enter", "shift+enter":
 		m.chat.compose.InsertString("\n")
@@ -2038,7 +2238,8 @@ func slashMatches(draft string) []string {
 			out = append(out, n)
 		}
 	}
-	return out
+	slices.Sort(out) // the menu reads A to Z
+	return slices.Compact(out)
 }
 
 // pathToken reports the trailing token of the draft when it is a path the user

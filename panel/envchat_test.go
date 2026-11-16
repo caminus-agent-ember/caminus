@@ -360,17 +360,18 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	m.chat.compose.SetValue("/s")
 	next, done := m.cycleSlash()
 	m = next.(envModel)
-	if !done || m.chat.compose.Value() != "/session " {
+	// (A to Z, as the menu lists them)
+	if !done || m.chat.compose.Value() != "/servers " {
 		t.Fatalf("first Tab gave %q", m.chat.compose.Value())
 	}
 	next, done = m.cycleSlash()
 	m = next.(envModel)
-	if !done || m.chat.compose.Value() != "/sessions " {
+	if !done || m.chat.compose.Value() != "/session " {
 		t.Fatalf("second Tab gave %q", m.chat.compose.Value())
 	}
 	next, done = m.cycleSlash()
 	m = next.(envModel)
-	if !done || m.chat.compose.Value() != "/start " {
+	if !done || m.chat.compose.Value() != "/sessions " {
 		t.Fatalf("cycle skipped a longer command: %q", m.chat.compose.Value())
 	}
 	m.chat.compose.SetValue("/new steer me")
@@ -483,6 +484,7 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 				events: []residentEvent{{Seq: i, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "text line"}}}})
 		}
 		m.chat.compose.SetValue("/s")
+		m.syncChat() // (typing syncs the frame; the menu above the composer takes its rows from the transcript)
 		frame := ansi.Strip(m.render())
 		rows := strings.Split(frame, "\n")
 		if len(rows) > size[1] {
@@ -493,8 +495,8 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 				t.Fatalf("%v: line too wide: %q", size, row)
 			}
 		}
-		if !strings.Contains(frame, "Tab completes") || !strings.Contains(frame, "/session") {
-			t.Fatalf("%v: autocomplete hint missing", size)
+		if !strings.Contains(frame, "/session") || (size[1] >= 32 && !strings.Contains(frame, "open a session NAME")) {
+			t.Fatalf("%v: the slash menu (name and what it does) is missing:\n%s", size, frame)
 		}
 		if len(rows) < 3 {
 			t.Fatal("frame lost the header and footer lines")
@@ -1831,5 +1833,70 @@ func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	m.resident.Goals[0].State = "completed"
 	if box := ansi.Strip(m.emberBox(90, 8)); !strings.Contains(box, "BL density") {
 		t.Fatalf("a fresh goal keeps the latest chain:\n%s", box)
+	}
+}
+
+func TestSlashMenuMovesAndTakesTheHighlightedCommand(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.chat.compose.Focus()
+	m.chat.compose.SetValue("/st")
+	m.syncChat()
+	if !m.slashMenuOpen() || !strings.Contains(ansi.Strip(m.render()), "run this session's loop") {
+		t.Fatal("/st opens the menu with each command's description")
+	}
+	first, matches, _ := m.slashPick()
+	next, _ := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = next.(envModel)
+	if pick, _, sel := m.slashPick(); sel != 1 || pick != matches[1] || pick == first {
+		t.Fatalf("↓ moves the highlight: %q %d", pick, sel)
+	}
+	next, _ = m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(envModel)
+	if m.chat.compose.Value() != matches[1]+" " || m.slashMenuOpen() {
+		t.Fatalf("Tab takes the highlighted command: %q", m.chat.compose.Value())
+	}
+	// Enter on a complete command runs it rather than completing it again
+	m.chat.compose.SetValue("/stop")
+	if _, done := m.slashMenuKey("enter"); done {
+		t.Fatal("Enter on an exact command is left to submit")
+	}
+}
+
+func TestUpDownRecallSentMessagesLikeAShell(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.compose.Focus()
+	for i, txt := range []string{"first message", "second message"} {
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+			events: []residentEvent{{Seq: 10 + i, Goal: "original", Kind: "user_message", Data: map[string]any{"text": txt}}}})
+	}
+	m.chat.newGoal, m.chat.target = true, "" // (no goal to pull a message back from: ↑ recalls at once)
+	up := tea.KeyPressMsg{Code: tea.KeyUp}
+	down := tea.KeyPressMsg{Code: tea.KeyDown}
+	next, _ := m.chatDraftKey(up)
+	m = next.(envModel)
+	if m.chat.compose.Value() != "second message" {
+		t.Fatalf("↑ brings back the last sent message: %q", m.chat.compose.Value())
+	}
+	next, _ = m.chatDraftKey(up)
+	m = next.(envModel)
+	if m.chat.compose.Value() != "first message" {
+		t.Fatalf("↑ again goes further back: %q", m.chat.compose.Value())
+	}
+	next, _ = m.chatDraftKey(down)
+	m = next.(envModel)
+	if m.chat.compose.Value() != "second message" {
+		t.Fatalf("↓ comes forward: %q", m.chat.compose.Value())
+	}
+	next, _ = m.chatDraftKey(down)
+	m = next.(envModel)
+	if m.chat.compose.Value() != "" {
+		t.Fatalf("↓ past the newest leaves the draft empty: %q", m.chat.compose.Value())
+	}
+	// with a goal, ↑ asks the resident to pull back an unread message; "nothing waiting" recalls instead
+	m.chat.newGoal, m.chat.target = false, "original"
+	next, _ = m.Update(unsendMsg{})
+	if next.(envModel).chat.compose.Value() != "second message" {
+		t.Fatalf("nothing to pull back: ↑ recalls: %q", next.(envModel).chat.compose.Value())
 	}
 }

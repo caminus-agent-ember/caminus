@@ -652,6 +652,12 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.err != "":
 			m.msg = "pull back: " + msg.err
 		case msg.text == nil:
+			// nothing waiting: ↑ was a request for history, so the last message you sent comes back to edit
+			if strings.TrimSpace(m.chat.compose.Value()) == "" {
+				if next, done := m.recallStep("up", true); done {
+					return next, nil
+				}
+			}
 			m.msg = "nothing to pull back: the agent has read your messages"
 		default:
 			m.chat.compose.SetValue(*msg.text)
