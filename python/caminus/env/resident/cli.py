@@ -320,7 +320,7 @@ def unit_text(name,home,program=None):
     cmd=shlex.join([sys.executable,'-I',program,'run',name,'--home',str(home)]).replace('%','%%')
     return (f'[Unit]\nDescription=Caminus resident agent {name}\n\n[Service]\nType=simple\n'
             f'WorkingDirectory={str(home).replace("%","%%")}\nExecStart={cmd}\n'
-            'Restart=on-failure\nRestartSec=3\nKillMode=process\nTimeoutStopSec=15\nUMask=0007\n'
+            'Restart=always\nRestartSec=3\nKillMode=process\nTimeoutStopSec=15\nUMask=0007\n'
             f'EnvironmentFile=-%h/.config/caminus/agents/{name}.env\n\n[Install]\nWantedBy=default.target\n')
 
 
