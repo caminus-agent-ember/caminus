@@ -1931,6 +1931,30 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_install_queues_an_update_for_every_running_daemon_on_an_older_runtime(self):
+        # an upgrade left a days-old daemon running: install alone restarted nothing
+        from caminus.ember import agent_host
+        fake=self.home/'fakehome';(fake/'homes'/'old').mkdir(parents=True);(fake/'homes'/'gone').mkdir();(fake/'homes'/'fresh').mkdir()
+        (fake/'homes'/'old'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
+        (fake/'homes'/'gone'/'heartbeat.json').write_text(json.dumps(dict(pid=2**22+12345,runtime='aaaa.pyz')))
+        (fake/'homes'/'nopid').mkdir();(fake/'homes'/'nopid'/'heartbeat.json').write_text(json.dumps(dict(runtime='aaaa.pyz')))
+        (fake/'homes'/'odd').mkdir();(fake/'homes'/'odd'/'heartbeat.json').write_text('[1,2]')
+        (fake/'homes'/'older').mkdir();(fake/'homes'/'older'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
+        (fake/'homes'/'older'/'update.json').write_text(json.dumps(dict(program='/x/older.pyz',now=False)))
+        def transport(argv,input=None,**kw):
+            return subprocess.run(['bash','-s'],input=input,capture_output=True,text=True,env=dict(os.environ,HOME=str(fake)))
+        import contextlib,io as _io
+        out=_io.StringIO()
+        with contextlib.redirect_stdout(out):agent_host.main(['install'],transport)
+        res=json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(res['updates_queued'],['old','older'],'live daemons on another runtime; a pending older update is replaced')
+        self.assertEqual(res['updates_skipped'],[])
+        self.assertTrue(json.loads((fake/'homes'/'older'/'update.json').read_text())['program'].endswith(res['sha256']+'.pyz'))
+        self.assertFalse((fake/'homes'/'nopid'/'update.json').exists(),'no pid is not alive (kill(0) would succeed)')
+        u=json.loads((fake/'homes'/'old'/'update.json').read_text())
+        self.assertTrue(u['program'].endswith(res['sha256']+'.pyz'));self.assertFalse(u['now'],'between goals, never mid-goal')
+        self.assertFalse((fake/'homes'/'gone'/'update.json').exists())
+
     def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
         cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)
         name=json.loads((self.home/'config.json').read_text())['name']
