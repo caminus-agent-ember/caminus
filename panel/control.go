@@ -131,14 +131,55 @@ type (
 )
 
 // fitInfo is `caminus fit --json` (serve's own projection; the panel shows it and does no memory math). max_ctx is per KV
-// format: f16 is the largest context that fits, q8 is null until the Q8 projection exists (#81).
+// format, each the largest context that fits with that cache: q8 is null when the model has no 8-bit cache (kv_formats
+// lacks "q8") or when no cards hold it. kv_fixed names the cache of a model that always keeps its own (the Coder's
+// "q8_0"; empty for the others): its f16 slot is that cache's figure, and the row shows it as the only one.
 type fitInfo struct {
-	OK     bool   `json:"ok"`
-	Error  string `json:"error"`
-	MaxCtx struct {
-		F16 *int `json:"f16"`
-		Q8  *int `json:"q8"`
-	} `json:"max_ctx"`
+	OK        bool     `json:"ok"`
+	Error     string   `json:"error"`
+	MaxCtx    fitCtx   `json:"max_ctx"`
+	KVFormats []string `json:"kv_formats"`
+	KVFixed   string   `json:"kv_fixed"`
+}
+
+// fitCtx is fit's max_ctx: positions per KV format, nil where none fits (or, for q8, where it is not offered).
+type fitCtx struct {
+	F16 *int `json:"f16"`
+	Q8  *int `json:"q8"`
+}
+
+// hasQ8 is whether fit projected the 8-bit cache for this model (kv_formats lists "q8").
+func (v fitInfo) hasQ8() bool {
+	for _, f := range v.KVFormats {
+		if f == "q8" {
+			return true
+		}
+	}
+	return false
+}
+
+// q8Text is the fit row's Q8 part: the figure, "none fits" for a model that has the 8-bit cache but no room for it, or
+// "not offered" for a model without one.
+func (v fitInfo) q8Text() string {
+	if v.MaxCtx.Q8 != nil {
+		return strconv.Itoa(*v.MaxCtx.Q8)
+	}
+	if v.hasQ8() {
+		return "none fits"
+	}
+	return "not offered"
+}
+
+// fixedText is the fit row's label for a model that keeps its own cache ("its own 8-bit cache" for q8_0), or "" for
+// a model with the F16 / Q8 choice.
+func (v fitInfo) fixedText() string {
+	switch {
+	case v.KVFixed == "":
+		return ""
+	case strings.HasPrefix(v.KVFixed, "q8"):
+		return "its own 8-bit cache"
+	}
+	return "its own " + v.KVFixed + " cache"
 }
 
 // fitEntry is one fit read: done once its answer (or error) has arrived.
@@ -242,25 +283,56 @@ func settle(m ctl, c tea.Cmd, depth int) ctl {
 	return settle(nm.(ctl), next, depth+1)
 }
 
-// fitRow is the picker's line for the context that fits at F16 (empty when there is no read for the selection).
+// fitRow is the picker's line for the context that fits at F16 and with the 8-bit cache, or with the model's own cache
+// for one without the choice (empty when there is no read for the selection).
 func (m ctl) fitRow(mi camModel) string {
 	key, _ := m.fitArgs(mi)
 	e, seen := m.fits[key]
 	if !seen {
 		return ""
 	}
+	fixed := e.info.fixedText()
 	switch {
 	case !e.done:
 		return fg(cMuted).Render("context that fits: reading caminus fit")
 	case e.err != nil:
 		return fg(cYellow).Render("context that fits: " + e.err.Error())
+	case !e.info.OK && fixed != "":
+		return fg(cYellow).Render("context that fits (" + fixed + "): " + e.info.Error)
 	case !e.info.OK:
-		return fg(cYellow).Render("context that fits: " + e.info.Error)
-	case e.info.MaxCtx.F16 == nil:
+		line := fg(cYellow).Render("context that fits: " + e.info.Error)
+		if q8 := e.info.MaxCtx.Q8; q8 != nil {
+			// (no cards for the selected cache, but the 8-bit one fits: fit keeps that figure in a refusal)
+			line += fg(cMuted).Render(" · Q8: ") + bold(cAccent).Render(strconv.Itoa(*q8)) + fg(cMuted).Render(" positions")
+		}
+		return line
+	case fixed != "" && e.info.MaxCtx.F16 == nil:
+		return fg(cYellow).Render("context that fits (" + fixed + "): none with this card count")
+	case e.info.MaxCtx.F16 == nil && e.info.MaxCtx.Q8 == nil && e.info.hasQ8():
+		// (both caches were projected: say Q8 fails too, so switching to --kv q8 is not the way out)
+		return fg(cYellow).Render("context that fits: no context fits at F16 or Q8 with this card count")
+	case e.info.MaxCtx.F16 == nil && e.info.MaxCtx.Q8 == nil:
 		return fg(cYellow).Render("context that fits: no context fits at F16 with this card count")
 	}
-	line := fg(cMuted).Render("context that fits at F16: ") + bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.F16)) +
-		fg(cMuted).Render(" positions · Q8: pending")
+	var line string
+	if fixed != "" {
+		// (no F16 / Q8 choice: f16 is the figure of the cache the model always builds, and there is no Q8 part)
+		line = fg(cMuted).Render("context that fits ("+fixed+"): ") + bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.F16)) +
+			fg(cMuted).Render(" positions")
+	} else if e.info.MaxCtx.F16 == nil {
+		// (only the 8-bit cache fits: `caminus start --kv q8` is the way to serve this choice)
+		line = fg(cYellow).Render("context that fits: none at F16") + fg(cMuted).Render(" · Q8: ") +
+			bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.Q8)) + fg(cMuted).Render(" positions")
+	} else {
+		q8 := e.info.q8Text()
+		line = fg(cMuted).Render("context that fits at F16: ") + bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.F16)) +
+			fg(cMuted).Render(" positions · Q8: ")
+		if e.info.MaxCtx.Q8 != nil {
+			line += bold(cAccent).Render(q8)
+		} else {
+			line += fg(cMuted).Render(q8)
+		}
+	}
 	if mode, _ := m.modelMode(mi); m.advanced && mode.Cards == 1 && m.card != "" && m.card != "auto" {
 		// caminus fit has no --card: it places the model itself, so a pinned card does not change this figure
 		line += fg(cYellow).Render(" · card " + m.card + " pinned: not in this figure")
