@@ -116,7 +116,7 @@ PIECE = 16 << 20                     # bytes per staging buffer and per checksum
 NBUF = 4                             # staging buffers (pinned: 64 MiB in all)
 from .. import config as _config   # noqa: E402
 DEFAULT_DIR = _config.kv_dir()   # ~/.cache/caminus/kv ($XDG_CACHE_HOME; CAMINUS_KV_DIR / config.toml)
-DEFAULT_CAP_GB = 30.0
+DEFAULT_CAP_GB = 64.0                # the whole cache folder, every model together (it was 30 per store; #173)
 DEFAULT_RETENTION_DAYS = 7.0
 DEFAULT_MIN_FREE_GB = 10.0           # never write an entry that would leave less free space on the disk
 # The cap covers the whole cache folder (config.kv_dir(): the root store and every model's store under it), not one store:

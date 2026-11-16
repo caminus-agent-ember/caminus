@@ -184,7 +184,7 @@ every checkpoint, and the live state as the deepest checkpoint.
   `pc.park_error`.
 - An unchanged slot is not written twice.
 - The cap covers the whole cache folder (`config.kv_dir()`: the root store and every model's store under it, as
-  `caminus start NAME` makes `kv/NAME`), not one store; it is also at most a quarter of the disk. Before a write the
+  `caminus start NAME` makes `kv/NAME`), not one store; it is also at most a quarter of the disk. Default 64 GB (it was 30 per store). Before a write the
   oldest entries by last use are evicted until it fits: this store's (never one the live slot or a checkpoint reads:
   `protect()`) and those of stores whose server is not running (their `.lock` taken for the eviction; a running server's
   store is never touched). Before, per-store caps added up (one machine: 20 park files, 113 GB, and the newest park

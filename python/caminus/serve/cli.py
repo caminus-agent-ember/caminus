@@ -133,7 +133,7 @@ def parser():
     ap.add_argument('--cache-dir', help='the prompt cache\'s disk tier (default ~/.cache/caminus/kv)')
     ap.add_argument('--no-disk-cache', action='store_true', default=None, help='no disk tier (VRAM checkpoints only)')
     ap.add_argument('--cache-cap-gb', type=float, help='the disk tier\'s size cap in GB over the whole cache folder, every model\'s '
-                    'store included (default 30; 64 in the long-context mode; at most a quarter of the disk)')
+                    'store included (default 64, also in the long-context mode; at most a quarter of the disk)')
     ap.add_argument('--cache-keep-per-root', type=int, help='park entries kept per conversation root, the most recently used '
                     '(default 3; 0 = no limit)')
     ap.add_argument('--kv-host', action='store_true', default=None, help='the Coder: its attention KV cache in pinned host memory '
