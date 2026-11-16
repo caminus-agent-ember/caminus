@@ -79,6 +79,7 @@ type ctl struct {
 	vals    map[string]string    // advanced: option values for the next start (dest -> text); absent = the default
 	card    string               // one-card models: "auto", "0", "1" (advanced; basic: auto)
 	picks   map[string]modelPick // model name -> card count and drafter choice at each count
+	fits    map[string]fitEntry  // caminus fit --json per model, card count and drafter (display only; read once)
 	curM    int
 	curS    int
 	curO    int
@@ -118,9 +119,82 @@ type (
 		what, note string
 		err        error
 	}
+	fitMsg struct {
+		key string
+		v   fitInfo
+		err error
+	}
 	ctlTick time.Time
 	ctlPoll time.Time
 )
+
+// fitInfo is `caminus fit --json` (serve's own projection; the panel shows it and does no memory math). max_ctx is per KV
+// format: f16 is the largest context that fits, q8 is null until the Q8 projection exists (#81).
+type fitInfo struct {
+	OK     bool   `json:"ok"`
+	Error  string `json:"error"`
+	MaxCtx struct {
+		F16 *int `json:"f16"`
+		Q8  *int `json:"q8"`
+	} `json:"max_ctx"`
+}
+
+// fitEntry is one fit read: done once its answer (or error) has arrived.
+type fitEntry struct {
+	done bool
+	info fitInfo
+	err  error
+}
+
+// fitArgs is the fit query for the model's next start: its file, card count and drafter (auto: serve's default).
+func (m ctl) fitArgs(mi camModel) (string, []string) {
+	mode, draft := m.modelMode(mi)
+	key := fmt.Sprintf("%s|%d|%s", mi.Name, mode.Cards, draft)
+	a := []string{"fit", "--model", mi.Path, "--cards", strconv.Itoa(mode.Cards)}
+	if draft != "auto" {
+		a = append(a, "--draft", draft)
+	}
+	return key, append(a, "--json")
+}
+
+// fitCmd reads the selected model's fit once per (model, cards, drafter); nil when cached, in flight or not on disk.
+func (m ctl) fitCmd() tea.Cmd {
+	mi := m.selModel()
+	if mi == nil || !mi.Present || m.fits == nil {
+		return nil
+	}
+	key, args := m.fitArgs(*mi)
+	if _, seen := m.fits[key]; seen {
+		return nil
+	}
+	m.fits[key] = fitEntry{}
+	return func() tea.Msg {
+		var v fitInfo
+		err := m.be.call(&v, 60*time.Second, args...)
+		return fitMsg{key: key, v: v, err: err}
+	}
+}
+
+// fitRow is the picker's line for the context that fits at F16 (empty when there is no read for the selection).
+func (m ctl) fitRow(mi camModel) string {
+	key, _ := m.fitArgs(mi)
+	e, seen := m.fits[key]
+	if !seen {
+		return ""
+	}
+	switch {
+	case !e.done:
+		return fg(cMuted).Render("context that fits: reading caminus fit")
+	case e.err != nil:
+		return fg(cYellow).Render("context that fits: " + e.err.Error())
+	case !e.info.OK:
+		return fg(cYellow).Render("context that fits: " + e.info.Error)
+	case e.info.MaxCtx.F16 == nil:
+		return fg(cYellow).Render("context that fits: no context fits at F16 with this card count")
+	}
+	return fg(cMuted).Render("context that fits at F16: ") + bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.F16)) +
+		fg(cMuted).Render(" positions · Q8: pending")
+}
 
 func ctlTickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg { return ctlTick(t) })
@@ -379,8 +453,20 @@ func (m ctl) visibleOpts() []option {
 	return out
 }
 
+// Update runs the message and then reads caminus fit for the selection when it is not yet known (cached per choice).
 func (m ctl) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	nm, cmd := m.update(msg)
+	mm := nm.(ctl)
+	if mm.loaded["models"] {
+		return mm, tea.Batch(cmd, mm.fitCmd())
+	}
+	return mm, cmd
+}
+
+func (m ctl) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case fitMsg:
+		m.fits[msg.key] = fitEntry{done: true, info: msg.v, err: msg.err}
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 	case ctlTick:
@@ -863,6 +949,9 @@ func (m ctl) modelRows() []string {
 			draft = "auto (server default)"
 		}
 		rows = append(rows, "", fg(cMuted).Render("next start: ")+bold(cAccent).Render(fmt.Sprintf("%d card(s) · drafter %s", mode.Cards, draft)))
+		if fr := m.fitRow(*mi); fr != "" {
+			rows = append(rows, fr)
+		}
 	}
 	if m.advanced {
 		if mi := m.selModel(); mi != nil {
@@ -1175,7 +1264,8 @@ func upFor(s float64) string {
 }
 
 func newCtl(be *ctlCLI, advanced bool, prefsFile string) ctl {
-	m := ctl{be: be, advanced: advanced, loaded: map[string]bool{}, vals: map[string]string{}, card: "auto", prefs: prefsFile}
+	m := ctl{be: be, advanced: advanced, loaded: map[string]bool{}, vals: map[string]string{}, card: "auto", prefs: prefsFile,
+		fits: map[string]fitEntry{}}
 	m.loadPrefs()
 	return m
 }
