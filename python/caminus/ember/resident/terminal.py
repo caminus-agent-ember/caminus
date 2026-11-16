@@ -56,6 +56,9 @@ def worker(job):
         if pid == 0:
             try:
                 os.chdir(req['cwd'])
+                # $WORKSPACE: the agent's workspace, where the file tools' relative paths start (~ is the account home:
+                # an agent wrote a file by a relative path, then looked for it under ~ in the shell)
+                os.environ['WORKSPACE'] = req.get('workspace') or req['cwd']
                 script='builtin cd -- '+shlex.quote(req['cwd'])+' || exit 127\n'+req['command']
                 os.execv('/bin/bash', ['bash', '-lc', script])
             except BaseException as e:
@@ -239,7 +242,7 @@ class Terminal:
                 raise ValueError('cwd is not a directory')
             job.mkdir(exist_ok=True)
             if not (job / 'request.json').exists():
-                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd)))
+                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd), workspace=str(self.home)))
             if not read_state(job):
                 self.launch(job)
         elif not job.is_dir():

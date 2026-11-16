@@ -2099,6 +2099,27 @@ for line in sys.stdin:
         chat=[b for b in sent if b and 'max_tokens' in b]
         self.assertEqual(chat[-1]['reasoning_effort'],'none','where there is a switch, a short call turns reasoning off')
 
+    def test_mistral_requests_carry_one_stable_prompt_cache_key(self):
+        from caminus.ember.resident.model import Model
+        sent=[]
+        mk=lambda name:Model(dict(endpoint='http://127.0.0.1:1/v1',model='zai-glm-5-3-flash',context=200000,
+                                  provider_kind='mistral',name=name))
+        for m in (mk('a'),mk('a'),mk('b')):
+            m.request=lambda url,body=None:(sent.append(body),dict(choices=[dict(message=dict(content='ok'),finish_reason='stop')]))[1]
+            m.complete([dict(role='user',content='hi')],max_tokens=8000)
+        keys=[b['prompt_cache_key'] for b in sent if b and 'max_tokens' in b]
+        self.assertEqual(keys[0],keys[1],'the same agent: the same key');self.assertNotEqual(keys[0],keys[2])
+        self.assertTrue(keys[0].startswith('ember-') and len(keys[0])==30,'a hash, no names in it')
+        other=Model(dict(endpoint='http://127.0.0.1:1/v1',model='m',context=200000))
+        other.request=lambda url,body=None:(sent.append(body),dict(choices=[dict(message=dict(content='ok'),finish_reason='stop')]))[1]
+        other.complete([dict(role='user',content='hi')],max_tokens=8000)
+        self.assertNotIn('prompt_cache_key',sent[-1],'only Mistral gets the key')
+
+    def test_terminal_commands_know_the_workspace(self):
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        out=t.call(sid,dict(command='printf "%s" "$WORKSPACE"',yield_ms=3000))
+        self.assertEqual(out['output'],str(self.home))
+
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog
         data=dict(data=[dict(id='mistral-medium-2508',aliases=['mistral-medium-latest'],max_context_length=131072,

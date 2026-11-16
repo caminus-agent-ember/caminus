@@ -227,6 +227,12 @@ class Model:
         if self.config.get('effort'):
             # OpenAI-compatible providers (DeepInfra) take reasoning depth as reasoning_effort; 'none' turns it off.
             body['reasoning_effort'] = self.config['effort']
+        if self.config.get('provider_kind') == 'mistral':
+            # Mistral routes requests to its prompt cache by this key (a hint, not a promise): one stable key per agent,
+            # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %.
+            import hashlib
+            body['prompt_cache_key'] = 'ember-' + hashlib.sha256(
+                ('%s|%s' % (self.config.get('name') or '', body['model'])).encode()).hexdigest()[:24]
         if body['max_tokens'] < SHORT_CALL:
             # A short side call (the finish judge's 600 tokens): a reasoning model spent all of it thinking and the
             # verdict came back cut off (GLM 5.3 on Mistral: a finish let through unchecked). Where the provider has a
