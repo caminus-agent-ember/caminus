@@ -246,7 +246,9 @@ journal entry before it stops. It is never graded. Work preempts it at once; a
 nightly dream consolidates notes. On the local server it works in the full context
 window: before a stretch overwrites the human's conversation, the prompt cache
 parks it to disk and the human's next request restores it. `caminus env agent
-heartbeat NAME on|off|status|recap`; the recap is the "while you were away" line.
+heartbeat NAME on|off|status|recap|now`; the recap is the "while you were away" line, and `now` (the panel's
+`/freetime`) starts a stretch at once. A stretch ends after `--stretch-steps` model steps (40 by default) or
+`--stretch-minutes` (30); `--rest-minutes` sets the rest between stretches and `--budget-usd` the daily allowance.
 On a remote model free time spends its own allowance (`free_time.budget_usd`,
 0.50 USD a day by default).
 

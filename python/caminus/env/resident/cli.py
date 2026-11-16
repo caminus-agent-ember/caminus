@@ -238,6 +238,7 @@ def parser():
             p.add_argument('--since',type=float,help='recap: stretches since this Unix time (default: the newest goal from you)')
             p.add_argument('--messages-per-day',type=int)
             p.add_argument('--stretch-minutes',type=float)
+            p.add_argument('--stretch-steps',type=int,help='model steps one free-time stretch may take (default 40)')
         if op=='message':
             p.add_argument('to')
             p.add_argument('--text')
@@ -574,7 +575,7 @@ def main(argv=None,stdin=None):
             if a.state in ('on','off'):ft['enabled']=a.state=='on'
             for flag,key,scale in (('rest_minutes','rest_seconds',60),('afk_minutes','afk_seconds',60),
                                    ('stretch_minutes','stretch_seconds',60),('budget_usd','budget_usd',1),
-                                   ('messages_per_day','messages_per_day',1)):
+                                   ('messages_per_day','messages_per_day',1),('stretch_steps','stretch_steps',1)):
                 v=getattr(a,flag)
                 if v is not None:
                     if v<0:raise ValueError('--'+flag.replace('_','-')+' must be 0 or more')

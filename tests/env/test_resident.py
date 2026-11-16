@@ -285,6 +285,16 @@ class Resident(unittest.TestCase):
             self.assertIsNone(rt.free.pulse(),'and not again')
         finally:rt.mail.close();rt.store.close()
 
+    def test_heartbeat_sets_the_stretch_steps(self):
+        out=self.cmd('heartbeat',['on','--stretch-steps','120'])
+        self.assertEqual(out['free_time']['stretch_steps'],120)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.free.pulse()
+            self.assertEqual(rt.store.goal(gid).get('max_steps') or rt.store.goal(gid).get('step_limit'),120,
+                             'a stretch takes the configured steps')
+        finally:rt.mail.close();rt.store.close()
+
     def test_three_plain_text_replies_pause_the_goal(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),
