@@ -272,6 +272,19 @@ class Resident(unittest.TestCase):
         res=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='finish'][-1]
         self.assertIn('ignored unknown argument(s) choices',res.get('note',''))
 
+    def test_heartbeat_now_starts_free_time_at_once(self):
+        out=self.cmd('heartbeat',['now'])
+        self.assertEqual(out['free_time'],'asked')
+        rt=Runtime(self.home)
+        try:
+            rt.free.cfg.update(enabled=False,rest_seconds=10**6)      # off, and the rest interval far from over
+            gid=rt.free.pulse()
+            self.assertTrue(gid,'asked free time starts at the next pass, past the rest interval and the switch')
+            self.assertEqual(rt.store.goal(gid)['kind'],'free')
+            self.assertFalse((self.home/'free_time_now').exists(),'the request is used once')
+            self.assertIsNone(rt.free.pulse(),'and not again')
+        finally:rt.mail.close();rt.store.close()
+
     def test_three_plain_text_replies_pause_the_goal(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),

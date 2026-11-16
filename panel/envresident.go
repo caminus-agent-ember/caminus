@@ -185,7 +185,7 @@ func residentRefresh(m envModel) tea.Cmd {
 }
 
 // auditedOps are the panel's resident controls the owner audit log records.
-var auditedOps = map[string]bool{"start": true, "stop": true, "cancel": true, "pause": true, "resume": true,
+var auditedOps = map[string]bool{"heartbeat": true, "start": true, "stop": true, "cancel": true, "pause": true, "resume": true,
 	"update": true, "rewind": true, "interrupt": true, "model": true}
 
 func residentAction(m envModel, args []string, input string) tea.Cmd {

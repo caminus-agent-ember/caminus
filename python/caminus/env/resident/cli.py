@@ -230,7 +230,7 @@ def parser():
             p.add_argument('--effort',choices=('low','medium','high','xhigh','max'))
             p.add_argument('--off',action='store_true',help='remove the advisor')
         if op=='heartbeat':
-            p.add_argument('state',nargs='?',choices=('on','off','status','recap'),default='status',
+            p.add_argument('state',nargs='?',choices=('on','off','status','recap','now'),default='status',
                            help='free time: the resident lives in its account when no work is queued')
             p.add_argument('--rest-minutes',type=float)
             p.add_argument('--budget-usd',type=float,help='daily free-time allowance on a priced remote model')
@@ -551,6 +551,15 @@ def main(argv=None,stdin=None):
                 st=Store(home)
                 try:emit(dict(recap=recap(st,a.since),now=__import__('time').time()),a.json)
                 finally:st.close()
+                return 0
+            if a.state=='now':
+                # a stretch at the daemon's next pass (after any running work; within the day's budget)
+                from .freetime import NOW_MARKER
+                (home/NOW_MARKER).write_text(str(__import__('time').time()))
+                st=Store(home)
+                try:busy=[g for g in (st.goal(x) for x in st.next_goal()) if g.get('kind','work') not in ('free','dream')]
+                finally:st.close()
+                emit(dict(free_time='asked',note='starts after the running work' if busy else 'starts at the next pass'),a.json)
                 return 0
             if a.state in ('on','off'):ft['enabled']=a.state=='on'
             for flag,key,scale in (('rest_minutes','rest_seconds',60),('afk_minutes','afk_seconds',60),

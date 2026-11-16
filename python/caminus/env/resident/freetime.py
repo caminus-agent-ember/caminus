@@ -41,6 +41,7 @@ from .store import atomic_json
 DEFAULTS = dict(enabled=False, rest_seconds=1800, stretch_steps=40, stretch_seconds=1800, budget_usd=0.50,
                 afk_seconds=600, messages_per_day=3, dream_hour=3, context_tokens=0)
 KINDS = ('free', 'dream')
+NOW_MARKER = 'free_time_now'   # `heartbeat now` writes it; the next pulse starts a stretch and removes it
 
 INVITATION = '''Free time. Nobody needs anything from you right now; this time is yours.
 
@@ -142,11 +143,14 @@ class FreeTime:
                 self._end(g['id'], 'preempted: your human queued work; pick this up from your journal next time')
             return None
         cfg = self.cfg
-        if not cfg['enabled'] or work or free:
+        # `heartbeat now` (the panel's /freetime): a stretch at the next pass, past the rest interval and even with
+        # free time switched off; work still comes first (the request waits for it) and the budget still holds.
+        asked = (self.rt.home / NOW_MARKER).exists()
+        if (not cfg['enabled'] and not asked) or work or free:
             return None
         state = self._state()
         now = time.time()
-        if now - float(state.get('last_end', 0)) < float(cfg['rest_seconds']):
+        if not asked and now - float(state.get('last_end', 0)) < float(cfg['rest_seconds']):
             return None
         if self.rt.brains.next_is_remote():
             if self._price_unknown():
@@ -154,8 +158,11 @@ class FreeTime:
             if self.spent_today() >= float(cfg['budget_usd']):
                 return self._note_once(state, 'budget', 'the free-time allowance for today is spent; resting '
                                        'until tomorrow or until a local model is configured')
-        dream = self._dream_due(state)
+        dream = self._dream_due(state) and not asked
+        (self.rt.home / NOW_MARKER).unlink(missing_ok=True)
         gid = self._start('dream' if dream else 'free', state)
+        if asked:
+            self.rt.store.event('free_time_asked', {}, gid)
         return gid
 
     def _price_unknown(self):
