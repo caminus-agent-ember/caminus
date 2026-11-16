@@ -15,7 +15,10 @@ import (
 
 // emberFrames are the sprite's pixel maps: k coal, w eye, o ember, y flame tip, . empty.
 var emberFrames = [2][10]string{
+	// (the empty pixel row is on top: the feet fill the bottom half of the last cell, so Ember stands on what is under
+	// it instead of hovering half a row above it)
 	{
+		"..........",
 		"....o.....",
 		"...oyo....",
 		"..kkkkkk..",
@@ -25,9 +28,9 @@ var emberFrames = [2][10]string{
 		".kkkkkkkk.",
 		".kkkkkkkk.",
 		"..k....k..",
-		"..........",
 	},
 	{
+		"..........",
 		".....o....",
 		"...oyyo...",
 		"..kkkkkk..",
@@ -37,7 +40,6 @@ var emberFrames = [2][10]string{
 		".kkkkkkkk.",
 		".kkkkkkkk.",
 		"..k....k..",
-		"..........",
 	},
 }
 

@@ -561,7 +561,8 @@ func (m envModel) sidePanel(sw, height int) string {
 	rows = rows[:height]
 	// Ember sits in the panel's bottom-right corner, right above the composer, in rows nothing else needs (it gives
 	// way to tasks and a long command); it flickers while a reply is written
-	if art := mascot(m.tickN % 2); height-used > len(art) {
+	// (not while the /btw answer or the / menu sits between the panel and the composer: Ember would float over it)
+	if art := mascot(m.tickN % 2); height-used > len(art) && !m.chat.btw.open && !m.slashMenuOpen() {
 		if !m.chat.live.active {
 			art = mascot(0)
 		}
