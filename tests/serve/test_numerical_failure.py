@@ -454,6 +454,7 @@ class StartupShutdown(unittest.TestCase):
         self.pc = NS(n_slots=0, tier_mib=(1.0,), store=None, side_rows=16)
         self.cache = ModuleType('caminus.cache.prompt')
         self.cache.PromptCache, self.cache.DEFAULT_CAP_GB = Mock(return_value=self.pc), 1.0
+        self.cache.DEFAULT_KEEP_PER_ROOT = 3          # (serve passes the per-root park limit too)
         cache_package = ModuleType('caminus.cache')
         cache_package.prompt = self.cache
         self.k3 = ModuleType('caminus.serve.k3_session')

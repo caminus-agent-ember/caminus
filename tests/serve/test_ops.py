@@ -135,12 +135,15 @@ class TestKvCacheCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             held = pc.DiskStore(d, staging=pc.Staging(piece=pc.PIECE, nbuf=1, pin=False))   # (as a running server holds it)
             try:
-                for cmd in ('list', 'purge'):
-                    r = subprocess.run([sys.executable, '-I', tool, cmd, '--dir', d], capture_output=True, text=True, timeout=120, env=env)
-                    self.assertEqual(r.returncode, 2, r.stderr)
-                    self.assertNotIn('Traceback', r.stderr)
-                    self.assertIn(f'kv_cache: {cmd} refused', r.stderr)
-                    self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+                # list reads headers only, so it runs beside a server and marks the store in use; purge is refused
+                r = subprocess.run([sys.executable, '-I', tool, 'list', '--dir', d], capture_output=True, text=True, timeout=120, env=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn('in use by a running server', r.stdout)
+                r = subprocess.run([sys.executable, '-I', tool, 'purge', '--dir', d], capture_output=True, text=True, timeout=120, env=env)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertNotIn('Traceback', r.stderr)
+                self.assertIn('kv_cache: purge refused', r.stderr)
+                self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
             finally:
                 held.close()
             r = subprocess.run([sys.executable, '-I', tool, 'list', '--dir', d], capture_output=True, text=True, timeout=120, env=env)
