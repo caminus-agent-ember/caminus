@@ -238,7 +238,7 @@ def parser():
             p.add_argument('--since',type=float,help='recap: stretches since this Unix time (default: the newest goal from you)')
             p.add_argument('--messages-per-day',type=int)
             p.add_argument('--stretch-minutes',type=float)
-            p.add_argument('--stretch-steps',type=int,help='model steps one free-time stretch may take (default 40)')
+            p.add_argument('--stretch-steps',type=int,help='model steps one free-time stretch may take; 0 (the default) = no step limit, its time ends it')
         if op=='message':
             p.add_argument('to')
             p.add_argument('--text')

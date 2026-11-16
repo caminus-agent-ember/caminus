@@ -13,7 +13,7 @@ known is not used for free time at all.
 Configuration, in config.json under "free_time" (all optional):
     enabled            false     the `heartbeat on` command sets it
     rest_seconds       1800      rest between two stretches
-    stretch_steps      40        model steps one stretch may take
+    stretch_steps      0         model steps one stretch may take; 0 = no step limit (its time ends it)
     stretch_seconds    1800      wall time one stretch may take
     budget_usd         0.50      daily allowance on a priced remote model
     afk_seconds        600       a question waits this long for an answer, then the stretch carries on
@@ -38,7 +38,7 @@ import time
 from .model import price
 from .store import atomic_json
 
-DEFAULTS = dict(enabled=False, rest_seconds=1800, stretch_steps=40, stretch_seconds=1800, budget_usd=0.50,
+DEFAULTS = dict(enabled=False, rest_seconds=1800, stretch_steps=0, stretch_seconds=1800, budget_usd=0.50,
                 afk_seconds=600, messages_per_day=3, dream_hour=3, context_tokens=0)
 KINDS = ('free', 'dream')
 NOW_MARKER = 'free_time_now'   # `heartbeat now` writes it; the next pulse starts a stretch and removes it
@@ -202,7 +202,10 @@ class FreeTime:
                       projects=str(studio / 'PROJECTS.md'), past=past, notes=notes,
                       messages=cfg['messages_per_day'], afk=max(1, int(cfg['afk_seconds']) // 60), resume=resume)
         prompt = (DREAM if kind == 'dream' else INVITATION).format(**values)
-        gid = self.rt.store.enqueue(prompt, max_steps=int(cfg['stretch_steps']),
+        # stretch_steps 0 (the default): no step limit; the stretch's time ends it (the owner: "unlimited steps, just
+        # time per stretch"; 40 steps lasted two minutes on a fast paid brain). The daily allowance still caps spend.
+        steps = int(cfg['stretch_steps'] or 0)
+        gid = self.rt.store.enqueue(prompt, max_steps=steps if steps > 0 else None,
                                     max_seconds=float(cfg['stretch_seconds']), kind=kind)
         if kind == 'dream':
             state['last_dream'] = self._today()

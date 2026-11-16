@@ -294,6 +294,18 @@ class Resident(unittest.TestCase):
             self.assertEqual(rt.store.goal(gid).get('max_steps') or rt.store.goal(gid).get('step_limit'),120,
                              'a stretch takes the configured steps')
         finally:rt.mail.close();rt.store.close()
+        # 0 (the default): no step limit, the stretch's time ends it
+        out=self.cmd('heartbeat',['--stretch-steps','0'])
+        self.assertEqual(out['free_time']['stretch_steps'],0)
+        rt=Runtime(self.home)
+        try:
+            rt.store.update(gid,state='completed')
+            rt.free.cfg['rest_seconds']=0
+            (self.home/'free_time_now').write_text('1')
+            g2=rt.free.pulse();goal=rt.store.goal(g2)
+            self.assertFalse(goal.get('max_steps') or goal.get('step_limit'),'no step limit')
+            self.assertTrue(goal.get('deadline') or goal.get('max_seconds'),'the time still ends it')
+        finally:rt.mail.close();rt.store.close()
 
     def test_three_plain_text_replies_pause_the_goal(self):
         self.gates_on()
