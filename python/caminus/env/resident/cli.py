@@ -559,7 +559,17 @@ def main(argv=None,stdin=None):
                 st=Store(home)
                 try:busy=[g for g in (st.goal(x) for x in st.next_goal()) if g.get('kind','work') not in ('free','dream')]
                 finally:st.close()
-                emit(dict(free_time='asked',note='starts after the running work' if busy else 'starts at the next pass'),a.json)
+                note='starts after the running work' if busy else 'starts at the next pass'
+                # say why it will not start rather than saying it will: the owner asked again and again while the
+                # day's allowance was spent, and nothing told them
+                import datetime as _dt
+                st8=json.loads((home/'free_time.json').read_text()) if (home/'free_time.json').exists() else {}
+                spent=float((st8.get('days',{}).get(_dt.date.today().isoformat()) or {}).get('usd',0.0))
+                budget=float(settings(cfg)['budget_usd'])
+                if spent and spent>=budget:
+                    note=(f"today's free-time allowance is spent (${spent:.2f} of ${budget:.2f}): it starts tomorrow, or "
+                          f"raise it: caminus env agent heartbeat {a.name} --budget-usd N")
+                emit(dict(free_time='asked',note=note,spent_today_usd=round(spent,4),budget_usd=budget),a.json)
                 return 0
             if a.state in ('on','off'):ft['enabled']=a.state=='on'
             for flag,key,scale in (('rest_minutes','rest_seconds',60),('afk_minutes','afk_seconds',60),

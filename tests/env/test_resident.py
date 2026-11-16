@@ -1874,6 +1874,8 @@ for line in sys.stdin:
             self.assertIn('Restart=on-failure',unit);self.assertIn('WantedBy=default.target',unit)
             self.assertNotIn('\nk\n',unit,'the key itself never goes in the unit')
             self.assertIn(['systemctl','--user','enable','--now','caminus-relay-deepinfra.service'],calls)
+            # a reinstall (a new cap) restarts the running relay so the new settings apply now
+            self.assertIn(['systemctl','--user','restart','caminus-relay-deepinfra.service'],calls)
             self.assertIn('enable-linger',out.getvalue())
             # it runs a frozen copy, never the source tree: editing or moving a checkout cannot stop the relay
             import re as _re;frozen=_re.search(r'/xdg-data/caminus/relay-code/[0-9a-f]{12}',unit)
@@ -2136,16 +2138,19 @@ for line in sys.stdin:
     def test_poll_returns_only_new_output_and_says_when_quiet(self):
         t=Terminal(self.home);sid=uuid.uuid4().hex
         # Two bursts separated by a pause; the command then waits for a line before exiting.
-        cmd='printf first-burst; sleep 1; printf second-burst; read x'
-        out=t.call(sid,dict(command=cmd,yield_ms=50))
+        # (the pause is long so a slow runner still polls inside it; the first burst may come back with the start or
+        # with the first poll, depending on the machine's speed, but exactly once)
+        cmd='printf first-burst; sleep 4; printf second-burst; read x'
+        start=t.call(sid,dict(command=cmd,yield_ms=50))
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
-        self.assertIn('first-burst',out['output']);self.assertNotIn('second-burst',out['output'])
-        self.assertFalse(out['no_new_output'])
+        both=start['output']+out['output']
+        self.assertEqual(both.count('first-burst'),1,both);self.assertNotIn('second-burst',both)
+        self.assertTrue(out['no_new_output'] if start['output'] else not out['no_new_output'])
         # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
         self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])
         # Second burst arrives; that poll returns only the second burst.
-        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=6000))
         self.assertEqual(out['output'],'second-burst');self.assertFalse(out['no_new_output'])
         # An explicit offset=0 still reads everything from the beginning.
         out=t.call(uuid.uuid4().hex,dict(session=sid,stdin='go\n',yield_ms=1000,offset=0))
