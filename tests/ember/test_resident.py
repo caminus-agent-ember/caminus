@@ -2068,6 +2068,29 @@ for line in sys.stdin:
         op=relay.OwnerPrices(str(pf),lambda m:None,fetch=lambda:listed)
         self.assertEqual(op.get('mistral-large-latest'),(0.7,2.1,0.7));self.assertIsNone(op.get('other'));self.assertIsNone(op.get('nope'))
 
+    def test_mistral_typed_content_blocks_become_text_and_reasoning(self):
+        from caminus.ember.resident.model import split_content, Model
+        blocks=[dict(type='thinking',thinking=[dict(type='text',text='2+2 is 4. ')],closed=True),dict(type='text',text='2+2 is 4.')]
+        self.assertEqual(split_content(blocks),('2+2 is 4.','2+2 is 4. '))
+        self.assertEqual(split_content('plain'),('plain',''));self.assertEqual(split_content(None),('',''))
+        m=Model(dict(endpoint='http://127.0.0.1:1/v1',model='zai-glm-5-3-flash',context=200000))
+        out=m._message(dict(content=blocks))
+        self.assertEqual(out['content'],'2+2 is 4.');self.assertEqual(out['reasoning_content'],'2+2 is 4. ')
+
+    def test_short_calls_on_openai_compatible_models_get_room_to_think(self):
+        from caminus.ember.resident.model import Model, SHORT_CALL
+        sent=[]
+        m=Model(dict(endpoint='http://127.0.0.1:1/v1',model='zai-glm-5-3-flash',context=200000))
+        m.request=lambda url,body=None:(sent.append(body),dict(choices=[dict(message=dict(content='ok'),finish_reason='stop')]))[1]
+        m.complete([dict(role='user',content='hi')],max_tokens=600)
+        m.complete([dict(role='user',content='hi')],max_tokens=16000)
+        chat=[b for b in sent if b and 'max_tokens' in b]
+        self.assertEqual((chat[0]['max_tokens'],chat[1]['max_tokens']),(SHORT_CALL,16000),'a short call has room for thinking')
+        m2=Model(dict(endpoint='http://127.0.0.1:1/v1',model='x',context=200000,effort='high'))
+        m2.request=m.request;m2.complete([dict(role='user',content='hi')],max_tokens=600)
+        chat=[b for b in sent if b and 'max_tokens' in b]
+        self.assertEqual(chat[-1]['reasoning_effort'],'none','where there is a switch, a short call turns reasoning off')
+
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog
         data=dict(data=[dict(id='mistral-medium-2508',aliases=['mistral-medium-latest'],max_context_length=131072,

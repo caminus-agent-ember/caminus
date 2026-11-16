@@ -14,6 +14,26 @@ THINKING_REQUIRED = frozenset(('claude-opus-5-5', 'claude-opus-5', 'claude-sonne
                                'claude-fable-5-2', 'claude-fable-5-1', 'claude-fable-5'))
 
 
+def split_content(content):
+    """An OpenAI-compatible message content as (text, thinking). Most servers send a string; Mistral sends typed blocks
+    for its reasoning models: [{type: thinking, thinking: [{type: text, text}] or str}, {type: text, text}]."""
+    if content is None or isinstance(content, str):
+        return content or '', ''
+    text, thinking = [], []
+    for b in content if isinstance(content, list) else [content]:
+        if isinstance(b, str):
+            text.append(b); continue
+        if not isinstance(b, dict):
+            continue
+        if b.get('type') == 'thinking':
+            inner = b.get('thinking')
+            for x in inner if isinstance(inner, list) else [inner]:
+                thinking.append(x.get('text', '') if isinstance(x, dict) else (x or ''))
+        elif b.get('type') in ('text', None) and isinstance(b.get('text'), str):
+            text.append(b['text'])
+    return ''.join(text), ''.join(thinking)
+
+
 class ModelError(Exception):
     pass
 
@@ -207,6 +227,14 @@ class Model:
         if self.config.get('effort'):
             # OpenAI-compatible providers (DeepInfra) take reasoning depth as reasoning_effort; 'none' turns it off.
             body['reasoning_effort'] = self.config['effort']
+        if body['max_tokens'] < SHORT_CALL:
+            # A short side call (the finish judge's 600 tokens): a reasoning model spent all of it thinking and the
+            # verdict came back cut off (GLM 5.3 on Mistral: a finish let through unchecked). Where the provider has a
+            # switch it is turned off; either way the call gets room for thinking (billed per token written, so the
+            # room costs nothing unused).
+            if self.config.get('effort'):
+                body['reasoning_effort'] = 'none'
+            body['max_tokens'] = min(SHORT_CALL, remaining)
         if tools:
             body['tools'] = tools
         if on_delta is not None:
@@ -226,9 +254,10 @@ class Model:
 
     def _message(self, m):
         """the reply in the shape the store keeps: validated tool calls, no unknown keys"""
-        out = dict(role='assistant', content=m.get('content') or '')
-        if m.get('reasoning_content'):
-            out['reasoning_content'] = m['reasoning_content']
+        text, thinking = split_content(m.get('content'))
+        out = dict(role='assistant', content=text)
+        if m.get('reasoning_content') or thinking:
+            out['reasoning_content'] = (m.get('reasoning_content') or '') + thinking
         calls = m.get('tool_calls') or []
         if calls:
             ids = [c['id'] for c in calls]
@@ -262,7 +291,8 @@ class Model:
                             continue
                         whole = json.loads(line)      # not SSE: the whole reply at once
                         m = whole['choices'][0]['message']
-                        for kind, value in (('reasoning', m.get('reasoning_content')), ('content', m.get('content'))):
+                        text, thinking = split_content(m.get('content'))
+                        for kind, value in (('reasoning', (m.get('reasoning_content') or '') + thinking), ('content', text)):
                             if value and on_delta(kind, value) is False:
                                 raise Cancelled()
                         for call in m.get('tool_calls') or []:
@@ -292,9 +322,15 @@ class Model:
                             if on_delta('reasoning', delta['reasoning_content']) is False:
                                 raise Cancelled()
                         if delta.get('content'):
-                            content.append(delta['content'])
-                            if on_delta('content', delta['content']) is False:
-                                raise Cancelled()
+                            text, thinking = split_content(delta['content'])   # (Mistral: typed blocks)
+                            if thinking:
+                                reasoning.append(thinking)
+                                if on_delta('reasoning', thinking) is False:
+                                    raise Cancelled()
+                            if text:
+                                content.append(text)
+                                if on_delta('content', text) is False:
+                                    raise Cancelled()
                         for call in delta.get('tool_calls') or []:
                             slot = calls.setdefault(call.get('index', 0), dict(id='', name='', arguments=''))
                             if call.get('id'):
