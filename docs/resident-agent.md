@@ -16,7 +16,9 @@ terminal under the account's normal permissions.
 
 ## Start and use a resident
 
-After `caminus env setup` and its human provisioning steps:
+New here: [the quickstart](env-quickstart.md) goes from install to the first conversation, and [the guide](env.md)
+covers the security model, where things live and troubleshooting. This page is the reference. After `caminus env
+setup` (one root script, then the command again):
 
 ```sh
 caminus env agent install
