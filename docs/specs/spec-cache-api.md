@@ -22,7 +22,7 @@ against. The lead reviews it before M7 starts; changes after that need the lead.
 ## Construction
 
 ```python
-pc = PromptCache(m, pf, draft=None, cache_dir=None, cap_gb=30, retention_days=7, min_free_gb=10, disk=True,
+pc = PromptCache(m, pf, draft=None, cache_dir=None, cap_gb=64, retention_days=7, min_free_gb=10, disk=True, keep_per_root=3,
                  n_slots=None, max_slots=64, side_rows=98304, auto_park_min=4096, every=8192, spill_min_gap=None)
 ```
 

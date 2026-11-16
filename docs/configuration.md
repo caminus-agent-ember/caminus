@@ -9,7 +9,7 @@ to get started: the defaults work.
 |---|---|---|
 | Model files | `~/.local/share/caminus/models` | `model_dir` / `CAMINUS_MODEL_DIR` |
 | More folders to look for model files | none | `model_search` / `CAMINUS_MODEL_SEARCH` (folders separated by `:`) |
-| The prompt cache on disk (up to 30 GB, 7 days) | `~/.cache/caminus/kv` | `kv_dir` / `CAMINUS_KV_DIR` |
+| The prompt cache on disk (up to 64 GB for the whole folder, 7 days) | `~/.cache/caminus/kv` | `kv_dir` / `CAMINUS_KV_DIR` |
 | The request log and replay files (up to 10 GB, 7 days) | `~/.cache/caminus/flight` | `flight_dir` / `CAMINUS_FLIGHT_DIR` |
 | Server logs and state | `~/.local/state/caminus` | `state_dir` / `CAMINUS_STATE_DIR` |
 | Qwen Code's home for Caminus | `~/.config/caminus/qwen-home` | `CAMINUS_QWEN_HOME` |

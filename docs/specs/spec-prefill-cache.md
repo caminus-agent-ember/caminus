@@ -153,7 +153,7 @@ SPEC: PREFILL + PROMPT/CONVERSATION CACHE for the GSQ-RCO Coder on K3 (XTX + XT,
 - **Host tier:** optional, pinned, ≤2 GB. The 28.8 GB PLE table's page cache and the torch process compete for the 29 GiB.
 - **Disk tier: REQUIRED (user, 11-04).** It replaces the earlier "no disk tier", which assumed too little free space on the development machine's root disk (since freed).
   - **Where:** ~/.cache/caminus/kv/ on root (never $ARTIFACTS / NTFS, never the repo), files 0600, local only, never uploaded; a purge command.
-  - **Size:** a cap (default 30 GB, configurable) with LRU eviction; retention default 7 days (configurable).
+  - **Size:** a cap (default 64 GB over the whole cache folder, configurable) with LRU eviction; retention default 7 days (configurable).
   - **Key and integrity:** the token-prefix hash + the model fingerprint + the numerics configuration (WMMA_OUT, MOE_PATH, engine version). Every file is checksummed; a truncated, corrupt or mismatched file is refused and the prompt re-prefilled.
   - **I/O:** O_DIRECT reads and writes through pinned buffers (as the PLE table does), so the page cache never grows. Page-cache pressure is what made KFD evict the GPU queues (db8bdfe). Parking writes in the background; writes are atomic (a temp file, then rename).
   - **Contents:** the token list, KV and indexer rows [0, n), and the checkpoints (GDN state, conv, PLE history, the drafter window and the DFlash ring).

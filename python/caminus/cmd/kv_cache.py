@@ -65,14 +65,37 @@ def main(argv=None):
     if a.older_than_days is None and a.keep_per_root is None and a.max_gb is None:
         print('kv_cache: prune needs --older-than-days, --keep-per-root and / or --max-gb', file=sys.stderr)
         return 2
-    gone, skipped = [], []
-    free = [(d, ents) for d, held, ents in found if not held]
-    skipped = [d for d, held, _ in found if held]
+    import fcntl
+    gone, skipped, locks = [], [], []
+    # prune holds each store's lock while it works on it (a server starting meanwhile waits a moment, then starts after);
+    # a store whose lock is taken has a running server and is skipped
+    free = []
+    for d, held, ents in found:
+        fd = None
+        if not held:
+            try:
+                fd = os.open(os.path.join(d, '.lock'), os.O_RDWR); fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                if fd is not None: os.close(fd)
+                fd, held = None, True
+        if held: skipped.append(d)
+        else: free.append((d, ents)); locks.append(fd)
+    try:
+        return _prune(a, top, now, found, free, skipped)
+    finally:
+        for fd in locks:
+            try: fcntl.flock(fd, fcntl.LOCK_UN)
+            finally: os.close(fd)
+
+
+def _prune(a, top, now, found, free, skipped):
+    gone = []
+    held_dirs = set(skipped)
     cands = [(h['_mtime'], h['_bytes'], d, nm, h) for d, ents in free for nm, h in ents if h is not None]
     drop = set()
     if a.older_than_days is not None:
         drop |= {(d, nm) for mt, _, d, nm, _ in cands if now - mt > a.older_than_days * 86400}
-    if a.keep_per_root is not None:
+    if a.keep_per_root is not None and a.keep_per_root >= 1:      # (0 means no limit, as --cache-keep-per-root 0 does)
         groups = {}
         for mt, b, d, nm, h in cands:
             # (a park without a root is never grouped: guessing would merge distinct chats)
@@ -81,7 +104,7 @@ def main(argv=None):
         for g in groups.values():
             drop |= {(d, nm) for _, d, nm in sorted(g, reverse=True)[max(0, a.keep_per_root):]}
     if a.max_gb is not None:
-        held_bytes = sum(h['_bytes'] for dd, held, ents in found if held for _, h in ents if h)
+        held_bytes = sum(h['_bytes'] for dd, _, ents in found if dd in held_dirs for _, h in ents if h)
         left = held_bytes + sum(b for _, b, d, nm, _ in cands if (d, nm) not in drop)
         for mt, b, d, nm, _ in sorted(cands):
             if left <= a.max_gb * 1e9: break

@@ -2894,9 +2894,12 @@ def stage_parkcap(cache_dir):
           and os.path.exists(os.path.join(top, 'c', 'c-held.ckv')),
           f'park cap: eviction keeps going oldest first across stores ({ev2}), still sparing the running store and the live slot')
     # making room below the free-space floor: evict when it helps, and evict nothing when even all of it would not
-    vfs = os.statvfs(top); free = vfs.f_bavail * vfs.f_frsize
+    # (the free space is injected: a live disk's other writers made the 5 MB shortfall below flaky)
+    from types import SimpleNamespace as _NS
+    free = 10**12
+    a.statvfs = lambda p: _NS(f_bavail=free, f_frsize=1, f_blocks=4 * free)
     a.cap = 10**15
-    a.min_free = free - 25 * MB                  # a 30 MB entry leaves ~55 MB short... relative: the store has a-2 (40) evictable
+    a.min_free = free - 25 * MB                  # a 30 MB entry leaves ~5 MB short of the floor: a-2 (40) is evictable
     n_before = len(a.index)
     h3 = put(a, 'a-3.ckv', 30)
     room = [n for w, n, _ in a.events if w == 'room']
@@ -2908,6 +2911,14 @@ def stage_parkcap(cache_dir):
     check(h4 is None and sorted(a.index) == kept and any(w == 'refused-write' for w, *_ in a.events[-1:]),
           'park cap: when evicting everything would still not make room, nothing is evicted and the write is refused')
     a.min_free = 0; a.cap = 10**15
+    # the cap path too evicts nothing when evicting everything that may go would not make the entry fit
+    with a._evictable() as cands: ev = sum(c[1] for c in cands)
+    a.cap = a.tree_bytes() - ev + 1 * MB
+    kept = sorted(a.index)
+    h5 = put(a, 'a-5.ckv', 5)
+    check(h5 is None and sorted(a.index) == kept and 'cap even after evicting' in a.events[-1][2],
+          f'park cap: a park that cannot fit even after evicting everything that may go is refused, nothing evicted ({a.events[-1]})')
+    a.cap = 10**15
     # the per-root limit: 3 most recently used parks of one root; the live slot's counts and stays
     for i in range(5): put(a, f'r{i}.ckv', 1, root='ROOT2')
     put(a, 'other-root.ckv', 1, root='ROOT3')
@@ -2946,10 +2957,16 @@ def stage_parkcap(cache_dir):
     check(left_roots == ['r4.ckv'] and os.path.exists(os.path.join(top, 'c', 'c-held.ckv')),
           f'kv-cache prune --keep-per-root 1: the newest park of the root left ({left_roots}); the running store skipped')
     out = io.StringIO()
+    with contextlib.redirect_stdout(out): kv_cache.main(['prune', '--dir', top, '--keep-per-root', '0', '--dry-run'])
+    check('would free 0.00 GB in 0 entries' in out.getvalue(), f'kv-cache prune --keep-per-root 0 means no limit:\n{out.getvalue()[:300]}')
+    out = io.StringIO()
     with contextlib.redirect_stdout(out): kv_cache.main(['prune', '--dir', top, '--max-gb', '0.025'])
-    a_left = sum(os.path.getsize(os.path.join(top, 'a', x)) for x in os.listdir(os.path.join(top, 'a')) if x.endswith('.ckv'))
-    check(a_left + os.path.getsize(os.path.join(top, 'c', 'c-held.ckv')) <= 25 * MB + 10 * MB or 'freed' in out.getvalue(),
-          f'kv-cache prune --max-gb: oldest first until the folder fits:\n{out.getvalue()[:300]}')
+    held_b = os.path.getsize(os.path.join(top, 'c', 'c-held.ckv'))
+    free_left = sum(os.path.getsize(os.path.join(dp, x)) for dp, _, fs in os.walk(top) if os.path.basename(dp) != 'c'
+                    for x in fs if x.endswith('.ckv'))
+    check(held_b + free_left <= 25e6 or free_left == 0,
+          f'kv-cache prune --max-gb: the folder fits 25 MB (or every entry outside the running store is gone; '
+          f'{(held_b + free_left) / MB:.1f} MB left):\n{out.getvalue()[:300]}')
     c.close()
 
 

@@ -57,7 +57,7 @@ is spilled to disk (a 'spill' entry, valid while the live rows below it are), a 
 the request's path; per-turn checkpoints a few hundred tokens apart are not worth it).
 
 The disk tier (required, user 11-04; DiskStore): ~/.cache/caminus/kv by default (configurable; tests use a scratch directory),
-directory 0700, files 0600, one owner process (an flock), a size cap (default 30 GB) with LRU by an explicit last-use stamp
+directory 0700, files 0600, one owner process (an flock), a size cap (default 64 GB over the whole cache folder) with LRU by an explicit last-use stamp
 (the file's mtime, set with the store's clock), retention (default 7 days), a free-space floor, atomic writes (a temp file in
 the same directory, fsync, rename, fsync of the directory), O_DIRECT reads / writes through a few pinned staging buffers (the
 page cache must not grow: page-cache pressure is what makes KFD evict the GPU queues, db8bdfe), every PIECE of every segment
@@ -600,10 +600,16 @@ class DiskStore:
         if disk_share: self.cap = min(self.cap, int(disk_share * vfs.f_blocks * vfs.f_frsize))
         self.keep_per_root = int(keep_per_root or 0)
         self.clock, self.protect = clock, protect or (lambda: ())
+        self.statvfs = os.statvfs                          # (tests inject the free space)
         self._lockfd = os.open(os.path.join(self.root, '.lock'), os.O_RDWR | os.O_CREAT, 0o600)
-        try: fcntl.flock(self._lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(self._lockfd); raise CacheError(f'promptcache: {self.root} is in use by another process (its .lock is held)')
+        # a probe (kv-cache list, prune, another store's eviction) holds the lock for a moment: retry for ~2 s before
+        # refusing, so a server starting in that window is not turned away; a running owner holds it for good
+        for i in range(41):
+            try: fcntl.flock(self._lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+            except OSError:
+                if i == 40:
+                    os.close(self._lockfd); raise CacheError(f'promptcache: {self.root} is in use by another process (its .lock is held)')
+                time.sleep(0.05)
         self.stg = staging or Staging()
         self.hbuf = mmap.mmap(-1, HEADER_MAX + ALIGN)     # page-aligned: header reads / writes with O_DIRECT
         self.index = {}                                    # file name -> header (+ '_mtime', '_toks' lazily)
@@ -714,7 +720,7 @@ class DiskStore:
                 except OSError: os.close(fd); continue              # (its server is running)
                 locks.append(fd)
                 cands += [(mt, b, d, nm) for nm, b, mt in ents]
-            yield sorted(cands)
+            yield sorted(cands, key=lambda c: (c[0], c[1]))   # (by last use, then size: the folder is None or a str)
         finally:
             for fd in locks:
                 try: fcntl.flock(fd, fcntl.LOCK_UN)
@@ -737,11 +743,14 @@ class DiskStore:
             if nm not in keep and now - h['_mtime'] > self.retention:
                 self._unlink(nm, 'retention', f'last used {(now - h["_mtime"]) / 86400:.2f} days ago')
         total = self.tree_bytes()
-        if total + incoming <= self.cap: return
+        if total + incoming <= self.cap: return True
         with self._evictable() as cands:
+            if total - sum(c[1] for c in cands) + incoming > self.cap:
+                return False             # even evicting everything evictable would not fit: evict nothing (refused)
             for c in cands:
                 if total + incoming <= self.cap: break
                 self._evict(c, 'lru', f'cap {self.cap / 1e9:.1f} GB over {self.budget_root}'); total -= c[1]
+        return True
 
     def make_room(self, need):
         """free `need` more bytes on the disk by evicting the oldest evictable entries, but only when they can: if evicting all
@@ -787,8 +796,11 @@ class DiskStore:
         for s in sizes: offs.append(off); off += _up(s)
         total = off
         if total > self.cap: self.events.append(('refused-write', name, f'{total} B > the cap')); return None
-        self.enforce(incoming=total)
-        vfs = os.statvfs(self.root); free = vfs.f_bavail * vfs.f_frsize
+        if not self.enforce(incoming=total):
+            # (the running stores and the live slot's entries alone leave no room under the cap: nothing was evicted)
+            self.events.append(('refused-write', name, f'{total / 1e9:.2f} GB would pass the {self.cap / 1e9:.1f} GB cap even '
+                                'after evicting every entry that may go')); return None
+        vfs = self.statvfs(self.root); free = vfs.f_bavail * vfs.f_frsize
         if free - total < self.min_free and not self.make_room(self.min_free + total - free):
             # (old entries are evicted before a new one is refused; this refusal means even that would not make room)
             self.events.append(('refused-write', name, f'{free / 1e9:.1f} GB free; {total / 1e9:.2f} GB more would leave less than {self.min_free / 1e9:.0f} GB'))
@@ -957,8 +969,9 @@ class PromptCache:
     it and the checkpoint below it (default every: the deep ones a long re-prefill would replace; the per-turn ones a few
     hundred tokens apart are dropped, since a spill writes ~160 MB in the request's path); clock: the disk tier's clock (tests)"""
     def __init__(self, m, pf, draft=None, cache_dir=None, cap_gb=DEFAULT_CAP_GB, retention_days=DEFAULT_RETENTION_DAYS,
-                 min_free_gb=DEFAULT_MIN_FREE_GB, disk=True, keep_per_root=DEFAULT_KEEP_PER_ROOT, n_slots=None, max_slots=64, side_rows=SIDE_ROWS, reserve_mib=None,
-                 work_mib=None, vram_check=True, auto_park_min=AUTO_PARK_MIN, every=EVERY, spill_min_gap=None, clock=time.time, key=None):
+                 min_free_gb=DEFAULT_MIN_FREE_GB, disk=True, n_slots=None, max_slots=64, side_rows=SIDE_ROWS, reserve_mib=None,
+                 work_mib=None, vram_check=True, auto_park_min=AUTO_PARK_MIN, every=EVERY, spill_min_gap=None, clock=time.time, key=None,
+                 keep_per_root=DEFAULT_KEEP_PER_ROOT):
         self.live = LiveState()      # the only copy of what the live slot holds (caminus.cache.livestate; self.log / self.st)
         # the request in flight (prompt(): the session's prompt phase): its prompt-end state (the bail recovery's checkpoint), its
         # prompt, whether it runs in the side slot, its recoveries so far, and the phase an exception left (prepare / first)
