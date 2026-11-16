@@ -22,29 +22,39 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// paintBackground draws the theme's gradient and pattern into a rendered frame; rows from protectFrom on (the
-// composer, the status line) get the gradient only.
-func paintBackground(frame string, protectFrom int) string {
+// paintBackground paints the theme's background into a rendered frame: every cell (many terminals, GNOME Terminal
+// among them, ignore a program's request to change their background colour, so a pink theme drew dark text on the
+// terminal's own dark background), as a gradient when the theme has one, and its pattern in rows above protectFrom
+// (not the composer and status line; patterns false for overlays). Rows are padded to width and the frame to
+// height, so the colour reaches the edges.
+func paintBackground(frame string, protectFrom, width, height int, patterns bool) string {
 	pat := themeRole("bg_pattern")
 	bg, bg2 := themeRole("bg"), themeRole("bg2")
-	gradient := pat == "gradient" && bg != "" && bg2 != ""
-	glyphs := pat != "" && pat != "none" && pat != "gradient"
-	if !gradient && !glyphs {
+	if _, _, _, ok := hexRGB(bg); !ok {
 		return frame
 	}
+	gradient := pat == "gradient" && bg2 != ""
+	glyphs := patterns && pat != "" && pat != "none" && pat != "gradient"
 	ink := themeRole("pattern")
 	if ink == "" {
 		ink = themeRole("dim")
 	}
 	inkSeq := sgrColor(38, ink)
 	lines := strings.Split(frame, "\n")
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
 	n := len(lines)
 	for y, line := range lines {
-		rowBg := ""
+		rowBg := sgrColor(48, bg)
 		if gradient {
 			rowBg = sgrColor(48, mixHex(bg, bg2, float64(y)/math.Max(1, float64(n-1))))
 		}
-		lines[y] = paintLine(line, y, rowBg, inkSeq, pat, glyphs && y < protectFrom)
+		rowBg += sgrColor(38, themeRole("text")) // and the theme's text as the default colour (re-applied with it)
+		if pad := width - ansi.StringWidth(line); pad > 0 {
+			line += "\x1b[0m" + strings.Repeat(" ", pad) // (the padding is plain blanks: painted, and patterned)
+		}
+		lines[y] = paintLine(line, y, rowBg, inkSeq, pat, glyphs && y < protectFrom) + "\x1b[0m"
 	}
 	return strings.Join(lines, "\n")
 }
@@ -89,9 +99,11 @@ func paintLine(line string, y int, rowBg, inkSeq, pat string, glyphs bool) strin
 					if sgrSetsBg(params) {
 						hasBg = true
 					}
-					if sgrClearsBg(params) {
-						hasBg = false
-						out += rowBg
+					if sgrClearsBg(params) || sgrClearsFg(params) {
+						if sgrClearsBg(params) {
+							hasBg = false
+						}
+						out += rowBg // (the default colours return after a 49 or 39)
 					}
 				}
 			}
@@ -200,6 +212,15 @@ func patternGlyph(pat string, x, y int) string {
 func sgrSetsBg(p string) bool {
 	for _, f := range strings.Split(p, ";") {
 		if f == "48" || (len(f) == 2 && f[0] == '4' && f[1] >= '0' && f[1] <= '7') || (len(f) == 3 && f[:2] == "10") {
+			return true
+		}
+	}
+	return false
+}
+
+func sgrClearsFg(p string) bool {
+	for _, f := range strings.Split(p, ";") {
+		if f == "39" {
 			return true
 		}
 	}

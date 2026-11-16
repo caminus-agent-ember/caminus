@@ -1338,17 +1338,20 @@ func (m envModel) auditPane() string {
 func (m envModel) View() tea.View {
 	frame := m.render()
 	bg := themeBackground()
-	if bg != nil && m.tab == 6 && !m.overlayOpen() {
-		// a theme's gradient or pattern, behind the conversation only (not over the composer and status line, nor
-		// under an overlay)
+	if bg != nil {
+		// the theme's background in every cell (a terminal may ignore the background request below); its pattern
+		// behind the conversation only (not over the composer and status line, nor under an overlay)
 		w := max(20, m.width)
-		frame = paintBackground(frame, max(0, m.height-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w))))
+		protect := 0
+		if m.tab == 6 {
+			protect = max(0, m.height-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w)))
+		}
+		frame = paintBackground(frame, protect, m.width, m.height, m.tab == 6 && !m.overlayOpen())
 	}
 	v := tea.NewView(frame)
-	if bg != nil {
-		// the theme's own background (light, pink, any colour) and its text as the default foreground
-		v.BackgroundColor, v.ForegroundColor = bg, themeColor("text")
-	}
+	// (no tea.View BackgroundColor / ForegroundColor: GNOME Terminal ignores the request, and the renderer then
+	// treated cells in that colour as the default and dropped it, so most rows stayed the terminal's dark; the
+	// painter writes both into every cell instead)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = m.windowTitle()
