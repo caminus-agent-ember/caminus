@@ -118,3 +118,143 @@ float64 attention over the same decoded rows (1e-5 x max |V|, the F16 bound: the
 The second checks verify passes on a Q8 cache bitwise against Q8 one-token decode, depths 0 and 512, grids 3 / 6 / 7.
 None of these has run on a GPU. Still missing after them: model accuracy at depth (KLD against the F16 cache),
 speed, matching prefill, cache park/restore, the GSQ verify objects and two cards.
+
+## Qwen3-30B-A3B (one card)
+
+`Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q3m_lean_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to
+`k3_q3m_lean`; the same ops, pairs and lean dispatch check). Its batched prefill `Q3MPrefill` follows the engine:
+`q3p_qk_rope_q8` and `q3p_attn_q8` from `q3m_prefill_kvq8` write and read the rows, every other kernel stays on
+`q3m_prefill`. Not served: no option selects it and neither object is in the installed runtime set. The registry's
+projection takes `opt['kv'] = 'q8'` (`arch.kv_q8`) so the later `--kv q8` switch only has to set it.
+
+Format: the same wire codec and row layout as the dense line (`kernels/own_kv_codec.h`, `caminus.ref_kv`), with K
+rotated (`Q3MoEOne.kv_format_id` = `q8_0-v1:qk-hadamard128:f16-rounded-v1`). Each block encodes the fp16-rounded values
+the F16 object stores, K after the head's orthonormal Walsh-Hadamard transform: a Q8 row is
+`encode_q8_kv(hadamard128(K), V)` of the F16 row's K and V (`caminus.ref_kv.hadamard128`); the gates below check exactly
+that. q gets the same transform after its RoPE, so the scores are q . k in exact arithmetic ((H q) . (H k) = q . k for
+an orthonormal H). The transform is `kernels/own_kv_rot128.h`, the dense line's butterflies in its order (h = 1, 2 .. 64,
+then x 1/sqrt(128) rounded to fp32: `0x1.6a09e6p-4`, one rounding more than the dense line's power-of-two scales). A
+wave's lane holds a head's dims l, l + 32, l + 64, l + 96; the stages h = 1 .. 16 are shuffles, 32 and 64 stay in
+registers, and every wave of a head computes all four quarters: no LDS and no barrier added (the decode op's 15,748 bytes
+are what eight workgroups per WGP leave room for). The decode op rotates q per head in its RoPE step and the position's
+own fp16-rounded k before its encode; the prefill's `q3p_qk_rope_q8` writes rotated K rows and writes q16 as
+fp16(H fp16(q)), the F16 kernel's q16 rotated (q16 has no other reader), so `q3p_attn_q8` is unchanged and
+rotation-blind. The engine key carries the format id, so the unrotated rows of the first draft (never merged) never
+restore into this engine.
+
+Why K and not V: a CPU float64 model of this model on the 128-token reference prompt (mean KLD against the float64
+reference, as the G-model gate scores; 21 valid draws) put the unrotated codec at 3.4e-3 .. 5.0e-3 (the device measured 5.40e-3), K and Q rotated by Hadamard128 at
+1.65e-3 .. 3.0e-3 (mean 2.09e-3), and V rotated by Hadamard64 as well (llama.cpp's recipe) at 1.49e-3 .. 2.78e-3 (mean
+1.87e-3); each layer's attention-output relative error fell to 0.60x (K and Q) and 0.55x (with V) on all 48 layers. K's
+encode was most of the error (K alone 4.49e-3, V alone 2.15e-3). V's further 10 % sits inside the draws' spread and needs
+the output rotated back (o = H^T sum p v') in the decode op's merge and in the prefill attention's WMMA output: not
+taken. llama.cpp's q8_0 KV on the same rows: 3.68e-3 rotated, 3.22e-3 unrotated.
+
+The writers are `own_kv_q8_encode_wave` (the codec's statements with one block per wave and the amax as a wave
+reduction, exact for the finite blocks that are stored). The position's own K / V that the attention keeps in LDS are the
+decoded values, so the current token reads what every later token reads. The prefill's attention rounds the decoded
+values to fp16 for its WMMA operands, one rounding more than the decode reader; the model gate at depth judges it.
+
+Refusals: a non-finite value (an fp16 overflow included) refuses its block. In K, a non-finite input was already the
+whole head's (the k norm), and the transform also spreads one RoPE'd value that overflows fp16 over its head: all four K
+blocks of that kv head are refused (`tests/engine/test_q3m_kvq8_atts.py` checks it in decode: one value past fp16 in
+blocks 0 / 2 refuses blocks 1 / 3 too). Decode sets bit 2 in the int32 word after
+Sync (`Engine.kv_error`, the dense line's word; `own_op_atts` takes `sy` for it), the prefill in its own `kverr` word.
+The word sits right after the status words, so a pass's one asynchronous status copy (`Engine.status_words`, 9 words
+on a Q8 engine) brings it: no extra read back per token. `_pass_wait` checks it before the bound and timeout paths (they
+zero Sync), `Engine.run(check=True)` likewise from its one status read, `step` marks the engine too, and the prefill's
+settle checks its word before the routing flags. The engine stays broken across `reset()` and raises
+`InvalidKVEncoding`. `Q3MoEVerify` and two cards refuse a Q8 engine, and every registry entry but the one-card
+qwen3moe one refuses `opt['kv'] = 'q8'` (`Arch.kv_check`) instead of building its F16 cache.
+
+Memory: 1,088 bytes per position and layer instead of 2,048 (`kv_pos_mib(q8=True)`: 0.0498 MiB per position over the
+48 layers, F16 0.0938), counted by `projection_mib(q8=True)` and the registry's checkpoint slots. The engine key carries
+`kv` (only when set: F16 keys are unchanged) and the module, so a Q8 park never restores into F16 rows. One-card
+`max_ctx auto` from the projection (guard line, margin, display reserve, cache work and slack as `context_fit`
+counts them, nothing else on the card):
+
+| Card | F16 | Q8 | Room-limited, without the file's 40,960 cap (F16 / Q8) |
+|---|---|---|---|
+| RX 7900 XTX, display, idle | 40,960 | 40,960 | 45,056 / 81,920 |
+| RX 7900 XTX, display, 1 GiB in use | 32,768 | 40,960 | 32,768 / 61,440 |
+| RX 7900 XT, idle | 4,096 | 8,192 | 4,096 / 8,192 |
+
+`k3_run` of `k3_q3m_lean_kvq8`: 96 VGPRs, 0 spilled, 19 spilled scalars, private segment 0, 15,748 bytes of LDS;
+`k3_q3m_lean`: 96, 0, 53, 15,748 (the chunk's V scales use the scores' spare LDS). The rotation keeps the LDS and the
+VGPRs; with the quarter index as a scalar (`wave & 3`; written `i >> 5` it spilled one more) it leaves 31 spilled
+scalars, and `OP_OWN_ATTS`'s own pin (its kv heads, splits and heads through an empty `asm volatile` scalar operand,
+under `K3_Q3M_KV_Q8` only) takes them to 19. Before the rotation, the unpinned Q8 attention alone made it 54.
+Changes to the attention op did not remove that one scalar: the error word's address made in the op, 32-bit row offsets,
+DPP or shuffle reductions, and selects or shifts for the half-dword parity were all measured.
+The module therefore defines `K3_Q3M_ADD_RMS_PIN`, the dense Q8 objects' pinning applied to another op.
+`OP_OWN_ADD_RMS16` takes its row length and slot count through an empty `asm volatile` scalar operand, so the op
+rebuilds them instead of keeping derived values live across the segment loop. No arithmetic changes.
+
+Other pins measured on the Q8 object, k3_run's spilled scalars:
+
+| Pin | Spilled scalars |
+|---|---|
+| none | 54 |
+| `OP_OWN_ADD_RMS16`'s N and slot count (shipped) | 31 |
+| `OP_OWN_ATTS`'s kv heads, splits and heads | 45 |
+| `OP_OWN_MV`'s rows, row bound and expert rows | 51 |
+| `OP_ROUTER`'s experts and k | 53 |
+| add_rms16 + atts | 19 |
+| add_rms16 + atts + router + `OP_F32_MV`'s rows | 12 |
+
+VGPRs stayed at 96, with 0 VGPR spills, in every row (measured before the rotation; with it: add_rms16 31, add_rms16 +
+atts 19, the shipped pair).
+The same add_rms16 pin on the F16 object gives 33, measured but not applied: `k3_q3m_lean` keeps its code. So, like for
+like, the Q8 attention adds no spilled scalar. The speed A/B below compares the shipped F16 object (53) with the Q8
+object (19), so the pins are part of the difference it measures. The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs,
+`q3p_attn_q8` 226 (F16: 25 and 223), no spills; the rotation left both counts as they were.
+
+Gates (a non-display card first):
+
+```bash
+tools/guard.sh LOG 600 python -I tests/engine/test_q3m_kvq8_atts.py                    # the op alone: rows, reads, grids, refusals
+tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache R.npz --kv q8
+tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz --kv q8
+tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --save-logits F16.bin       # the F16 run
+tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --kv q8 --llama LLQ8_128.bin --llama-kv q8_0 \
+    --against F16.bin --against-llama LL128.bin
+tools/guard.sh LOG 1800 python -I tools/gates/q3moe_depth_gmodel.py GGUF --ref REF32.npz --kv q8 --llama LLQ8.bin --llama-kv q8_0 \
+    --against F16.bin --against-llama LL.bin
+```
+
+Speed (decode and prefill; the two caches do not both fit one card at depth, so alternate runs, F16 then Q8, twice):
+
+```bash
+tools/guard.sh LOG 900 python -I benchmarks/q3moe_depth.py GGUF --depths 8,4096,16384,40900 [--kv q8]
+tools/guard.sh LOG 900 python -I benchmarks/q3moe_prefill.py GGUF --lengths 4096,32768 --chunk 2048 [--kv q8]
+```
+
+The row checks compare against the F16 row kernel (`q3p_qk_rope`: OP_OWN_ATTS's norm + RoPE statements) on the same
+q | k | v, its K halves through `ref_kv.hadamard128` before `encode_q8_kv`. `test_q3m_kvq8_atts.py` also compares the
+output with float64 attention of the float64-rotated q over the decoded rows at positions across one and many splits,
+checks the prefill's q16 bit for bit against fp16(hadamard128(the F16 kernel's q16)), and a NaN in k refusing its head's
+four K blocks. The bound is per element: 2 fp16 ulps of the reference plus 1e-5 x max |V|, the dense line's
+bound plus the output's fp16 rounding. A CPU fp32 emulation of the op's summation order on the test's inputs stays
+within one ulp + 1e-7 x max |V|. Faults injected into it (a neighbouring block's V scale, chunk 1 shifted by a row, one
+V row from its neighbour) fail the bound; a 4e-3 x max |V| bound passed all three. It also runs fixed fp16 edge blocks (+-65,504, exact ties, a scale that rounds to zero, zeros),
+checks `q3p_qk_rope_q8`'s rows and refusal, and `q3p_attn_q8` bit for bit against `q3p_attn` over fp16(decoded rows). The G-model gates score the Q8 run against the fp32 reference with the usual rule against
+the `--llama` rows given: llama.cpp's q8_0-KV rows (`kv q8_0` in gg_golden's job file, `--llama-kv q8_0`) are the like
+for like bound. `--save-logits` on the F16 run and `--against` on the Q8 run gate the KLD and top-1 agreement between
+the two caches (`tools/gates/kv_against.py`). The bar is the floor rule's shape: our F16 to Q8 mean KLD at most
+llama.cpp's own F16-KV to q8_0-KV mean KLD on the same tokens (`--against-llama` names its F16-KV rows), and top-1
+agreement at most one point or one row (whichever is more) below its own: on 64 rows one row is 1.56 points, and a bar
+finer than one row is below the measurement's resolution. Explicit `--against-kld` / `--against-top1` bars exist for rows without
+llama.cpp references. An `--against` with no bound is refused. `test_q3moe_one.py --kv q8` gates its mean KLD against the fp32 reference
+below 2.08e-3, the unrotated draft's on that test (1e-3 is the F16 cache's bar). CPU: `tests/engine/test_q3moe_kvq8_cpu.py`, which also checks the
+rotation: H128 / sqrt(128) orthonormal, (H q) . (H k) = q . k on float64 vectors, `hadamard128` within fp32 rounding of
+it with the kernel header's scale literal, a Python lane-by-lane transcription of the kernel's statements bit for bit
+`hadamard128` (it checks the reference, not the compiled code: the device rows checks do that), and the format id's key apart from the unrotated draft's.
+Both RoPE sites round each fma to fp32 and then to fp16 through an opaque copy (`own_kv_f16r`), as the F16 objects do:
+a plain `(_Float16)fmaf(...)` let the backend fuse it into one `v_fma_mix*_f16` (one rounding of the exact value), which
+disagrees with the two-step rounding on about 6e-5 of values, and the transform spreads each such ulp over the head. The rotated objects passed on a device on 2026-11-16: the op test, the one-card decode and the prefill on the XT, and on
+the XTX the G-model gates: mean KLD against the reference 1.15e-3 (128 rows), 3.66e-3 (16,384), 2.35e-3 (40,896), and
+against our own F16 cache 1.19e-3 / 3.57e-3 / 1.87e-3, each below llama.cpp's own F16 to q8_0 cost (4.17e-3 / 6.63e-3 /
+4.24e-3). The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
+40,896 positions), and failed the 128-token G-model gate: mean KLD 5.40e-3 against float64 (llama.cpp's q8_0 KV
+3.68e-3) and 5.53e-3 against our F16 cache (llama.cpp's own F16 to q8_0 cost 4.17e-3); the rotation is the answer to
+that row.
