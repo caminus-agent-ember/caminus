@@ -383,6 +383,30 @@ class Resident(unittest.TestCase):
         try:self.assertEqual([it['text'] for it in store.todo(out['id'])['items']],['first','second'])
         finally:store.close()
 
+    def test_status_counts_each_goals_compactions_and_reports_time_online(self):
+        store=Store(self.home)
+        try:
+            a,b=store.enqueue('one goal'),store.enqueue('another')
+            for g in (a,a,b):store.event('compacted',dict(before=10,after=2),g)
+            store.event('compacting',dict(part=1,parts=2),a)       # (a start is not a compaction)
+            self.assertEqual(store.status()['compactions'],{a:2,b:1},'counted from the whole history, per goal')
+        finally:store.close()
+        from caminus.env.resident.cli import _online_s
+        self.assertIsNotNone(_online_s(os.getpid()));self.assertIsNone(_online_s(None))
+
+    def test_the_meter_totals_todays_cache_reads_for_the_hit_rate(self):
+        rt=Runtime(self.home)
+        try:
+            for usage in (dict(input_tokens=100,cache_read_input_tokens=900,cache_creation_input_tokens=0,output_tokens=5),
+                          dict(prompt_tokens=1000,prompt_tokens_details=dict(cached_tokens=500),completion_tokens=5)):
+                rt.model.last_usage=usage;rt._meter('g1')
+            import datetime
+            day=json.loads((self.home/'spend.json').read_text())['days'][datetime.date.today().isoformat()]
+            self.assertEqual((day['in_tok'],day['cache_read']),(2000,1400),'both reporting styles, input with the cache')
+            out=self.cmd('status',[])
+            self.assertAlmostEqual(out['cache_hit'],0.7)
+        finally:rt.mail.close();rt.store.close()
+
     def test_boolean_arguments_reach_the_tool(self):
         (self.home/'t.txt').write_text('a a\n')
         self.replies(call('edit',dict(path='t.txt',old='a',new='b',replace_all=True)),call('finish',dict(summary='Done.')))

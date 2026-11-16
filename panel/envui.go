@@ -91,6 +91,7 @@ type envModel struct {
 	agentName      string
 	defaultAgent   string
 	pendingLast    string
+	statusAt       time.Time // when the last status arrived (the online clock ticks from it)
 	resident       residentStatus
 	residentEvents []residentEvent
 	goalSel        int

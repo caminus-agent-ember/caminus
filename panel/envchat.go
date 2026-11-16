@@ -231,6 +231,7 @@ func (m *envModel) receiveResident(msg residentMsg) {
 	// A slower poll must not roll newer goal state backwards.
 	if msg.status.LastEvent >= m.resident.LastEvent {
 		m.resident = msg.status
+		m.statusAt = time.Now() // (the online clock ticks on from here between refreshes)
 	}
 	defer m.notifyResident(msg.events)
 	for _, e := range msg.events {
@@ -463,7 +464,39 @@ func (m envModel) sideWidth() int {
 const sideMinTerminal, sideMax = 160, 90
 
 // sideEmberRows is the thoughts' window in the side panel: about 60 % of the body, the rest for tasks and now.
-func (m envModel) sideEmberRows() int { return max(3, m.bodyHeight()*6/10-3) }
+// goalCompactions is how many times the goal in view was compacted (the resident counts from its whole history);
+// -1 with no goal in view hides the bubble.
+func (m envModel) goalCompactions() int {
+	if m.chat.target == "" {
+		return -1
+	}
+	return m.resident.Compactions[m.chat.target]
+}
+
+// cacheHit is today's share of input tokens served from the prompt cache; -1 before any turn today.
+func (m envModel) cacheHit() float64 {
+	if m.resident.CacheHit == nil {
+		return -1
+	}
+	return *m.resident.CacheHit
+}
+
+// onlineSeconds is the daemon's running time as the last status reported it, advanced by the time since (it ticks
+// between refreshes); 0 when the daemon is down or the time is unknown.
+func (m envModel) onlineSeconds() float64 {
+	if !m.resident.DaemonAlive || m.resident.OnlineS <= 0 {
+		return 0
+	}
+	if m.statusAt.IsZero() {
+		return m.resident.OnlineS
+	}
+	return m.resident.OnlineS + time.Since(m.statusAt).Seconds()
+}
+
+// sideEmberRows: the thoughts keep one size (they do not jump as text arrives) but a modest one, about a third of the
+// panel, so tasks start right under them; the spare rows go to the bottom of the panel, not between the two (at 60 %
+// there was a wide gap above tasks).
+func (m envModel) sideEmberRows() int { return max(6, min(14, m.bodyHeight()*35/100)) }
 
 // sidePanel is the right column: Ember's box on top (one size), then the goal's whole todo list and what runs now.
 func (m envModel) sidePanel(sw, height int) string {
@@ -653,6 +686,8 @@ func (m envModel) nowState(goal *residentGoal) (string, string) {
 	now, command := "idle", ""
 	l := m.chat.live
 	switch {
+	case goal != nil && m.compactingNote(goal.ID) != "":
+		now = m.compactingNote(goal.ID)
 	case l.active && l.text != "":
 		now = "writing its reply"
 	case l.active && len(l.tools) > 0:
@@ -677,6 +712,39 @@ func (m envModel) nowState(goal *residentGoal) (string, string) {
 		}[goal.State]
 	}
 	return now, command
+}
+
+// compactingNote: while a goal's history is being summarised (a compacting event with no compacted, error or
+// assistant reply after it), "compacting · part i of n · 398K tokens"; else "". The summary takes a model call per
+// part and nothing else moves meanwhile: without this the chat looked frozen.
+func (m envModel) compactingNote(gid string) string {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != gid {
+			continue
+		}
+		switch e.Kind {
+		case "compacting":
+			part, _ := e.Data["part"].(float64)
+			parts, _ := e.Data["parts"].(float64)
+			before, _ := e.Data["before_tokens"].(float64)
+			note := strings.TrimSpace(g.compact + " compacting")
+			if parts > 1 {
+				// a small gauge of the parts summarised so far, then the count
+				n := min(10, int(parts))
+				done := int(float64(n) * (part - 1) / parts)
+				note += " " + strings.Repeat(g.bar, done) + strings.Repeat(g.barEmpty, n-done) +
+					fmt.Sprintf(" part %d of %d", int(part), int(parts))
+			}
+			if before > 0 {
+				note += " · " + short(int(before))
+			}
+			return note
+		case "compacted", "runtime_error", "assistant", "watchdog", "finished":
+			return ""
+		}
+	}
+	return ""
 }
 
 // activeGoal is the goal the agent is on now (working or waiting on something), nil between goals.
@@ -2596,9 +2664,12 @@ func (m envModel) chatFoot(w int) string {
 	if m.resident.SpendToday > 0 || len(m.resident.SpendGoals) > 0 {
 		usd = m.resident.SpendGoals[m.chat.target]
 	}
+	if ag := m.activeGoal(); ag != nil && m.compactingNote(ag.ID) != "" {
+		keys = append([]string{envWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
+	}
 	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
-		tps: m.resident.TokPerS, queue: queued, keys: keys}, w)
+		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	status := []string{}
 	if !m.sshOK {
 		status = append(status, envWarn.Render("SSH …"))

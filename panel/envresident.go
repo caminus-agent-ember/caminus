@@ -35,6 +35,9 @@ type residentStatus struct {
 	CompactTarget    float64            `json:"compact_target_ratio"`
 	SpendToday       float64            `json:"spend_today"` // every priced turn today, across goals
 	SpendGoals       map[string]float64 `json:"spend_goals"` // per goal
+	Compactions      map[string]int     `json:"compactions"` // per goal: how many times its history was compacted
+	OnlineS          float64            `json:"online_s"`    // how long the daemon has been running (0: unknown)
+	CacheHit         *float64           `json:"cache_hit"`   // today's input served from the prompt cache, 0-1 (nil: no turns yet)
 	DaemonAlive      bool               `json:"daemon_alive"`
 	Goals            []residentGoal     `json:"goals"`
 	LastEvent        int                `json:"last_event"`

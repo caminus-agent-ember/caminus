@@ -1981,3 +1981,39 @@ func TestEveryBundledThemeSetsEveryRole(t *testing.T) {
 		}
 	}
 }
+
+func TestCompactingShowsUntilItEndsAndTheStatusLineCountsIt(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.width, m.height = 160, 40
+	m.chat.target = "original"
+	m.resident.Compactions = map[string]int{"original": 2}
+	m.resident.OnlineS, m.resident.DaemonAlive = 3*3600+12*60, true
+	hit := 0.874
+	m.resident.CacheHit = &hit
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+		events: []residentEvent{{Seq: 2, Goal: "original", Kind: "compacting", Data: map[string]any{"part": 3.0, "parts": 5.0, "before_tokens": 398000.0}}}})
+	m.syncChat()
+	v := ansi.Strip(m.render())
+	for _, want := range []string{"⇊ compacting", "part 3 of 5", "398K", "⇊ 2 compactions", "◉ online 3h12m", "↺ 87% cached"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
+	}
+	if !strings.Contains(v, "▓▓░░░") {
+		t.Fatalf("the parts gauge (2 of 5 done before part 3):\n%s", v)
+	}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+		events: []residentEvent{{Seq: 3, Goal: "original", Kind: "compacted", Data: map[string]any{"before": 300.0, "after": 11.0}}}})
+	if v := ansi.Strip(m.render()); strings.Contains(v, "compacting ") {
+		t.Fatalf("the indicator ends with the compaction:\n%s", v)
+	}
+	// a narrow terminal: the new bubbles go before the keys
+	m.width = 80
+	m.syncChat()
+	if foot := ansi.Strip(m.chatFoot(80)); !strings.Contains(foot, "/help") {
+		t.Fatalf("the keys stay on a narrow status line: %q", foot)
+	}
+}

@@ -24,6 +24,20 @@ from . import btw
 from . import export as export_mod
 
 
+
+def _online_s(pid):
+    """how long the daemon has been running, in seconds (from /proc: its start against the boot clock); None when it
+    is not running or not readable. A runtime update restarts the daemon, and the clock with it."""
+    try:
+        pid = int(pid)
+        with open(f'/proc/{pid}/stat') as f:
+            start_ticks = int(f.read().rsplit(')', 1)[1].split()[19])
+        with open('/proc/uptime') as f:
+            up = float(f.read().split()[0])
+        return max(0.0, up - start_ticks / os.sysconf('SC_CLK_TCK'))
+    except (TypeError, ValueError, OSError, IndexError):
+        return None
+
 def _current(cfg):
     keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
@@ -617,13 +631,16 @@ def main(argv=None,stdin=None):
             import datetime as _dt
             try:spend=json.loads((home/'spend.json').read_text())
             except (OSError,ValueError):spend={}
-            spend_today=((spend.get('days') or {}).get(_dt.date.today().isoformat()) or {}).get('usd',0.0)
+            today=(spend.get('days') or {}).get(_dt.date.today().isoformat()) or {}
+            spend_today=today.get('usd',0.0)
+            cache_hit=(today.get('cache_read',0)/today['in_tok']) if today.get('in_tok') else None
             emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       tok_per_s=speed.get('tps') if isinstance(speed,dict) else None,
                       compact_threshold=trig,compact_target_ratio=targ,
-                      spend_today=spend_today,spend_goals=spend.get('goals') or {},
-                      daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,**store.status()),True)
+                      spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
+                      daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,
+                      online_s=_online_s(heartbeat.get('pid')),**store.status()),True)
             store.close();return 0
         if a.op=='events':
             emit(store.events(a.after),True);store.close();return 0

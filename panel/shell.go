@@ -29,6 +29,7 @@ type glyphs struct {
 	todoDone, todoNow, todoNext          string
 	user, agent, tool, edit, gate, root  string // card kinds
 	model, clock, cost, speed, queue     string // status line
+	compact, online, cache               string // status line: compactions, time online, cache hits
 	segL, segR                           string // status segment edges (powerline in nerd)
 	bar, barEmpty                        string
 	spinner                              []string
@@ -38,17 +39,17 @@ var glyphTiers = map[string]glyphs{
 	"unicode": {name: "unicode", working: "●", waiting: "◐", done: "✓", idle: "○", failed: "✗",
 		collapsed: "▸", expanded: "▾", pass: "✓", fail: "✗", todoDone: "●", todoNow: "◐", todoNext: "○",
 		user: "›", agent: "◆", tool: "$", edit: "±", gate: "✓", root: "⚿",
-		model: "◇", clock: "◷", cost: "$", speed: "⇢", queue: "≡", segL: "", segR: " · ",
+		model: "◇", clock: "◷", cost: "$", speed: "⇢", queue: "≡", compact: "⇊", online: "◉", cache: "↺", segL: "", segR: " · ",
 		bar: "▓", barEmpty: "░", spinner: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}},
 	"nerd": {name: "nerd", working: "", waiting: "", done: "", idle: "", failed: "",
 		collapsed: "", expanded: "", pass: "", fail: "", todoDone: "", todoNow: "", todoNext: "",
 		user: "", agent: "\U000f06a9", tool: "", edit: "", gate: "", root: "",
-		model: "", clock: "", cost: "", speed: "", queue: "", segL: "", segR: "",
+		model: "", clock: "", cost: "", speed: "", queue: "", compact: "\uf066", online: "\uf1e6", cache: "\uf0e7", segL: "", segR: "",
 		bar: "█", barEmpty: "░", spinner: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}},
 	"ascii": {name: "ascii", working: "*", waiting: "~", done: "+", idle: "o", failed: "x",
 		collapsed: ">", expanded: "v", pass: "+", fail: "x", todoDone: "[x]", todoNow: "[~]", todoNext: "[ ]",
 		user: ">", agent: "*", tool: ">", edit: "+-", gate: "+", root: "#",
-		model: "", clock: "", cost: "$", speed: "", queue: "", segL: "", segR: " | ",
+		model: "", clock: "", cost: "$", speed: "", queue: "", compact: "", online: "", cache: "", segL: "", segR: " | ",
 		bar: "#", barEmpty: ".", spinner: []string{"|", "/", "-", "\\"}},
 }
 
@@ -315,6 +316,9 @@ type status struct {
 	usdDay       float64 // today's spend across goals; shown with usd when positive
 	tps          float64
 	queue        int
+	compactions  int     // times this goal's history was compacted; -1 hides the bubble (no goal in view)
+	online       float64 // how long the agent has been online, seconds; 0 hides it
+	cacheHit     float64 // today's input from the prompt cache, 0-1; negative hides it
 	keys         []string
 }
 
@@ -354,6 +358,22 @@ func statusLine(s status, w int) string {
 	if s.queue > 0 {
 		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %d queued", g.queue, s.queue)))
 	}
+	// the newest bubbles last: on a narrow terminal they go first (footBar drops from the end)
+	if s.compactions >= 0 {
+		// beside the context gauge it belongs to
+		word := "compactions"
+		if s.compactions == 1 {
+			word = "compaction"
+		}
+		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %d %s", g.compact, s.compactions, word)))
+	}
+	if s.cacheHit >= 0 {
+		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %.0f%% cached", g.cache, s.cacheHit*100)))
+	}
+	if s.online > 0 {
+		segs = append(segs, strings.TrimSpace(g.online+" online "+upFor(s.online)))
+	}
+
 	return footBar(segs, s.keys, w)
 }
 
@@ -381,6 +401,10 @@ func footBar(segs, keyList []string, w int) string {
 	}
 	keys := envDim.Render(strings.Join(keyList, "  "))
 	gap := w - lipgloss.Width(left) - lipgloss.Width(keys)
+	if gap < 2 && len(segs) > 2 && len(keyList) > 0 {
+		// short of room: the optional bubbles go, newest added first, before the keys do
+		return footBar(segs[:len(segs)-1], keyList, w)
+	}
 	if gap < 2 {
 		return ansi.Truncate(left, w, "…")
 	}

@@ -471,7 +471,11 @@ class Store:
         goals = [dict(r) for r in self.db.execute('SELECT id,prompt,state,summary,error,steps,created,updated,'
                                                   'plan,plan_text FROM goals ORDER BY created DESC LIMIT 50')]
         waiting = [dict(r) for r in self.db.execute("SELECT goal,name,bridge_id FROM actions WHERE state='waiting'")]
-        return dict(goals=goals, waiting=waiting, last_event=self.db.execute('SELECT coalesce(max(seq),0) FROM events').fetchone()[0])
+        # compactions per goal, counted from the whole history (the panel keeps only its newest events)
+        compactions = {g: n for g, n in self.db.execute("SELECT goal,count(*) FROM events WHERE kind='compacted' "
+                                                         "AND goal IS NOT NULL GROUP BY goal")}
+        return dict(goals=goals, waiting=waiting, compactions=compactions,
+                    last_event=self.db.execute('SELECT coalesce(max(seq),0) FROM events').fetchone()[0])
 
 
 def log_failure(home, record):
