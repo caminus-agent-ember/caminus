@@ -636,6 +636,47 @@ class Resident(unittest.TestCase):
         bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
         self.assertTrue(any('something is still running: the build started' in b and 'Use the wait tool' in b for b in bodies))
 
+    def test_three_refused_finishes_start_an_advising_round_instead_of_a_pause(self):
+        from caminus.env.resident import judge
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Find the flag.')
+            rt.store.update(gid,done_check='FLAG.txt holds the flag')
+            for _ in range(judge.JUDGE_LIMIT-1):
+                rt.store.event('judged',dict(verdict='not_yet',reason='no flag yet'),gid)
+            rt.model.complete=lambda msgs,tools=None,max_tokens=None,**k:dict(content='{"verdict": "not_yet", "reason": "FLAG.txt is empty"}')
+            asked=[]
+            rt.advisor.ask=lambda g,q,c='':(asked.append(q),dict(advice='Decompile the check routine first.',model='advisor-m'))[1]
+            out=judge.review(rt,gid,dict(summary='I could not find it.'))
+            self.assertNotIn('pause',out,'an advising round, not a pause')
+            self.assertIn('Decompile the check routine first.',out['error'])
+            self.assertIn('I could not find it.',asked[0]);self.assertIn('FLAG.txt is empty',asked[0])
+            # the next refusal starts a fresh count
+            out=judge.review(rt,gid,dict(summary='still nothing'))
+            self.assertNotIn('pause',out);self.assertNotIn('Its advice:',out['error'],'a plain refusal, not another round')
+            self.assertEqual(len(asked),1,'one advising round per set of refusals')
+            # without an advisor the agent's own model takes a fresh look
+            for _ in range(judge.JUDGE_LIMIT):
+                rt.store.event('judged',dict(verdict='not_yet',reason='no flag yet'),gid)
+            def none(*a,**k):raise ValueError('no advisor is configured for this resident')
+            rt.advisor.ask=none
+            calls=[]
+            def own(msgs,tools=None,max_tokens=None,**k):
+                calls.append(msgs[0]['content'])
+                if msgs[0]['content'].startswith('You are a senior engineer'):return dict(content='Try strings on the binary.')
+                return dict(content='{"verdict": "not_yet", "reason": "FLAG.txt is empty"}')
+            rt.model.complete=own
+            out=judge.review(rt,gid,dict(summary='nothing'))
+            self.assertNotIn('pause',out);self.assertIn('Try strings on the binary.',out['error'])
+            # after ADVISE_ROUNDS rounds, a run of refusals pauses the goal
+            for _ in range(judge.ADVISE_ROUNDS):
+                rt.store.event('judge_advised',dict(refusals=3),gid)
+            for _ in range(judge.JUDGE_LIMIT):
+                rt.store.event('judged',dict(verdict='not_yet',reason='no flag yet'),gid)
+            out=judge.review(rt,gid,dict(summary='nothing'))
+            self.assertIn('pause',out);self.assertIn('advising rounds already',out['error'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_judge_never_declares_a_goal_impossible_the_agent_keeps_working(self):
         # (the owner's rule: an impossible verdict paused solvable work; it reads as not yet done)
         self.gates_on()

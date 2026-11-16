@@ -10,9 +10,11 @@ When a graded goal calls finish (after define_done and verify), two things run b
    depends on something still running (a build, CI, a service coming up) and points the agent at its wait tool. The
    judge never declares a goal impossible (the owner's rule, 11-15: it stopped solvable work; on one benchmark task the
    agent quit after two minutes on a task another harness solved): whether to stop is the agent's call, and a blocked
-   agent asks its human; an "impossible" from a model is read as not_yet. After JUDGE_LIMIT
-   refusals the goal pauses instead of looping (agent and judge disagree: a person decides); waits have their own,
-   looser limit (WAIT_LIMIT), since waiting for a slow job is not a disagreement.
+   agent asks its human; an "impossible" from a model is read as not_yet. After JUDGE_LIMIT refusals in a row the
+   advisor is asked what the agent should try differently (without one, or past its limits, the agent's own model
+   takes a fresh look) and the advice goes back with a fresh set of tries; after ADVISE_ROUNDS rounds the goal pauses
+   for a person, as it always did before.
+   Waits have their own, looser limit (WAIT_LIMIT), since waiting for a slow job is not a disagreement.
 
 The judge runs on the agent's own model in a fresh context by default, so it costs nothing on a local brain. With config
 `judge_model: "advisor"` it runs on the advisor's model instead (an independent reviewer, paid from the advisor's daily
@@ -29,6 +31,14 @@ GATE_TIMEOUT = 600
 JUDGE_LIMIT = 3
 WAIT_LIMIT = 6
 EVIDENCE_RESULTS = 12
+
+# advising rounds per goal before a run of refusals pauses it (each round: the advisor's, or a fresh look)
+ADVISE_ROUNDS = 3
+
+FRESH_EYES = '''You are a senior engineer looking at another agent's stuck task with fresh eyes. You see the goal, its done
+check and evidence from what actually ran, not the agent's reasoning. It keeps trying to stop without the proof. Name
+the most likely reason it is stuck, then three concrete next steps it has not tried (commands, tools, angles), most
+promising first. No encouragement, no restating the goal.'''
 
 SYSTEM = '''JUDGE. You check whether an agent's goal is done. You see the goal, the done check the agent wrote, its human's
 steers, and evidence from what actually ran. You do not see the agent's reasoning; do not guess at it.
@@ -101,8 +111,12 @@ def review(rt, gid, result):
         rt.store.event('gate', dict(command=gate, passed=ok, output=out[-2000:]), gid)
         if not ok:
             return dict(error='the gate failed, so the goal is not done; fix what it shows, then finish again:\n' + out)
+    # refusals since the last advising round (an advised agent gets a fresh set of tries with a new plan)
+    since = rt.store.db.execute("SELECT coalesce(max(seq),0) FROM events WHERE goal=? AND kind='judge_advised'",
+                                (gid,)).fetchone()[0]
     refusals = rt.store.db.execute(
-        "SELECT count(*) FROM events WHERE goal=? AND kind='judged' AND data LIKE '%\"not_yet\"%'", (gid,)).fetchone()[0]
+        "SELECT count(*) FROM events WHERE goal=? AND kind='judged' AND data LIKE '%\"not_yet\"%' AND seq>?",
+        (gid, since)).fetchone()[0]
     messages = [dict(role='system', content=SYSTEM),
                 dict(role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', '')))]
     def ask(msgs):
@@ -148,8 +162,49 @@ def review(rt, gid, result):
                     'process, port, file, session or time) for it instead of polling, then verify and finish again.',
                     waiting=True)   # not a failure: the repeat-failure watchdog does not count it (WAIT_LIMIT does)
     if refusals + 1 >= JUDGE_LIMIT:
-        return dict(error=f'the judge refused this finish {refusals + 1} times (latest: {v["reason"]}). The goal is '
-                    'paused for your human to decide.', pause='judge refused the finish %d times: %s'
-                    % (refusals + 1, v['reason']))
+        # An advising round instead of a pause (the owner, 11-15: nobody is there to decide in an unattended run, and
+        # an agent that keeps trying to finish without the proof needs a new plan, not a stop): the advisor sees the
+        # goal, the done check, the judge's reason and the agent's last summary, and its advice goes back to the agent
+        # with a fresh set of tries. The advisor's per-goal call limit and daily budget bound the rounds; without an
+        # advisor (or past its limits) the goal pauses for the human as before.
+        question = (f'The agent has tried {refusals + 1} times to finish this goal without meeting its done check. '
+                    f'The judge\'s latest reason: {v["reason"]} The agent\'s last summary: '
+                    f'{(result.get("summary") or "")[:1500]} What should it try differently? Give concrete next steps '
+                    'it has not tried, not encouragement.')
+        rounds = rt.store.db.execute("SELECT count(*) FROM events WHERE goal=? AND kind='judge_advised'",
+                                     (gid,)).fetchone()[0]
+        got, why = None, ''
+        if rounds < ADVISE_ROUNDS:
+            try:
+                got = rt.advisor.ask(gid, question, 'the finish judge asked for this advice after repeated refusals')
+            except Exception as e:
+                why = str(e)
+                # no advisor (or past its limits): the agent's own model in a fresh context, with the evidence but
+                # not the agent's reasoning, the way the judge itself runs
+                try:
+                    reply = rt.model.complete([dict(role='system', content=FRESH_EYES), dict(
+                        role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', '')) +
+                        '\n\n' + question)], tools=None, max_tokens=1500)
+                    text = (reply.get('content') if isinstance(reply, dict) else '') or ''
+                    try:
+                        rt.brains.account(gid)
+                    except Exception:
+                        pass
+                    if text.strip():
+                        got = dict(advice=text, model='own model, fresh context')
+                except Exception as e2:
+                    why += f'; a fresh look failed too ({type(e2).__name__})'
+        else:
+            why = f'{rounds} advising rounds already'
+        if got is None:
+            return dict(error=f'the judge refused this finish {refusals + 1} times (latest: {v["reason"]}), and no '
+                        f'advice could help ({why}). The goal is paused for your human to decide.',
+                        pause='judge refused the finish %d times: %s' % (refusals + 1, v['reason']))
+        rt.store.event('judge_advised', dict(refusals=refusals + 1, reason=v['reason'][:500],
+                                              model=got.get('model'), advice=(got.get('advice') or '')[:2000]), gid)
+        return dict(error='not done yet, by the evidence: ' + v['reason'] + '\n\nYou have tried to finish '
+                    f'{refusals + 1} times without the proof, so your advisor looked at where you are. Its advice:\n'
+                    + (got.get('advice') or '').strip() + '\n\nTake a new approach from this; finish only when the '
+                    'done check is proven.')
     return dict(error='not done yet, by the evidence: ' + v['reason'] + ' Do what is missing, run the check, verify, '
                 'then finish again. If one approach failed, try another; if only your human can unblock you, ask them.')

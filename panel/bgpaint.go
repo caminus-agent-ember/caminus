@@ -3,8 +3,8 @@
 
 package main
 
-// bgpaint.go: a theme's background beyond one colour. The solid colour (bg) is the terminal's own background, set by
-// the view (tea.View.BackgroundColor), so every cell gets it, light and pink themes included. On top of it:
+// bgpaint.go: a theme's background. The solid colour (bg) is painted into every cell (terminals may ignore a request
+// to change their own background), light and pink themes included. On top of it:
 //   - gradient: each row shaded from bg to bg2, re-applied after every reset that clears a background, so text sits on
 //     the gradient instead of in boxes of the flat colour;
 //   - dots, grid, diagonal, waves, stars: a faint pattern in the pattern colour, drawn only in runs of three or more
@@ -267,7 +267,7 @@ func mixHex(a, b string, t float64) string {
 	return fmt.Sprintf("#%02x%02x%02x", m(ar, br), m(ag, bg), m(ab, bb))
 }
 
-// themeBackground is the colour the view sets as the terminal's background (nil: the terminal's own).
+// themeBackground is the theme's background colour (nil: none, the terminal's own shows).
 func themeBackground() color.Color {
 	if _, _, _, ok := hexRGB(themeRole("bg")); ok {
 		return themeColor("bg")
