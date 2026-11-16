@@ -1243,7 +1243,22 @@ class Runtime:
         complete again (it was nudged back to work instead, and with nothing left to do it re-ran its done check in a
         loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted."""
         how=self._answering(gid)
+        prompted=self.__dict__.setdefault('_reopen_prompted',set())
+        if how=='reopened' and gid not in prompted:
+            # The agent decides, not a guess from its words: a reopened goal is either a question (the answer is
+            # the whole job) or new work ("now do step 6", answered "Sure, I'll start"). One gentle prompt; a second
+            # plain reply in a row completes it, so the old loop cannot come back.
+            prompted.add(gid)
+            with self.store.transaction():
+                if self.store.goal(gid)['state']=='cancelled':return True
+                messages=self.store.goal(gid)['messages']+[dict(role='user',content=(
+                    '[harness] Your human has your reply. If that is all they needed, call finish with it as the '
+                    'summary (or simply reply again); if they asked for more work, start it now with a tool call.'))]
+                self.store.update(gid,messages=messages)
+                self.store.event('plain_answer',dict(reopened=True),gid)
+            return True
         if how=='reopened':
+            prompted.discard(gid)
             reply=self.store.goal(gid)['messages'][-1]
             self.plain_replies.pop(gid,None)
             self.store.event('answered',dict(reason='a plain answer to the human on a reopened goal'),gid)
@@ -1625,6 +1640,7 @@ class Runtime:
                     self._finish(gid,reply['content'])
             else:
                 self.plain_replies.pop(gid,None)
+                self.__dict__.setdefault('_reopen_prompted',set()).discard(gid)   # work started: a fresh episode
             self.truncations.pop(gid,None)        # a whole reply arrived: the cut-off streak is over
             return True
         except Cancelled:
