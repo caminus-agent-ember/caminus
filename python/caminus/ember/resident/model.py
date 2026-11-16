@@ -8,6 +8,12 @@ import urllib.parse
 import urllib.request
 
 
+SHORT_CALL = 4096          # a call with less output room than this runs without thinking (see _anthropic)
+# models that refuse thinking off (current Opus and Sonnet; the advisor runs on them): short calls keep thinking there
+THINKING_REQUIRED = frozenset(('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5',
+                               'claude-fable-5-2', 'claude-fable-5-1', 'claude-fable-5'))
+
+
 class ModelError(Exception):
     pass
 
@@ -460,7 +466,12 @@ class Model:
         body = self._to_anthropic(messages, tools, model)
         body['max_tokens'] = max_tokens
         body['stream'] = True
-        allowed = ('low', 'medium', 'high') if self.config.get('thinking', 'adaptive') == 'disabled' else (
+        # A short side call (the finish judge's 600 tokens, a fresh look, a theme) answers without thinking: thinking
+        # shares the output budget, and with it on the judge's verdict came back empty in 20 of 54 calls on a CTF
+        # benchmark run (each one a finish let through unchecked). Main turns keep their thinking.
+        if (max_tokens or 0) < SHORT_CALL and 'thinking' not in body and body['model'] not in THINKING_REQUIRED:
+            body['thinking'] = dict(type='disabled')
+        allowed = ('low', 'medium', 'high') if body.get('thinking') == dict(type='disabled') else (
             'low', 'medium', 'high', 'xhigh', 'max')
         if self.config.get('effort', 'medium') not in allowed:
             raise ValueError('effort must be one of %s here' % ', '.join(allowed))

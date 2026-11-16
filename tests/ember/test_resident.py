@@ -3624,6 +3624,15 @@ class AnthropicTransport(unittest.TestCase):
                 dict(role='user',content='[steer] use b'),
                 dict(role='system',content='MEMORY.md:\nnotes')]
 
+    def test_short_side_calls_answer_without_thinking(self):
+        # the judge's 600 tokens: with thinking on, the verdict came back empty (a finish let through unchecked)
+        m=self.model(sse('ok'),sse('ok'))
+        m.complete(self.history(),None,max_tokens=600)
+        m.complete(self.history(),TOOLS[:1],max_tokens=16000)
+        short,main=self.wire.requests[0][2],self.wire.requests[1][2]
+        self.assertEqual(short['thinking'],dict(type='disabled'),'a short call runs without thinking')
+        self.assertNotIn('thinking',main,'a main turn keeps adaptive thinking')
+
     def test_request_shape(self):
         m=self.model(sse('Done.'))
         m.complete(self.history(),TOOLS[:1],max_tokens=500)
@@ -3633,7 +3642,7 @@ class AnthropicTransport(unittest.TestCase):
         self.assertEqual(h['x-api-key'],'sk-fixture');self.assertNotIn('authorization',h)
         self.assertIn('anthropic-version',h)
         for banned in ('temperature','top_p','top_k'):self.assertNotIn(banned,body)
-        self.assertNotIn('thinking',body,'adaptive by default: no switch-off sent');self.assertEqual(body['output_config'],dict(effort='medium'))
+        self.assertEqual(body['thinking'],dict(type='disabled'),'500 tokens is a short call: no thinking');self.assertEqual(body['output_config'],dict(effort='medium'))
         self.assertTrue(body['stream']);self.assertEqual(body['max_tokens'],500)
         self.assertEqual(body['system'][0]['text'],'You are the resident.');self.assertIn('cache_control',body['system'][0])
         roles=[x['role'] for x in body['messages']]
