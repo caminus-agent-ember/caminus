@@ -57,6 +57,8 @@ class Stub(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path.endswith('/count_tokens'):          # the resident's context counter, not a turn
+            return self.send(dict(input_tokens=len(json.dumps(body)) // 4))
         msgs = body.get('messages') or [{}]
         usage = dict(prompt_tokens=30, completion_tokens=10)
         if str(msgs[0].get('content', '')).startswith('JUDGE'):
