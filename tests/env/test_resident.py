@@ -307,6 +307,21 @@ class Resident(unittest.TestCase):
             self.assertTrue(goal.get('deadline') or goal.get('max_seconds'),'the time still ends it')
         finally:rt.mail.close();rt.store.close()
 
+    def test_studio_reads_raw_bytes_and_skips_binary_headlines(self):
+        import base64
+        (self.home/'studio').mkdir(exist_ok=True)
+        png=bytes([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a])+b'\0'*40
+        (self.home/'studio'/'sheet.png').write_bytes(png)
+        listing=self.cmd('studio',[])
+        e=[x for x in listing['studio'] if x['name']=='sheet.png'][0]
+        self.assertEqual(e['head'],'','no text headline from an image')
+        raw=self.cmd('studio',['--read',str(self.home/'studio'/'sheet.png'),'--raw'])
+        self.assertEqual(base64.b64decode(raw['data']),png)
+        txt=self.cmd('studio',['--read',str(self.home/'studio'/'sheet.png')])
+        self.assertTrue(txt['binary'],'a text read says it is binary')
+        with self.assertRaises(AssertionError):
+            self.cmd('studio',['--read',str(self.home/'config.json'),'--raw'])      # only the journal and the studio
+
     def test_three_plain_text_replies_pause_the_goal(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),

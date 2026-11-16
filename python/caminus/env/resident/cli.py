@@ -29,6 +29,11 @@ def _current(cfg):
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
 
 
+# files whose first line is not a headline (images, documents, archives, media)
+BINARY_SUFFIXES={'.png','.jpg','.jpeg','.gif','.webp','.bmp','.ico','.tif','.tiff','.pdf','.zip','.gz','.tar','.xz',
+                 '.mp3','.wav','.ogg','.flac','.mp4','.webm','.mkv','.npy','.npz','.pkl','.bin','.so','.o','.sqlite3','.db'}
+
+
 def studio_op(a,home):
     """What free time made: the journal (newest first), the studio, the "for you" shelf and PROJECTS.md; --read gives
     one file, only from those folders."""
@@ -41,8 +46,14 @@ def studio_op(a,home):
         f=(home/f if not f.is_absolute() else f).resolve()
         if not any(f==r or r in f.parents for r in roots) or not f.is_file():
             raise ValueError('studio --read takes a file in the journal or the studio')
-        raw=f.read_bytes()[:64*1024]
-        emit(dict(path=str(f),text=raw.decode('utf-8','replace'),truncated=f.stat().st_size>64*1024),a.json);return 0
+        size=f.stat().st_size
+        if a.raw:
+            # the bytes, for the panel's image view and for opening it on the owner's desktop (24 MB at most)
+            import base64
+            if size>24*1024*1024:raise ValueError(f'{f.name} is {size//(1024*1024)} MB: over the 24 MB a studio read takes')
+            emit(dict(path=str(f),size=size,data=base64.b64encode(f.read_bytes()).decode()),a.json);return 0
+        raw=f.read_bytes()[:256*1024]
+        emit(dict(path=str(f),text=raw.decode('utf-8','replace'),truncated=size>256*1024,binary=b'\0' in raw[:8192]),a.json);return 0
     def entries(folder,skip=()):
         if not folder.is_dir():return []
         out=[]
@@ -50,7 +61,7 @@ def studio_op(a,home):
             if not f.is_file() or any(s in f.parents or f==s for s in skip) or f.name.startswith('.'):continue
             st=f.stat()
             head=''
-            if st.st_size<512*1024:
+            if st.st_size<512*1024 and f.suffix.lower() not in BINARY_SUFFIXES:
                 try:
                     for line in f.read_text(errors='replace').splitlines():
                         line=line.strip().lstrip('#').strip()
@@ -190,6 +201,7 @@ def parser():
             p.add_argument('--off',action='store_true')
         if op=='studio':
             p.add_argument('--read',help='one file from the journal, the studio or the shelf, as text')
+            p.add_argument('--raw',action='store_true',help='with --read: the bytes, base64 (images, documents; 24 MB at most)')
         if op=='pause':
             p.add_argument('goal_id',nargs='?',help='the goal to pause; defaults to the most recent one')
         if op=='queue':

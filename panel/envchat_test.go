@@ -1801,7 +1801,6 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 	}
 }
 
-
 func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 200, 50

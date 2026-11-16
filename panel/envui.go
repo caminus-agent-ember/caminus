@@ -668,13 +668,18 @@ func (m envModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case studioTextMsg:
 		if msg.path == m.chat.studio.reading {
-			if msg.err != "" {
+			switch {
+			case msg.err != "":
 				m.chat.studio.err = msg.err
-			} else {
-				m.chat.studio.text = strings.Split(msg.text, "\n")
+			case msg.binary:
+				m.chat.studio.text = []string{"A binary file: the panel cannot show it as text. Press o to open it in your desktop's viewer."}
+			default:
+				m.chat.studio.text = formatText(studioKind(msg.path), msg.text, max(20, m.width-6))
 			}
 		}
 		return m, nil
+	case studioRawMsg:
+		return m.receiveStudioRaw(msg), nil
 	case residentActionMsg:
 		m.msg = msg.text
 		return m, residentRefresh(m)
