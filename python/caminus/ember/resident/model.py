@@ -8,6 +8,10 @@ import urllib.parse
 import urllib.request
 
 
+# a speed is measured only over a window this long with this many tokens: a reply that arrived in one burst (Haiku
+# with thinking) divided its tokens by microseconds and the status line read 31,746,037 tok/s
+SPEED_MIN_S = 0.25
+SPEED_MIN_TOKENS = 16
 SHORT_CALL = 4096          # a call with less output room than this runs without thinking (see _anthropic)
 # models that refuse thinking off (current Opus and Sonnet; the advisor runs on them): short calls keep thinking there
 THINKING_REQUIRED = frozenset(('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5',
@@ -357,7 +361,7 @@ class Model:
             raise ModelError(str(e)) from e
         self.last_usage = usage
         tokens = usage.get('completion_tokens') if isinstance(usage, dict) else None
-        if isinstance(tokens, int) and tokens > 0 and t_first and t_last > t_first:
+        if isinstance(tokens, int) and tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
             self.last_speed = dict(tokens=tokens, seconds=round(t_last - t_first, 3),
                                    tps=round(tokens / (t_last - t_first), 1))
         try:
@@ -593,7 +597,7 @@ class Model:
         self.last_usage = dict(prompt_tokens=(usage.get('input_tokens') or 0) + read + wrote,
                                completion_tokens=out_tokens, cache_read_input_tokens=read,
                                cache_creation_input_tokens=wrote)
-        if out_tokens > 0 and t_first and t_last > t_first:
+        if out_tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
             self.last_speed = dict(tokens=out_tokens, seconds=round(t_last - t_first, 3),
                                    tps=round(out_tokens / (t_last - t_first), 1))
         out = dict(role='assistant', content=''.join(text))

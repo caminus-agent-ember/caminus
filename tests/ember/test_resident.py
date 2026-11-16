@@ -3788,6 +3788,12 @@ class AnthropicTransport(unittest.TestCase):
         self.assertEqual(short['thinking'],dict(type='disabled'),'a short call runs without thinking')
         self.assertNotIn('thinking',main,'a main turn keeps adaptive thinking')
 
+    def test_a_burst_reply_reports_no_speed(self):
+        # the whole reply in one read: tokens over microseconds read 31,746,037 tok/s on the status line
+        m=self.model(sse('ok'))
+        m.complete(self.history(),TOOLS[:1],max_tokens=16000)
+        self.assertIsNone(m.last_speed,'no measurable window: no speed (the last real one stays on the status line)')
+
     def test_request_shape(self):
         m=self.model(sse('Done.'))
         m.complete(self.history(),TOOLS[:1],max_tokens=500)
