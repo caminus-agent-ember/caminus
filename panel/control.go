@@ -204,11 +204,12 @@ func (m ctl) fitArgs(mi camModel) (string, []string) {
 	if draft != "auto" {
 		a = append(a, "--draft", draft)
 	}
+	a = append(a, m.extraArgs(mi)...)
 	if m.advanced {
 		var keys []string
 		for k := range m.vals {
 			switch k {
-			case "cards", "draft", "no_drafter", "model", "config", "port":
+			case "cards", "draft", "no_drafter", "model", "config", "port", "kv", "long_context":
 				continue
 			}
 			keys = append(keys, k)
@@ -459,6 +460,92 @@ func (m ctl) selServer() *serverInfo {
 type modelPick struct {
 	Cards  int            `json:"cards"`
 	Drafts map[int]string `json:"drafts"`
+	// KV and Long are the cache and long-context choices at each card count ("" / false: the server's default).
+	KV   map[int]string `json:"kv,omitempty"`
+	Long map[int]bool   `json:"long,omitempty"`
+}
+
+// modelExtras is the next start's cache and long-context choice for the mode: kv "auto" (no --kv: F16, or in the
+// long-context mode the format the mode picks for the cards), "f16" or "q8"; long true adds --long-context. A choice the
+// mode does not offer reads as the default.
+func (m ctl) modelExtras(mi camModel, mode serveMode) (string, bool) {
+	p, saved := m.picks[mi.Name]
+	kv := p.KV[mode.Cards]
+	long := p.Long[mode.Cards]
+	if !saved && m.advanced { // (an advanced layout's saved --kv / --long-context values, from before the picker owned them)
+		kv, long = m.vals["kv"], m.vals["long_context"] == "true"
+	}
+	ok := false
+	for _, f := range mode.KV {
+		if f == kv {
+			ok = true
+		}
+	}
+	if !ok {
+		kv = "auto"
+	}
+	return kv, mode.Long && long
+}
+
+// cycleExtra steps the cache choice (auto, then each format) or flips the long-context mode, for the current card count.
+func (m *ctl) cycleExtra(mi camModel, long bool) {
+	mode, draft := m.modelMode(mi)
+	kv, lc := m.modelExtras(mi, mode)
+	p := m.picks[mi.Name]
+	if p.Drafts == nil {
+		p.Drafts = make(map[int]string)
+	}
+	if p.KV == nil {
+		p.KV = make(map[int]string)
+	}
+	if p.Long == nil {
+		p.Long = make(map[int]bool)
+	}
+	// (the first saved pick carries what the next start shows now: the card count, drafter, cache and mode, which in the
+	//  advanced layout may come from its values; modelMode and modelExtras read only the pick once it exists)
+	p.Cards, p.Drafts[mode.Cards], p.Long[mode.Cards] = mode.Cards, draft, lc
+	if kv != "auto" {
+		p.KV[mode.Cards] = kv
+	}
+	if long {
+		if !mode.Long {
+			return
+		}
+		p.Long[mode.Cards] = !lc
+	} else {
+		if len(mode.KV) < 2 {
+			return
+		}
+		choices := append([]string{"auto"}, mode.KV...)
+		for i, v := range choices {
+			if v == kv {
+				p.KV[mode.Cards] = choices[(i+1)%len(choices)]
+				break
+			}
+		}
+		if p.KV[mode.Cards] == "auto" {
+			delete(p.KV, mode.Cards)
+		}
+	}
+	if m.picks == nil {
+		m.picks = make(map[string]modelPick)
+	}
+	m.picks[mi.Name] = p
+	m.savePrefs()
+}
+
+// extraArgs is the cache and long-context flags of the next start (caminus start and caminus fit take the same ones).
+func (m ctl) extraArgs(mi camModel) []string {
+	mode, _ := m.modelMode(mi)
+	kv, lc := m.modelExtras(mi, mode)
+	var a []string
+	if kv != "auto" {
+		a = append(a, "--kv", kv)
+	}
+	if lc {
+		a = append(a, "--long-context")
+	}
+	return a
 }
 
 func (mi camModel) servingModes() []serveMode {
@@ -553,11 +640,12 @@ func (m ctl) startArgs(mi camModel) []string {
 	if m.advanced && mode.Cards == 1 && m.card != "" && m.card != "auto" {
 		a = append(a, "--card", m.card)
 	}
+	a = append(a, m.extraArgs(mi)...) // (caminus start's own --kv / --long-context: it checks them before a card is picked)
 	var keys []string
 	if m.advanced {
 		for k := range m.vals {
 			switch k {
-			case "cards", "draft", "no_drafter":
+			case "cards", "draft", "no_drafter", "kv", "long_context":
 				continue
 			}
 			keys = append(keys, k)
@@ -603,7 +691,7 @@ func (m ctl) visibleOpts() []option {
 	var out []option
 	for _, o := range m.opts {
 		switch o.Dest {
-		case "model", "config", "port", "cards", "draft", "no_drafter":
+		case "model", "config", "port", "cards", "draft", "no_drafter", "kv", "long_context":
 			continue
 		}
 		out = append(out, o)
@@ -726,7 +814,7 @@ func (m ctl) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.move(1)
 		return m, nil
 	}
-	if m.busy != "" && s != "l" && s != "m" {
+	if m.busy != "" && !(m.focus == paneServers && (s == "l" || s == "m")) { // (log and monitor of a server only: MODELS' l is a choice)
 		m.setNote("wait: "+m.busy+" is still running", false)
 		return m, nil
 	}
@@ -798,6 +886,10 @@ func (m ctl) modelsKey(s string) (tea.Model, tea.Cmd) {
 		m.cycleModelMode(*mi, true)
 	case "d":
 		m.cycleModelMode(*mi, false)
+	case "v":
+		m.cycleExtra(*mi, false)
+	case "l":
+		m.cycleExtra(*mi, true)
 	case "b":
 		if m.advanced {
 			m.busy = "starting the brain / hands team"
@@ -1121,7 +1213,28 @@ func (m ctl) modelRows() []string {
 		if draft == "auto" {
 			draft = "auto (server default)"
 		}
-		rows = append(rows, "", fg(cMuted).Render("next start: ")+bold(cAccent).Render(fmt.Sprintf("%d card(s) · drafter %s", mode.Cards, draft)))
+		next := fmt.Sprintf("%d card(s) · drafter %s", mode.Cards, draft)
+		if kv, lc := m.modelExtras(*mi, mode); len(mode.KV) > 1 || mode.Long {
+			if len(mode.KV) > 1 {
+				if kv == "auto" {
+					kv = "auto (F16; the long-context mode picks)"
+					if !lc {
+						kv = "auto (F16)"
+					}
+				}
+				next += " · KV " + kv
+			}
+			if mode.Long {
+				if lc && mode.Cards >= 2 {
+					next += " · long context (YaRN x4, up to 131,072)"
+				} else if lc {
+					next += " · long context (YaRN x4, as far as the card holds: the fit row; 131,072 needs two cards)"
+				} else {
+					next += " · native context"
+				}
+			}
+		}
+		rows = append(rows, "", fg(cMuted).Render("next start: ")+bold(cAccent).Render(next))
 		if fr := m.fitRow(*mi); fr != "" {
 			rows = append(rows, fr)
 		}
@@ -1332,6 +1445,12 @@ func (m ctl) keysLine() string {
 			}
 			if len(mode.Drafts) > 1 {
 				p = append(p, k("d", "drafter"))
+			}
+			if len(mode.KV) > 1 {
+				p = append(p, k("v", "KV cache"))
+			}
+			if mode.Long {
+				p = append(p, k("l", "long context"))
 			}
 		}
 		if m.advanced {
