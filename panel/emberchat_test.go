@@ -2530,6 +2530,26 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	}
 }
 
+func TestASwitchedSessionSaysLoadingNotStoppedUntilItsStatusLands(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.sessionNames = []string{"resident", "local-testing"}
+	m.openResident("local-testing")
+	frame := ansi.Strip(m.render())
+	if strings.Contains(frame, "stopped") || strings.Contains(frame, "will stay here") || !strings.Contains(frame, "loading") {
+		t.Fatalf("before its first status a session is loading, not stopped with the empty welcome:\n%s", frame)
+	}
+	if !strings.Contains(m.windowTitle(), "loading") {
+		t.Fatalf("the tab title says loading: %q", m.windowTitle())
+	}
+	m.receiveResident(residentMsg{agent: "local-testing", status: residentStatus{Name: "local-testing", DaemonAlive: false}})
+	m.syncChat()
+	if frame = ansi.Strip(m.render()); !strings.Contains(frame, "stopped") || strings.Contains(frame, "loading") ||
+		!strings.Contains(frame, "will stay here") {
+		t.Fatalf("once its status lands, an empty stopped session shows stopped and the welcome, no loading line:\n%s", frame)
+	}
+}
+
 func TestAMetVerdictShowsOnceOnTheFinishLine(t *testing.T) {
 	m := chatFixture(t)
 	met := residentEvent{Seq: 8, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists"}}
