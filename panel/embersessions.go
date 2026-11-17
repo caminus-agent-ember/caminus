@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,49 @@ func loadSessionCards(m emberModel, names []string) tea.Cmd {
 }
 
 type residentCreatedMsg struct{ name, err string }
+
+// residentDestroyedMsg: a session the switcher removed, and where its home is kept.
+type residentDestroyedMsg struct{ name, kept, err string }
+
+// destroyResidentSession cancels every live goal of the session (which withdraws their open requests), then removes it:
+// its service stops, its name leaves the mail bus, its home moves to removed-sessions.
+func destroyResidentSession(m emberModel, name string, active []string) tea.Cmd {
+	return func() tea.Msg {
+		// a runtime from before `remove` refuses here, before the goal is cancelled: nothing changes half-way
+		if out, err := runResident(residentCommand(m, []string{"remove", name, "--dry-run", "--json"}, "")); err != nil {
+			text := strings.TrimSpace(string(out))
+			if strings.Contains(text, "invalid choice") {
+				text = "the agent's runtime predates destroy: run caminus ember agent install, then try again"
+			}
+			return residentDestroyedMsg{name: name, err: text}
+		}
+		// the goals as they are now, not as the card last read them (a card still loading, or one read minutes ago,
+		// knows none or stale ones): a status that cannot be read stops the destroy
+		now := loadSessionCard(m, name)
+		if now.status == "unknown" {
+			return residentDestroyedMsg{name: name, err: "could not read its goals; nothing was changed, try again"}
+		}
+		for _, id := range now.active {
+			if !slices.Contains(active, id) {
+				active = append(active, id)
+			}
+		}
+		for _, id := range active { // every live goal, so none leaves a request behind for a session that is gone
+			_, _ = runResident(residentCommand(m, []string{"cancel", name, id, "--json"}, ""))
+		}
+		out, err := runResident(residentCommand(m, []string{"remove", name, "--json"}, ""))
+		if err != nil {
+			return residentDestroyedMsg{name: name, err: strings.TrimSpace(string(out))}
+		}
+		var r struct {
+			Kept string `json:"kept"`
+		}
+		if i := strings.LastIndex(string(out), "{"); i >= 0 {
+			_ = json.Unmarshal(out[i:], &r)
+		}
+		return residentDestroyedMsg{name: name, kept: r.Kept}
+	}
+}
 
 func emberClip(text string, width int) string {
 	if width <= 0 {

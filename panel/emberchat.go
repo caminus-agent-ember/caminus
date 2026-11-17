@@ -45,6 +45,7 @@ type residentChat struct {
 	pickerSel                               int
 	pickerNew                               bool   // the switcher is asking for a new session's name
 	pickerName                              string // that name as typed
+	pickerDestroy                           string // the session x armed: a second x destroys it
 	approvals                               bool   // the Approvals overlay is over the conversation
 	approvalSel                             int    // the row it has selected
 	approvalDetail                          bool   // Enter opened the selected request in full
@@ -1962,6 +1963,10 @@ func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.chat.picker {
 		if i := m.cardAt(click.X, click.Y); i >= 0 {
+			if i == len(m.switcherCards()) {
+				m.chat.pickerSel, m.chat.pickerNew, m.chat.pickerName = i, true, ""
+				return m, nil
+			}
 			return m.switchToCard(i)
 		}
 		return m, nil
@@ -2754,6 +2759,9 @@ func (m emberModel) cycleSlash() (tea.Model, bool) {
 // slot, so it reuses the composer's measured height.
 func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	if k != "x" {
+		m.chat.pickerDestroy = ""
+	}
 	if m.chat.pickerNew {
 		switch k {
 		case "esc":
@@ -2806,6 +2814,28 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.chat.compose.Focus()
+	case "x": // destroy the selected session: armed by the first x, done by the second
+		cards := m.switcherCards()
+		i := m.chat.pickerSel
+		if i < 0 || i >= len(cards) {
+			return m, nil
+		}
+		if len(cards) < 2 {
+			m.msg = "the last session can't be destroyed"
+			return m, nil
+		}
+		if m.chat.pickerDestroy != cards[i].name {
+			m.chat.pickerDestroy = cards[i].name
+			return m, nil
+		}
+		m.chat.pickerDestroy = ""
+		c := cards[i]
+		if c.name == m.agentName { // never stay in the session being removed: the next card first
+			other := cards[(i+1)%len(cards)].name
+			m.openResident(other)
+			m.chat.picker = true
+		}
+		return m, destroyResidentSession(m, c.name, c.active)
 	case "n": // a new session from this one: its name on a line under the cards
 		m.chat.pickerNew, m.chat.pickerName = true, ""
 		return m, nil
@@ -2828,9 +2858,13 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.chat.pickerSel += cardCols(max(18, m.width-2))
 	case "enter":
+		if m.chat.pickerSel == len(m.switcherCards()) { // the "+ new session" card
+			m.chat.pickerNew, m.chat.pickerName = true, ""
+			return m, nil
+		}
 		return m.switchToCard(m.chat.pickerSel)
 	}
-	m.chat.pickerSel = max(0, min(m.chat.pickerSel, len(m.switcherCards())-1))
+	m.chat.pickerSel = max(0, min(m.chat.pickerSel, m.cardCount()-1))
 	return m, nil
 }
 
