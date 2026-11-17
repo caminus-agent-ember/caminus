@@ -40,15 +40,16 @@ type residentChat struct {
 	questionArmed                           bool
 	questionInput                           textarea.Model
 	questionDeferred, questionError         string
+	later                                   map[string]bool   // requests put off with Esc: they wait; Tab brings them back
+	reqOutcome                              map[string]string // each request's state for its one-line record
+	resSeen                                 map[string]string // answers read from the bridge's res/ (final: read once)
+	questionAt                              time.Time         // when the prompt opened (a grace period before Enter decides)
 	picker                                  bool
 	pickerSel                               int
 	hostShell                               bool   // shell mode runs in your own shell on this machine (!!), not the agent's
 	pickerNew                               bool   // the switcher is asking for a new session's name
 	pickerName                              string // that name as typed
 	pickerDestroy                           string // the session x armed: a second x destroys it
-	approvals                               bool   // the Approvals overlay is over the conversation
-	approvalSel                             int    // the row it has selected
-	approvalDetail                          bool   // Enter opened the selected request in full
 	goals, goalsDetail                      bool   // the Goals overlay, and its selected goal opened in full
 	loadingShown                            bool   // the transcript shows "loading NAME…"
 	goalsSel                                int
@@ -346,6 +347,11 @@ func (m emberModel) liveGoalIndex() int {
 	return -1
 }
 
+// recordLine is a request's one-line record in the transcript.
+func recordLine(icon, text string, w int) string {
+	return emberClip(" "+emberWarn.Render(icon)+" "+emberDim.Render(text), max(10, w))
+}
+
 // humanRefusal says why a request was not filed, for a person: the gate's text addresses the model.
 func humanRefusal(err string) string {
 	switch {
@@ -408,6 +414,12 @@ func (m *emberModel) syncChat() {
 		// header and the status line still use the full width.
 		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
+	}
+	// a request's one-line record carries its state (waiting, yes, no: …): when one changes, the history is drawn
+	// again (rare: a request filed, answered or timed out)
+	if out := m.requestOutcomes(); fmt.Sprint(out) != fmt.Sprint(m.chat.reqOutcome) {
+		m.chat.reqOutcome = out
+		m.chat.content, m.chat.rendered = "", 0
 	}
 	changed := m.chat.rendered != len(m.residentEvents)
 	if m.chat.rendered == 0 {
@@ -1208,37 +1220,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return strings.Join(parts, "\n")
 	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
-		if name := str("name"); name == "ask_user" || name == "ask_root" {
-			// the result of asking you, in your words: the model-facing text ("your human has not answered yet. Work
-			// on…", a gate's refusal) was shown as is, and a question not answered yet drew an empty answer bubble
-			errText, _ := result["error"].(string)
-			if errText != "" {
-				return toolCard(map[string]string{"ask_user": "question", "ask_root": "root request"}[name], "not sent: "+humanRefusal(errText), "", false, c.expanded, lines(errText, 8), w)
+		if name := str("name"); name == "ask_user" || name == "ask_root" || name == "github_handoff" {
+			// the outcome is on the request's one-line record; only a request never filed shows here
+			if errText, _ := result["error"].(string); errText != "" {
+				return recordLine(map[string]string{"ask_user": "?", "ask_root": g.root, "github_handoff": "⇡"}[name], "not sent: "+humanRefusal(errText), w)
 			}
-			if by, _ := result["by"].(string); by == "timeout" {
-				// no answer came in time: the resident carried on (a question with its recommended option, root
-				// with no); the answer text is addressed to the model and is not yours
-				what := map[string]string{"ask_user": "no answer in time: it carried on with its recommended option",
-					"ask_root": "no answer in time: not run"}[name]
-				return toolCard(map[string]string{"ask_user": "question", "ask_root": "root request"}[name], what, "", true, false, nil, w)
-			}
-			if pending, _ := result["pending"].(bool); pending {
-				if name == "ask_root" {
-					return toolCard("root request", "waiting for your approval · Ctrl+A decides", "", true, false, nil, w)
-				}
-				return "" // the question's own card asks it
-			}
-			answer, _ := result["answer"].(string)
-			if answer == "" {
-				answer, _ = result["decision"].(string)
-			}
-			if strings.TrimSpace(answer) == "" {
-				return ""
-			}
-			if name == "ask_root" {
-				return toolCard("root request", answer, "", answer != "denied", false, nil, w)
-			}
-			return turn(g.user, "you · answer", cBlue, c.renderMarkdown(answer))
+			return ""
 		}
 		if name := str("name"); (name == "edit" || name == "write") && result["error"] == nil {
 			// an edit is a diff card: open when it is short, folded (Ctrl+E) when it is long
@@ -1313,25 +1300,35 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "finished":
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
+		// one line, not a card: you decide in the prompt where you type (the outcome is the result's line)
+		status := ""
+		if s := c.reqOutcome[str("id")]; s != "" {
+			status = " · " + s
+		}
+		room := max(12, w-10-ansi.StringWidth(status)) // a long command is cut, never its state
 		if str("kind") == "github" {
-			// the card shows what will be posted under your name: the summary, then the body's first lines (all of it
-			// in the approvals screen, Ctrl+A then Enter)
-			text := residentText(str("summary"))
-			if h, ok := e.Data["github"].(map[string]any); ok {
-				if _, body := handoffText(h); strings.TrimSpace(body) != "" {
-					lines := strings.Split(strings.TrimRight(residentText(body), "\n"), "\n")
-					shown := lines[:min(len(lines), 10)]
-					text += "\n\n" + strings.Join(shown, "\n")
-					if len(lines) > len(shown) {
-						text += fmt.Sprintf("\n… %d more lines · Ctrl+A, Enter shows all of it", len(lines)-len(shown))
-					}
+			return recordLine("⇡", "github: "+ansi.Truncate(oneLine(residentText(str("summary"))), room, "…")+status, w)
+		}
+		return recordLine(g.root, "root: "+ansi.Truncate(oneLine(residentText(str("cmd"))), room, "…")+status, w)
+	case "question":
+		// the state first (a long question's choices must not push it off the line); the choices only while it waits
+		state := c.reqOutcome[str("id")]
+		tail := ""
+		if state != "" {
+			tail = " · " + state
+		}
+		// a long question is cut, never its state
+		text := ansi.Truncate(oneLine(residentText(str("text"))), max(12, w-4-ansi.StringWidth(tail)), "…") + tail
+		if ch, _ := e.Data["choices"].([]any); len(ch) > 0 && (state == "" || state == "waiting") {
+			var opts []string
+			for _, x := range ch {
+				if t, _ := x.(string); t != "" {
+					opts = append(opts, residentText(t))
 				}
 			}
-			return approvalCard("github", text, residentText(str("reason")), w)
+			text += "  (" + strings.Join(opts, " / ") + ")"
 		}
-		return approvalCard("root", residentText(str("cmd")), residentText(str("reason")), w)
-	case "question":
-		return turn("?", "question", cYellow, c.renderMarkdown(str("text")))
+		return recordLine("?", text, w)
 	case "compacted":
 		return toolCard("note", "context compacted", "the whole conversation stays in this transcript", true, false, nil, w)
 	case "cancelled":
@@ -1518,6 +1515,9 @@ func (m emberModel) chatBottom() string {
 	if act := m.activityLine(max(18, m.width-2)); act != "" && m.height >= 20 { // (a small terminal keeps its rows)
 		out = act + "\n" + out // above the todo list, where the work is described
 	}
+	if line := m.waitingLine(); line != "" && m.chat.question == nil {
+		out = line + "\n" + out // requests put off with Esc: they still wait, Tab answers
+	}
 	if side := m.btwSection(max(18, m.width-2)); side != "" {
 		out = side + "\n" + out
 	}
@@ -1676,7 +1676,7 @@ func helpLines(width int) []string {
 		{"Ctrl+N", "a new goal"},
 		{"Shift+Tab", "sessions: a card per session"},
 		{"Ctrl+G", "goals"},
-		{"Ctrl+A", "approvals"},
+		{"Tab", "a waiting request: answer it (it shows where you type)"},
 		{"Ctrl+R", "search what you sent"},
 		{"Ctrl+O", "layout: compact (a card per action) or everything"},
 		{"Ctrl+T", "hold the live view"},
@@ -2019,13 +2019,7 @@ func (m emberModel) renderChat() string {
 	head := m.chatHead(w)
 	foot := m.chatFoot(w)
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /cancel · /resume · /compact · /approvals") + "\n" + clip("/sessions · /remember TEXT · /memory · /context · /audit") + "\n" + clip("/start · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
-	}
-	if m.chat.approvals {
-		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
-		// small so a short terminal (with /help's extra lines) still gets a box inside the frame.
-		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
-		return head + "\n" + m.approvalOverlay(w, h) + "\n" + foot
+		foot += "\n" + clip("/new [goal] · /goals · /cancel · /resume · /compact") + "\n" + clip("/sessions · /remember TEXT · /memory · /context") + "\n" + clip("/start · /theme NAME · /help · /quit · Ctrl+N new · Ctrl+L follow · Ctrl+G goals")
 	}
 	if m.chat.goals {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
@@ -2077,9 +2071,6 @@ func (m emberModel) renderChat() string {
 	if card := m.planCard(w); card != "" {
 		body = append(body, card)
 	}
-	if card := m.rootsCard(w); card != "" {
-		body = append(body, card)
-	}
 	return strings.Join(append(body, m.chatBottom(), foot), "\n")
 }
 
@@ -2114,7 +2105,7 @@ func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.themes.open && !m.chat.studio.open &&
+	} else if !m.chat.sending && !m.chat.goals && !m.chat.models.open && !m.chat.themes.open && !m.chat.studio.open &&
 		!m.chat.view.open && !m.chat.rewind.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
@@ -2124,9 +2115,6 @@ func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m emberModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.initChat()
-	if m.chat.approvals {
-		return m.approvalKey(msg)
-	}
 	if m.chat.goals {
 		return m.goalsKey(msg)
 	}
@@ -2190,13 +2178,6 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
 		m.chat.compose.Blur()
 		return m, nil
-	case "ctrl+a":
-		// The Approvals overlay over the conversation: the requests a person has to decide, in the one box every
-		// overlay uses. It owns the keys while it is open, so the composer lets go of them.
-		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
-		m.chat.armed = ""
-		m.chat.compose.Blur()
-		return m, nil
 	case "tab", "shift+tab":
 		if next, done := m.slashMenuKey("tab"); done && k == "tab" {
 			next.syncChat()
@@ -2207,6 +2188,11 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if next, done := m.cyclePath(); done {
 			return next, nil
+		}
+		if k == "tab" { // no completion under way: a waiting request comes back where you type (the draft is kept)
+			if next, ok := m.reopenPrompt(); ok {
+				return next, nil
+			}
 		}
 		if k == "shift+tab" { // no completion under way: Shift+Tab opens the session switcher (Ctrl+P does too)
 			m.chat.picker, m.chat.pickerSel = true, 0
@@ -2418,12 +2404,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.chat.compose.SetValue(arg)
 			return m.sendCompose(arg)
 		}
-	case "/approvals":
-		// the overlay over the conversation: questions and root requests, to approve, edit or deny
-		clear()
-		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
-		m.chat.armed = ""
-		m.chat.compose.Blur()
 	case "/memory":
 		clear()
 		m.msg = "reading the memory…"
@@ -2543,25 +2523,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.msg = "theme: " + name
 		m.syncChat()
 		return m, nil
-	case "/deny":
-		// "No, do this instead": deny the newest root request and send the text to its goal as a steer.
-		i := m.pendingRoot()
-		if i < 0 {
-			m.msg = "no root request is waiting"
-			return m, nil
-		}
-		text := strings.TrimSpace(arg)
-		if text == "" {
-			m.msg = "usage: /deny TEXT — denies the root request and tells the agent what to do instead"
-			return m, nil
-		}
-		// The instruction rides in the denial itself; the runtime files it as a steer on the request's goal (one
-		// write, so a denial can never arrive without its instruction).
-		r := m.reqs[i]
-		m.sel = i
-		m.mode, m.edit, m.editRequest = "denywhy", text, &r
-		clear()
-		return m.submitInput()
 	case "/resume":
 		g := m.selectedResidentGoal()
 		if g == nil {
@@ -2589,7 +2550,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 // slashCommands backs the composer autocomplete; every name must be handled by
 // chatSlash. The list stays in one place so the two never drift apart.
 var slashCommands = []struct{ name, hint string }{
-	{"/approvals", "open the approvals overlay (Ctrl+A)"},
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
@@ -2607,7 +2567,6 @@ var slashCommands = []struct{ name, hint string }{
 	{"/start", "run this session's loop (stop and start any session from Shift+Tab)"},
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/theme", "the theme screen: preview and pick (or /theme NAME)"},
-	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
 	{"/memory", "this session's memory file"},
 	{"/context", "what the agent's context holds"},
 	{"/btw", "a side question with no tools; the goal keeps nothing"},
@@ -2865,8 +2824,8 @@ func (m emberModel) chatFoot(w int) string {
 	if m.chat.live.active && m.chat.live.hold {
 		keys = append([]string{"held · ^T follow"}, keys...)
 	}
-	if len(m.reqs) > 0 {
-		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
+	if m.runtimeOutdated() {
+		keys = append([]string{emberWarn.Render("older runtime · caminus ember agent install")}, keys...)
 	}
 	if m.runtimeOutdated() {
 		keys = append([]string{emberWarn.Render("older runtime · caminus ember agent install")}, keys...)
@@ -2886,68 +2845,6 @@ func (m emberModel) chatFoot(w int) string {
 	// (no line under the status line: the occasional states ride among its keys and a message sits on the composer's
 	// frame, so nothing appears and goes below it)
 	return statusBar
-}
-
-// pendingRoots are the indexes in m.reqs of this resident's waiting root requests, oldest first.
-func (m emberModel) pendingRoots() []int {
-	var out []int
-	for i, r := range m.reqs {
-		if r.kind() != "question" && (r.Agent == "" || r.Agent == m.agentName) { // root requests and GitHub hand-offs
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-// pendingRoot is the index in m.reqs of the root request the keys act on: the one highlighted on the shared card
-// ([ and ] move it), else the newest; -1 when none waits.
-func (m emberModel) pendingRoot() int {
-	roots := m.pendingRoots()
-	if len(roots) == 0 {
-		return -1
-	}
-	for _, i := range roots {
-		if m.reqs[i].ID == m.chat.rootSel {
-			return i
-		}
-	}
-	return roots[len(roots)-1]
-}
-
-// rootsCard: when several root requests wait, one card above the composer lists them all; the decision keys act on
-// the highlighted one. One request needs no extra card (its card is in the transcript).
-func (m emberModel) rootsCard(w int) string {
-	roots := m.pendingRoots()
-	anyGranted := false
-	for _, i := range roots {
-		anyGranted = anyGranted || grantRecorded(m.auditPath, m.reqs[i], time.Now())
-	}
-	if len(roots) < 2 && !anyGranted {
-		return ""
-	}
-	cur := m.pendingRoot()
-	inner := max(10, min(w, 96)-4)
-	var rows []string
-	for n, i := range roots {
-		r := m.reqs[i]
-		line := fmt.Sprintf("%d  %s", n+1, residentText(r.Cmd))
-		if grantRecorded(m.auditPath, r, time.Now()) {
-			line += "   granted for this goal: one a runs it"
-		}
-		if i == cur {
-			rows = append(rows, emberSel.Render(ansi.Truncate(g.collapsed+" "+line, inner, "…")))
-		} else {
-			rows = append(rows, emberDim.Render(ansi.Truncate("  "+line, inner, "…")))
-		}
-	}
-	rows = append(rows, emberDim.Render("esc, then [ ] pick  ·  a a approve  ·  g g grant for the goal  ·  e edit  ·  d deny  ·  /deny TEXT what instead"))
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).
-		Width(min(w, 96)).Render(strings.Join(rows, "\n"))
-	title := fmt.Sprintf("%s %d ROOT REQUESTS WAITING", g.root, len(roots))
-	if len(roots) == 1 {
-		title = g.root + " ROOT REQUEST WAITING"
-	}
-	return borderTitle(box, title, emberWarn.Bold(true))
 }
 
 // toggleLayout switches the two layouts: compact (a card per action with short previews, replies in full) and
