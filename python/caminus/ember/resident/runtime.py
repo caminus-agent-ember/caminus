@@ -292,6 +292,15 @@ class Live:
         return self.flush()
 
     def flush(self):
+        if not self.check():
+            return False
+        atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
+                                    content=''.join(self.content), reasoning=''.join(self.reasoning),
+                                    tools=self.tools))
+        return True
+
+    def check(self):
+        """False when the turn must stop: the goal was cancelled, or an Esc asked to interrupt it."""
         if self.store.goal(self.gid)['state'] == 'cancelled':
             return False
         # Esc while generating (agent interrupt): the request arrives through the store like /pause, and this
@@ -303,9 +312,6 @@ class Live:
             self.store.event('turn_interrupted', {}, self.gid)
             self.interrupted = True
             return False
-        atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
-                                    content=''.join(self.content), reasoning=''.join(self.reasoning),
-                                    tools=self.tools))
         return True
 
     def clear(self):
@@ -857,10 +863,65 @@ class Runtime:
                         break
             # the cut replies' calls must not run after the rewind (a reply with several calls, a waiting request)
             self.store.db.execute("DELETE FROM actions WHERE goal=? AND state!='done'", (gid,))
+            # the undone steps are no rewind points any more (/rewind kept offering what was just undone)
+            self.store.db.execute('DELETE FROM file_snapshots WHERE goal=? AND step>?', (gid, to))
             self.store.update(gid, messages=g['messages'][:cut], steps=to, state='paused', summary='',
                               error='rewound to step %d (terminal side effects are not undone)' % to)
         self.store.event('rewound', dict(to=to, restored=restored, removed=removed, skipped=skipped), gid)
         return dict(restored=restored, removed=removed, skipped=skipped)
+
+    def _note_cut_turns(self):
+        """A live snapshot left from before this process started is a turn the old daemon was generating when it died:
+        the step runs again (nothing was stored), and the transcript says so (a restart that retried left no trace)."""
+        for p in sorted((self.home / 'live').glob('*.json')) if (self.home / 'live').is_dir() else []:
+            gid = p.stem
+            try:
+                g = self.store.goal(gid)
+            except ValueError:
+                g = None
+            if g and g['state'] in ('working', 'waiting_model', 'queued'):
+                self.store.event('turn_retried', dict(step=int(g.get('steps') or 0) + 1, reason='agent restarted'), gid)
+            p.unlink(missing_ok=True)
+
+    def _watched(self, live, call, poll=.25):
+        """Run one model call on a worker thread while this thread watches the goal: a /cancel (or an Esc) aborts it at
+        once, also before the first token. A cancelled goal's call held the daemon until the server answered it (the
+        queue sat behind it; minutes on a slow local model). The worker never touches the store: its streamed pieces
+        come back here and go through live.on_delta, which owns the cancel and interrupt checks. An abandoned call
+        finishes on its own; its result is dropped."""
+        import queue, threading
+        if not isinstance(self.model, Model):
+            return call(live.on_delta)          # (a stand-in model may use the store itself: it runs on this thread)
+        pieces, out, stop = queue.Queue(), {}, threading.Event()
+
+        def on_delta(kind, value):
+            if stop.is_set():
+                return False
+            pieces.put((kind, value))
+            return True
+
+        def run():
+            try:
+                out['reply'] = call(on_delta)
+            except BaseException as e:          # (re-raised on this thread below)
+                out['error'] = e
+            pieces.put(None)
+
+        threading.Thread(target=run, daemon=True, name='model-call').start()
+        while True:
+            try:
+                item = pieces.get(timeout=poll)
+            except queue.Empty:
+                item = ()
+            if item is None:
+                break
+            if item and live.on_delta(*item) is False or not item and not live.check():
+                stop.set()
+                self.model.abort()   # (the server stops too: an abandoned call kept it generating)
+                raise Cancelled()
+        if 'error' in out:
+            raise out['error']
+        return out['reply']
 
     def _apply_rewinds(self):
         """/rewind: queued like /pause and applied here, between steps, so a tool is never cut off mid-call."""
@@ -1922,10 +1983,9 @@ class Runtime:
                 request = [self.system(),*messages]
                 if (budget := self.context_message(gid)):
                     request.append(budget)
-                reply = self.model.complete(request,self.tools,
-                                            max_tokens=min(self._out_boost.get(gid) or self._reply_limit(),
-                                                           self.model.context_size()//4),
-                                            on_delta=live.on_delta)
+                limit = min(self._out_boost.get(gid) or self._reply_limit(), self.model.context_size()//4)
+                reply = self._watched(live, lambda on_delta: self.model.complete(request, self.tools, max_tokens=limit,
+                                                                                 on_delta=on_delta))
             finally:
                 live.clear()
             self._throughput_note(gid,getattr(self.model,'last_speed',None))
@@ -2108,6 +2168,8 @@ class Runtime:
     def run(self, target=None, stop=None, poll=.2, observe=None):
         """Same loop for daemon and oneshot; callers own the process lock."""
         last_heartbeat=0
+        if not target:
+            self._note_cut_turns()
         while stop is None or not stop():
             if not target and self._maybe_update():
                 return None                   # systemd restarts the daemon on the new runtime
@@ -2134,9 +2196,15 @@ class Runtime:
                 atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working',runtime=RUNTIME))
                 last_heartbeat=time.time()
             for gid in goals:
-                progressed |= self.tick(gid)
+                moved = self.tick(gid)
+                progressed |= bool(moved)
                 if observe:
                     observe(self.store)
+                if moved and not target:
+                    # one goal at a time, in queue order: a goal that made progress has the pass; the next one starts
+                    # only while those before it wait (parked, a pending request, the model away). Every goal was
+                    # ticked each pass, so queued goals ran interleaved with the working one, all three "working".
+                    break
                 if target:
                     state = self.store.goal(gid)['state']
                     if state in PAUSED or state == 'waiting_model':
