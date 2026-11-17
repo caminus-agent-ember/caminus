@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
@@ -20,6 +21,26 @@ import (
 type residentSessionsMsg struct {
 	agent, memory, err string
 	names              []string
+}
+
+// sessionCardsMsg: the switcher's cards, loaded after the names so the session list never waits on them.
+type sessionCardsMsg struct {
+	agent string
+	cards []sessionCard
+}
+
+// loadSessionCards reads every session's card at once (each command has residentCommand's own deadline).
+func loadSessionCards(m emberModel, names []string) tea.Cmd {
+	return func() tea.Msg {
+		cards := make([]sessionCard, len(names))
+		var wg sync.WaitGroup
+		for i, n := range names {
+			wg.Add(1)
+			go func() { defer wg.Done(); cards[i] = loadSessionCard(m, n) }()
+		}
+		wg.Wait()
+		return sessionCardsMsg{agent: m.agentName, cards: cards}
+	}
 }
 
 type residentCreatedMsg struct{ name, err string }
@@ -206,26 +227,6 @@ func (m emberModel) sessionKeys(k string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	}
 	return m, nil
-}
-
-// pickerNames lists the sessions the Ctrl+P query still matches; an empty list
-// keeps the current name so the switcher can always reopen it.
-func (m emberModel) pickerNames() []string {
-	names := m.sessionNames
-	if len(names) == 0 {
-		names = []string{m.agentName}
-	}
-	query := strings.ToLower(m.chat.pickerQuery)
-	if query == "" {
-		return names
-	}
-	var out []string
-	for _, n := range names {
-		if strings.Contains(strings.ToLower(n), query) {
-			out = append(out, n)
-		}
-	}
-	return out
 }
 
 func (m emberModel) sessionsPane() string {
