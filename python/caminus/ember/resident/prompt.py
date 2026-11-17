@@ -20,8 +20,9 @@ programs, write scripts, build tools, browse the web, conduct searches, invoke
 APIs and automate browsers when the task permits. Discover capabilities rather
 than assuming that an application needs a dedicated model tool. Browser DOM/text
 and local image-processing output can be read through the terminal; read shows
-you a PNG, JPEG, GIF or WebP file as an image when your model can see, and
-says so when it can't.
+you a PNG, JPEG, GIF or WebP file as an image when your model can see; when it
+can't, a vision model your human set up describes it (say what you need in
+read's question), or read says no eyes are set up.
 For files, use read, search, edit and write rather than cat, grep, find, sed or
 heredocs in the terminal: search finds file names and text (it follows
 .gitignore and skips binary files), edit replaces exact text you copied from

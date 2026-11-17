@@ -150,7 +150,7 @@ LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 # Images (files.read): a tool message names its image (store.action_result; a user message can too: the finish judge's),
 # and each request sends the file itself, so the store keeps no bytes and a brain switched mid-goal gets what it can
 # take: the image where its config says vision (the catalog's flag, copied at init and /model), a line saying it can't
-# see where not.
+# see where not, nothing more where the eyes model already described it in the result (advisor.Eyes).
 IMAGES_PER_REQUEST = 20    # newest image results sent as images; 20 x 5 MB stays inside the API's 128 MB request
 IMAGE_CACHE = 32           # encoded files kept per brain: compaction counts the same request many times
 NO_VISION = ("this model can't see images; {name} is a {w}x{h} {fmt}; describe-by-tool options: discover topic images "
@@ -610,8 +610,8 @@ class Model:
             img = messages[i]['image']
             name = os.path.basename(str(img.get('path') or '')) or 'the file'
             if not self.config.get('vision'):
-                plan[i] = (None, NO_VISION.format(name=name, w=img.get('width'), h=img.get('height'),
-                                                  fmt=str(img.get('format') or '').upper()))
+                plan[i] = (None, None if img.get('described_by') else NO_VISION.format(
+                    name=name, w=img.get('width'), h=img.get('height'), fmt=str(img.get('format') or '').upper()))
             elif 'sha256' not in img:
                 plan[i] = (None, None)                       # past read's caps: the result's note says so
             elif i not in recent:

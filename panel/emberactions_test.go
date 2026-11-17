@@ -34,6 +34,7 @@ func TestToolCardsSayWhatCameBackInPlainWords(t *testing.T) {
 		{"search", map[string]any{"pattern": "("}, map[string]any{"error": "pattern is not a valid regex (missing ), unterminated subpattern at position 0)"}, "“(”  ·  pattern is not a valid regex"},
 		{"search", map[string]any{"pattern": "x", "path": "gone"}, map[string]any{"error": "[Errno 2] No such file or directory: '" + home + "/gone'"}, "“x” under gone  ·  [Errno 2] No such file or directory: '~/gone'"},
 		{"read", map[string]any{"path": cwd + "/plot.png"}, map[string]any{"path": cwd + "/plot.png", "image": map[string]any{"format": "png", "width": 640.0, "height": 480.0, "bytes": 2048.0}}, "read  plot.png  ·  image 640x480"},
+		{"read", map[string]any{"path": cwd + "/plot.png"}, map[string]any{"path": cwd + "/plot.png", "description": "A loss curve.", "image": map[string]any{"format": "png", "width": 640.0, "height": 480.0, "described_by": "ministral-8b-latest"}}, "image 640x480 · described by ministral-8b-latest"},
 		{"peers", nil, map[string]any{"peers": []any{map[string]any{"name": "lab"}}}, "1 peer: lab"},
 		{"lease", map[string]any{"action": "list"}, map[string]any{"leases": []any{}}, "no leases"},
 		{"discover", nil, map[string]any{"account": map[string]any{"user": "agent"}, "programs": map[string]any{"build": map[string]any{"make": "/usr/bin/make", "gcc": "/usr/bin/gcc"}}}, "account agent · 2 programs found"},

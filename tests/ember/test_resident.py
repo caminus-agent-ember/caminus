@@ -722,7 +722,7 @@ class Resident(unittest.TestCase):
             results=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result']
             self.assertTrue(any(r.get('name')=='edit' and '+gamma' in r['result'].get('diff','') for r in results),results)
             self.assertTrue(any(r.get('name')=='search' and r['result'].get('text')=='notes.txt\n     1-  alpha\n     2:  gamma' for r in results),results)
-            self.assertTrue(any(r.get('name')=='read' and 'ignored unknown argument(s) offset; read takes: lines, path, start'
+            self.assertTrue(any(r.get('name')=='read' and 'ignored unknown argument(s) offset; read takes: lines, path, question, start'
                                 in r['result'].get('note','') for r in results),results)
         finally:store.close()
 
@@ -2140,7 +2140,8 @@ for line in sys.stdin:
         cfg=json.loads((self.home.parent/paid/'config.json').read_text())
         cfg.update(model='claude-haiku-5-5',relay=True,prices={'in':1},context=1000000,api='anthropic',thinking='adaptive',
                    effort='medium',provider='anthropic',providers={'anthropic':{'kind':'anthropic'}},
-                   fallback={'model':'claude-haiku-5-5'},advisor={'model':'claude-opus-5-5'},judge_model='claude-haiku-5-5')
+                   fallback={'model':'claude-haiku-5-5'},advisor={'model':'claude-opus-5-5'},judge_model='claude-haiku-5-5',
+                   eyes={'provider':'anthropic','model':'claude-haiku-5-5'})
         (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
         new='local-'+uuid.uuid4().hex[:8]
         home=self.home.parent/new
@@ -2150,8 +2151,8 @@ for line in sys.stdin:
         self.assertEqual(json.loads(made.stdout)['model'],'swift-1.5')
         got=json.loads((home/'config.json').read_text())
         self.assertEqual((got['model'],got['endpoint']),('swift-1.5',url))
-        for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model'):
-            self.assertNotIn(k,got,f'{k} belonged to the paid brain')
+        for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model','eyes'):
+            self.assertNotIn(k,got,f'{k} belonged to the paid brain')   # (eyes bill too: the owner turns them on again)
         self.assertIn('providers',got,'/model can still switch back to a paid brain')
 
     CODER_IDS=['k3-coder','k3-coder-xhigh','k3-coder-low','k3-coder-nothink']   # what the Coder's server lists
@@ -4008,6 +4009,37 @@ for line in sys.stdin:
                 self.assertLessEqual(spent,full*1.01,provider)
             finally:stop()
 
+    def test_a_cut_stream_counts_an_image_by_its_tokens_not_its_base64(self):
+        # an eyes call carries a screenshot; a stream cut before its usage arrived was booked at request bytes / 4, so a
+        # 1 MB image came to ~350K phantom input tokens. Images now count by the provider's image rule.
+        import base64
+        from caminus.ember import relay
+        from caminus.ember.resident.model import image_tokens
+        big=base64.b64encode(png(1000,700)+b'\x00'*1_000_000).decode()     # (a 1000x700 header, a megabyte of payload)
+        anth=dict(model='claude-haiku-5-5',max_tokens=100,messages=[dict(role='user',content=[dict(type='text',text='What is it?'),
+              dict(type='image',source=dict(type='base64',media_type='image/png',data=big))])])
+        oai=dict(model='ministral-8b-latest',max_tokens=100,messages=[dict(role='user',content=[dict(type='text',text='What is it?'),
+             dict(type='image_url',image_url=dict(url='data:image/png;base64,'+big))])])
+        text=lambda b:len(json.dumps(b).encode().replace(big.encode(),b''))//4
+        self.assertAlmostEqual(relay.prompt_tokens(anth,'anthropic'),text(anth)+image_tokens(1000,700),delta=2)
+        self.assertAlmostEqual(relay.prompt_tokens(oai,'mistral'),text(oai)+36*25,delta=20,msg='28 px patches, no downscale')
+        self.assertLess(relay.prompt_tokens(anth,'anthropic'),5000,'not the ~350K tokens its base64 would be')
+        junk=json.loads(json.dumps(oai).replace(big,'bm90IGFuIGltYWdl'))
+        self.assertAlmostEqual(relay.prompt_tokens(junk,'mistral'),text(junk)+108*108,delta=20,
+                               msg='an image without a readable header counts as the largest read sends')
+        # through the relay: a Mistral stream cut before its usage chunk
+        pf=self.home/'mistral-prices.json';pf.write_text(json.dumps({'ministral-8b-latest':[0.15,0.15]}))
+        cut=b'data: '+json.dumps(dict(choices=[dict(delta=dict(content='a'))])).encode()+b'\n\n'
+        base,calls,ledger,log,stop=self._relay('mistral',lambda c:(200,cut,'text/event-stream'),cap=5.0,
+                                               prices=relay.OwnerPrices(str(pf),lambda m:None))
+        try:
+            self._post(base+'/v1/chat/completions',dict(oai,stream=True))
+            self.assertTrue(any('NO-USAGE' in l for l in log),log[-2:])
+            want=(relay.prompt_tokens(calls[-1]['body'],'mistral')*0.15+100*0.15)/1e6
+            self.assertAlmostEqual(ledger.spent(),want,places=6)
+            self.assertLess(ledger.spent(),len(big)/4*0.15/1e6/20,'a twentieth of what its bytes would have booked')
+        finally:stop()
+
     def test_the_mistral_relay_meters_from_the_owners_prices_and_sends_no_stream_options(self):
         from caminus.ember import relay
         pf=self.home/'mistral-prices.json';pf.write_text(json.dumps({'mistral-medium-latest':[0.4,2.0]}))
@@ -4018,7 +4050,9 @@ for line in sys.stdin:
         base,calls,ledger,log,stop=self._relay('mistral',lambda c:(200,sse,'text/event-stream'),cap=5.0,prices=prices)
         try:
             code,body=self._post(base+'/v1/chat/completions',dict(model='codestral-latest',messages=[]))
-            self.assertEqual(code,403);self.assertIn(b'--prices',body);self.assertEqual(calls,[],'an unpriced model goes nowhere')
+            self.assertEqual(code,403);self.assertEqual(calls,[],'an unpriced model goes nowhere')
+            self.assertIn(b'--prices file as \\"codestral-latest\\"',body,'the refusal names the entry')
+            self.assertNotIn(str(pf).encode(),body,'and no path of the owner\'s: the text reaches the agent')
             code,_=self._post(base+'/v1/chat/completions',dict(model='mistral-medium-latest',messages=[],stream=True))
             self.assertEqual(code,200);sent=calls[-1]
             self.assertEqual(sent['path'],'/v1/chat/completions');self.assertEqual(sent['headers']['Authorization'],'Bearer SECRET-KEY')
@@ -4468,6 +4502,224 @@ for line in sys.stdin:
             rt.advisor.ask(gid,'Question?')
             self.assertNotIn('cache_control',json.dumps(wire.requests[0][2]),'a one-shot call would pay the write premium for nothing')
         finally:rt.mail.close();rt.store.close()
+
+    # ---- eyes -------------------------------------------------------------------------------------------------
+
+    MISTRAL='http://127.0.0.1:8767/v1'
+    ANTHROPIC='http://127.0.0.1:8765/v1'
+
+    def eyes_home(self,eyes=None,providers=('mistral',)):
+        """this fixture with the relay providers named, their catalog entries cached (no discovery call) and an image"""
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['providers']={p:dict(kind=p,endpoint=self.MISTRAL if p=='mistral' else self.ANTHROPIC,relay=True) for p in providers}
+        if eyes is not None:conf['eyes']=eyes
+        (self.home/'config.json').write_text(json.dumps(conf))
+        (self.home/'models.json').write_text(json.dumps(dict(updated=time.time(),providers={},models=[
+            dict(id='ministral-8b-2512',aliases=['ministral-8b-latest'],provider='mistral',context=262144,vision=True,
+                 prices=dict(input=0.15,output=0.15,cache_read=0.015)),
+            dict(id='codestral-latest',provider='mistral',context=262144,vision=False,prices=dict(input=0.3,output=0.9)),
+            dict(id='claude-haiku-5-5',provider='anthropic',context=1000000,vision=True,prices=None)])))
+        (self.home/'shot.png').write_bytes(png(6,4))
+
+    def chat(self,text,usage=dict(prompt_tokens=900,completion_tokens=40)):
+        return dict(choices=[dict(message=dict(role='assistant',content=text),finish_reason='stop')],usage=usage)
+
+    def test_eyes_describe_an_image_for_a_brain_without_vision_on_the_mistral_relay(self):
+        import base64
+        from caminus.ember.resident import agenda, files
+        from caminus.ember.resident.model import Model
+        self.eyes_home(eyes=dict(provider='mistral',model='ministral-8b-latest'))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(self.chat('The terminal shows "make: *** [all] Error 2" in red.'))
+            gid=rt.store.enqueue('Find out why the build in shot.png failed.')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'),'What error does it show?')
+            url,headers,body=wire.requests[0]
+            self.assertEqual(url,self.MISTRAL+'/chat/completions');self.assertEqual(body['model'],'ministral-8b-latest')
+            self.assertEqual({k.lower():v for k,v in headers.items()}.get('authorization'),'Bearer caminus-local',
+                             'no key leaves the agent: the relay adds it')
+            user=body['messages'][1]
+            self.assertEqual(user['content'][1],dict(type='image_url',image_url=dict(
+                url='data:image/png;base64,'+base64.b64encode(png(6,4)).decode())))
+            self.assertIn('What error does it show?',user['content'][0]['text'])
+            self.assertIn('Find out why the build',user['content'][0]['text'],'the task gives the question its context')
+            self.assertIn('6x4 PNG',user['content'][0]['text']);self.assertNotIn('tools',body)
+            self.assertIn('Error 2',got['description']);self.assertEqual(got['image']['described_by'],'ministral-8b-latest')
+            self.assertEqual((got['image']['width'],got['image']['height']),(6,4))
+            usd=(900*0.15+40*0.15)/1e6
+            self.assertAlmostEqual(rt.eyes.spent_today(),usd,places=9,msg='priced from the relay\'s catalog price')
+            self.assertTrue(any(e['kind']=='eyes' and e['data']['usd']>0 for e in rt.store.events()))
+            self.assertEqual(agenda.budget(rt,gid)['spend']['eyes']['usd_per_day'],0.25)
+            # the stored result reaches a brain without vision as the description, with no "can't see" line after it
+            msg=dict(role='tool',tool_call_id='t1',content=json.dumps(got),image=dict(got['image'],path=got['path']))
+            m=Model(dict(model='m',endpoint='http://127.0.0.1:9/v1',context=100000))
+            wired=m._wire([dict(role='user',content='x'),msg])
+            self.assertIn('Error 2',wired[1]['content']);self.assertNotIn("can't see images",wired[1]['content'])
+            # spent out: no call, the read still answers with why
+            state=json.loads((self.home/'eyes.json').read_text());next(iter(state.values()))['usd']=0.25
+            (self.home/'eyes.json').write_text(json.dumps(state))
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn("eyes budget ($0.25) is spent",got['eyes_error']);self.assertEqual(len(wire.requests),1)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_eyes_on_the_anthropic_relay_send_an_image_block(self):
+        import base64
+        from caminus.ember.resident import files
+        self.eyes_home(eyes=dict(provider='anthropic',model='claude-haiku-5-5'),providers=('mistral','anthropic'))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(sse('A bar chart: three bars, the middle one tallest (42).'))
+            gid=rt.store.enqueue('Read the chart.')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            url,headers,body=wire.requests[0]
+            self.assertEqual(url,self.ANTHROPIC+'/messages');self.assertEqual(body['model'],'claude-haiku-5-5')
+            self.assertNotIn('x-api-key',{k.lower() for k in headers},'the relay adds the key')
+            text,image=body['messages'][0]['content']
+            self.assertIn('Describe what matters in this image for the task.',text['text'],'the default question')
+            self.assertEqual(image,dict(type='image',source=dict(type='base64',media_type='image/png',
+                                                                 data=base64.b64encode(png(6,4)).decode())))
+            self.assertIn((body.get('thinking') or {}).get('type'),(None,'disabled'),'a short call: no thinking billed')
+            self.assertNotIn('cache_control',json.dumps(body),'one image, once: no cache write premium')
+            self.assertIn('tallest',got['description']);self.assertEqual(got['image']['described_by'],'claude-haiku-5-5')
+            self.assertGreater(rt.eyes.spent_today(),0)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_eyes_are_opt_in_off_without_a_block_even_with_a_relay_provider(self):
+        class Blind:
+            config={}
+            def __init__(self,replies):self.replies=list(replies)
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return self.replies.pop(0)
+        self.eyes_home(providers=('mistral','anthropic'))      # both relay providers, no eyes block
+        rt=Runtime(self.home,model=Blind([call('read',dict(path='shot.png')),dict(role='assistant',content='Done.')]))
+        try:
+            rt.eyes_opener=wire=Wire()
+            self.assertIsNone(rt.eyes.cfg,'no eyes block: off, whatever relays the session has; nothing billed')
+            gid=rt.store.enqueue('Look at shot.png.')
+            for _ in range(4):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            result=next(e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result')
+            self.assertIn('caminus ember agent eyes NAME --provider P --model M',result['note'])
+            self.assertIn('--auto',result['note']);self.assertNotIn('description',result)
+            self.assertEqual(wire.requests,[])
+        finally:rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)
+        try:
+            # on once the human runs `agent eyes` (it writes the block); a running resident follows it at its next turn
+            self.cmd('eyes',['--auto']);rt._follow_config()
+            self.assertEqual(rt.eyes.cfg['model'],'ministral-8b-latest','on after agent eyes --auto')
+            conf=json.loads((self.home/'config.json').read_text());conf['eyes']=False
+            (self.home/'config.json').write_text(json.dumps(conf));rt._follow_config()
+            self.assertIsNone(rt.eyes.cfg,'eyes false: off even with a relay provider')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_brain_without_vision_reads_an_image_through_the_eyes_in_the_loop(self):
+        class Blind:
+            config={}
+            def __init__(self,replies):self.replies=list(replies);self.seen=[]
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                self.seen.append(messages);return self.replies.pop(0)
+        self.eyes_home()
+        self.cmd('eyes',['--provider','mistral','--model','ministral-8b-latest'])
+        brain=Blind([call('read',dict(path='shot.png',question='Which line is red?')),dict(role='assistant',content='Line 3.')])
+        rt=Runtime(self.home,model=brain)
+        try:
+            rt.eyes_opener=wire=Wire(self.chat('Line 3 is red: "FAILED test_parse".'))
+            gid=rt.store.enqueue('Which test failed in shot.png?')
+            for _ in range(4):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            self.assertIn('Which line is red?',json.dumps(wire.requests[0][2]),'the read\'s question goes to the eyes')
+            tool=next(m for m in brain.seen[-1] if m['role']=='tool')
+            self.assertIn('FAILED test_parse',tool['content'])
+            result=next(e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result')
+            self.assertEqual(result['image']['described_by'],'ministral-8b-latest','the panel card names the eyes')
+            self.assertEqual(rt.store.goal(gid)['state'],'completed')
+            # the finish judge: the agent saw a description, not the image; it is the eyes model's observation
+            from caminus.ember.resident import judge
+            self.assertNotIn('seen',judge.viewed(rt,gid)[0])
+            brief=judge.evidence(rt,gid,'test_parse failed.','')
+            self.assertIn('IMAGES DESCRIBED TO THE AGENT',brief)
+            self.assertIn('shot.png (6x4 PNG) described by ministral-8b-latest',brief)
+            self.assertIn('the eyes model\'s observation',brief)
+            self.assertNotIn('COULD NOT SEE',brief);self.assertNotIn('IMAGES THE AGENT SAW',brief)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_eyes_get_at_most_600_characters_of_the_goal(self):
+        from caminus.ember.resident import files
+        self.eyes_home(eyes=dict(provider='mistral',model='ministral-8b-latest'))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(self.chat('A red line.'))
+            goal='Find the failing test. '+''.join(f'{i:04}' for i in range(200))   # 823 characters, none repeated
+            gid=rt.store.enqueue(goal)
+            rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            text=wire.requests[0][2]['messages'][1]['content'][0]['text']
+            self.assertIn(goal[:600],text);self.assertNotIn(goal[:601],text,'the goal is cut at 600 characters')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_relay_that_refuses_the_eyes_model_says_the_exact_fix(self):
+        from caminus.ember.resident import files
+        from caminus.ember.resident.advisor import eyes_refusal
+        self.eyes_home(eyes=dict(provider='anthropic',model='claude-haiku-5-5'),providers=('anthropic',))
+        new=json.dumps(dict(type='error',error=dict(type='permission_error',message=(
+            "relay: model not allowed: 'claude-haiku-5-5' (this relay allows claude-opus-5-5; to allow it too: caminus ember "
+            'relay install --provider anthropic --cap-usd 3.0 --model claude-opus-5-5 --model claude-haiku-5-5)'))))
+        old=json.dumps(dict(type='error',error=dict(type='permission_error',message="relay: model not allowed: 'claude-haiku-5-5'")))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=Wire((403,new),(403,old),(402,json.dumps(dict(error=dict(message='relay: daily cap $3.00 reached')))))
+            gid=rt.store.enqueue('x')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn('Your human can fix it: caminus ember relay install --provider anthropic --cap-usd 3.0 --model '
+                          'claude-opus-5-5 --model claude-haiku-5-5',got['eyes_error'],'this relay version names the whole command')
+            self.assertNotIn('described_by',got['image'])
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn('does not allow claude-haiku-5-5',got['eyes_error'])
+            self.assertIn('naming every --model it should serve',got['eyes_error'],'an older relay: how, without a command')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn('spent its daily cap',got['eyes_error'])
+            self.assertTrue(any(e['kind']=='eyes_failed' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+        from caminus.ember.resident.model import ModelError
+        err=ModelError("relay: no price for 'ministral-3b-latest': it cannot be metered");err.status=403
+        text=eyes_refusal(dict(provider='mistral',model='ministral-3b-latest'),err)
+        self.assertIn('"ministral-3b-latest": [input, output]',text);self.assertIn('price file',text)
+        self.assertNotIn('--model',text,'the Mistral relay takes no --model: its price file is its model list')
+        # a model the catalog says can't see is refused before any call
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['providers']['mistral']=dict(kind='mistral',endpoint=self.MISTRAL,relay=True)
+        conf['eyes']=dict(provider='mistral',model='codestral-latest');(self.home/'config.json').write_text(json.dumps(conf))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire()
+            got=rt.eyes.see(rt.store.enqueue('x'),files.read(self.home,'shot.png'))
+            self.assertIn("can't see images",got['eyes_error']);self.assertEqual(wire.requests,[])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_agent_eyes_turns_them_on_with_a_model_or_the_auto_pick_and_off(self):
+        self.cmd('eyes',['--auto'],code=1)                          # no relay provider: nothing to pick
+        self.eyes_home(providers=('mistral','anthropic'))
+        self.assertIsNone(self.cmd('eyes')['eyes'],'opt-in: relay providers alone turn nothing on')
+        self.cmd('eyes',['--budget-usd','0.5'],code=1)               # a budget alone names no model
+        out=self.cmd('eyes',['--auto'])
+        self.assertEqual((out['eyes']['provider'],out['eyes']['model']),('mistral','ministral-8b-latest'),'the auto pick')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['eyes'],
+                         dict(provider='mistral',model='ministral-8b-latest'),'--auto writes the pick as the block')
+        out=self.cmd('eyes',['--budget-usd','0.5'])
+        self.assertEqual((out['eyes']['model'],out['eyes']['budget_usd']),('ministral-8b-latest',0.5),'a budget alone keeps the model')
+        out=self.cmd('eyes',['--provider','anthropic','--model','claude-haiku-5-5','--budget-usd','0.1'])
+        self.assertEqual((out['eyes']['model'],out['eyes']['budget_usd'],out['eyes']['endpoint']),('claude-haiku-5-5',0.1,self.ANTHROPIC))
+        self.cmd('eyes',['--provider','nowhere','--model','m'],code=1)
+        self.assertIsNone(self.cmd('eyes',['--off'])['eyes'])
+        self.assertFalse(json.loads((self.home/'config.json').read_text())['eyes'])
+        conf=json.loads((self.home/'config.json').read_text());conf['providers'].pop('mistral')
+        (self.home/'config.json').write_text(json.dumps(conf))
+        self.assertEqual(self.cmd('eyes',['--auto'])['eyes']['model'],'claude-haiku-5-5','no Mistral relay: Haiku')
 
     # ---- two brains -------------------------------------------------------------------------------------------
 

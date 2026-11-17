@@ -117,6 +117,29 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   advisor cannot be called (the relay refuses its model, is not running, or has spent its cap), `/advisor` opens the
   reason and the exact command to run, the agent's advisor tool says the same, and the attempt does not count against
   the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart.
+- **Eyes.** A brain without vision (every local Caminus model) can still look at an image, once you turn eyes on:
+  when it reads one, Ember sends that image to a vision model on your relay, and the description is the read's result.
+  With the image go the agent's question (read's `question` argument, else "describe what matters in this image for
+  the task") and the first 600 characters of its goal, so the eyes model knows what matters. The chat's read card says
+  `image WxH · described by MODEL`. Eyes are off until you turn them on, whatever relays the agent has (a session
+  made with `create NAME --model` starts without them, as without an advisor or fallback); until then the read tells
+  the agent its image's size and format and how you turn them on. Turn them on with
+  `caminus ember agent eyes NAME --auto` (ministral-8b-latest on a Mistral relay provider, else Claude Haiku 5.5 on an
+  Anthropic one) or a model of your choice, `--provider mistral --model ministral-14b-latest`. `--off` turns them off
+  again, and `--budget-usd` sets their daily budget ($0.25 by default, counted by the agent like the advisor's and
+  inside the relay's cap). The candidates, with the prices the relays are set up with (USD per million tokens,
+  input / output):
+
+  | Model | Relay | Price | An 860x480 terminal screenshot | On four images (terminal, chart, form, diagram) |
+  |---|---|---|---|---|
+  | ministral-3b-latest | Mistral | 0.10 / 0.10 | $0.00008 | every fact found; misquoted one character of an assertion |
+  | ministral-8b-latest (`--auto`'s pick) | Mistral | 0.15 / 0.15 | $0.00012 | every fact right, text quoted exactly |
+  | ministral-14b-latest | Mistral | 0.20 / 0.20 | $0.00015 | every fact right |
+  | claude-haiku-5-5 | Anthropic | 0.10 / 0.50 | $0.00014 | every fact right, the most complete (quotes notes and labels too) |
+
+  The Mistral relay allows a model it has a price for, so add the one you pick to its price file. The Anthropic relay
+  allows only its `--model` list: `relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5` plus every
+  model it allows now. A refused model's error tells the agent the exact command or price-file line for you.
 - **Removing one.** `caminus ember relay uninstall --provider anthropic` stops it; the key file stays where you put it.
 
 ## A second setup on one machine
@@ -177,7 +200,8 @@ key of that file.
 | A question's wait while you are away | until 15 min after you come back, at most 8 h | away = no key or mouse in the chat for 5 min; the prompt then says "waits while you're away"; root requests keep their 15 min ([the rule](specs/spec-ember.md#9-questions-steering-context)) | `question_away_max` (seconds) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
-| Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images the agent saw when its brain sees; otherwise it is told the agent's account of them is an observation. An image read by a brain without vision is listed as unseen: what the agent says it shows is not evidence | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
+| Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the eyes model describes it once you turn eyes on (Eyes, above), else the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images the agent saw when its brain sees; otherwise it is told the agent's account of them is an observation. An image the eyes described is listed with the eyes model's name: the description is that model's observation. One read by a brain without vision and without eyes is listed as unseen: what the agent says it shows is not evidence | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
+| Eyes | off; once on, $0.25 a day | a vision model describes an image for a brain that can't see it (Eyes, above) | `caminus ember agent eyes NAME --provider P --model M` or `--auto` (ministral-8b-latest on a Mistral relay, else Claude Haiku 5.5), `--off`, `--budget-usd N`; `eyes` |
 
 Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-reads the conversation once.
 A local session finds its server's effort ids by asking the server (at creation, `/model` or `/effort`); a session
