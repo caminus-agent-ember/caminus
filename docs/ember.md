@@ -193,6 +193,23 @@ made before that keeps running at medium until you pick a level.
 
 A side call (the judge's check of a finish) always runs with thinking off.
 
+### The web tools
+
+- **web_search** asks the ddgs engines in turn (auto, Bing, Brave, Mojeek, Wikipedia) until one has results; each
+  engine gets at most 25 s, the search 75 s. The result's `tried` names what each engine gave (results, empty, or the
+  error), and so does the error when none had results. ddgs says "No results found" both for an empty answer and for
+  an engine that refuses (a rate limit), so that is named apart from an empty list; when no engine failed outright but
+  none had results, auto and Bing are asked once more after 2.5 s. It needs ddgs in the agent's account (the install
+  line is in [the resident's tool table](resident-agent.md); `search_python` in `config.json` names another Python that
+  has it).
+- **web_fetch** makes up to three tries on HTTP 429 and 5xx, waiting what the site's Retry-After asks (else 2 s, then 4 s);
+  a site that asks for a wait past 30 s fails at once, naming the wait. A URL fetched again within a goal comes from a
+  cache for 10 minutes, marked `cached` (`fresh=true` fetches it again); the cache holds 4M characters in all. A PDF (by
+  its content type or its first bytes, up to 30 MB) comes back as text through `pdftotext` when it is installed
+  (poppler-utils), else (or when pdftotext fails on it) through a small built-in reader that marks its text partial,
+  says what it skipped, and after 5 s returns what it has read so far. `paper=true` on an arXiv abstract URL fetches the
+  paper's PDF.
+
 ## Its memory
 
 An agent keeps what it learns across goals in its home:
