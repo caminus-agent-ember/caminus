@@ -12,6 +12,7 @@ package main
 //   /NAME args      a custom command: ~/.config/caminus/commands/NAME.md, $ARGUMENTS replaced, sent as a message
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,9 +20,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 type editorDoneMsg struct {
@@ -32,6 +35,7 @@ type editorDoneMsg struct {
 type bangDoneMsg struct {
 	cmd, output string
 	err         string
+	host        bool // run in your own shell (!!), not the agent's account
 }
 
 // composerKey handles the extras' keys before the composer's own; ok reports whether it took the key.
@@ -177,6 +181,48 @@ func agentRun(m emberModel, script string) (string, error) {
 	return string(out), err
 }
 
+// hostShellStyle is the host shell's colour: copper, apart from the agent shell's purple.
+func hostShellStyle() lipgloss.Style { return lipgloss.NewStyle().Bold(true).Foreground(cOrange) }
+
+// hostRun runs one command in your own shell on this machine ($SHELL -c, else sh), bounded to 30 seconds: the !!
+// shell mode. It runs only from your keystrokes; the agent has no way to reach it.
+func hostRun(script string) (string, error) {
+	sh := os.Getenv("SHELL")
+	if sh == "" {
+		sh = "/bin/sh"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hostRunLimit)
+	defer cancel()
+	c := exec.CommandContext(ctx, sh, "-c", script)
+	// the shell and everything it starts are one process group, killed together at the limit; and the output is not
+	// waited on past it (a backgrounded child kept the pipe open, so the result never came)
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
+	c.WaitDelay = 2 * time.Second
+	out, err := c.CombinedOutput()
+	if ctx.Err() != nil {
+		return string(out), fmt.Errorf("timed out after %s", hostRunLimit)
+	}
+	return string(out), err
+}
+
+// hostRunLimit bounds a !! command (a test shortens it).
+var hostRunLimit = 30 * time.Second
+
+func runHostBang(cmd string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := hostRun(cmd)
+		if len(out) > 32*1024 {
+			out = out[len(out)-32*1024:]
+		}
+		msg := bangDoneMsg{cmd: cmd, output: strings.TrimRight(out, "\n"), host: true}
+		if err != nil {
+			msg.err = err.Error()
+		}
+		return msg
+	}
+}
+
 func runBang(m emberModel, cmd string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := agentRun(m, cmd)
@@ -193,7 +239,11 @@ func runBang(m emberModel, cmd string) tea.Cmd {
 
 // bangDone puts the command and its output in the draft, fenced, for the next message.
 func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
-	block := "```\n$ " + msg.cmd + "\n" + msg.output + "\n```"
+	prompt := "$ "
+	if msg.host {
+		prompt = "(my shell) $ " // so the agent can tell your machine's output from its own account's
+	}
+	block := "```\n" + prompt + msg.cmd + "\n" + msg.output + "\n```"
 	if msg.err != "" {
 		block += "\n(" + msg.err + ")"
 	}

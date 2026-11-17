@@ -67,7 +67,7 @@ func TestApprovalsOverlayOpensListsAndCloses(t *testing.T) {
 		}
 		frame := ansi.Strip(m.render())
 		for _, want := range []string{"approvals  2 pending", g.root + " root", "? ask", "apt-get install -y libcmocka-dev",
-			"Which parser should the empty-input test use?", "esc close", "CAMINUS", "^P sessions"} {
+			"Which parser should the empty-input test use?", "esc close", "CAMINUS", "⇧Tab sessions"} {
 			if !strings.Contains(frame, want) {
 				t.Fatalf("%s: the overlay is missing %q:\n%s", open, want, frame)
 			}
@@ -82,7 +82,7 @@ func TestApprovalsOverlayOpensListsAndCloses(t *testing.T) {
 		}
 		// the first a only arms: nothing is decided
 		m, _ = press(m, 'a', 0)
-		if m.chat.armed != "r1" || !strings.Contains(m.msg, "press a again") {
+		if m.chat.armed != "a:r1" || !strings.Contains(m.msg, "press a again") {
 			t.Fatalf("%s: the first a must only arm the approval: %q", open, m.msg)
 		}
 		if _, err := os.Stat(filepath.Join(m.bridge, "res", "r1.json")); err == nil {

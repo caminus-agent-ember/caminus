@@ -75,8 +75,8 @@ func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(emberModel)
-	if m.chat.compose.Focused() || m.chat.compose.Value() == "" {
-		t.Fatal("Escape should browse without deleting the draft")
+	if !m.chat.compose.Focused() || m.chat.compose.Value() == "" {
+		t.Fatal("Esc while idle does nothing: the draft and the composer stay")
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(emberModel)
@@ -1171,7 +1171,7 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	folded := ansi.Strip(m.chat.content)
-	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "a approve", "/deny TEXT"} {
+	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "Ctrl+A", "/deny TEXT"} {
 		if !strings.Contains(folded, want) {
 			t.Fatalf("folded transcript missing %q:\n%s", want, folded)
 		}
@@ -1208,7 +1208,7 @@ func TestChatDecidesRootRequestsInline(t *testing.T) {
 			next, _ = m.chatSlash("/deny use the vendored copy in third_party/ instead")
 			m = next.(emberModel)
 		} else {
-			m.chat.compose.Blur()
+			m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
 			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
 			m = next.(emberModel)
 		}
@@ -1233,7 +1233,7 @@ func TestChatApprovalNeedsASecondPress(t *testing.T) {
 	writeReq(t, bridge, "r1", "rm -rf /var/cache/foo", 1)
 	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
 	m.refreshLocal()
-	m.chat.compose.Blur()
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
 	press := func(r rune) {
 		next, _ := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = next.(emberModel)
@@ -1614,12 +1614,13 @@ func TestSeveralRootRequestsShareOneCard(t *testing.T) {
 	if m.reqs[m.pendingRoot()].ID != "r2" {
 		t.Fatal("the keys act on the newest by default")
 	}
-	m.chat.compose.Blur()
-	next, _ := m.chatKey(tea.KeyPressMsg{Code: '[', Text: "["})
-	m = next.(emberModel)
-	if m.reqs[m.pendingRoot()].ID != "r1" {
-		t.Fatal("[ moves to the older request")
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A; its rows pick one)
+	for row, i := range m.approvalOrder() {
+		if m.reqs[i].ID == "r1" {
+			m.chat.approvalSel = row
+		}
 	}
+	var next tea.Model
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	m = next.(emberModel)
 	if data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json")); err != nil || !strings.Contains(string(data), `"denied"`) {
@@ -1655,7 +1656,7 @@ func TestGrantTakesTwoPressesAndAGrantedRepeatOne(t *testing.T) {
 	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
 	writeReq(t, bridge, "r1", "systemctl restart foo", 1)
 	m.refreshLocal()
-	m.chat.compose.Blur()
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
 	press := func(r rune) tea.Cmd {
 		next, cmd := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = next.(emberModel)
@@ -2051,7 +2052,7 @@ func TestThemeScreenPreviewsKeepsAndRestores(t *testing.T) {
 	}
 	frame := m.render()
 	plain := ansi.Strip(frame)
-	for _, want := range []string{"themes  ", "add tests for the parser", "the gate fails", "a framed box", "esc browse", "↑↓ preview"} {
+	for _, want := range []string{"themes  ", "add tests for the parser", "the gate fails", "a framed box", "⇧Tab sessions", "↑↓ preview"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("the screen misses %q:\n%s", want, plain)
 		}
@@ -2252,7 +2253,7 @@ func TestAGithubHandoffIsACardAndTakesTwoPresses(t *testing.T) {
 		t.Fatalf("a hand-off card offers run and deny, never a grant: %q", card)
 	}
 	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Agent: m.agentName, Summary: "open a pull request on a/b"}}
-	m.chat.compose.Blur() // (the card's keys work while browsing: "esc, then a a")
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A) // (the card's keys work while browsing: "esc, then a a")
 	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m = next.(emberModel)
 	if cmd != nil || !strings.Contains(m.msg, "run on GitHub as you") {
@@ -2728,6 +2729,89 @@ func TestGoalsVOpensThePlanAndABareVerdictIsNoGoal(t *testing.T) {
 		if cmd != nil || next.chat.sending || next.msg != "no plan is waiting" {
 			t.Fatalf("/plan %s with no plan waiting starts nothing: %q", bare, next.msg)
 		}
+	}
+}
+
+func TestBangBangIsYourOwnShellInItsOwnColour(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
+	m = next.(emberModel)
+	if !m.chat.shell || m.chat.hostShell || !strings.Contains(m.composerTitle(), "runs as the agent") {
+		t.Fatal("! is the agent's shell")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
+	m = next.(emberModel)
+	if !m.chat.hostShell || !strings.Contains(m.composerTitle(), "runs as you") || m.chat.compose.Value() != "" {
+		t.Fatal("a second ! is your own shell, and types nothing")
+	}
+	if !strings.Contains(ansi.Strip(m.chatComposer()), "!! ") {
+		t.Fatal("its prompt is !!")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m = next.(emberModel)
+	if m.chat.shell || m.chat.hostShell {
+		t.Fatal("Backspace on the empty line leaves")
+	}
+	msg := runHostBang("echo from-the-host")().(bangDoneMsg)
+	if msg.err != "" || msg.output != "from-the-host" || !msg.host {
+		t.Fatalf("it runs in your shell: %+v", msg)
+	}
+	m = m.bangDone(msg)
+	if !strings.Contains(m.chat.compose.Value(), "(my shell) $ echo from-the-host") {
+		t.Fatalf("the draft says the output came from your shell:\n%s", m.chat.compose.Value())
+	}
+}
+
+func TestTheStatusLineShowsWhereTheAgentWorks(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 160, 40
+	m.resident.Home = "/srv/agent/homes/resident"
+	if got := m.agentCwd(); got != "~/homes/resident" {
+		t.Fatalf("no terminal call yet: the session's home, %q", got)
+	}
+	call := func(args string) residentEvent {
+		return residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{
+			"function": map[string]any{"name": "terminal", "arguments": args}}}}}
+	}
+	m.residentEvents = []residentEvent{call(`{"command":"ls","cwd":"~/projects/inventory"}`)}
+	if got := m.agentCwd(); got != "~/projects/inventory" {
+		t.Fatalf("the newest terminal call's cwd: %q", got)
+	}
+	m.residentEvents = append(m.residentEvents, call(`{"command":"cd tests && python3 -m unittest"}`))
+	if got := m.agentCwd(); got != "~/homes/resident/tests" {
+		t.Fatalf("a leading cd counts, from the default folder: %q", got)
+	}
+	foot := ansi.Strip(m.chatFoot(m.width))
+	if i, j := strings.Index(foot, "~/homes/resident/tests"), strings.Index(foot, "/"+"0"); i < 0 || (j >= 0 && j < i) {
+		t.Fatalf("the folder sits left of the context pill:\n%s", foot)
+	}
+}
+
+func TestAHostCommandStopsAtItsLimitEvenWithAChildRunning(t *testing.T) {
+	saved := hostRunLimit
+	hostRunLimit = time.Second
+	defer func() { hostRunLimit = saved }()
+	start := time.Now()
+	_, err := hostRun("sleep 30 & wait")
+	if err == nil || !strings.Contains(err.Error(), "timed out") || time.Since(start) > 6*time.Second {
+		t.Fatalf("a background child does not hold the result past the limit: %v after %s", err, time.Since(start))
+	}
+}
+
+func TestTheActivityLineSaysEscInterruptsWhileAReplyIsWritten(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 140, 40
+	m.resident.DaemonAlive = true
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}
+	m.chat.target = "original"
+	m.chat.live.active = false
+	if strings.Contains(ansi.Strip(m.activityLine(140)), "esc interrupts") {
+		t.Fatal("nothing to interrupt: no hint")
+	}
+	m.chat.live.active = true
+	if line := ansi.Strip(m.activityLine(140)); !strings.Contains(line, "esc interrupts") {
+		t.Fatalf("while a reply is written the activity line says Esc interrupts it: %q", line)
 	}
 }
 

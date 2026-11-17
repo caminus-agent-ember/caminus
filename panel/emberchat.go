@@ -43,6 +43,7 @@ type residentChat struct {
 	questionDeferred, questionError         string
 	picker                                  bool
 	pickerSel                               int
+	hostShell                               bool   // shell mode runs in your own shell on this machine (!!), not the agent's
 	pickerNew                               bool   // the switcher is asking for a new session's name
 	pickerName                              string // that name as typed
 	pickerDestroy                           string // the session x armed: a second x destroys it
@@ -216,10 +217,23 @@ func shellMark(info textarea.PromptInfo) string {
 	return ""
 }
 
+// hostShellMark is the host shell's prompt: "!!", run as you on this machine.
+func hostShellMark(info textarea.PromptInfo) string {
+	if info.LineNumber == 0 {
+		return "!! "
+	}
+	return ""
+}
+
 // setShell switches shell mode: the prompt, its colour and the placeholder say which mode the draft is in.
 func (m *emberModel) setShell(on bool) {
 	m.chat.shell = on
-	if on {
+	if !on {
+		m.chat.hostShell = false
+	}
+	if on && m.chat.hostShell {
+		m.chat.compose.SetPromptFunc(3, hostShellMark)
+	} else if on {
 		m.chat.compose.SetPromptFunc(2, shellMark)
 	} else {
 		m.chat.compose.SetPromptFunc(2, promptMark)
@@ -235,6 +249,9 @@ func (m *emberModel) chatStyles() {
 	s.Focused.Prompt, s.Blurred.Prompt = emberBusy, emberBusy
 	if m.chat.shell {
 		s.Focused.Prompt, s.Blurred.Prompt = emberShell, emberShell
+	}
+	if m.chat.hostShell {
+		s.Focused.Prompt, s.Blurred.Prompt = hostShellStyle(), hostShellStyle()
 	}
 	s.Focused.Placeholder, s.Blurred.Placeholder = emberDim, emberDim
 	// the editor's default cursor line has a grey background: the placeholder sat under a highlight bar
@@ -1364,8 +1381,12 @@ func (m emberModel) chatComposer() string {
 	}
 	box := composerBox(input, m.composerTitle(), max(18, m.width-2))
 	if m.chat.shell {
-		box = borderTitle(emberBorder.BorderForeground(cPurple).Padding(0, 1).Width(max(18, m.width-2)).Render(input),
-			m.composerTitle(), emberShell)
+		edge, st := cPurple, emberShell
+		if m.chat.hostShell { // your own shell, not the agent's: its own colour, so the two never look alike
+			edge, st = cOrange, hostShellStyle()
+		}
+		box = borderTitle(emberBorder.BorderForeground(edge).Padding(0, 1).Width(max(18, m.width-2)).Render(input),
+			m.composerTitle(), st)
 	}
 	// a message (delivered, queued, an error) sits on the frame for a few seconds instead of a line of its own under
 	// the status line, which appeared and went with every message
@@ -1377,6 +1398,8 @@ func (m emberModel) chatComposer() string {
 func (m emberModel) composerTitle() string {
 	title := "new goal"
 	switch {
+	case m.chat.hostShell:
+		title = "host shell · runs as you, on this machine"
 	case m.chat.shell:
 		title = "shell · runs as the agent"
 	case m.chat.sending:
@@ -1389,19 +1412,16 @@ func (m emberModel) composerTitle() string {
 			title = "continue goal " + shortGoal(m.chat.target)
 		}
 	}
-	if !m.chat.compose.Focused() && !m.chat.sending {
-		title += " · browsing"
-	}
 	return title
 }
 
 // composerHint is the composer's placeholder: what Enter does with the draft now.
 func (m emberModel) composerHint() string {
-	if m.chat.shell {
-		return "a command, run in the agent's account · Enter runs it · Backspace leaves"
+	if m.chat.hostShell {
+		return "a command, run as you in your own shell · Enter runs it · Backspace leaves"
 	}
-	if !m.chat.compose.Focused() {
-		return "browsing history · Enter returns to typing"
+	if m.chat.shell {
+		return "a command, run in the agent's account · ! again: your own shell · Enter runs it · Backspace leaves"
 	}
 	if m.chat.newGoal {
 		return "type a goal · Enter starts it · ! for shell mode · /help"
@@ -1568,10 +1588,10 @@ func helpLines() []string {
 		{"Enter", "send · Alt+Enter adds a line"},
 		{"↑ ↓", "your sent messages (an unread one is pulled back first)"},
 		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
-		{"Esc", "browse the history; while a reply is written, interrupt that turn"},
+		{"Esc", "while a reply is written, interrupt that turn"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
-		{"Shift+Tab, Ctrl+P", "sessions: a card per session"},
+		{"Shift+Tab", "sessions: a card per session"},
 		{"Ctrl+G", "goals"},
 		{"Ctrl+A", "approvals"},
 		{"Ctrl+R", "search what you sent"},
@@ -2153,8 +2173,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, interruptTurn(m, goal)
 			}
 		}
-		m.chat.compose.Blur()
-		return m, nil
+		return m, nil // (idle, Esc does nothing: the browse mode it opened is gone, PgUp/PgDn and the wheel scroll)
 	case "up", "down":
 		if next, done := m.slashMenuKey(k); done {
 			return next, nil
@@ -2180,83 +2199,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !m.chat.compose.Focused() {
-		// A pending root request is decided right here, through the Requests page's own handler (the same sudo
-		// run, claim, audit entry and answer files): a approves, d denies, e opens it in the Requests editor.
-		// Approving runs a root command, so it takes two presses: the first a arms it and shows the exact
-		// command, a second a within 10 s approves. Any other key disarms. Denying runs nothing and needs one.
-		armed := m.chat.armed
-		m.chat.armed = ""
-		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "g" || k == "d" || k == "e") {
-			r := m.reqs[i]
-			// A command you granted for this goal (checked against your own audit, not the agent's word) runs with
-			// one a; anything else, and every grant, takes two presses.
-			granted := k == "a" && grantRecorded(m.auditPath, r, time.Now())
-			if (k == "a" || k == "g") && !granted && (armed != k+":"+r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
-				m.chat.armed, m.chat.armedAt = k+":"+r.ID, time.Now()
-				what := "approve as root: "
-				if k == "g" {
-					what = "approve and grant for this goal (the same command then needs one a): "
-				}
-				m.msg = what + terminalText(r.Cmd, false) + " ? press " + k + " again (any other key cancels)"
-				if r.kind() == "github" {
-					m.chat.armed = ""
-					m.msg = "a hand-off runs once, as filed: a a runs it as you, d denies"
-					if k == "a" {
-						m.chat.armed = k + ":" + r.ID
-						m.msg = "run on GitHub as you: " + terminalText(r.Summary, false) + " ? press a again (any other key cancels)"
-					}
-				}
-				return m, nil
-			}
-			if r.kind() == "github" && (k == "g" || k == "e") {
-				return m, nil // a hand-off runs once, as filed
-			}
-			m.sel = i
-			return m.reqKeys(k) // e opens the edit prompt in the composer's slot
-		}
-		if armed != "" {
-			m.msg = "approval cancelled"
-		}
-		if roots := m.pendingRoots(); len(roots) > 1 && (k == "[" || k == "]") {
-			pos := 0
-			for n, i := range roots {
-				if i == m.pendingRoot() {
-					pos = n
-				}
-			}
-			if k == "[" {
-				pos = max(0, pos-1)
-			} else {
-				pos = min(len(roots)-1, pos+1)
-			}
-			m.chat.rootSel = m.reqs[roots[pos]].ID
-			m.msg = fmt.Sprintf("request %d of %d: %s", pos+1, len(roots), terminalText(m.reqs[roots[pos]].Cmd, false))
-			return m, nil
-		}
-		switch k {
-		case "enter", "t":
-			return m, m.chat.compose.Focus()
-		case "n":
-			m.chat.newGoal = true
-			m.chat.forceNew = true
-			m.chat.target = ""
-			return m, m.chat.compose.Focus()
-		case "q":
-			return m, tea.Quit
-		case "up", "k":
-			m.chat.transcript.ScrollUp(1)
-			return m, nil
-		case "down", "j":
-			m.chat.transcript.ScrollDown(1)
-			return m, nil
-		case "home":
-			m.chat.transcript.GotoTop()
-			return m, nil
-		case "end":
-			m.chat.transcript.GotoBottom()
-			return m, nil
-		}
-		return m, nil
+		// (no browse mode any more: a composer left unfocused takes the key back to typing)
+		return m, m.chat.compose.Focus()
 	}
 	if m.chat.sending {
 		return m, nil
@@ -2264,6 +2208,12 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Shell mode, as in Claude Code: "!" on an empty draft switches the composer to commands run in the agent's
 	// account (its files, its rights: what it sees), shown by a "!" prompt; Backspace on an empty line or Esc leaves.
 	if k == "!" && m.chat.compose.Value() == "" && !m.chat.shell {
+		m.setShell(true)
+		return m, nil
+	}
+	// "!" again on the empty agent shell: the host shell, your own account on this machine (!! as in a terminal)
+	if k == "!" && m.chat.compose.Value() == "" && m.chat.shell && !m.chat.hostShell {
+		m.chat.hostShell = true
 		m.setShell(true)
 		return m, nil
 	}
@@ -2276,8 +2226,13 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if cmd == "" {
 			return m, nil
 		}
+		host := m.chat.hostShell
 		m.chat.compose.Reset()
 		m.setShell(false)
+		if host {
+			m.msg = "running in your shell…"
+			return m, runHostBang(cmd)
+		}
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, cmd)
 	}
@@ -2424,7 +2379,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.goalSel = found[0]
 		m.chat.forceNew = false
 		m.targetSelectedGoal()
-	case "/start": // (the header asks for it when the loop is down; Ctrl+P stops and starts any session)
+	case "/start": // (the header asks for it when the loop is down; Shift+Tab stops and starts any session)
 		clear()
 		return m, residentAction(m, []string{strings.TrimPrefix(command, "/"), m.agentName, "--json"}, "")
 	case "/cancel":
@@ -2565,7 +2520,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/remember", "append TEXT to this session's memory"},
 	{"/resume", "resume the selected goal"},
 	{"/sessions", "every session as a card: switch with Enter or a click"},
-	{"/start", "run this session's loop (stop and start any session from Shift+Tab or Ctrl+P)"},
+	{"/start", "run this session's loop (stop and start any session from Shift+Tab)"},
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/theme", "the theme screen: preview and pick (or /theme NAME)"},
 	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
@@ -2901,7 +2856,7 @@ func (m emberModel) chatFoot(w int) string {
 	}
 	// The status line: brain, context, speed and queue, then the keys that matter now (shell.go). Everything that is
 	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
-	keys := []string{"esc browse", "^P sessions", "/help"}
+	keys := []string{"⇧Tab sessions", "/help"} // (Ctrl+P still opens it; Shift+Tab is the one shown)
 	if m.chat.seq < m.resident.LastEvent {
 		keys = append([]string{"loading history"}, keys...)
 	}
@@ -2928,7 +2883,7 @@ func (m emberModel) chatFoot(w int) string {
 	if ag := m.activeGoal(); ag != nil && m.compactingNote(ag.ID) != "" {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
-	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
+	statusBar := statusLine(status{brain: residentText(m.resident.Model), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
 		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip

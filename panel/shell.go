@@ -249,16 +249,13 @@ func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	if kind == "question" {
 		title = "? QUESTION"
 	}
-	keys := emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" approve  ") + emberWarn.Render("g g") +
-		emberDim.Render(" grant for the goal  ") + emberWarn.Render("e") +
-		emberDim.Render(" edit  ") + emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
-		emberDim.Render(" says what to do instead")
+	keys := emberWarn.Render("Ctrl+A") + emberDim.Render(" decides it (approve, grant for the goal, edit, deny)  ·  ") +
+		emberWarn.Render("/deny TEXT") + emberDim.Render(" says what to do instead")
 	if kind == "github" {
 		// a hand-off runs once, as filed, with the owner's gh: no grant, no edit
 		title = "⇡ GITHUB"
-		keys = emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" run it as you  ") +
-			emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
-			emberDim.Render(" says what to do instead")
+		keys = emberWarn.Render("Ctrl+A") + emberDim.Render(" decides it (run it as you, deny)  ·  ") +
+			emberWarn.Render("/deny TEXT") + emberDim.Render(" says what to do instead")
 	}
 	if !inline {
 		keys = emberDim.Render("decide in ") + emberWarn.Render("/approvals")
@@ -380,6 +377,7 @@ func labBadge(model string) string {
 // powerline pills; elsewhere they are joined by a dot.
 type status struct {
 	brain        string
+	cwd          string // the folder the agent works in, left of the context pill; empty hides it
 	used, window int
 	compact      float64 // the compaction threshold as a fraction of the window; the bar warms toward it
 	usd          float64 // this goal's spend; negative hides the segment (an unpriced brain)
@@ -413,8 +411,13 @@ func statusLine(s status, w int) string {
 	bar := barSt.Render(strings.Repeat(g.bar, full)) + emberDim.Render(strings.Repeat(g.barEmpty, cells-full))
 	segs := []string{
 		strings.TrimSpace(labBadge(s.brain) + " " + s.brain),
-		emberDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
 	}
+	if s.cwd != "" {
+		segs = append(segs, emberCode.Render(clipPath(s.cwd, max(12, w/5))))
+	}
+	segs = append(segs,
+		emberDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window)))+bar,
+	)
 	if s.usd >= 0 {
 		seg := strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd))
 		if s.usdDay > 0 {
