@@ -48,7 +48,7 @@ from .. import config as _config
 DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
 DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, draft=None, host='127.0.0.1',
-                port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, kv_host=False,
+                port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, cache_keep_per_root=None, kv_host=False,
                 kv=None,
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
@@ -147,7 +147,10 @@ def parser():
     ap.add_argument('--chunk', type=int, help='the batched prefill\'s chunk (tokens)')
     ap.add_argument('--cache-dir', help='the prompt cache\'s disk tier (default ~/.cache/caminus/kv)')
     ap.add_argument('--no-disk-cache', action='store_true', default=None, help='no disk tier (VRAM checkpoints only)')
-    ap.add_argument('--cache-cap-gb', type=float, help='the disk tier\'s size cap in GB (default 30; 64 in the long-context mode)')
+    ap.add_argument('--cache-cap-gb', type=float, help='the disk tier\'s size cap in GB over the whole cache folder, every model\'s '
+                    'store included (default 64, also in the long-context mode; at most a quarter of the disk)')
+    ap.add_argument('--cache-keep-per-root', type=int, help='park entries kept per conversation root, the most recently used '
+                    '(default 3; 0 = no limit)')
     ap.add_argument('--kv', choices=('f16', 'q8'), default=None, help='the KV cache format: f16 (the default) or q8 (8-bit '
                     'Q8_0 rows: about half the memory per position; qwen3-30b-a3b on one card or two). Every other model keeps '
                     'its own cache (the dense 27B models F16, the Coder its own 8-bit rows) and refuses q8')
@@ -246,7 +249,9 @@ def build_engine(opt, stats, log=print):
         raise SystemExit(EXIT_BROKEN)
     disk = not opt['no_disk_cache']
     pc = PC.PromptCache(m, pf, dr, cache_dir=opt['cache_dir'] if disk else None, disk=disk,
-                        cap_gb=float(opt['cache_cap_gb']) if opt.get('cache_cap_gb') else PC.DEFAULT_CAP_GB)
+                        cap_gb=float(opt['cache_cap_gb']) if opt.get('cache_cap_gb') else PC.DEFAULT_CAP_GB,
+                        keep_per_root=(PC.DEFAULT_KEEP_PER_ROOT if opt.get('cache_keep_per_root') is None
+                                       else int(opt['cache_keep_per_root'])))
     sess = K3Session(m, pf, dr, pc, stats=stats, idle_s=(float(opt['idle_park_s']) or None), side_route=not opt['no_side_route'],
                      eos_ids=opt.get('eos_ids') or (248046, 248044))
     log(f'caminus serve: engine built in {time.time() - t0:.1f} s: max_ctx {m.max_ctx} (usable {sess.max_ctx}), kv {kv["format"]}, qsa {m.qsa}, '

@@ -84,7 +84,7 @@ conversation to disk, then exits. Ctrl-C ends only the guard and leaves the serv
 |---|---|
 | `caminus doctor` | Checks your machine; `--gpu` also runs a tiny test on each card under the guard. |
 | `caminus purge` | Lists the prompt cache and the request log on disk; `--yes` deletes them. |
-| `caminus kv-cache list` / `purge` | The prompt cache on disk only. |
+| `caminus kv-cache list` / `prune` / `purge` | The prompt cache on disk: every model's store with each entry's size, age and last use (beside a running server too); prune by age (`--older-than-days`), parks per conversation (`--keep-per-root N`) or size (`--max-gb G`), skipping a running server's store (`--dry-run` first). |
 | `caminus flight list` / `purge` / `bundle` | The request log: one line per request (never the text) and replay files. |
 | `caminus replay BUNDLE` | Reruns a saved request exactly, for a bug report. |
 | `caminus guard LOG SECS CMD...` | Runs any command under the guard. `caminus guard --lines` prints each card's memory limit. |

@@ -2858,6 +2858,118 @@ def stage_dflash35(cache_dir, small):
     NUMBERS['dflash35'] = dict(rounds=len(rounds), gen=gen_acc, plain=gen_plain)
 
 
+def stage_parkcap(cache_dir):
+    """#173: the cap over the whole cache folder, eviction across stores (never a running server's, never the live slot's),
+    making room before a refusal, the per-root limit, and `caminus kv-cache list / prune`. CPU only."""
+    import contextlib, io, shutil
+    from caminus.cache import prompt as pc
+    from caminus.cmd import kv_cache
+    top = os.path.join(cache_dir, 'parkcap'); shutil.rmtree(top, ignore_errors=True); os.makedirs(top, mode=0o700)
+    clk = [2_000_000.0]
+    stg = lambda: pc.Staging(piece=1 << 20, nbuf=2, pin=False)
+    MB = 1_000_000
+    def store(sub, cap_mb=100, protect=None, keep=3, min_free=0):
+        return pc.DiskStore(os.path.join(top, sub), cap_gb=cap_mb / 1000, retention_days=365, min_free_gb=min_free,
+                            clock=lambda: clk[0], staging=stg(), protect=protect, budget_root=top, keep_per_root=keep, disk_share=0)
+    def put(st, nm, mb, key='K', root='R', kind='park'):
+        clk[0] += 10
+        return st.write(nm, dict(kind=kind, key_sha=key, root_sha=root, n=0), [('a', [np.zeros(mb * MB, dtype=np.uint8)])])
+    # a store whose server is not running (written, then closed: its lock is free)
+    b = store('b'); put(b, 'b-old.ckv', 30); put(b, 'b-new.ckv', 30); b.close()
+    # a store whose server IS running (kept open: its lock is held)
+    c = store('c'); put(c, 'c-held.ckv', 20)
+    a = store('a', protect=lambda: {'a-live.ckv'})
+    put(a, 'a-live.ckv', 10)                     # the oldest of a's, but the live slot reads it
+    clk[0] += 1000
+    h = put(a, 'a-1.ckv', 30)                    # 30 + 30 + 20 + 10 + 30 = 120 MB > 100: evict the oldest evictable: b-old
+    ev = [(w, n) for w, n, _ in a.events if w == 'lru']
+    left_b = sorted(x for x in os.listdir(os.path.join(top, 'b')) if x.endswith('.ckv'))
+    check(h is not None and ev == [('lru', os.path.join('b', 'b-old.ckv'))] and left_b == ['b-new.ckv']
+          and os.path.exists(os.path.join(top, 'c', 'c-held.ckv')) and 'a-live.ckv' in a.index and a.tree_bytes() <= a.cap,
+          f'park cap: one cap over the cache folder; the oldest evictable entry went first, from a store whose server is not '
+          f'running ({ev}); a running server\'s store and the live slot\'s entry kept; {a.tree_bytes() / MB:.0f} MB <= {a.cap / MB:.0f}')
+    h2 = put(a, 'a-2.ckv', 40)                   # needs 40 more: b-new (30) then a-1 (30), never c-held or a-live
+    ev2 = [n for w, n, _ in a.events if w == 'lru'][1:]
+    check(h2 is not None and ev2 == [os.path.join('b', 'b-new.ckv'), 'a-1.ckv'] and 'a-live.ckv' in a.index
+          and os.path.exists(os.path.join(top, 'c', 'c-held.ckv')),
+          f'park cap: eviction keeps going oldest first across stores ({ev2}), still sparing the running store and the live slot')
+    # making room below the free-space floor: evict when it helps, and evict nothing when even all of it would not
+    # (the free space is injected: a live disk's other writers made the 5 MB shortfall below flaky)
+    from types import SimpleNamespace as _NS
+    free = 10**12
+    a.statvfs = lambda p: _NS(f_bavail=free, f_frsize=1, f_blocks=4 * free)
+    a.cap = 10**15
+    a.min_free = free - 25 * MB                  # a 30 MB entry leaves ~5 MB short of the floor: a-2 (40) is evictable
+    n_before = len(a.index)
+    h3 = put(a, 'a-3.ckv', 30)
+    room = [n for w, n, _ in a.events if w == 'room']
+    check(h3 is not None and room == ['a-2.ckv'] and 'a-live.ckv' in a.index,
+          f'park cap: below the free-space floor the oldest evictable entry is evicted before refusing ({room})')
+    a.min_free = free + 10**12                   # nothing evictable could make this room
+    kept = sorted(a.index)
+    h4 = put(a, 'a-4.ckv', 1)
+    check(h4 is None and sorted(a.index) == kept and any(w == 'refused-write' for w, *_ in a.events[-1:]),
+          'park cap: when evicting everything would still not make room, nothing is evicted and the write is refused')
+    a.min_free = 0; a.cap = 10**15
+    # the cap path too evicts nothing when evicting everything that may go would not make the entry fit
+    with a._evictable() as cands: ev = sum(c[1] for c in cands)
+    a.cap = a.tree_bytes() - ev + 1 * MB
+    kept = sorted(a.index)
+    h5 = put(a, 'a-5.ckv', 5)
+    check(h5 is None and sorted(a.index) == kept and 'cap even after evicting' in a.events[-1][2],
+          f'park cap: a park that cannot fit even after evicting everything that may go is refused, nothing evicted ({a.events[-1]})')
+    a.cap = 10**15
+    # the per-root limit: 3 most recently used parks of one root; the live slot's counts and stays
+    for i in range(5): put(a, f'r{i}.ckv', 1, root='ROOT2')
+    put(a, 'other-root.ckv', 1, root='ROOT3')
+    a.protect = lambda: {'a-live.ckv', 'r0.ckv'}
+    gone = a.limit_roots('K', 'ROOT2', 'r4.ckv')
+    left = sorted(n for n in a.index if n.startswith('r'))
+    check(sorted(gone) == ['r1.ckv', 'r2.ckv'] and left == ['r0.ckv', 'r3.ckv', 'r4.ckv'] and 'other-root.ckv' in a.index,
+          f'per-root limit: 3 parks of a root kept, the live slot\'s among them (removed {gone}); another root untouched')
+    # the root tells chats apart: a harness's chats share a long system prompt (review note: 4,096 tokens of it would
+    # have merged every chat into one root, keeping only its 3 newest parks)
+    from types import SimpleNamespace as NS
+    system = list(range(1000, 7000))                       # a 6,000-token system + tools block, the same for every chat
+    chat_a, chat_b = system + [1] * 2000, system + [2] * 2000
+    ra = pc.PromptCache._root_sha(NS(main_root=len(system), log=chat_a, ckpts=[]))
+    rb = pc.PromptCache._root_sha(NS(main_root=len(system), log=chat_b, ckpts=[]))
+    ra_later = pc.PromptCache._root_sha(NS(main_root=len(system), log=chat_a + [9] * 50000, ckpts=[]))
+    none = pc.PromptCache._root_sha(NS(main_root=None, log=chat_a, ckpts=[]))
+    check(ra and rb and ra != rb and ra == ra_later and none is None and a.limit_roots('K', None) == [],
+          'per-root limit: two chats with the same long system prompt are two roots; one chat keeps its root as it grows; '
+          'without a root mark there is no root and nothing is grouped')
+    # caminus kv-cache list / prune
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out): kv_cache.main(['list', '--dir', top])
+    lst = out.getvalue()
+    check('c  (in use by a running server)' in lst and 'r4.ckv' in lst and 'age' in lst and 'last used' in lst,
+          f'kv-cache list: every store, the running one marked, each entry with age and last use:\n{lst[:400]}')
+    a.close()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out): kv_cache.main(['prune', '--dir', top, '--keep-per-root', '1', '--dry-run'])
+    dry = out.getvalue()
+    still = sorted(x for x in os.listdir(os.path.join(top, 'a')) if x.endswith('.ckv'))
+    check('would remove' in dry and 'skipped c' in dry and 'r0.ckv' in still, f'kv-cache prune --dry-run removes nothing:\n{dry[:300]}')
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out): kv_cache.main(['prune', '--dir', top, '--keep-per-root', '1'])
+    left_roots = sorted(x for x in os.listdir(os.path.join(top, 'a')) if x.startswith('r'))
+    check(left_roots == ['r4.ckv'] and os.path.exists(os.path.join(top, 'c', 'c-held.ckv')),
+          f'kv-cache prune --keep-per-root 1: the newest park of the root left ({left_roots}); the running store skipped')
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out): kv_cache.main(['prune', '--dir', top, '--keep-per-root', '0', '--dry-run'])
+    check('would free 0.00 GB in 0 entries' in out.getvalue(), f'kv-cache prune --keep-per-root 0 means no limit:\n{out.getvalue()[:300]}')
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out): kv_cache.main(['prune', '--dir', top, '--max-gb', '0.025'])
+    held_b = os.path.getsize(os.path.join(top, 'c', 'c-held.ckv'))
+    free_left = sum(os.path.getsize(os.path.join(dp, x)) for dp, _, fs in os.walk(top) if os.path.basename(dp) != 'c'
+                    for x in fs if x.endswith('.ckv'))
+    check(held_b + free_left <= 25e6 or free_left == 0,
+          f'kv-cache prune --max-gb: the folder fits 25 MB (or every entry outside the running store is gone; '
+          f'{(held_b + free_left) / MB:.1f} MB left):\n{out.getvalue()[:300]}')
+    c.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('args', nargs='+', help='[CODER] STAGE...')
@@ -2872,11 +2984,13 @@ def main():
     FAKE_CARDS, FAKE_T = a.cards, a.t
     stages = [s for s in a.args if not s.endswith('.gguf')]
     cache_dir = safe_dir(a.cache_dir); os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    if 'cpu' in stages or 'parkcap' in stages:
+        stage_parkcap(cache_dir)
     if 'cpu' in stages:
         stage_cpu(cache_dir)
         stage_mtp35(cache_dir, a.small)
         stage_dflash35(cache_dir, a.small)
-    gpu = [s_ for s_ in stages if s_ != 'cpu']
+    gpu = [s_ for s_ in stages if s_ not in ('cpu', 'parkcap')]
     if gpu:
         import torch
         coder = next((x for x in a.args if x.endswith('.gguf')), None)

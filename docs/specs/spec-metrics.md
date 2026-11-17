@@ -190,7 +190,7 @@ A pass counts in the class it started in.
 | `caminus:cache_vram_tier_mib` | gauge | MiB | the tier's VRAM (`pc.tier_mib`) |
 | `caminus:cache_vram_headroom_mib` | gauge | MiB | the headroom the tier was sized from (`pc.headroom`) |
 | `caminus:cache_disk_bytes` | gauge | bytes | `pc.store.total_bytes()` |
-| `caminus:cache_disk_cap_bytes` | gauge | bytes | `pc.store.cap` (30 GB default) |
+| `caminus:cache_disk_cap_bytes` | gauge | bytes | `pc.store.cap` (64 GB default, the whole cache folder) |
 | `caminus:cache_events_total{event}` | counter | | the prompt cache's own counters: `checkpoints`, `evicted`, `spilled`, `parked`, `unparked`, `park_failed`, `refused`, `side_requests`, `side_ends`, `main_lost`, `external_reset` |
 | `caminus:cache_route_total{route,reason}` | counter | requests | side-slot routing (section 13): `route="side"` `reason="unrelated"`; `route="main"` with `reason` `match`, `no_main`, `no_fit`, `main_shorter`, `parked`, `off` |
 | `caminus:cache_side_active` | gauge | | 1 while a side call holds the engine (the main line waits in the side slot), else 0; absent until the engine reports it |
@@ -427,7 +427,7 @@ tool calls, reasoning vs answer tokens, loops, finish reasons.
 - **The batched prefill:** every prompt pass but the last when the new tokens reach T* 48. It runs at 2,900 tok/s and
   is followed by a 2 ms hand-off.
 - **Restores by source:** VRAM 0.6 ms, disk 260 ms.
-- **Cache tier sizes:** 160 MiB per checkpoint and a 30 GB disk cap.
+- **Cache tier sizes:** 160 MiB per checkpoint and a 64 GB disk cap over the cache folder.
 - **Bails:** an optional recovered bail every N passes.
 
 **The stand-in disk tier.** `disk_slots` > 0 enables a second checkpoint tier: a checkpoint the VRAM LRU drops is
