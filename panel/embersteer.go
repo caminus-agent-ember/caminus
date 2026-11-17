@@ -129,7 +129,7 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 		if err := residentJSON(m, append(args, "--json"), &out); err != nil {
 			text := err.Error()
 			if strings.Contains(text, "no advisor") {
-				text = "no advisor set up: /advisor setup picks one"
+				text = "no advisor set up: caminus ember agent advisor " + m.agentName + " picks one"
 			}
 			return residentActionMsg{"advisor: " + terminalText(text, false)}
 		}
@@ -195,19 +195,6 @@ func fetchDiff(m emberModel, goal string) tea.Cmd {
 			lines[i] = residentText(l)
 		}
 		return textViewMsg{title: "diff", lines: lines, diff: true}
-	}
-}
-
-func exportGoal(m emberModel, goal string) tea.Cmd {
-	return func() tea.Msg {
-		var out struct {
-			Path  string `json:"path"`
-			Bytes int    `json:"bytes"`
-		}
-		if err := residentJSON(m, []string{"export", m.agentName, goal, "--json"}, &out); err != nil {
-			return residentActionMsg{"export: " + err.Error()}
-		}
-		return residentActionMsg{fmt.Sprintf("exported to %s (%d bytes, in the agent's account)", out.Path, out.Bytes)}
 	}
 }
 
@@ -447,10 +434,10 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 	switch command {
 	case "/advisor":
 		// a review now: the advisor reads the goal and its advice reaches the agent with its current reply dropped, so
-		// it reads the advice before its next step. /advisor setup is the settings screen (model, budget, off).
-		if strings.TrimSpace(arg) == "setup" {
-			next, cmd := m.openAdvisor()
-			return next, cmd, true
+		// it reads the advice before its next step (its settings: caminus ember agent advisor NAME).
+		if strings.TrimSpace(arg) == "setup" { // (the settings screen left the TUI: never a paid review about "setup")
+			m.msg = "the advisor's settings are in the CLI: caminus ember agent advisor " + m.agentName
+			return m, nil, true
 		}
 		if !need() {
 			return m, nil, true
@@ -470,11 +457,6 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 	case "/diff":
 		m.msg = "reading the changes…"
 		return m, fetchDiff(m, goal), true
-	case "/export":
-		if !need() {
-			return m, nil, true
-		}
-		return m, exportGoal(m, goal), true
 	case "/rewind":
 		if !need() {
 			return m, nil, true
