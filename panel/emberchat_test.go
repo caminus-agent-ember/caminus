@@ -1213,13 +1213,15 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 			"name": "search", "arguments": `{"pattern":"len","glob":"*.c"}`}}}}},
 		{Seq: 5, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "search", "call_id": "s1", "result": map[string]any{
 			"path": ".", "matches": float64(1), "files": float64(1), "searched": float64(3), "text": "src/parse.c\n     2:      if (n >= len) return -1;"}}},
+		{Seq: 6, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
+			"path": "plots/loss.png", "image": map[string]any{"format": "png", "width": float64(640), "height": float64(480)}}}},
 	}
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
 	// the file's line numbers from the hunk header, the marker, then the code (highlighted, so compare it stripped)
 	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "   1   int f(void) {", "   2 -     if (n > len) return -1;",
-		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40 of 90", "search  “len” in *.c  ·  1 match in 1 file"} {
+		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40 of 90", "search  “len” in *.c  ·  1 match in 1 file", "read  plots/loss.png  ·  image 640x480"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}

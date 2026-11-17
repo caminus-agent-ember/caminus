@@ -1364,12 +1364,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
-			shown, _ := result["shown"].(string)
-			meta := "lines " + shown
-			if dir, _ := result["directory"].(bool); dir {
-				meta = "directory"
-			}
-			return toolCard("read", residentText(path), meta, true, false, nil, w)
+			return toolCard("read", residentText(path), readMeta(result), true, false, nil, w)
+		}
+		if str("name") == "search" && result["error"] == nil {
+			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
+			text, _ := result["text"].(string)
+			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
 		}
 		if str("name") == "search" && result["error"] == nil {
 			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)

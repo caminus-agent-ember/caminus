@@ -44,6 +44,21 @@ def call(name,args):
     return dict(role='assistant',content='',tool_calls=[dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name=name,arguments=json.dumps(args)))])
 
 
+def png(w,h):
+    """a real (black) PNG of w x h"""
+    import zlib
+    chunk=lambda kind,data:len(data).to_bytes(4,'big')+kind+data+zlib.crc32(kind+data).to_bytes(4,'big')
+    return (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',w.to_bytes(4,'big')+h.to_bytes(4,'big')+b'\x08\x02\x00\x00\x00')
+            +chunk(b'IDAT',zlib.compress((b'\x00'+b'\x00'*3*w)*h))+chunk(b'IEND',b''))
+
+
+def image_msg(path,call_id='t1'):
+    """a stored tool message for a read of the image at path, as store.action_result writes it"""
+    from caminus.ember.resident import files
+    r=files.read('/',str(path))
+    return dict(role='tool',tool_call_id=call_id,content=json.dumps(r),image=dict(r['image'],path=r['path']))
+
+
 def pdf(*runs):
     """a small valid PDF: one page, one Flate content stream showing each run (bytes) with Tj on its own line"""
     import zlib
@@ -67,10 +82,12 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
     def do_GET(self):
         if self.path.startswith('/web/'):self.web();return
-        # a test that sets models[key] / props[key] gets that model list (effort ids included) and /props; else n_ctx
+        # a test that sets models[key] / props[key] gets that model list (a list of ids, effort ids included, or a dict
+        # sent as it is: a provider's own list shape) and /props; else n_ctx
         key=self.path.split('/')[1];self.gets.append(self.path)
-        if self.path.endswith('/v1/models') and key in self.models:
-            self.respond(dict(object='list',data=[dict(id=i,object='model',owned_by='k3') for i in self.models[key]]));return
+        if '/models' in self.path and key in self.models:
+            m=self.models[key]
+            self.respond(m if isinstance(m,dict) else dict(object='list',data=[dict(id=i,object='model',owned_by='k3') for i in m]));return
         if self.path.endswith('/props') and key in self.props:
             self.respond(self.props[key]);return
         if self.path.endswith('/caminus/status') and key in self.status:
@@ -579,6 +596,116 @@ class Resident(unittest.TestCase):
         p=home/'win.txt';p.write_bytes(b'one\r\ntwo\r\n');p.chmod(0o640)
         files.edit(home,'win.txt','one\ntwo','uno\ndos')
         self.assertEqual(p.read_bytes(),b'uno\r\ndos\r\n');self.assertEqual(p.stat().st_mode&0o777,0o640)
+
+    def test_read_knows_an_image_by_its_header_and_refuses_one_past_the_caps(self):
+        from caminus.ember.resident import files
+        import hashlib
+        le=lambda n,k:n.to_bytes(k,'little');be=lambda n,k:n.to_bytes(k,'big')
+        heads={
+            'png':png(7,5),
+            'gif':b'GIF89a'+le(7,2)+le(5,2)+b'\x00\x00\x00;',
+            # an APP0 segment first, as in every JFIF file: the frame header is found past it
+            'jpeg':b'\xff\xd8\xff\xe0'+be(16,2)+b'JFIF\x00'+b'\x00'*9+b'\xff\xc0'+be(17,2)+b'\x08'+be(5,2)+be(7,2)+b'\x03'+b'\x00'*9+b'\xff\xd9',
+            'webp-vp8':b'RIFF'+le(30,4)+b'WEBP'+b'VP8 '+le(18,4)+b'\x00\x00\x00\x9d\x01\x2a'+le(7,2)+le(5,2),
+            'webp-vp8l':b'RIFF'+le(30,4)+b'WEBP'+b'VP8L'+le(5,4)+b'\x2f'+le(6|(4<<14),4),
+            'webp-vp8x':b'RIFF'+le(30,4)+b'WEBP'+b'VP8X'+le(10,4)+b'\x00'*4+le(6,3)+le(4,3),
+        }
+        for name,data in heads.items():
+            (self.home/name).write_bytes(data)
+            r=files.read(self.home,name)
+            self.assertEqual((r['image']['format'],r['image']['width'],r['image']['height']),(name.split('-')[0],7,5),name)
+            self.assertEqual(r['image']['sha256'],hashlib.sha256(data).hexdigest(),'the transport sends the file only while it matches')
+            self.assertNotIn('text',r)
+        self.assertIsNone(files.image_info(b'plain text'),'a text file is not an image')
+        (self.home/'bad.png').write_bytes(b'\x89PNG\r\n\x1a\n'+b'\x00'*8)
+        with self.assertRaises(ValueError) as c:files.read(self.home,'bad.png')
+        self.assertIn('IHDR',str(c.exception))
+        (self.home/'bad.jpg').write_bytes(b'\xff\xd8\xff\xda'+b'\x00'*20)
+        with self.assertRaises(ValueError):files.read(self.home,'bad.jpg')
+        # past the caps: the size and format, no sha256 (nothing is sent), and how to make it fit
+        (self.home/'wide.png').write_bytes(png(files.IMAGE_MAX_SIDE+1,1))
+        (self.home/'heavy.gif').write_bytes(heads['gif']+b'\x00'*files.IMAGE_MAX_BYTES)
+        for name in ('wide.png','heavy.gif'):
+            r=files.read(self.home,name)
+            self.assertNotIn('sha256',r['image'],name);self.assertIn('no image is sent',r['note']);self.assertIn('smaller copy',r['note'])
+
+    def test_an_image_read_reaches_a_brain_that_sees_as_an_image_and_one_that_cannot_as_a_line(self):
+        import base64
+        data=png(4,3);(self.home/'plot.png').write_bytes(data)
+        conf=json.loads((self.home/'config.json').read_text());conf['vision']=True
+        (self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.seen.clear()
+        self.replies(call('read',dict(path='plot.png')),dict(role='assistant',content='A black 4x3 image.'))
+        self.assertEqual(self.cmd('once',['--goal','Look at plot.png.'])['state'],'completed')
+        sent=[b for k,b in Endpoint.seen if k==self.key][1]['messages']
+        i=next(n for n,m in enumerate(sent) if m['role']=='tool')
+        self.assertNotIn('image',sent[i],'the stored marker never reaches the provider')
+        self.assertEqual(sent[i+1]['role'],'user','the image follows its tool result')
+        self.assertEqual(sent[i+1]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+base64.b64encode(data).decode())))
+        result=next(e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result')
+        self.assertEqual((result['image']['width'],result['image']['height']),(4,3),'the card reads the size from the event')
+        self.assertNotIn(base64.b64encode(data).decode()[:40],(self.home/'agent.sqlite3').read_bytes().decode('latin-1'),
+                         'the store keeps no image bytes')
+        # the same read on a brain without vision: the result says so plainly, and no image goes out
+        conf['vision']=False;(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.seen.clear()
+        self.replies(call('read',dict(path='plot.png')),dict(role='assistant',content='I cannot see it.'))
+        self.cmd('once',['--goal','Look at plot.png again.'])
+        sent=[b for k,b in Endpoint.seen if k==self.key][1]['messages']
+        tool=next(m for m in sent if m['role']=='tool')
+        self.assertIn("this model can't see images; plot.png is a 4x3 PNG; describe-by-tool options",tool['content'])
+        self.assertNotIn('image_url',json.dumps(sent))
+        # only read's own result names an image to send: another tool's 'image' and 'path' are just its data
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('x')
+            rt.store.model_reply(gid,call('mcp__pics__get',{}))
+            rt.store.action_result(rt.store.actions(gid)[0],dict(path=str(self.home/'plot.png'),image=dict(width=4,height=3)))
+            self.assertNotIn('image',rt.store.goal(gid)['messages'][-1])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_finish_judge_sees_the_images_the_agent_read_or_takes_its_account_of_them(self):
+        # a live Haiku run read a code off a picture, and a judge that was never shown the picture refused the correct
+        # finish twice (the agent went on to install an OCR model)
+        import base64
+        self.gates_on()
+        data=png(5,2);(self.home/'code.png').write_bytes(data)
+        def judged(vision):
+            conf=json.loads((self.home/'config.json').read_text());conf['vision']=vision
+            (self.home/'config.json').write_text(json.dumps(conf))
+            Endpoint.judge_seen.clear()
+            self.replies(call('define_done',dict(check='I have read the code in code.png')),
+                         call('read',dict(path='code.png')),
+                         call('verify',dict(evidence='the image shows the code 4711')),
+                         call('finish',dict(summary='The code in code.png is 4711.')))
+            goal=self.cmd('once',['--goal','What code is in code.png?']);self.assertEqual(goal['state'],'completed')
+            return [b for k,b in Endpoint.judge_seen if k==self.key][0]['messages'],goal['id']
+        from caminus.ember.resident import judge
+        sent,gid=judged(True)
+        self.assertIn('IMAGES THE AGENT SAW (its model can see; each follows this brief, as the agent saw it)',sent[1]['content'])
+        self.assertEqual(sent[2]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+base64.b64encode(data).decode())))
+        # the agent saw it and the judge can't (the advisor as judge): the agent's account is an observation
+        rt=Runtime(self.home)
+        try:
+            self.assertTrue(judge.viewed(rt,gid)[0]['seen'],'read on a brain with vision marks the image seen')
+            brief=judge.evidence(rt,gid,'The code is 4711.','',sees=False)
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('IMAGES THE AGENT SAW (its model can see; you cannot see them here)',brief)
+        self.assertIn('is an observation, as a command',brief);self.assertNotIn('COULD NOT SEE',brief)
+        # a blind agent and a blind judge (one local brain): what the agent says the picture shows is no observation
+        sent,gid=judged(False)
+        self.assertNotIn('image_url',json.dumps(sent))
+        brief=sent[1]['content']
+        self.assertIn('IMAGES THE AGENT READ BUT COULD NOT SEE',brief);self.assertIn('code.png (5x2 PNG)',brief)
+        self.assertIn('is not an observation',brief);self.assertNotIn('IMAGES THE AGENT SAW',brief)
+        self.assertNotIn('is an observation, as a command',brief)
+        self.assertNotIn("can't see images",json.dumps(sent),'the judge gets the judge\'s note, not the agent\'s')
+        # a judge that can see is not handed an image the agent never saw as its own observation
+        rt=Runtime(self.home)
+        try:
+            self.assertNotIn('seen',judge.viewed(rt,gid)[0])
+            self.assertIn('COULD NOT SEE',judge.evidence(rt,gid,'The code is 4711.','',sees=True))
+        finally:rt.mail.close();rt.store.close()
 
     def test_file_tools_through_the_loop(self):
         self.replies(call('write',dict(path='notes.txt',content='alpha\nbeta\n')),
@@ -2397,6 +2524,36 @@ for line in sys.stdin:
         cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:9')   # (init asks a local server: none listens on 9)
         self.assertEqual(cfg['endpoint'],'http://127.0.0.1:9/v1');self.assertNotIn('api',cfg)
 
+    def test_init_and_create_take_vision_from_the_catalog(self):
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        def init(name,*extra):
+            argv=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init',name,'--home',str(self.home/name),'--json',
+                  '--bus',str(self.home/'mail.sqlite3'),'--bridge',str(self.bridge),'--endpoint',url,*extra]
+            p=subprocess.run(argv,capture_output=True,text=True,timeout=15);self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+            return json.loads((self.home/name/'config.json').read_text())
+        # the owner's Anthropic relay: the Messages API list's image_input
+        Endpoint.models[self.key]=dict(data=[dict(id='claude-sees',capabilities=dict(image_input=dict(supported=True))),
+                                             dict(id='claude-blind',capabilities=dict(image_input=dict(supported=False)))])
+        anthropic=('--api','anthropic','--context','200000')
+        self.assertTrue(init('a','--model','claude-sees',*anthropic)['vision'])
+        self.assertNotIn('vision',init('b','--model','claude-blind',*anthropic))
+        # an OpenAI-compatible relay: the list's shape names the provider (DeepInfra's tags here)
+        Endpoint.models[self.key]=dict(data=[dict(id='Qwen/VL',metadata=dict(tags=['chat','vision','vlm'])),
+                                             dict(id='GLM',metadata=dict(tags=['chat']))])
+        self.assertTrue(init('c','--model','Qwen/VL')['vision'])
+        self.assertNotIn('vision',init('d','--model','GLM'))
+        self.assertNotIn('vision',init('e','--model','gone'),'a model the list does not name: unknown is no')
+        # a new session on a local model: the sibling's catalog says whether it sees (nothing is asked)
+        (self.home/'models.json').write_text(json.dumps(dict(models=[dict(id='qwen-vl',provider='local',vision=True),
+                                                                     dict(id='swift-1.5',provider='local',vision=False)])))
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','create']
+        for model,sees in (('qwen-vl',True),('swift-1.5',False)):
+            new='s-'+uuid.uuid4().hex[:8]
+            made=subprocess.run(base+[new,'--from',self.home.name,'--model',model,'--endpoint','http://127.0.0.1:9/v1',
+                                      '--home',str(self.home.parent/new),'--json'],capture_output=True,text=True,timeout=15)
+            self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+            self.assertEqual(json.loads((self.home.parent/new/'config.json').read_text()).get('vision',False),sees,model)
+
     # ---- free time ------------------------------------------------------------------------------------------
 
     def free_runtime(self,model=None,**cfg):
@@ -2695,6 +2852,9 @@ for line in sys.stdin:
                  metadata=dict(description='x',tags=['embed'],pricing=dict(input_tokens=0.01)))]),
         'http://127.0.0.1:8092/v1/models': dict(data=[dict(id='k3-coder')]),
         'http://127.0.0.1:8092/props': dict(n_ctx=1048576),
+        # a llama-server with a vision projector says so in /props (caminus serve says false)
+        'http://127.0.0.1:8093/v1/models': dict(data=[dict(id='qwen-vl')]),
+        'http://127.0.0.1:8093/props': dict(n_ctx=32768,modalities=dict(vision=True,audio=False)),
     }
 
     def catalog_opener(self, seen=None):
@@ -2728,6 +2888,9 @@ for line in sys.stdin:
         self.assertEqual(glm['prices'],dict(input=0.6,output=2.2,cache_read=0.11))
         self.assertNotIn('BAAI/bge-m3',by,'an embedding model is not a brain')
         self.assertEqual(by['k3-coder']['context'],1048576,'the local window comes from /props')
+        self.assertFalse(by['k3-coder']['vision'],'no modalities.vision: no vision')
+        vl=catalog.discover('vl',dict(kind='local',endpoint='http://127.0.0.1:8093/v1'),self.catalog_opener())
+        self.assertEqual((vl[0]['id'],vl[0]['vision']),('qwen-vl',True),'a local server that reports vision gets images')
         self.assertFalse(cat['providers']['gone']['ok']);self.assertTrue(cat['providers']['deepinfra']['ok'])
         self.assertFalse(any('x-api-key' in h or 'Authorization' in h for _,h in seen),'through the relay no key is sent')
         # a provider that goes away keeps its last entries, marked stale
@@ -2750,6 +2913,7 @@ for line in sys.stdin:
         self.assertEqual((cur['model'],cur['provider'],cur['context'],cur['max_tokens'],cur.get('effort'),cur['relay']),
                          ('zai-org/GLM-5.2','deepinfra',202752,16384,None,True))
         self.assertNotIn('api',json.loads((self.home/'config.json').read_text()),'OpenAI-compatible is the default transport')
+        self.assertNotIn('vision',cur,'GLM 5.2 lists no vision tag')
         # one scale on every brain: xhigh runs as GLM's nearest, high
         out=self.cmd('effort',['xhigh'])
         self.assertEqual((out['effort'],out['runs_as']),('xhigh','high'));self.assertIn('xhigh as high',out['summary'])
@@ -2757,15 +2921,18 @@ for line in sys.stdin:
         # the level stays across /model when the new brain has effort control; Opus always thinks, so none runs as low
         out=self.cmd('model',['claude-opus-5-5'])['current']
         self.assertEqual((out['api'],out['thinking'],out['effort'],out['context']),('anthropic','adaptive','none',1000000))
+        self.assertTrue(out['vision'],"the catalog's image_input: read sends this brain images")
         self.assertEqual(self.cmd('effort',[])['runs_as'],'low')
         self.assertEqual(self.cmd('effort',['xhigh'])['effort'],'xhigh')
         # a running resident takes the new brain at its next turn, and meters a catalog model by its prices
         rt=Runtime(self.home)
         try:
+            self.assertTrue(rt.model.config['vision'])
             self.cmd('model',['zai-org/GLM-5.2'])
             gid=rt.store.enqueue('Switch.')
             rt._follow_config()
             self.assertEqual(rt.model.config['model'],'zai-org/GLM-5.2');self.assertTrue(rt.model.remote,'relayed: billed and bounded')
+            self.assertNotIn('vision',rt.model.config,'leaving a brain that sees takes images away at the next turn')
             self.assertIn('model_switched',[e['kind'] for e in rt.store.events()])
             self.assertAlmostEqual(price('zai-org/GLM-5.2',dict(prompt_tokens=1_000_000,completion_tokens=1_000_000)),2.8)
         finally:rt.mail.close();rt.store.close()
@@ -5996,6 +6163,78 @@ class AnthropicTransport(unittest.TestCase):
         self.assertEqual(m.tokens(self.history(),TOOLS),1234)
         url,_,body=self.wire.requests[0]
         self.assertTrue(url.endswith('/messages/count_tokens'));self.assertNotIn('max_tokens',body);self.assertNotIn('stream',body)
+
+    def image_history(self):
+        import base64
+        d=S/('img-'+uuid.uuid4().hex);d.mkdir()
+        data=png(2,3);(d/'a.png').write_bytes(data)
+        h=self.history()
+        h[2]['tool_calls'].append(dict(id='t2',type='function',function=dict(name='read',arguments='{"path":"a.png"}')))
+        h.insert(4,image_msg(d/'a.png','t2'))
+        return h,d/'a.png',base64.b64encode(data).decode()
+
+    def test_an_image_read_goes_in_its_tool_result_to_a_brain_that_sees(self):
+        h,path,b64=self.image_history()
+        m=self.model(sse('ok'),vision=True)
+        m.complete(h,None,max_tokens=16000)
+        user=self.wire.requests[0][2]['messages'][2]
+        results=[b for b in user['content'] if b['type']=='tool_result']
+        self.assertEqual([r['tool_use_id'] for r in results],['t1','t2'],'both parallel results in one user turn')
+        text,image=results[1]['content']
+        self.assertEqual(text['type'],'text');self.assertIn('"width": 2',text['text'])
+        self.assertEqual(image,dict(type='image',source=dict(type='base64',media_type='image/png',data=b64)))
+        # without vision: the plain line, no image block; a file changed since the read: a line, never the new file
+        m=self.model(sse('ok'))
+        m.complete(h,None,max_tokens=16000)
+        line=[b for b in self.wire.requests[0][2]['messages'][2]['content'] if b['type']=='tool_result'][1]['content']
+        self.assertIsInstance(line,str);self.assertIn("this model can't see images; a.png is a 2x3 PNG",line)
+        path.write_bytes(png(3,3))
+        m=self.model(sse('ok'),vision=True)
+        m.complete(h,None,max_tokens=16000)
+        line=[b for b in self.wire.requests[0][2]['messages'][2]['content'] if b['type']=='tool_result'][1]['content']
+        self.assertIn('changed or is gone since it was read',line)
+
+    def test_a_user_message_carries_its_image_too(self):
+        # the finish judge's brief: the images follow it as user messages
+        h,_,b64=self.image_history()
+        brief=[dict(role='system',content='JUDGE'),dict(role='user',content='brief'),
+               dict(role='user',content='a.png, as the agent saw it:',image=h[4]['image'])]
+        m=self.model(sse('ok'),vision=True)
+        m.complete(brief,None,max_tokens=600)
+        blocks=self.wire.requests[0][2]['messages'][0]['content']
+        self.assertEqual([b['type'] for b in blocks],['text','text','image']);self.assertEqual(blocks[2]['source']['data'],b64)
+
+    def test_an_image_counts_as_its_patches_not_its_base64(self):
+        from caminus.ember.resident.model import image_tokens
+        h,_,b64=self.image_history()
+        plain=self.model(sse('ok')).tokens(h,[])
+        seen=self.model(sse('ok'),vision=True).tokens(h,[])
+        self.assertEqual(seen-plain,image_tokens(2,3),'one 28 px patch, not the bytes')
+        self.assertEqual((image_tokens(28,28),image_tokens(1000,1000),image_tokens(3000,3000)),(1,1296,4784))
+        # the Messages API counter: the image's patches added once, its bytes never uploaded (compaction counts often)
+        m=self.model(dict(input_tokens=777),vision=True);m.counter=True
+        self.assertEqual(m.tokens(h,[]),777+image_tokens(2,3))
+        self.assertNotIn(b64,json.dumps(self.wire.requests[0][2]))
+
+    def test_an_openai_compatible_brain_gets_the_image_after_the_turns_results(self):
+        from caminus.ember.resident.model import Model
+        h,_,b64=self.image_history()
+        def wired(**cfg):
+            w=Wire(dict(choices=[dict(message=dict(role='assistant',content='ok'),finish_reason='stop')]))
+            m=Model(dict(model='m',endpoint='http://127.0.0.1:9/v1',context=100000,**cfg),opener=w);m.counter=False
+            m.complete(h,None,max_tokens=8000)
+            return w.requests[0][2]['messages']
+        sent=wired(vision=True)
+        self.assertEqual([m['role'] for m in sent],['system','user','assistant','tool','tool','user','user','system'])
+        self.assertNotIn('image',sent[4],'the marker stays home')
+        self.assertEqual(sent[5]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+b64)))
+        self.assertIn('t2',sent[5]['content'][0]['text'],'the image names the read it answers')
+        blind=wired()
+        self.assertEqual(len(blind),7);self.assertNotIn('image_url',json.dumps(blind))
+        self.assertIn("this model can't see images",blind[4]['content'])
+        plain=self.history()
+        self.assertIs(Model(dict(model='m',endpoint='http://127.0.0.1:9/v1',vision=True))._wire(plain),plain,
+                      'a history without images is sent as stored (the local prompt cache keeps its prefix)')
 
     def test_config_validation(self):
         from caminus.ember.resident.model import Model

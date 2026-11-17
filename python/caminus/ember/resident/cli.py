@@ -110,7 +110,7 @@ def _local_effort(cfg, keep_level=False):
 
 
 def _current(cfg):
-    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
+    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices','vision')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
 
 
@@ -209,7 +209,7 @@ def model_ops(a,home):
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking','model_variants','efforts'):
+        for k in ('relay','prices','context','thinking','model_variants','efforts','vision'):
             cfg.pop(k,None)
         if cfg.pop('max_tokens_auto',None):
             cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
@@ -219,6 +219,7 @@ def model_ops(a,home):
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
         if entry.get('context'):cfg['context']=int(entry['context'])
+        if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
         if entry.get('variants'):
             cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
         elif spec['kind']=='local':
@@ -527,10 +528,13 @@ def main(argv=None,stdin=None):
                 cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
                 # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
-                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model',
+                for k in ('relay','prices','context','thinking','effort','vision','provider','provider_kind','api','compaction_model',
                           'fallback','advisor','judge_model','model_variants','efforts'):
                     cfg.pop(k,None)
                 _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
+                from . import catalog
+                # (after _local_effort: the catalog knows the base id, not an effort id such as ...-nothink)
+                if catalog.model_vision(source,cfg,ask=False):cfg['vision']=True   # (the sibling's catalog says so)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -572,6 +576,8 @@ def main(argv=None,stdin=None):
             from .model import Model
             Model(cfg)                     # validate before persisting
             _local_effort(cfg)             # a local server's own id and its effort ids, when it is up
+            from . import catalog
+            if catalog.model_vision(home,cfg):cfg['vision']=True   # (read sends images to this brain, as after /model)
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()

@@ -200,7 +200,7 @@ TOOLS = [
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
-    tool('read', 'Read a text file with line numbers, a window at a time (start is the first line, lines the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
+    tool('read', 'Read a text file with line numbers, a window at a time (start is the first line, lines the count; 400 by default). A directory lists its entries. A PNG, JPEG, GIF or WebP file comes back as an image if your model can see (up to 3000 px a side and 3.75 MB), else as its size and format. Paths are relative to your home unless absolute.',
          dict(path={'type':'string'}, start={'type':'integer'}, lines={'type':'integer'}), ('path',)),
     tool('search', 'Find files under path (default: your home). glob matches file names (*.py; with a slash, the path: src/**/test_*.py). pattern is a Python regex found in the text ((?i) ignores case), shown with context lines around each match (2 by default). Follows .gitignore inside a git repository (outside one, skips hidden folders unless path names one), skips binary files, and caps the result with a count of what it left out. Paths come back ready for read.',
          dict(path={'type':'string'}, glob={'type':'string'}, pattern={'type':'string'}, context={'type':'integer'})),
@@ -1152,6 +1152,9 @@ class Runtime:
                     result['note'] = 'ledger is now todo: send items with a state next time'
                 elif name == 'read':
                     result = files.read(self.home, args['path'], args.get('start'), args.get('lines'))
+                    img = result.get('image')
+                    if isinstance(img, dict) and 'sha256' in img and (getattr(self.model, 'config', None) or {}).get('vision'):
+                        img['seen'] = True            # (the transport sends it: the judge may take what it shows as seen)
                     rel = str(args['path']).removeprefix(str(self.home) + '/').removeprefix('./')
                     if rel.startswith('notes/') and rel.endswith('.md'):
                         self.memory.touch(rel)        # a note read is a note used: it stays in a full index longer
@@ -1889,7 +1892,7 @@ class Runtime:
 
     MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
                   'provider', 'provider_kind', 'api_key_env', 'temperature', 'top_p', 'top_k', 'min_p',
-                  'presence_penalty', 'model_variants', 'efforts', 'max_tokens_auto')   # (a /model takes effect whole)
+                  'presence_penalty', 'model_variants', 'efforts', 'max_tokens_auto', 'vision')   # (a /model takes effect whole)
 
     def _stamp(self):
         try:
