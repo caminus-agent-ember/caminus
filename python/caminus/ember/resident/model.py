@@ -13,8 +13,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import sys
+import uuid
 
-from . import effort
+from . import catalog, effort
 
 
 # a speed is measured only over a window this long with this many tokens: a reply that arrived in one burst (Haiku
@@ -101,6 +103,12 @@ class ModelRefused(ModelError):
 
 
 ANTHROPIC_VERSION = '2026-10-21'
+# What an OpenCode plan is sent (catalog.OPENCODE): Ember's own name, not a library's (OpenCode Go asks clients to
+# identify themselves), and the Messages API version its gateway was checked with (2026-11-18)
+# (the version from the top package, which Python loaded before this module: the zipapp and the frozen relay carry its
+#  __init__.py, and the resident package imports nothing outside itself)
+USER_AGENT = 'ember/' + str(getattr(sys.modules.get(__name__.split('.')[0]), '__version__', 'unknown'))
+OPENCODE_ANTHROPIC_VERSION = '2023-06-01'
 
 # USD per million tokens (input, output, cache read, 5-minute cache write), below and above a prompt-length line.
 # From the Claude API reference as cached 2026-11-03: check live pricing before budgeting on these numbers.
@@ -133,10 +141,18 @@ def flat_row(inp, out, read):
 
 
 def remember_prices(model, prices):
-    """prices: {input, output, cache_read} in USD per million tokens, as the catalog stores them."""
+    """prices: {input, output, cache_read, cache_write?} in USD per million tokens, as the catalog stores them, with a
+    long-context tier under `long` ({above, input, output, ...}: an OpenCode model's) where the provider lists one."""
+    def rates(p):
+        inp = float(p['input'])
+        return (inp, float(p['output']), float(p['cache_read']) if p.get('cache_read') is not None else inp,
+                float(p['cache_write']) if p.get('cache_write') is not None else inp)
     if model and prices and prices.get('input') is not None and prices.get('output') is not None:
-        inp, out = float(prices['input']), float(prices['output'])
-        CATALOG_PRICES[model] = flat_row(inp, out, float(prices['cache_read']) if prices.get('cache_read') is not None else inp)
+        low, long = rates(prices), prices.get('long')
+        try:
+            CATALOG_PRICES[model] = (low, rates(long), int(long['above'])) if isinstance(long, dict) else (low, low, 10**9)
+        except (KeyError, TypeError, ValueError):
+            CATALOG_PRICES[model] = (low, low, 10**9)
 
 
 def price_row(model):
@@ -148,7 +164,12 @@ def price(model, usage, served=None):
     """the USD cost of one call's usage on a priced model, or None when the model's price is not known. When a fallback
     served the call (served differs from model), it is priced at the serving model's rates, or at the highest known
     rates when that model is not in the table: an estimate that errs high. Meta's published table, with Muse Ember's
-    long-prompt tier, comes before the catalog's flat copy of its first tier."""
+    long-prompt tier, comes before the catalog's flat copy of its first tier.
+    A reply that says what it charged (an OpenCode plan's usage.cost beside usage.opencode: 0 inside a Go allowance,
+    dollars from the balance past it) costs that, whatever the price table says."""
+    charged = catalog.opencode_charge(usage)
+    if charged is not None:
+        return charged
     row = price_row(model)
     if row is None:
         return None
@@ -173,6 +194,13 @@ def row_cost(row, usage):
     rate = high if fresh + read + wrote > line else low
     return (max(0, fresh) * rate[0] + out * rate[1] + read * rate[2] + wrote * rate[3]) / 1e6
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+def is_remote(config):
+    """Whether a brain bills each call (Model.remote: its retries are bounded): an endpoint off this machine, one
+    marked as the owner's key relay, or an OpenCode plan (its relay listens on loopback, --relay given or not)."""
+    host = urllib.parse.urlsplit((config.get('endpoint') or '').rstrip('/')).hostname
+    return host not in LOOPBACK or bool(config.get('relay')) or config.get('provider_kind') in catalog.OPENCODE
 
 # Images (files.read): a tool message names its image (store.action_result; a user message can too: the finish judge's),
 # and each request sends the file itself, so the store keeps no bytes and a brain switched mid-goal gets what it can
@@ -269,11 +297,15 @@ class Model:
         # A remote provider bills each call: the runtime bounds its retries (a local server is waited for).
         # A paid provider reached through the owner's key relay listens on loopback but bills like a remote one.
         self.direct = parsed.hostname not in LOOPBACK
-        self.remote = self.direct or bool(config.get('relay'))
+        self.remote = is_remote(config)
         if self.api == 'anthropic' and config.get('context') is None:
             raise ValueError('the anthropic api needs an explicit context window (--context)')
         self.context, self._context_at = None, 0.0   # the window context_size resolved, and when
-        self.counter = True
+        # an OpenCode plan: each request names its conversation (x-opencode-session: Go refuses a client without one)
+        # and Ember (USER_AGENT); its errors are never retried in a loop (runtime) and nothing is asked that it may
+        # not serve (no count_tokens call: the estimate counts)
+        self.opencode = config.get('provider_kind') in catalog.OPENCODE
+        self.counter = not self.opencode
         self.last_usage = {}
         self.last_speed = None   # the last reply's speed: engine_speed on a Caminus server, else estimated_speed
         self.caminus = None     # whether the endpoint is a Caminus server, once asked (is_caminus)
@@ -296,13 +328,21 @@ class Model:
                 s.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass                      # (already closed)
-    def headers(self, stream=False, beta=None):
+    def headers(self, stream=False, beta=None, session=None):
+        """session: the conversation's id for an OpenCode plan (a goal's, kept with it); a call without one is a
+        conversation of its own (a side call: the judge, a summary) and gets a fresh id"""
         name = self.config.get('api_key_env', 'CAMINUS_AGENT_API_KEY')
         key = os.environ.get(name)
         headers = {'Content-Type': 'application/json'}
         if stream:
             headers['Accept'] = 'text/event-stream'
-        if self.api == 'anthropic':
+        if self.opencode:
+            headers['x-opencode-session'] = session or uuid.uuid4().hex
+            headers['User-Agent'] = USER_AGENT
+            if self.api == 'anthropic':
+                headers['anthropic-version'] = OPENCODE_ANTHROPIC_VERSION
+            headers['Authorization'] = 'Bearer ' + (key or 'caminus-relay')   # (Bearer on both APIs; the relay replaces it)
+        elif self.api == 'anthropic':
             # No key is refused before anything is sent, unless the endpoint is a local relay that adds it.
             if key:
                 headers['x-api-key'] = key
@@ -317,8 +357,8 @@ class Model:
             headers['Authorization'] = 'Bearer ' + (key or 'caminus-local')
         return headers
 
-    def request(self, url, body=None):
-        req = urllib.request.Request(url, None if body is None else json.dumps(body).encode(), self.headers())
+    def request(self, url, body=None, session=None):
+        req = urllib.request.Request(url, None if body is None else json.dumps(body).encode(), self.headers(session=session))
         try:
             with self.opener(req, timeout=float(self.config.get('timeout', 900))) as r:
                 raw = r.read(16 * 1024 * 1024 + 1)
@@ -409,15 +449,17 @@ class Model:
         to 64K, a paid one 4096 (its catalog maximum, up to 64K, is set when it is picked)."""
         return effort.reply_limit(self.config, self.remote)
 
-    def complete(self, messages, tools=None, max_tokens=None, model=None, on_delta=None):
+    def complete(self, messages, tools=None, max_tokens=None, model=None, on_delta=None, session=None):
         """One reply. With on_delta(kind, value) the reply streams: kind is 'reasoning', 'content' or 'tool'
         (a tool call's name starts), value is the text or the name. on_delta returning False cancels: the
-        stream is closed and Cancelled is raised, so a cancelled turn stores no reply and runs no tool."""
+        stream is closed and Cancelled is raised, so a cancelled turn stores no reply and runs no tool.
+        session: the conversation's id, sent to an OpenCode plan (headers)."""
         remaining = self.context_size() - self.tokens(messages, tools or []) - 256
         if remaining < 1:
             raise ModelContextError('request exceeds the model context; compact or shorten the goal')
         if self.api == 'anthropic':
-            return self._anthropic(messages, tools, min(max_tokens or self.reply_limit(), remaining), model, on_delta)
+            return self._anthropic(messages, tools, min(max_tokens or self.reply_limit(), remaining), model, on_delta,
+                                   session)
         limit = min(max_tokens or self.reply_limit(), remaining)
         # the effort in force (effort.py): a local model takes it as the server's model id for the level, a provider
         # with reasoning_effort as that field; a short side call (the judge's) runs with thinking off
@@ -450,8 +492,8 @@ class Model:
             # usage in the final chunk gives the generated token count for a client-measured decode speed (a Caminus
             # server's own timings replace it: _speed)
             body['stream_options'] = dict(include_usage=True)
-            return self._stream(body, on_delta)
-        result = self.request(self.base + '/chat/completions', body)
+            return self._stream(body, on_delta, session)
+        result = self.request(self.base + '/chat/completions', body, **({'session': session} if session else {}))
         self.last_usage = result.get('usage') or {}
         # no decode window without streamed pieces: only a server's own timings give a speed here
         self.last_speed = self._speed(result.get('timings'))
@@ -482,11 +524,11 @@ class Model:
             raise ValueError('empty assistant response')
         return out
 
-    def _stream(self, body, on_delta):
+    def _stream(self, body, on_delta, session=None):
         """read the SSE reply, hand each piece to on_delta, assemble the message complete() would return.
         A backend that answers with one whole JSON body instead of a stream is accepted and reported once."""
         req = urllib.request.Request(self.base + '/chat/completions', json.dumps(body).encode(),
-                                     self.headers(stream=True))
+                                     self.headers(stream=True, session=session))
         content, reasoning, calls, finish, usage, timings = [], [], {}, None, {}, None
         self.last_speed = None
         t_first = t_last = None    # decode window: first choice-chunk to the last chunk read, prefill excluded
@@ -797,7 +839,9 @@ class Model:
             if self.config.get('cache', True):
                 out[-1]['content'][-1]['cache_control'] = dict(type='ephemeral')
         if tail:
-            if out and out[-1]['role'] == 'user':
+            if out and out[-1]['role'] == 'user' and not self.opencode:
+                # (not to an OpenCode plan: its Messages API is checked at the 2023-06-01 version, which has no
+                #  mid-conversation system message; there the block joins the last user turn as text)
                 out.append(dict(role='system', content=tail))
             else:
                 # a system message must follow a user turn, and a final assistant turn would be a prefill
@@ -829,7 +873,7 @@ class Model:
             body['fallbacks'] = self.config['fallbacks']
         return body
 
-    def _anthropic(self, messages, tools, max_tokens, model, on_delta):
+    def _anthropic(self, messages, tools, max_tokens, model, on_delta, session=None):
         body = self._to_anthropic(messages, tools, model)
         body['max_tokens'] = max_tokens
         body['stream'] = True
@@ -838,12 +882,21 @@ class Model:
         # benchmark run (each one a finish let through unchecked). Main turns keep their thinking.
         if (max_tokens or 0) < SHORT_CALL:
             effort.anthropic_thinking_off(body)   # (Opus 5.5 and Fable cannot: they answer at effort low)
-        return self._anthropic_stream(body, on_delta or (lambda kind, value: None))
+        have = effort.efforts(self.config) if self.opencode else None
+        if have is not None and 'effort' in (body.get('output_config') or {}):
+            # an OpenCode model on Messages takes only the levels its list names (Qwen3.8: low, medium, xhigh), and a
+            # model that lists none (MiniMax M3) is sent none
+            if have:
+                body['output_config']['effort'] = effort.nearest(body['output_config']['effort'], have)
+            else:
+                body.pop('output_config')
+        return self._anthropic_stream(body, on_delta or (lambda kind, value: None), session)
 
-    def _anthropic_stream(self, body, on_delta):
+    def _anthropic_stream(self, body, on_delta, session=None):
         """read a Messages API event stream into the reply shape complete() returns"""
         req = urllib.request.Request(self.base + '/messages', json.dumps(body).encode(),
-                                     self.headers(stream=True, beta=FALLBACK_BETA if 'fallbacks' in body else None))
+                                     self.headers(stream=True, beta=FALLBACK_BETA if 'fallbacks' in body else None,
+                                                  session=session))
         text, blocks, stop, usage, details, timings = [], {}, None, {}, None, None
         served, declined, fallback_ran, request_id = body.get('model'), [], False, None
         self.last_call = dict(model=body.get('model'))
@@ -926,6 +979,9 @@ class Model:
         self.last_usage = dict(prompt_tokens=(usage.get('input_tokens') or 0) + read + wrote,
                                completion_tokens=out_tokens, cache_read_input_tokens=read,
                                cache_creation_input_tokens=wrote)
+        for k in ('cost', 'opencode'):      # what an OpenCode plan charged (price() meters it)
+            if k in usage:
+                self.last_usage[k] = usage[k]
         self.last_speed = self._speed(timings, out_tokens, t_first, t_last)
         out = dict(role='assistant', content=''.join(text))
         if not done:
