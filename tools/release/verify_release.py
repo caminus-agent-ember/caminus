@@ -1,13 +1,14 @@
 """Check a release's (or a nightly's) wheel and sdist before they go to PyPI (.github/workflows/release.yml and nightly.yml;
 tools/release/release_build.sh runs it too). CPU only, no network. Run it in a checkout of the release tag:
 
-  python -I tools/release/verify_release.py DIST --tag vX.Y.Z      DIST: caminus-X.Y.Z-py3-none-any.whl, caminus-X.Y.Z.tar.gz, SHA256SUMS
+  python -I tools/release/verify_release.py DIST --tag vX.Y.Z      DIST: caminus-X.Y.Z-<setup.py's WHEEL_TAG>.whl, caminus-X.Y.Z.tar.gz, SHA256SUMS
   python -I tools/release/verify_release.py DIST --tag vX.Y.Z.devYYYYMMDD   a nightly's files at its tag (docs/dev/releasing.md)
   python -I tools/release/verify_release.py DIST --untagged        a rehearsal at an untagged commit (the version from the tree)
 
 Checked: the tag's form and that it names HEAD; DIST holds exactly the two files and SHA256SUMS, whose hashes match; one version
 everywhere (the tag, the file names, the wheel's METADATA, the sdist's PKG-INFO, python/caminus/__init__.py); the wheel's tag
-(py3-none-any) and its RECORD hashes; every file of the package in the wheel is the checkout's file byte for byte
+(setup.py's WHEEL_TAG, a platform tag: Root-Is-Purelib false, no `any` platform) and its RECORD hashes; the panel a static
+x86-64 ELF executable (EM_X86_64, no PT_INTERP); every file of the package in the wheel is the checkout's file byte for byte
 (only the code objects, their provenance.json and the panel are built); its code objects are exactly caminus.device.kernels.RUNTIME_SET, each one's sha256 and size equal
 provenance.json's and the committed packaging/gfx1100-kernels.sha256's; provenance.json names this commit, a clean tree, gfx1100,
 build.sh's sha256 and the kernel tree hash recomputed here (tools/release/stage_kernels.py's rule); the sdist carries the same code
@@ -16,12 +17,14 @@ tools/release/repro_dist.py's reproducible form (every sdist member at one time,
 0755, a gzip header without a file name at that time; every wheel entry at one time with modes 0644 / 0755; that time ==
 provenance.json's `built`). Exit 1 on any failure, every failure printed."""
 import argparse
+import ast
 import base64
 import hashlib
 import io
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tarfile
@@ -47,6 +50,50 @@ def check(what, ok, detail=''):
     if not ok:
         FAILS.append(what)
     return ok
+
+
+def wheel_tag(root=ROOT):
+    """setup.py's WHEEL_TAG (the one place the wheel's tag is set), read without running setup.py; None when it is not a
+    top-level string literal (plain or annotated assignment)"""
+    with open(os.path.join(root, 'setup.py')) as f:
+        tree = ast.parse(f.read())
+    for n in tree.body:
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) and n.value else []
+        if any(isinstance(t, ast.Name) and t.id == 'WHEEL_TAG' for t in targets):
+            try:
+                v = ast.literal_eval(n.value)
+            except ValueError:
+                return None
+            return v if isinstance(v, str) else None
+    return None
+
+
+def wheel_file_problem(text, tag):
+    """what is wrong with a wheel's WHEEL file for the platform tag `tag` (None: Root-Is-Purelib false, exactly that tag,
+    and the tag's platform is not `any`)"""
+    if tag.endswith('-any'):
+        return f'the expected tag {tag} is not a platform tag'
+    if re.search(r'^Root-Is-Purelib: false$', text, re.M) is None:
+        return 'Root-Is-Purelib is not false'
+    tags = re.findall(r'^Tag: (.*)$', text, re.M)
+    return None if tags == [tag] else f'Tag lines {tags} != [{tag!r}]'
+
+
+def elf_problem(b):
+    """why `b` is not a static x86-64 ELF executable (None if it is): ELF64 little-endian, e_machine EM_X86_64 (0x3e),
+    no PT_INTERP program header. The panel's static linking is what makes the manylinux_2_17 tag honest"""
+    if len(b) < 64 or b[:4] != b'\x7fELF' or b[4] != 2 or b[5] != 1:
+        return 'not a 64-bit little-endian ELF file'
+    machine, = struct.unpack_from('<H', b, 18)
+    if machine != 0x3e:
+        return f'e_machine {machine:#x}, not EM_X86_64 (0x3e)'
+    phoff, = struct.unpack_from('<Q', b, 32)
+    phentsize, phnum = struct.unpack_from('<HH', b, 54)
+    if phentsize < 4 or phoff + phentsize * phnum > len(b):
+        return 'program headers outside the file'
+    if any(struct.unpack_from('<I', b, phoff + i * phentsize)[0] == 3 for i in range(phnum)):
+        return 'has PT_INTERP (dynamically linked)'
+    return None
 
 
 def sha(b):
@@ -109,7 +156,10 @@ def main(argv=None):
     status = git('status', '--porcelain', '--untracked-files=no').stdout.strip()
     check('the checkout has no changes to tracked files', not status, status[:300])
 
-    whl_n, sd_n = f'caminus-{ver}-py3-none-any.whl', f'caminus-{ver}.tar.gz'
+    tag = wheel_tag()
+    if not check("setup.py's WHEEL_TAG is a string literal", tag is not None):
+        return 1
+    whl_n, sd_n = f'caminus-{ver}-{tag}.whl', f'caminus-{ver}.tar.gz'
     names = sorted(os.listdir(a.dist))
     if not check('DIST holds the wheel, the sdist and SHA256SUMS, nothing else', names == sorted([whl_n, sd_n, 'SHA256SUMS']), str(names)):
         return 1
@@ -128,7 +178,8 @@ def main(argv=None):
     meta = files.get(di + 'METADATA', b'').decode()
     check('wheel METADATA: Name caminus, the release version', re.search(r'^Name: caminus$', meta, re.M) is not None
           and re.search(rf'^Version: {re.escape(ver)}$', meta, re.M) is not None, meta[:200])
-    check('wheel tag py3-none-any', re.search(r'^Tag: py3-none-any$', files.get(di + 'WHEEL', b'').decode(), re.M) is not None)
+    wp = wheel_file_problem(files.get(di + 'WHEEL', b'').decode(), tag)
+    check(f'wheel WHEEL: Root-Is-Purelib false, the one tag {tag} (a platform wheel: the panel is an x86-64 binary)', wp is None, wp)
     bad = []
     for line in files.get(di + 'RECORD', b'').decode().splitlines():
         p, h, _n = line.rsplit(',', 2)
@@ -172,7 +223,9 @@ def main(argv=None):
     check('provenance: kernel_tree_sha256 == kernels/ + build.sh here', src.get('kernel_tree_sha256') == kt, f'{src.get("kernel_tree_sha256")} != {kt}')
     check('provenance: build_sh_sha256 == build.sh here', src.get('build_sh_sha256') == stage_kernels.sha256(os.path.join(ROOT, 'build.sh')))
     check('wheel carries the guard', 'caminus/share/guard.sh' in files)
-    check('wheel carries the panel', 'caminus/share/caminus-panel' in files)
+    check('wheel carries the panel', PANEL in files)
+    ep = elf_problem(files.get(PANEL, b''))
+    check('wheel panel: a static x86-64 ELF executable (EM_X86_64, no PT_INTERP: the manylinux_2_17 tag\'s basis)', ep is None, ep)
     for p, b in files.items():
         scan_text('wheel', p, b)
 

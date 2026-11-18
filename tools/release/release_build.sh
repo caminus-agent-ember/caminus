@@ -63,10 +63,11 @@ echo "release_build: ./build.sh done ($(ls build/*.hsaco | wc -l) code objects; 
 "$PY" -I tools/release/stage_kernels.py
 STAGED=python/caminus/hsaco/gfx1100
 echo "release_build: provenance: $("$PY" -I -c "import json; p = json.load(open('$STAGED/provenance.json')); g = p['ggml_headers']; print(f\"built {p['built']} ({p['built_from']}); ggml headers {g['commit']} {'(dirty)' if g['dirty'] else '(clean)'}\")")"
-# the panel (panel/, Go): built reproducibly (no VCS stamp, no build id, trimmed paths, the package's version) and staged as
+# the panel (panel/, Go): built reproducibly (no VCS stamp, no build id, trimmed paths, the package's version), static for
+# linux/amd64 whatever the host (the wheel's tag, setup.py's WHEEL_TAG, says x86-64; verify_release.py checks the ELF), and staged as
 # package data (pyproject.toml: share/caminus-panel), so `caminus panel` works from the wheel
 command -v go > /dev/null || die "go is missing: the panel is part of the release (panel/; Go 1.22 or newer)"
-(cd panel && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -ldflags "-s -w -buildid= -X main.version=$VER" \
+(cd panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-buildvcs=false go build -trimpath -ldflags "-s -w -buildid= -X main.version=$VER" \
     -o ../python/caminus/share/caminus-panel .) > build/release-panel.log 2>&1 || { tail -30 build/release-panel.log >&2; die "go build of the panel failed"; }
 echo "release_build: the panel built ($(go version | cut -d' ' -f3); sha256 $(sha256sum python/caminus/share/caminus-panel | cut -c1-16))"
 HASHES=packaging/gfx1100-kernels.sha256
@@ -88,7 +89,8 @@ mkdir dist
 "$PY" -I -m pip wheel . --no-deps --no-build-isolation -w dist > build/release-wheel.log 2>&1 || { tail -30 build/release-wheel.log >&2; die "pip wheel failed"; }
 "$PY" -I -c "from setuptools import build_meta as b; b.build_sdist('dist')" > build/release-sdist.log 2>&1 || { tail -30 build/release-sdist.log >&2; die "build_sdist failed"; }
 "$PY" -I tools/release/repro_dist.py dist || die "tools/release/repro_dist.py refused the archives"
-(cd dist && sha256sum "caminus-$VER-py3-none-any.whl" "caminus-$VER.tar.gz" > SHA256SUMS)
+# the one wheel repro_dist.py found; its name carries setup.py's WHEEL_TAG, which verify_release.py checks
+(cd dist && sha256sum caminus-"$VER"-*.whl "caminus-$VER.tar.gz" > SHA256SUMS)
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "the build changed tracked files (git status)"
 if [ "$mode" = tag ]; then "$PY" -I tools/release/verify_release.py dist --tag "$TAG"; else "$PY" -I tools/release/verify_release.py dist --untagged; fi
 echo "release_build: dist/ ready:"; cat dist/SHA256SUMS

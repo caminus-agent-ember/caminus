@@ -28,7 +28,7 @@
 
 ## Get started
 
-You need Linux, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source). Four steps: install,
+You need Linux on x86-64, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source). Four steps: install,
 open the panel, start the model for your cards, then set up Qwen Code.
 
 ### 1. Install
@@ -99,7 +99,7 @@ the optional advisor, Hermes Agent, Claude Code, and the addresses for any OpenA
 [pre-release](https://github.com/jdominick05/caminus/releases) (the newest one is at the top). It has what the next
 release will have, tested less. Nightlies are on GitHub only for now, not on PyPI. To try one, copy the link of the `.whl`
 file attached to the newest pre-release and install it:
-`pip install https://github.com/jdominick05/caminus/releases/download/vX.Y.Z.devYYYYMMDD/caminus-X.Y.Z.devYYYYMMDD-py3-none-any.whl`.
+`pip install https://github.com/jdominick05/caminus/releases/download/vX.Y.Z.devYYYYMMDD/caminus-X.Y.Z.devYYYYMMDD-py3-none-manylinux_2_17_x86_64.whl`.
 Please report what breaks.
 
 ## Supported hardware
