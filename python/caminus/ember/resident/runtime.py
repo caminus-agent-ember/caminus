@@ -621,6 +621,20 @@ class Runtime:
                 if since >= TODO_STALE:
                     lines.append(f'LOOP: your todo list has not changed in {since} steps: mark items done as you finish '
                                  'them (todo), so your human sees progress and you resume from it after a compaction.')
+                # The moments the list is most likely to be wrong, before the step-count threshold is reached: the
+                # done check already ran (the goal is about to finish), or a compaction just summarized the
+                # transcript away. A 5-of-6-open finish spent fewer than TODO_STALE steps between its last todo
+                # update and its verify, so the count alone never mentioned it.
+                opened = len([it for it in todo['items'] if it['state'] != 'done'])
+                for what in ('verified', 'compacted'):
+                    if self.store.db.execute(
+                            'SELECT 1 FROM events WHERE goal=? AND kind=? AND seq > COALESCE('
+                            "(SELECT MAX(seq) FROM events WHERE goal=? AND kind='todo'),0) LIMIT 1",
+                            (gid, what, gid)).fetchone():
+                        lines.append(f'LOOP: you {what} after your last todo update and {opened} '
+                                     f'{"item" if opened == 1 else "items"} still open: mark the ones you finished '
+                                     'done (todo) before you finish, or name them in finish\'s open.')
+                        break
         if todo['blockers']:
             lines.append('LOOP: blocked by: ' + ' | '.join(todo['blockers']))
         if not self.store.verified_since_steer(gid):
@@ -1414,6 +1428,14 @@ class Runtime:
                         raise ValueError('your todo list still has unfinished items (%s): mark them done with todo, '
                                          'or name what is left in open' % '; '.join(left[:5]))
                     result = dict(summary=args['summary'], open=args.get('open', ''))
+                    if graded and left:
+                        # The judge sees the list too (judge.evidence), and this note is on the record: a successful
+                        # finish ends the goal, so the model never reads it back, but the tool_result and the event
+                        # below are what make a 5-of-6-open finish auditable after the fact.
+                        result['todo_open'] = ('%d todo item%s still open (%s): the judge sees them, so name each in '
+                                               'open or mark it done' % (len(left), '' if len(left) == 1 else 's',
+                                                                         '; '.join(left[:5])))
+                        self.store.event('finish_open_todo', dict(left=left[:20]), action['goal'])
             if name in ('terminal', 'sandbox'):
                 # Preparation already launched or queued input. Polling must not
                 # relaunch a worker if cancellation raced after preparation.
