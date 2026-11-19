@@ -249,6 +249,44 @@ def main():
           'ps: a guard refusal on a fault file that is still there preserves the startup failure reason')
     check(v['guard-cleared']['state'] == 'stopped' and v['guard-cleared']['error'] == '' and 'cleared' in v['guard-cleared']['note'],
           f"ps: a guard refusal whose fault file is gone is re-checked: stopped, with a note ({v['guard-cleared']})")
+    check(isinstance(v['crashed']['failed_at'], float) and abs(v['crashed']['failed_at'] - time.time()) < 600
+          and v['clean']['failed_at'] is None, 'ps: a failed start carries when it ended (its log\'s last write) for the panel')
+    # a code object that was missing: cleared once it is in the directory a start would load from now (kernels.kernel_dir,
+    # here CAMINUS_KERNEL_DIR at scratch), whatever directory the old message named, and from the whole log line (an
+    # installed package's message is longer than the 300 characters ps keeps)
+    from caminus.device import kernels as K
+    kd, old_kd = os.path.join(S, 'kdir'), os.path.join(S, 'kdir-then')
+    os.makedirs(kd, exist_ok=True); os.makedirs(old_kd, exist_ok=True)
+    keep_kd = os.environ.get('CAMINUS_KERNEL_DIR')
+    os.environ['CAMINUS_KERNEL_DIR'] = kd
+    wheel = os.path.join(S, 'home', 'u', '.local', 'lib', 'python3.13', 'site-packages', 'caminus', 'hsaco', 'gfx1100',
+                         'a-longer-install-prefix' * 3)
+    put('hsaco-missing', dead.pid, f'FileNotFoundError: code object k3_gone.hsaco not found in {kd} (run ./build.sh in the checkout)\n', 18100)
+    put('hsaco-built', dead.pid, f'FileNotFoundError: code object k3_here.hsaco not found in {kd} (run ./build.sh in the checkout)\n', 18101)
+    put('hsaco-elsewhere', dead.pid, f'FileNotFoundError: {K.missing_message("k3_here", old_kd, "env CAMINUS_KERNEL_DIR")}\n', 18102)
+    put('hsaco-wheel', dead.pid, f'FileNotFoundError: {K.missing_message("k3_here", wheel, "package")}\n', 18103)
+    open(os.path.join(kd, 'k3_here.hsaco'), 'w').close()
+    try:
+        vm, vb, ve, vw = (manage.server_view(manage.load_server(n)) for n in ('hsaco-missing', 'hsaco-built', 'hsaco-elsewhere', 'hsaco-wheel'))
+        os.environ['CAMINUS_KERNEL_DIR'] = old_kd
+        vgone = manage.server_view(manage.load_server('hsaco-built'))
+    finally:
+        os.environ.pop('CAMINUS_KERNEL_DIR', None)
+        if keep_kd is not None:
+            os.environ['CAMINUS_KERNEL_DIR'] = keep_kd
+    check(vm['state'] == 'failed' and vb['state'] == 'stopped' and 'k3_here.hsaco' in vb['note'] and vb['failed_at'] is None,
+          f"ps: a start that failed on a missing code object that is built now is no longer failed ({vb['note']!r})")
+    check(ve['state'] == 'stopped' and vgone['state'] == 'failed',
+          f"ps: the code object is looked for where a start would load it now, not where the old message looked ({ve['state']}, {vgone['state']})")
+    check(len(manage.log_error(manage.load_server('hsaco-wheel')['log'], keep=None)) > 400 and len(vw['error']) <= 300
+          and vw['state'] == 'stopped', f"ps: an installed package's long message (its head past 300 characters) still clears ({vw['state']})")
+    # a start given its card (--card N: no fit before the launch) that the server refuses: its refusal is the error start
+    # and the panel show, not 'the server exited'
+    serve_refusal = ('caminus serve: the model fits none of the free cards: XT card2: 0.1 of 20.0 GB in use; needs 19.8 GB + '
+                     '1.9 GB reserved at 40,960 positions; fits 32,768 now')
+    put('card-refused', dead.pid, f'caminus serve: loading\n{serve_refusal}\nGUARD: rc=2 after 3 s\n', 18104)
+    vr = manage.server_view(manage.load_server('card-refused'))
+    check(vr['state'] == 'failed' and vr['error'] == serve_refusal, f"ps: caminus serve's placement refusal is the failure shown ({vr['error']!r})")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         manage.cmd_ps(['--json'])
@@ -307,6 +345,57 @@ def main():
             check('not downloaded' in str(err), f'start: a model not on disk is refused ({err})')
     finally:
         live.kill(); live.wait()
+    # a new start of a model supersedes its older dead records (their failure is no longer that model's last start), once
+    # its own record is written: a launch that fails (NoLaunch refuses it here) leaves them for ps and the panel
+    before = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
+    try:
+        manage.start_one('qwen3.6', name='fresh', devs_override=[0])
+    except RuntimeError:
+        pass
+    kept = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
+    check({'crashed', 'hsaco-missing'} <= before and kept == before,
+          f'start: a launch that fails keeps the older records ({sorted(before)} -> {sorted(kept)})')
+
+    class Launched(NoLaunch):                   # (a launch that "starts": the pid of an exited child, no process runs)
+        @staticmethod
+        def Popen(*a, **k):
+            return argparse.Namespace(pid=dead.pid)
+    crashed_json = open(os.path.join(manage.server_dir('crashed'), 'server.json')).read()
+    # (a record removed while the start runs, between its scan and its mark (caminus stop OLD): never brought back)
+    real_all = manage.all_servers
+
+    def scan_then_stop():
+        got = real_all()
+        if os.path.exists(os.path.join(manage.server_dir('fresh'), 'server.json')):   # (the scan after the new record)
+            os.remove(os.path.join(manage.server_dir('clean'), 'server.json'))
+        return got
+    manage.subprocess, manage.all_servers = Launched, scan_then_stop
+    try:
+        manage.start_one('qwen3.6', name='fresh', devs_override=[0], wait=False, log=lambda *a: None)
+    finally:
+        manage.subprocess, manage.all_servers = NoLaunch, real_all
+    after = {x['name']: manage.server_view(x) for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
+    check(set(after) == before - {'clean'} | {'fresh'} and all(v['state'] == 'stopped' and v['error'] == '' for n, v in after.items() if n != 'fresh')
+          and open(os.path.join(manage.server_dir('crashed'), 'server.json')).read() == crashed_json
+          and os.path.exists(os.path.join(manage.server_dir('crashed'), manage.SUPERSEDED))
+          and not os.path.exists(os.path.join(manage.server_dir('fresh'), manage.SUPERSEDED)),
+          f'start: a new start of a model supersedes its older failed records by a marker, their server.json (settings for '
+          f'caminus restart NAME) untouched ({sorted((n, v["state"]) for n, v in after.items())})')
+    check(not os.path.exists(os.path.join(manage.server_dir('clean'), 'server.json')),
+          'start: a record removed between the scan and the mark stays removed (no server.json brought back)')
+    # (a later start under a superseded name is that name's own start again: its marker goes)
+    manage.subprocess = Launched
+    try:
+        manage.start_one('qwen3.6', name='crashed', devs_override=[0], wait=False, log=lambda *a: None)
+    finally:
+        manage.subprocess = NoLaunch
+    check(not os.path.exists(os.path.join(manage.server_dir('crashed'), manage.SUPERSEDED))
+          and os.path.exists(os.path.join(manage.server_dir('fresh'), manage.SUPERSEDED)),
+          'start: a start under a superseded name clears its marker and supersedes the others')
+    for n in set(after) | {'crashed'}:
+        for f in ('server.json', manage.SUPERSEDED):
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(manage.server_dir(n), f))
 
     # ---- --kv (caminus start --kv, or `-- --kv`): checked against the model's entry before any card is picked (only
     # qwen3-30b-a3b takes q8, one card or two), threaded into the card fit's projection, shown by ps from /props
@@ -354,11 +443,70 @@ def main():
     _ar.of = lambda path: Rec('rec', 'rec')
     try:
         ent = dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={})
-        manage.fits_fn(ent, kv='q8')(dict(line_mib=24000, display=False)); manage.pair_fits(q3, ent, cards=2, kv='q8')([{}, {}])
-        manage.fits_fn(ent)(dict(line_mib=24000, display=False))
+        manage.card_fit(q3, ent, kv='q8')[0](dict(line_mib=24000, display=False)); manage.pair_fits(q3, ent, cards=2, kv='q8')([{}, {}])
+        manage.card_fit(q3, ent)[0](dict(line_mib=24000, display=False))
     finally:
         _ar.of = real_of
     check(seen == ['q8', 'q8', 'q8', 'f16', 'f16'], f'start --kv: the one-card and two-card fits project the asked cache (opt kv {seen})')
+    # the refusal's model part (caminus.device.host.one's explain), built with fits from one projection: the need and what
+    # the fit keeps beside it, so in use + need + reserved past the card's total is exactly the refusal (the numbers never
+    # read as fitting), and the most that fits now; without a projection the size rule's, worded by the same formatter
+    import re as _re
+    nums = lambda t: [float(x) for x in _re.search(r'needs (?:about )?([0-9.]+) GB \+ ([0-9.]+) GB reserved', t).groups()]
+    g0 = H.gpus(manage.ROOT)[0]
+    used0 = H.used_mib(g0) / 1024
+    for need_mib, refused in ((g0['total_mib'] * 0.93, True), (g0['total_mib'] * 0.5, False)):
+        class Big(_ar.Arch):
+            cards = 1
+            def auto_need(self, opt, slots, cards=None): return 40960, [0], 1.0, lambda c: [need_mib if c >= 32768 else 1.0]
+            def variant(self, cards): return self
+        _ar.of = lambda path: Big('big', 'big')
+        try:
+            fits, explain = manage.card_fit(q3, dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={}))
+            ok, t_proj = fits(g0), explain(g0)
+        finally:
+            _ar.of = real_of
+        n, r = nums(t_proj)
+        _ar.of = lambda path: Big('big', 'big')
+        try:   # (the context it says fits is one a start with --ctx takes)
+            again = manage.card_fit(q3, dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={}), ctx=28672)[0](g0)
+        finally:
+            _ar.of = real_of
+        check(ok is not refused and (used0 + n + r > g0['total_mib'] / 1024) is refused and again
+              and (' GB short;' in t_proj) is refused
+              and f" at 32,768 positions{', 0.5 GB short' if refused else ''}; fits {28672 if refused else 40960:,} now" in t_proj,
+              f'start refusal: in use {used0:.1f} + need + reserved vs the card\'s {g0["total_mib"] / 1024:.1f} GB says what fits says ({t_proj!r})')
+    fits, explain = manage.card_fit(q3, dict(path=os.path.join(S, 'no-such.gguf'), size_gb=18.6, need_gb=18.6, paths={}))
+    t_size = explain(g0)
+    n, r = nums(t_size)
+    check(not fits(g0) and used0 + n + r > g0['total_mib'] / 1024 and t_size.startswith('needs about 23.1 GB + 1.2 GB reserved')
+          and t_size.endswith("; no context fits by that rule (no projection here)"),
+          f'start refusal: the size rule\'s need and reserve against the card\'s free memory, as card_text\'s in use reads ({t_size!r})')
+    # the refusal names every card: a free one with its use and the model's need, a held one with the server that holds it
+    # (from the registry: one still loading holds no VRAM yet); a card nobody holds says nothing of a holder
+    tc = (models.BY_NAME['thinkingcap'], dict(path=os.path.join(S, 'no-such.gguf'), size_gb=40, need_gb=40, paths={}))
+    refusal = {}
+    real_all, real_alive = manage.all_servers, manage.alive
+    manage.all_servers = lambda: [dict(name='tcap', model='thinkingcap', port=8093, devices=[1], guard_pid=4242),
+                                  dict(name='mine', model='thinkingcap', path='/m/my-model.gguf', port=8094, devices=[0], guard_pid=4242)]
+    manage.alive = lambda pid: pid == 4242
+    try:
+        for what, held in (('free', set()), ('held', {1}), ('own file', {0})):
+            try:
+                manage.pick_cards(*tc, None, held)
+                refusal[what] = ''
+            except manage.ManageError as e:
+                refusal[what] = str(e)
+    finally:
+        manage.all_servers, manage.alive = real_all, real_alive
+    # (a server of a file outside the catalog is named by that file, as KFD's process list names it: never twice)
+    own = refusal.pop('own file')
+    check('XTX card1: 0.1 of 24.0 GB in use; held by my-model.gguf on :8094' in own, f'start: a held card of a non-catalog file ({own})')
+    check(all('fits none of the free cards' in t and 'XTX card1: 0.1 of 24.0 GB in use; needs about' in t for t in refusal.values())
+          and 'XT card2: 0.1 of 20.0 GB in use; needs' in refusal['free'] and 'held by' not in refusal['free']
+          and 'XT card2: 0.1 of 20.0 GB in use; held by thinkingcap on :8093' in refusal['held']
+          and refusal['held'].count('needs') == 1 and refusal['held'].startswith('thinkingcap: '),
+          f'start: the refusal names each card, its use and the model\'s need, a held one by its server ({refusal})')
     sv = dict(name='kvq8', model='qwen3-30b-a3b', path='/m/q3.gguf', port=18099, devices=[0], card_names=['XTX'], argv=[],
               guard_pid=1, log=os.path.join(S, 'none.log'), started=time.time(), alias='qwen3-30b-a3b', kv='q8')
     props = {'n_ctx': 40960, 'model_alias': 'qwen3-30b-a3b', 'caminus': {'kv_cache': {'type': 'q8', 'format': 'q8_0-v1:x'}}}
@@ -699,6 +847,7 @@ def unmanaged_checks(S):
     """unmanaged_servers() scans /proc for caminus_serve.py processes outside the registry and never raises, even on a
     machine with none running (CI): every entry is a dict with the keys cmd_ps and cmd_top read"""
     from caminus.cmd import manage
+    from caminus.device import host as H
     try:
         found = manage.unmanaged_servers()
     except Exception as e:
@@ -712,11 +861,11 @@ def unmanaged_checks(S):
     ports = [s['port'] for s in found]
     check(ports == sorted(ports) and len(ports) == len(set(ports)),
           f'unmanaged: one entry per server, sorted by port ({ports})')
-    check(manage.serve_argv_of(['python', '-I', 'tools/caminus_serve.py', '--model', 'x.gguf'])
-          and manage.serve_argv_of(['/usr/bin/caminus', 'serve', '--port', '8100'])
-          and manage.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'serve'])
-          and not manage.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'ps', '--json'])
-          and not manage.serve_argv_of(['nginx', 'serve']),
+    check(H.serve_argv_of(['python', '-I', 'tools/caminus_serve.py', '--model', 'x.gguf'])
+          and H.serve_argv_of(['/usr/bin/caminus', 'serve', '--port', '8100'])
+          and H.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'serve'])
+          and not H.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'ps', '--json'])
+          and not H.serve_argv_of(['nginx', 'serve']),
           'unmanaged: caminus_serve.py and the CLI\'s serve command are servers; other caminus commands and programs are not')
     # a fake /proc: a server started by a script without --port (it listens on 8092), its wrapper, and a guard's command
     # line; the port comes from the socket table, the catalog name from /props' model path (none here: the file label)

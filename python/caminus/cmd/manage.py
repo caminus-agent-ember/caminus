@@ -27,6 +27,7 @@ import contextlib
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -39,7 +40,7 @@ import urllib.error
 import urllib.request
 
 from .. import config, models
-from ..device import host, machine
+from ..device import host, kernels, machine
 from . import guarded
 from ..ember.resident.catalog import decode_tps   # (the one reading of /caminus/status's decode speed)
 
@@ -197,6 +198,12 @@ def server_dir(name):
     return os.path.join(servers_root(), name)
 
 
+# A marker file in a dead record's folder: a later start of its model superseded it (ps shows it stopped, its failure no
+# longer the model's last start; its server.json, with its settings for caminus restart NAME, is never rewritten by
+# another process). Created with exclusive create: a record removed meanwhile (caminus stop) is never brought back.
+SUPERSEDED = 'superseded'
+
+
 def load_server(name):
     try:
         with open(os.path.join(server_dir(name), 'server.json')) as f:
@@ -265,16 +272,18 @@ def find_key(d, key):
     return None
 
 
-def log_error(path):
-    """the last error-looking line of a server log ('' when none)"""
+def log_error(path, keep=300):
+    """the last error-looking line of a server log ('' when none), its last `keep` characters (None: the whole line). A
+    placement refusal counts (caminus serve's 'fits none of the free cards', for a start given its card)"""
     try:
         with open(path, errors='replace') as f:
             lines = f.read().splitlines()[-200:]
     except OSError:
         return ''
     for l in reversed(lines):
-        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'GUARD REFUSED', 'killed')):
-            return l.strip()[-300:]
+        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'GUARD REFUSED', 'killed',
+                                'fits none of the free cards')):
+            return l.strip()[-keep:] if keep else l.strip()
     return ''
 
 
@@ -284,7 +293,7 @@ def server_view(s):
     v = dict(name=s['name'], model=s['model'], url=f"http://127.0.0.1:{s['port']}", port=s['port'], cards=s.get('card_names', []),
              pid=s.get('guard_pid'), log=s['log'], uptime_s=max(0.0, time.time() - s.get('started', time.time())),
              max_ctx=None, decode_tps=None, alias=s.get('alias'), busy=False, error='', kv=None, note='',
-             external=False)
+             external=False, failed_at=None)
     if alive(s.get('guard_pid')):
         code, _ = http_json(v['url'] + '/health')
         v['state'] = 'ready' if code == 200 else 'loading'
@@ -305,25 +314,33 @@ def server_view(s):
                 clean = 'stopped in' in f.read()[-4000:]
         except OSError:
             clean = False
-        v['state'] = 'stopped' if clean else 'failed'
-        if not clean:
-            v['error'] = log_error(s['log']) or 'the server exited (caminus logs ' + s['name'] + ')'
-            cleared = cleared_refusal(v['error'])
-            if cleared:                      # (the guard refused on a fault file that is gone: nothing stops a start now)
-                v['state'], v['error'], v['note'] = 'stopped', '', cleared
+        # (superseded: a later start of the model replaced it, so its failure is no longer the model's last start)
+        v['state'] = 'stopped' if clean or os.path.exists(os.path.join(server_dir(s['name']), SUPERSEDED)) else 'failed'
+        if v['state'] == 'failed':
+            line = log_error(s['log'], keep=None)  # (the whole line for the check below: a long path pushes its head out of 300)
+            v['error'] = line[-300:] or 'the server exited (caminus logs ' + s['name'] + ')'
+            with contextlib.suppress(OSError):   # (when it failed: its log's last write; the panel shows the time)
+                v['failed_at'] = os.path.getmtime(s['log'])
+            cleared = cleared_failure(line)
+            if cleared:                      # (the cause is gone: nothing it names stops a start now)
+                v['state'], v['error'], v['note'], v['failed_at'] = 'stopped', '', cleared, None
     return v
 
 
-def cleared_refusal(error):
-    """a note when error is the guard's refusal on a recorded GPU fault whose stop file no longer exists (the fault was
-    cleared: the record is a stopped server, not a failed one), else None"""
+def cleared_failure(error):
+    """a note when a failed start's cause is gone, else None: the guard's refusal on a recorded GPU fault whose stop file
+    no longer exists, or a code object that was missing (caminus.device.kernels.missing_message) and is now in the
+    directory a start would load it from (kernels.kernel_dir: wherever the old message looked)"""
     head = 'GUARD REFUSED: a GPU fault was recorded ('
-    if head not in error:
+    if head in error:
+        path = error.split(head, 1)[1].split(')', 1)[0]
+        if path and not os.path.exists(os.path.expanduser(os.path.expandvars(path))):
+            return 'its last start was refused on a GPU fault that has since been cleared'
         return None
-    path = error.split(head, 1)[1].split(')', 1)[0]
-    if not path or os.path.exists(os.path.expanduser(os.path.expandvars(path))):
-        return None
-    return 'its last start was refused on a GPU fault that has since been cleared'
+    m = re.search(r'code object (\S+\.hsaco) not found in ', error)
+    if m and os.path.isfile(os.path.join(kernels.kernel_dir()[0], m.group(1))):
+        return f'its last start failed on a missing code object ({m.group(1)}) that is there now'
+    return None
 
 
 def card_view(gs=None):
@@ -331,9 +348,8 @@ def card_view(gs=None):
     and the panel use; pci = the card's identity; hip = its HIP index (HIP_VISIBLE_DEVICES)"""
     out = []
     for i, c in enumerate(host.usable(host.gpus(ROOT) if gs is None else gs)):
-        used = machine._read(os.path.join(c['dev'], 'mem_info_vram_used'))
         out.append(dict(index=i, name=c['label'], card=c['card'], pci=c['pci'], hip=c['hip'], status=c['status'],
-                        used_mib=(int(used) >> 20) if used else 0, line_mib=c['line_mib'], total_mib=c['total_mib'],
+                        used_mib=int(host.used_mib(c) or 0), line_mib=c['line_mib'], total_mib=c['total_mib'],
                         display=c['display'], link=host.link_text(c['link']), link_ok=c['link_ok']))
     return out
 
@@ -375,17 +391,6 @@ def listen_ports(pid, proc='/proc'):
     return sorted(ports)
 
 
-def serve_argv_of(argv):
-    """whether a command line runs the Caminus server: tools/caminus_serve.py, or the caminus CLI's serve command
-    (`caminus serve`, `python -m caminus serve`, a boot script importing caminus.__main__)"""
-    if any(a.endswith('caminus_serve.py') for a in argv):
-        return True
-    if 'serve' not in argv:
-        return False
-    head = argv[:argv.index('serve')]
-    return any(os.path.basename(a) == 'caminus' or a == 'caminus' or 'caminus.__main__' in a for a in head)
-
-
 def unmanaged_servers(proc='/proc'):
     """Live Caminus servers no slot in the registry owns (started by a script or `caminus serve` directly): watched
     read-only, never controlled (no start/stop/restart, no qwen attach); the panel shows them as started outside it.
@@ -414,9 +419,9 @@ def unmanaged_servers(proc='/proc'):
                 argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
         except OSError:
             continue
-        if not serve_argv_of(argv) or any(os.path.basename(a) == 'guard.sh' for a in argv):
+        if not host.serve_argv_of(argv) or any(os.path.basename(a) == 'guard.sh' for a in argv):
             continue                          # (a guard's own command line: its server is a slot's, or its child is seen)
-        flag = lambda k: argv[argv.index(k) + 1] if k in argv and argv.index(k) + 1 < len(argv) else None
+        flag = lambda k: host.argv_flag(argv, k)
         ports = listen_ports(pid, proc)
         try:
             port = ports[0] if ports else int(flag('--port') or 8092)
@@ -532,13 +537,13 @@ def pick_port(want, taken):
     raise ManageError(f'no free port in {PORT0}..{PORT0 + 99}')
 
 
-def fits_fn(entry, ctx=None, kv=None, long_context=False):
-    """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
-    (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it projects; long_context: in the model's long-context mode,
-    Arch.long_mode, whose format choice applies when kv is not given); without torch (no projection here) a size rule:
-    the file + 4 GiB within the line"""
-    size_mib = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20   # (the files it serves with: an optional drafter is not loaded by default)
-    rule = lambda g: size_mib * 1.1 + 4096 <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
+def card_fit(m, entry, ctx=None, kv=None, long_context=False):
+    """(fits(card), explain(card)) for a one-card catalog model m's file, from one projection: fits, the registry's
+    projection at 32K positions (or --ctx) on that card now (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it
+    projects; long_context: in the model's long-context mode, Arch.long_mode, whose format choice applies when kv is not
+    given); explain, for caminus.device.host.one's refusal, what it needs on the card and the most that fits now
+    (Arch.need_text). Without torch or with a header the projection cannot read, a size rule: the files it serves with
+    (an optional drafter is not loaded by default) + 10 % + 4 GiB within the line less a display's reserve or 256 MiB"""
     try:
         from .. import arch
         A = arch.of(entry['path'])
@@ -547,8 +552,10 @@ def fits_fn(entry, ctx=None, kv=None, long_context=False):
         A.long_mode(opt)                         # (the long-context mode's cap and format: refused by start_one before here)
         A.auto_need(opt, 4)                      # (probe the projection without inventing a zero-card fit)
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
-        return rule
-    return lambda g: A.fits(opt, [g])
+        need = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20 * 1.1 + 4096
+        room = lambda g: g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
+        return (lambda g: need <= room(g)), (lambda g: host.need_text(need, room(g), g['total_mib'] - (host.used_mib(g) or 0)))
+    return (lambda g: A.fits(opt, [g])), (lambda g: A.need_text(opt, g))
 
 
 def pair_fits(m, entry, ctx=None, cards=None, kv=None, long_context=False):
@@ -594,7 +601,12 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context
     if not cs:
         raise ManageError('no supported GPU (RX 7900 XTX / XT; caminus doctor)')
     by_pci = {c['pci']: c['index'] for c in cs}
-    held_pci = {c['pci'] for c in cs if c['index'] in held}
+    # (held cards by PCI address, each with its server from the registry for one()'s refusal: a server still loading holds
+    #  no VRAM yet, so KFD's per-process files cannot name it)
+    # (named as host.gpu_users names the same process, by its file: a GGUF outside the catalog is not named twice)
+    holder = {d: (f"{models.model_name(s['path']) if s.get('path') else s['model']} on :{s['port']}", s['port'])
+              for s in all_servers() if alive(s.get('guard_pid')) for d in s.get('devices', [])}
+    held_pci = {c['pci']: holder.get(c['index']) for c in cs if c['index'] in held}   # (label, port), or None
     free = [c for c in cs if c['index'] not in held]
     if (cards or m.cards) >= 2:
         try:
@@ -622,8 +634,9 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context
         return [i]
     if not free:
         raise ManageError('every card is held by a Caminus server (caminus ps; caminus stop NAME)')
+    fits, explain = card_fit(m, entry, ctx, kv=kv, long_context=long_context)
     try:
-        return [by_pci[host.one(gs, fits_fn(entry, ctx, kv=kv, long_context=long_context), held=held_pci)['pci']]]
+        return [by_pci[host.one(gs, fits, held=held_pci, root=ROOT, explain=explain)['pci']]]
     except host.PlacementError as e:
         raise ManageError(f'{m.name}: {e}') from None
 
@@ -784,8 +797,15 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     s = dict(name=name, model=m.name, path=e['path'] or recorded_path, port=port, devices=devs, card_names=[cs.get(i, str(i)) for i in devs],
              pcis=[view[i]['pci'] for i in devs],
              argv=serve, guard_pid=p.pid, log=logp, started=time.time(), alias=m.alias, **({'kv': kv} if kv else {}))
+    with contextlib.suppress(FileNotFoundError):  # (this name's own start: no longer superseded)
+        os.remove(os.path.join(d, SUPERSEDED))
     with open(os.path.join(d, 'server.json'), 'w') as f:
         json.dump(s, f, indent=1)
+    for old in all_servers():                     # (this start, its record written, supersedes an older dead record of the
+        if old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid')):   # model: see SUPERSEDED
+            with contextlib.suppress(FileNotFoundError, FileExistsError), \
+                    open(os.path.join(server_dir(old['name']), SUPERSEDED), 'x') as f:
+                f.write(f"{s['started']}\n")
     log(f"{name}: starting {m.name} on {'+'.join(s['card_names'])} at http://127.0.0.1:{port} (log: caminus logs {name})")
     if wait:
         t0 = time.time()

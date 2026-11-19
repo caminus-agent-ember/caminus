@@ -23,6 +23,7 @@ import (
 	"image/color"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -48,7 +49,7 @@ func (m ctl) View(w, h int) string {
 
 	top := []string{m.header(W)}
 	top = append(top, m.hwLines(W)...)
-	bottom := []string{m.noteLine(W)}
+	bottom := strings.Split(m.noteLine(W), "\n")
 	bottom = append(bottom, strings.Split(m.keysLine(), "\n")...)
 
 	card := m.runningRows(W - 4)
@@ -72,7 +73,7 @@ func (m ctl) View(w, h int) string {
 		// (the key line under the list says whether ? turns the page: drawn again with this frame's page count, one line
 		//  either way, so the room above it is unchanged)
 		m.helpDrawn = pages
-		bottom = append([]string{m.noteLine(W)}, strings.Split(m.keysLine(), "\n")...)
+		bottom = append(strings.Split(m.noteLine(W), "\n"), strings.Split(m.keysLine(), "\n")...)
 	case viewOptions:
 		body = m.optionsLines(W, room)
 	default:
@@ -396,15 +397,44 @@ func (m ctl) liveOf(name string) *serverInfo {
 	return nil
 }
 
-// recordOf is the registry's record of the model's server that does not run (a failed or stopped start), nil if none.
+// recordOf is the registry's record of the model's server that does not run, nil if none: its failed start first, else
+// a stopped one with a note. (Records a later start superseded stay for caminus restart NAME, stopped and with nothing
+// to say: one of them never hides the model's own failure.)
 func (m ctl) recordOf(name string) *serverInfo {
+	var stopped *serverInfo
 	for i := range m.ps.Servers {
 		s := m.ps.Servers[i]
-		if s.Model == name && !s.External && (s.State == "failed" || s.State == "stopped") {
+		switch {
+		case s.Model != name || s.External:
+		case s.State == "failed":
 			return &s
+		case s.State == "stopped" && (stopped == nil || stopped.Note == ""):
+			stopped = &s
 		}
 	}
-	return nil
+	return stopped
+}
+
+// fitLines is the most lines the fit row wraps to: a refusal names every card (its use, holder, the model's need and the
+// context that fits there), two cards' worth whole in the detail column at 80 columns (48 cells: 8-9 lines with need_text's
+// real wording and a second holder on a card), with headroom. On a short screen it takes only what the rows under it
+// leave (detailRows' room), 2 lines at least.
+const fitLines = 10
+
+// whenText is " 21:26 today", " 21:26 yesterday" or " Nov 16 21:26" for a Unix time (seconds), "" when unknown (0).
+func whenText(at float64, now time.Time) string {
+	if at <= 0 {
+		return ""
+	}
+	t := time.Unix(int64(at), 0).In(now.Location())
+	date := func(x time.Time) string { return x.Format("2006-01-02") } // (calendar dates: a DST change makes a day 23 or 25 h)
+	switch {
+	case date(t) >= date(now):
+		return " " + t.Format("15:04") + " today"
+	case date(t) == date(now.AddDate(0, 0, -1)):
+		return " " + t.Format("15:04") + " yesterday"
+	}
+	return " " + t.Format("Jan 2 15:04")
 }
 
 func gbText(v float64) string { return strconv.FormatFloat(v, 'f', 0, 64) + " GB" }
@@ -482,8 +512,9 @@ func (m ctl) choiceLine(label string, on bool, values []string, chosen string) s
 }
 
 // detailRows are the selected model's details, w cells wide: what it is, how fast, its choices, the context that fits,
-// the edited options, what runs or failed, and what enter and p do.
-func (m ctl) detailRows(w int) []string {
+// the edited options, what runs or failed, and what enter and p do. room: the lines the screen has for them (0: no
+// limit); the fit row gives up lines first, so what failed and what enter does stay on a short screen.
+func (m ctl) detailRows(w, room int) []string {
 	mi := m.selModel()
 	if mi == nil {
 		return nil
@@ -542,8 +573,9 @@ func (m ctl) detailRows(w int) []string {
 		}
 		rows = append(rows, line)
 	}
+	fitAt, fitRow := -1, ""
 	if fr := m.fitRow(*mi); fr != "" && m.liveOf(mi.Name) == nil { // (a running model's own memory is in the cards' figure)
-		rows = append(rows, wrapped(fr, w, 2)...)
+		fitAt, fitRow = len(rows), fr
 	}
 	if o := m.editedText(*mi); o != "" {
 		rows = append(rows, wrapped(fg(cMuted).Render("options  ")+bold(cAccent).Render(o)+fg(cMuted).Render(" · o edits"), w, 2)...)
@@ -555,8 +587,8 @@ func (m ctl) detailRows(w int) []string {
 			fg(cMuted).Render(" · started outside the panel · s says what stops it"), w, 2)...)
 	case sv != nil:
 		rows = append(rows, fg(cGreen).Render("running on :"+strconv.Itoa(sv.Port))+fg(cMuted).Render(" · s stops it"))
-	case rec != nil && rec.State == "failed" && rec.Error != "":
-		rows = append(rows, wrapped(fg(cRed).Render("last start failed: "+rec.Error), w, 2)...)
+	case rec != nil && rec.State == "failed" && rec.Error != "" && mi.Present: // (not downloaded: that line says what to do)
+		rows = append(rows, wrapped(fg(cRed).Render("last start failed"+whenText(rec.FailedAt, time.Now())+": "+rec.Error), w, 2)...)
 	case rec != nil && rec.Note != "":
 		rows = append(rows, wrapped(fg(cMuted).Render(rec.Note), w, 2)...)
 	}
@@ -564,7 +596,7 @@ func (m ctl) detailRows(w int) []string {
 	case !mi.Present && mi.Previous != "": // (the catalog's file changed: the old one is on disk, the new one not yet)
 		rows = append(rows, wrapped(fg(cYellow).Render("new file not downloaded")+fg(cMuted).Render(" · the previous one is on disk · p downloads the new one ("+gbText(mi.SizeGB)+")"), w, 2)...)
 	case !mi.Present:
-		rows = append(rows, fg(cYellow).Render("not downloaded")+fg(cMuted).Render(" · p downloads it ("+gbText(mi.SizeGB)+")"))
+		rows = append(rows, wrapped(fg(cYellow).Render("not downloaded")+fg(cMuted).Render(" · p downloads it ("+gbText(mi.SizeGB)+")"), w, 2)...)
 	case m.psDown() && m.liveOf(mi.Name) == nil: // (enter starts nothing until what runs is known)
 		rows = append(rows, wrapped(fg(cYellow).Render("no start until the running servers can be read")+rAgain(), w, 2)...)
 		if mi.MissingDrafter != "" {
@@ -576,6 +608,13 @@ func (m ctl) detailRows(w int) []string {
 			fg(cYellow).Render(mi.MissingDrafter+" missing")+fg(cMuted).Render(fmt.Sprintf(": p downloads it (%.1f GB)", mi.MissingDrafterGB)), w, 2)...)
 	case m.liveOf(mi.Name) == nil:
 		rows = append(rows, wrapped(bold(cAccent).Render("enter")+fg(cMuted).Render(m.startsText()), w, 2)...)
+	}
+	if fitAt >= 0 { // (the fit row last: as many lines as the room leaves after every other row, at most fitLines)
+		n := fitLines
+		if room > 0 {
+			n = min(n, max(2, room-len(rows)))
+		}
+		rows = append(rows[:fitAt], append(wrapped(fitRow, w, n), rows[fitAt:]...)...)
 	}
 	return rows
 }
@@ -633,7 +672,7 @@ func (m ctl) modelsLines(W, room int) []string {
 	}
 	if W >= twoColumnsAt {
 		dw := W - listW - 1
-		det := m.detailRows(dw)
+		det := m.detailRows(dw, max(3, room-1))
 		n := max(len(list), len(det))
 		n = min(n, max(3, room-1))
 		lo := window(m.curM, len(list), n)
@@ -653,7 +692,11 @@ func (m ctl) modelsLines(W, room int) []string {
 		}
 		return out
 	}
-	det := m.detailRows(W - 3)
+	detRoom := room - 2 - min(len(list), 3) // (the head, the name row and at least three list rows; a stale line is in room)
+	if stale != "" {
+		detRoom--
+	}
+	det := m.detailRows(W-3, max(1, detRoom))
 	nl := min(len(list), max(3, room-2-len(det)))
 	lo := window(m.curM, len(list), nl)
 	out := []string{head}
@@ -790,14 +833,14 @@ func (m ctl) noteLine(W int) string {
 			c = cRed
 		}
 		return ansi.Truncate(fg(c).Render(" "+m.note), W, "…")
-	case m.nothingSetUp():
-		return ansi.Truncate(emberDim.Render(" "+wizardHint), W, "…")
+	case m.nothingSetUp(): // (wrapped to the layout's width, never cut: it is the only thing a new host has to read)
+		return strings.Join(wrapped(emberDim.Render(" "+wizardHint), W, 3), "\n")
 	}
 	return ""
 }
 
 // wizardHint is the note line while nothing is set up: caminus wizard walks a first run from a terminal.
-const wizardHint = "new here? run `caminus wizard` in a terminal: it checks the machine, then pulls and starts a model and sets up Qwen Code"
+const wizardHint = "new here? run `caminus wizard` in a terminal: it checks the machine, starts a model and sets up Qwen Code"
 
 // nothingSetUp is whether this host has nothing to show yet: the model list and the servers read without an error, no
 // model on disk, no server running.
