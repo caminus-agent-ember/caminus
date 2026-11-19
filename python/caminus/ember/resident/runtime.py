@@ -626,11 +626,11 @@ class Runtime:
                 # transcript away. A 5-of-6-open finish spent fewer than TODO_STALE steps between its last todo
                 # update and its verify, so the count alone never mentioned it.
                 opened = len([it for it in todo['items'] if it['state'] != 'done'])
-                for kind, what in (('verified', 'verified'), ('compacted', 'compacted')):
+                for what in ('verified', 'compacted'):
                     if self.store.db.execute(
                             'SELECT 1 FROM events WHERE goal=? AND kind=? AND seq > COALESCE('
                             "(SELECT MAX(seq) FROM events WHERE goal=? AND kind='todo'),0) LIMIT 1",
-                            (gid, kind, gid)).fetchone():
+                            (gid, what, gid)).fetchone():
                         lines.append(f'LOOP: you {what} after your last todo update and {opened} '
                                      f'{"item" if opened == 1 else "items"} still open: mark the ones you finished '
                                      'done (todo) before you finish, or name them in finish\'s open.')
@@ -1429,8 +1429,9 @@ class Runtime:
                                          'or name what is left in open' % '; '.join(left[:5]))
                     result = dict(summary=args['summary'], open=args.get('open', ''))
                     if graded and left:
-                        # The judge sees the list too (judge.evidence). The agent gets the same reading in its own
-                        # result: a goal finished with five of six items open and nothing said so.
+                        # The judge sees the list too (judge.evidence), and this note is on the record: a successful
+                        # finish ends the goal, so the model never reads it back, but the tool_result and the event
+                        # below are what make a 5-of-6-open finish auditable after the fact.
                         result['todo_open'] = ('%d todo item%s still open (%s): the judge sees them, so name each in '
                                                'open or mark it done' % (len(left), '' if len(left) == 1 else 's',
                                                                          '; '.join(left[:5])))
