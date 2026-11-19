@@ -75,6 +75,24 @@ func planView(g residentGoal, width int) textView {
 }
 
 // fetchMemoryView reads the session's memory file into the viewer: /memory.
+// fetchSimView reads the SIM log (issue #341): one structured record per harness change, newest first,
+// each naming the brain that wrote it and whether it is a prediction, a observation or a proposal.
+func fetchSimView(m emberModel) tea.Cmd {
+	return func() tea.Msg {
+		var r struct {
+			Lines []string `json:"lines"`
+		}
+		if err := residentJSON(m, []string{"sim", m.agentName, "--json"}, &r); err != nil {
+			return textViewMsg{err: "sim: " + err.Error()}
+		}
+		lines := r.Lines
+		if len(lines) == 0 {
+			lines = []string{"no SIM records yet"}
+		}
+		return textViewMsg{title: "sim · " + residentText(m.agentName), lines: lines}
+	}
+}
+
 func fetchMemoryView(m emberModel) tea.Cmd {
 	return func() tea.Msg {
 		var r struct {

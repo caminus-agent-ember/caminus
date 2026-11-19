@@ -299,7 +299,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore','sim'):
         p=sub.add_parser(op)
         p.add_argument('name',**(dict(nargs='?',help='the session to restore; none lists the closed ones') if op=='restore' else {}))
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -356,6 +356,24 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='sim':
+            p.add_argument('--on',action='store_true',help='write sim true: this session records SIM predictions')
+            p.add_argument('--off',action='store_true',help='write sim false: the agent says the log is off instead of recording')
+            p.add_argument('--record',action='store_true',help='write a prediction (needs --change and --predicted)')
+            p.add_argument('--observe',metavar='ID',help='append what CI and the reviews showed to a record (needs --observed)')
+            p.add_argument('--problem-group',help='the recurring problem group the change belongs to')
+            p.add_argument('--change',help='the harness change this record predicts')
+            p.add_argument('--rationale',help='why the change should work')
+            p.add_argument('--predicted',help='the outcome you expect, as CI or a reviewer can confirm or contradict')
+            p.add_argument('--observed',help='what CI and the reviews actually showed')
+            p.add_argument('--prediction-error',help='where the prediction was wrong (empty: it held exactly)')
+            p.add_argument('--eval-context',help='what ran: the tests, the CI job, the reviewer')
+            p.add_argument('--status',choices=('proposed','recorded'),
+                           help='proposed: a post-goal reflection that changes nothing yet')
+            p.add_argument('--goal-id',help='the goal the record belongs to (default: the session, no goal)')
+            p.add_argument('--export',action='store_true',help='write the records as JSONL')
+            p.add_argument('--out',help='with --export: the file (default: sim.jsonl in the agent home)')
+            p.add_argument('--limit',type=int,default=20,help='list at most this many records')
         if op=='studio':
             p.add_argument('--read',help='one file from the journal, the studio or the shelf, as text')
             p.add_argument('--raw',action='store_true',help='with --read: the bytes, base64 (images, documents; 24 MB at most)')
@@ -773,6 +791,45 @@ def main(argv=None,stdin=None):
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)
             return 0
         store=Store(home)
+        if a.op=='sim':
+            # The SIM log (issue #341): predictions before a harness change and observations after CI and the
+            # reviews. Listing and export read the event log; a record is one event, so a live daemon sees it at
+            # once and two writers do not need the runtime lock (WAL, busy_timeout).
+            from types import SimpleNamespace
+            from . import sim
+            cfg=json.loads((home/'config.json').read_text())
+            if a.on and a.off:
+                raise ValueError('use --on or --off, not both')
+            if a.on or a.off:
+                cfg['sim']=bool(a.on)
+                atomic_json(home/'config.json',cfg)
+            gid=store.resolve(a.goal_id) if a.goal_id else None
+            rt=SimpleNamespace(store=store,home=home,config=cfg)
+            try:
+                if a.record:
+                    rec=sim.tool(rt,gid,dict(action='record',problem_group=a.problem_group,change=a.change,
+                                             rationale=a.rationale,predicted=a.predicted,
+                                             eval_context=a.eval_context,status=a.status))['record']
+                    if a.json:emit(dict(name=a.name,record=rec,id=rec['id']),True)
+                    else:print('%s: %s · %s' % (rec['id'],rec['status'],rec['change'][:120]),flush=True)
+                    return 0
+                if a.observe:
+                    rec=sim.tool(rt,gid,dict(action='observe',id=a.observe,observed=a.observed,
+                                             eval_context=a.eval_context,prediction_error=a.prediction_error))['record']
+                    if a.json:emit(dict(name=a.name,record=rec,id=rec['id']),True)
+                    else:print('%s: observed · %s' % (rec['id'],(rec['observed'] or '')[:120]),flush=True)
+                    return 0
+                if a.export:
+                    p,n,nbytes=sim.export(rt,gid,a.out)
+                    if a.json:emit(dict(name=a.name,path=str(p),records=n,bytes=nbytes),True)
+                    else:print('%s: %d records, %d bytes' % (p,n,nbytes),flush=True)
+                    return 0
+                out=sim.tool(rt,gid,dict(action='list',limit=a.limit,goal=bool(gid)))
+            finally:
+                store.close()
+            if a.json:emit(dict(name=a.name,lines=out['lines'],records=out['records']),True)
+            else:print('\n'.join(out['lines']),flush=True)
+            return 0
         if a.op=='fallback':
             from .brain import DEFAULTS as FB
             from .model import Model, price

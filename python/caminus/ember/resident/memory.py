@@ -36,7 +36,9 @@ USED = 'notes/.used.json'
 PINNED = ' · pinned'
 LINK = re.compile(r'\]\((notes/[^)]+)\)')        # an index line's note: - [name](notes/x.md) — summary
 HISTORY_KINDS = {'goal_queued': ('prompt',), 'user_message': ('text',), 'peer_message': ('text',),
-                 'assistant': ('content',), 'finished': ('summary',), 'tool_result': ('result',)}
+                 'assistant': ('content',), 'finished': ('summary',), 'tool_result': ('result',),
+                 # a SIM record (resident/sim.py): searchable by its problem group, change and outcomes
+                 'sim': ('problem_group', 'change', 'rationale', 'predicted', 'observed', 'prediction_error')}
 
 
 def _clip(text, cap, name, hint):

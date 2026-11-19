@@ -32,6 +32,7 @@ from .mcp import MCP
 from .brain import Brains
 from . import planning
 from . import sandbox
+from . import sim
 from . import browser
 
 TODO_STATES = ('pending', 'in_progress', 'done')
@@ -356,6 +357,13 @@ TOOLS = [
               summary={'type':'string'}, pin={'type':'boolean'}, index={'type':'string'}, archive={'type':'string'})),
     tool('history_search', 'Full-text search over your own past: earlier goals, your replies, tool results, finish summaries, notes/index-archive.md (each matching line, up to half the limit, with the note it names), your journal and notes. No model call; each hit says its source (past goal, index archive, old index, journal, note; this goal last, without its own prompt) and where.',
          dict(query={'type':'string'}, limit={'type':'integer'}), ('query',)),
+    tool('sim', 'The self-improvement memory (SIM): one structured record per harness change, grouped by the recurring problem it belongs to. record a prediction BEFORE a harness change (problem_group, change, rationale, predicted outcome, eval_context), and observe the outcome AFTER CI and the reviews (what actually happened, and where the prediction was wrong). Every record carries the brain that wrote it (provider, model, effort), so weak-vs-strong runs need no code change; the session can switch the log off (config sim). status: record writes `recorded` (or `proposed` when nothing changes yet), observe writes `observed`. export writes the records as JSONL.',
+         dict(action={'type':'string','enum':['record','observe','list','export']},
+              problem_group={'type':'string'}, change={'type':'string'}, rationale={'type':'string'},
+              predicted={'type':'string'}, observed={'type':'string'}, eval_context={'type':'string'},
+              prediction_error={'type':'string'}, status={'type':'string','enum':list(sim.STATUSES)},
+              id={'type':'string'}, path={'type':'string'}, limit={'type':'integer'},
+              goal={'type':'boolean'}), ('action',)),
     tool('todo', 'Your plan for this goal as a checklist: each item pending, in_progress (one at a time) or done, plus what blocks you now. Send the whole list each time; it replaces the last one, is pinned into every turn (it survives compaction) and shows above your human\'s composer. finish refuses while items are unfinished unless open names what is left.',
          dict(items={'type':'array','items':{'type':'object','properties':{'text':{'type':'string'},
               'state':{'type':'string','enum':['pending','in_progress','done']}},'required':['text','state'],
@@ -472,7 +480,7 @@ REPEAT_EXEMPT = {'wait', 'todo', 'note', 'remember', 'heartbeat', 'machine', 'ma
 # (sandbox too: a box changes nothing of the agent's outside its own folder; with hosts it can still send data to
 # them, which the human sees in its connection log)
 PRE_DONE_ALLOWED = {'read', 'search', 'discover', 'history_search', 'web_search', 'web_fetch', 'machine', 'todo', 'ask_user',
-                    'advisor', 'peers', 'mail', 'remember', 'note', 'wait', 'sandbox'}
+                    'advisor', 'peers', 'mail', 'remember', 'note', 'wait', 'sandbox', 'sim'}
 
 class Runtime:
     def __init__(self, home, model=None, terminal=None):
@@ -1374,6 +1382,8 @@ class Runtime:
                     result = agenda.schedule(self, action['goal'], args['after_minutes'], args['note'])
                 elif name == 'remember':
                     result = self.memory.call(args)
+                elif name == 'sim':
+                    result = sim.tool(self, action['goal'], args)
                 elif name == 'history_search':
                     result = self.memory.search(args['query'], args.get('limit', 8), action['goal'])
                 elif name == 'checkpoint':

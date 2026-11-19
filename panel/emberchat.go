@@ -2973,6 +2973,10 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		m.msg = "reading the memory…"
 		return m, fetchMemoryView(m)
+	case "/sim":
+		clear()
+		m.msg = "reading the SIM log…"
+		return m, fetchSimView(m)
 	case "/context":
 		clear()
 		return m.openPage(pageOverlays[command].tab)
@@ -3147,6 +3151,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/new", "start a new goal"},
 	{"/quit", "close the UI; the daemon continues"},
 	{"/remember", "append TEXT to this session's memory"},
+	{"/sim", "the self-improvement memory: predictions before harness changes and what CI showed"},
 	{"/resume", "resume the selected goal"},
 	{"/sessions", "every session as a card: switch with Enter or a click"},
 	{"/start", "run this session's loop (stop and start any session from Shift+Tab)"},
