@@ -778,10 +778,14 @@ func (m emberModel) headExpanded(agent, state string, steps, w int) string {
 	return out + "\n" + rule
 }
 
-// scrollHead moves the expanded goal's first row by n.
-func (m *emberModel) scrollHead(n int) {
+// scrollHead moves the expanded goal's first row by n, and reports whether it moved: a goal that fits its half of
+// the screen has nowhere to go, and PgUp/PgDn must then page the transcript as they always did.
+func (m *emberModel) scrollHead(n int) bool {
 	lines := lipgloss.Height(m.headExpandedBody(max(20, m.width)))
-	m.chat.headTop = max(0, min(m.chat.headTop+n, max(0, lines-m.headRows())))
+	top := max(0, min(m.chat.headTop+n, max(0, lines-m.headRows())))
+	was := m.chat.headTop
+	m.chat.headTop = top
+	return top != was
 }
 
 // headKey is a goal's text in the expanded header's drawing cache, with the width it was drawn at.
@@ -2836,8 +2840,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil // the chat is the only screen: Tab completes and does nothing else
 	case "pgup":
-		if m.chat.headOpen { // an expanded goal taller than its half of the screen scrolls first
-			m.scrollHead(-m.headRows())
+		// an expanded goal taller than its half of the screen scrolls first; one that fits does not take the key
+		if m.chat.headOpen && m.scrollHead(-m.headRows()) {
 			return m, nil
 		}
 		if m.liveBoxShown() {
@@ -2847,8 +2851,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
-		if m.chat.headOpen {
-			m.scrollHead(m.headRows())
+		if m.chat.headOpen && m.scrollHead(m.headRows()) {
 			return m, nil
 		}
 		if m.liveBoxShown() {

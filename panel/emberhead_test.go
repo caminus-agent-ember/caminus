@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -151,6 +152,60 @@ func TestAShortGoalHasNoHintAndDoesNotExpand(t *testing.T) {
 	}
 	if strings.Contains(ansi.Strip(m.chatHead(100)), "Alt+G expands") {
 		t.Fatal("a goal that fits does not say it is cut")
+	}
+}
+
+// TestPgUpAndPgDnPageTheTranscriptUnderAGoalThatFits: an expanded goal with nowhere to scroll does not take the
+// paging keys from the history under it.
+func TestPgUpAndPgDnPageTheTranscriptUnderAGoalThatFits(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	// long enough to be cut in the collapsed header (4+ wrapped lines), short enough to render in fewer rows than
+	// the expansion shows at once.
+	goal := strings.Repeat("A short brief. ", 20)
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: goal}}
+	m.goalSel, m.chat.target = 0, "original"
+	if !m.headCut(100) {
+		t.Fatalf("fixture: the goal is cut in the collapsed header")
+	}
+	// a history long enough to page through
+	for i := 0; i < 40; i++ {
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{
+			Seq: 100 + i, Goal: "original", Kind: "assistant",
+			Data: map[string]any{"content": fmt.Sprintf("Observation %d stays in the transcript.", i)}}}})
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'g', Mod: tea.ModAlt})
+	m = next.(emberModel)
+	if !m.chat.headOpen {
+		t.Fatal("Alt+G did not open the goal")
+	}
+	lines := lipgloss.Height(m.headExpandedBody(100))
+	if lines > m.headRows() {
+		t.Fatalf("fixture: the open goal fits (%d rows of %d)", lines, m.headRows())
+	}
+	if m.chat.headTop != 0 {
+		t.Fatalf("fixture: the open goal starts at row %d", m.chat.headTop)
+	}
+	// PgUp over an open goal that cannot scroll pages the history instead of doing nothing.
+	if !m.chat.transcript.AtBottom() {
+		t.Fatalf("fixture: the transcript starts at the bottom")
+	}
+	beforeView := ansi.Strip(m.chat.transcript.View())
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = next.(emberModel)
+	if ansi.Strip(m.chat.transcript.View()) == beforeView {
+		t.Fatalf("PgUp under a goal that fits left the transcript where it was (offset %d)", m.chat.transcript.YOffset())
+	}
+	if m.chat.headTop != 0 {
+		t.Fatalf("a goal that fits scrolled to row %d", m.chat.headTop)
+	}
+	// PgDn walks back down.
+	up := m.chat.transcript.YOffset()
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = next.(emberModel)
+	if m.chat.transcript.YOffset() <= up {
+		t.Fatalf("PgDn under a goal that fits did not page the transcript down (offset %d, was %d)",
+			m.chat.transcript.YOffset(), up)
 	}
 }
 
