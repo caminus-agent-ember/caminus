@@ -84,6 +84,7 @@ it; the durable blocks replace it when the turn lands.
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
 | `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory file, in a scrolling view |
+| `/sim` | the SIM log: each harness change's prediction, what CI and the reviews showed, and the brain that wrote it (`caminus ember agent sim NAME --on/--off` switches it for a session; `--record` / `--observe` / `--export` from the CLI) |
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
 | `/panel` | the Caminus panel (models, servers, the cards) full screen inside Ember; Esc, q or e comes back to the chat as it was |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
@@ -247,6 +248,7 @@ one call waits for output), `discover`, the loop's tools and the bridge
 | `read`, `search`, `edit`, `write` | Files without the terminal: numbered windows (`start`, `lines`); file names by glob and text by regex; exact, unique replacement (CRLF and mode kept, atomic); whole-file writes; edits return a diff |
 | `todo` | The goal's checklist (see the loop) |
 | `remember`, `history_search` | A one-fact note with its index line; full-text search over the agent's own past goals, results, journal and notes |
+| `sim` | The SIM log when the session has it on (config.json `sim`, default on; `ember agent sim NAME --on/--off`): `record` a prediction before a harness change (problem group, change, rationale, predicted, eval context), `observe` it after CI and the reviews (observed, eval context, the prediction error if known), `list` the records with `history_search` finding them by text. Append-only: a recorded prediction is never rewritten; a second `observe` only adds the observation. Nothing automatic reads it, and the agent's tool has no export (the CLI has `--export`) |
 | `wait` | Block without model calls until a time, a file, a port, a process, a terminal session or a message; a message, cancellation or new work ends it early |
 | `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
 | `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |

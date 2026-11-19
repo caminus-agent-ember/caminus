@@ -36,7 +36,9 @@ USED = 'notes/.used.json'
 PINNED = ' · pinned'
 LINK = re.compile(r'\]\((notes/[^)]+)\)')        # an index line's note: - [name](notes/x.md) — summary
 HISTORY_KINDS = {'goal_queued': ('prompt',), 'user_message': ('text',), 'peer_message': ('text',),
-                 'assistant': ('content',), 'finished': ('summary',), 'tool_result': ('result',)}
+                 'assistant': ('content',), 'finished': ('summary',), 'tool_result': ('result',),
+                 # a SIM record (resident/sim.py): searchable by its problem group, change and outcomes
+                 'sim': ('problem_group', 'change', 'rationale', 'predicted', 'observed', 'prediction_error')}
 
 
 def _clip(text, cap, name, hint):
@@ -326,12 +328,18 @@ class Memory:
         fts = ' '.join('"%s"*' % t.replace('"', '')[:max(4, len(t) - 3)] if len(t) > 5 else '"%s"*' % t for t in terms)
         # The running goal (gid) is not the past: its own prompt matched every search drawn from it and came first,
         # labelled a past goal, so it is left out (the agent has it); its other hits are 'this goal' and come last.
+        # A session with the SIM log off must not read its records: that is the A/B's off arm.
+        try:
+            no_sim = not self.rt.config.get('sim', True)
+        except AttributeError:            # (a bare store in a test or a CLI helper: no session switch to read)
+            no_sim = False
         hits, mine = [], []
         for r in self.rt.store.db.execute(
                 'SELECT f.seq, f.goal, f.kind, snippet(history_fts, 0, "[", "]", " … ", 24) AS snip, e.ts '
                 'FROM history_fts f JOIN events e ON e.seq=f.seq WHERE history_fts MATCH ? '
-                'AND NOT (f.goal IS ? AND f.kind=\'goal_queued\') ORDER BY f.goal IS ?, rank LIMIT ?',
-                (fts, gid or '', gid or '', limit)):
+                "AND NOT (f.goal IS ? AND f.kind='goal_queued') AND NOT (? AND f.kind='sim') "
+                'ORDER BY f.goal IS ?, rank LIMIT ?',
+                (fts, gid or '', no_sim, gid or '', limit)):
             this = bool(gid) and r['goal'] == gid
             (mine if this else hits).append(dict(
                 source='this goal' if this else 'past goal', where=f"goal {(r['goal'] or '')[:8]} · {r['kind']}",

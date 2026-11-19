@@ -442,10 +442,13 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/sessions]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
+	if got := slashMatches("/si"); fmt.Sprint(sortedCopy(got)) != "[/sim]" {
+		t.Fatalf("unexpected matches: %v", got)
+	}
 	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/sessions /start /steer /studio]" {
+	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/sessions /sim /start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -454,7 +457,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /approvals /sessions /remember /goals /start /cancel /compact /resume /theme /deny /steer /memory /context /model /advisor /effort /pause /halt /studio /btw /diff /rewind /plan /panel /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /approvals /sessions /remember /sim /goals /start /cancel /compact /resume /theme /deny /steer /memory /context /model /advisor /effort /pause /halt /studio /btw /diff /rewind /plan /panel /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -468,13 +471,18 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/start " {
+	if !done || m.chat.compose.Value() != "/sim " {
 		t.Fatalf("second Tab gave %q", m.chat.compose.Value())
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/steer " {
+	if !done || m.chat.compose.Value() != "/start " {
 		t.Fatalf("third Tab gave %q", m.chat.compose.Value())
+	}
+	next, done = m.cycleSlash()
+	m = next.(emberModel)
+	if !done || m.chat.compose.Value() != "/steer " {
+		t.Fatalf("fourth Tab gave %q", m.chat.compose.Value())
 	}
 	m.chat.compose.SetValue("/new steer me")
 	next, done = m.cycleSlash()

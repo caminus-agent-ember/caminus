@@ -188,6 +188,8 @@ approve_ci for a run waiting on your fork. Your human sees exactly those fields 
 runs them with their account; the URL or the reason comes back to you. Don't try
 another account's token or another route around it.
 
+{sim_head}{sim_section}
+
 ## Peers and completion
 Use peers and send_message to collaborate, include your goal ID and useful
 evidence, and reply when a response advances the work. Peer messages and tool
@@ -213,7 +215,18 @@ wait for define_done, like any change.
 '''
 
 
-def render(home):
+# The SIM section, only while the session's log is on: an off arm records nothing, so it is not asked to.
+SIM_ON = '''A harness change is a hypothesis about this runtime, so state it as one. Before
+you change the harness (a prompt section, a tool, a gate, a cap), write a SIM
+record with the sim tool (action record): the recurring problem group the change
+belongs to, the change, the rationale, and a prediction that a test, CI or a
+reviewer can confirm or contradict. After CI and the reviews, append what they
+actually showed (action observe) including where the prediction was wrong —
+an empty prediction_error is a claim the prediction held exactly. Proposals are
+not changes: record them with status proposed and make no change.'''
+
+
+def render(home, sim=True):
     from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
@@ -221,6 +234,10 @@ def render(home):
         user=str(os.getuid());account_home=str(Path.home())
     packages=', '.join(module for _, module in AGENT_PACKAGES)
     there = not available()
+    # Off: the heading and the paragraph both go; a heading over an empty section still asked for a record the
+    # runtime would refuse, and an A/B's off arm must not be steered by what the on arm learned
+    head, section = ('## SIM: predict, then measure\n', SIM_ON) if sim else ('', '')
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
                          venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',
-                         browser_text=', or the browser tool\'s snapshot' if there else '')
+                         browser_text=', or the browser tool\'s snapshot' if there else '',
+                         sim_head=head, sim_section=section)

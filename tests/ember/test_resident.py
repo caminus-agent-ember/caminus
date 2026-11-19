@@ -2450,6 +2450,192 @@ for line in sys.stdin:
         try:self.assertTrue(rt.memory.search('flux capacitor')['hits'])
         finally:rt.mail.close();rt.store.close()
 
+    def test_sim_records_a_prediction_observes_it_and_exports_jsonl(self):
+        # issue #341: a structured record before a harness change, carrying the brain that wrote it; the
+        # observation after CI is a new version of the same id; the log is searchable, exportable as JSONL,
+        # and the session switch turns it off.
+        self.replies(call('sim',dict(action='record',problem_group='delegate · a child that runs away',
+                                     change='caps on by default',rationale='a runaway child bills and stalls the parent',
+                                     predicted='CI green and a capped child reports partial',
+                                     eval_context='tests/ember/test_resident.py -k sim')),
+                     call('finish',dict(summary='Recorded the prediction.')))
+        goal=self.cmd('once',['--goal','Predict the delegate caps change.'])
+        self.assertEqual(goal['state'],'completed')
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data'].get('name')=='sim']
+        rec=results[-1]['record']
+        self.assertEqual(rec['status'],'recorded')
+        self.assertEqual(rec['brain'],dict(provider='',model='fixture',effort=''),'the brain that wrote it rides along')
+        self.assertEqual(rec['goal'],goal['id'])
+        self.assertEqual(rec['prediction_error'],'')
+        # the record is history: history_search finds its text without a model call
+        rt=Runtime(self.home)
+        try:
+            hits=rt.memory.search('runaway child')['hits']
+            self.assertTrue(any(h['where'].endswith('· sim') for h in hits),hits)
+        finally:rt.mail.close();rt.store.close()
+        # the observation (after CI and the reviews) appends a version; the list shows the newest, once
+        out=self.cmd('sim',['--observe',rec['id'],'--observed','CI green; the reviewer asked for a cap on steps',
+                            '--prediction-error','the reviewer also wanted the report to name the model'])
+        self.assertEqual(out['record']['status'],'observed')
+        self.assertTrue(out['record']['observed_ts']>0)
+        listed=self.cmd('sim',[])
+        self.assertEqual([(r['id'],r['status']) for r in listed['records']],[(rec['id'],'observed')])
+        self.assertIn('observed: CI green', '\n'.join(listed['lines']))
+        self.assertIn('prediction_error: the reviewer also wanted', '\n'.join(listed['lines']))
+        # JSONL: one line per record, the newest version only
+        out=self.cmd('sim',['--export'])
+        path=Path(out['path'])
+        self.assertEqual(out['records'],1)
+        lines=path.read_text().strip().split('\n')
+        self.assertEqual(len(lines),1)
+        self.assertEqual(json.loads(lines[0])['id'],rec['id'])
+        self.assertTrue(str(path).endswith('sim.jsonl'))
+        # a proposal is a record too, and changes nothing by itself
+        out=self.cmd('sim',['--record','--status','proposed','--change','parallel children',
+                            '--predicted','the TUI shows one card per child','--problem-group','delegate · visibility'])
+        self.assertEqual(out['record']['status'],'proposed')
+        both=self.cmd('sim',[])
+        self.assertEqual({r['status'] for r in both['records']},{'observed','proposed'})
+        # a record without a prediction is refused: there is nothing CI could contradict
+        self.cmd('sim',['--record','--change','no prediction'],code=1)
+        # a prediction is append-only: naming an existing id cannot rewrite it (only observe adds a version)
+        from caminus.ember.resident import sim as simmod
+        rt=Runtime(self.home)
+        try:
+            with self.assertRaises(ValueError):
+                simmod.record(rt,None,dict(id=rec['id'],change='rewrite the prediction',predicted='x'))
+        finally:rt.mail.close();rt.store.close()
+        self.assertEqual(self.cmd('sim',[])['records'][-1]['status'],'observed','the prediction was not rewritten')
+
+    def test_an_observation_is_append_only_and_keeps_the_predictors_brain(self):
+        # an observation must not rewrite the prediction fields by naming the record's id, and it must be
+        # stamped with the predictor's brain rather than the observer's session model. Both hold here: a $0
+        # local worker predicts, the paid session model observes, and the observation changes nothing it should
+        # not. A running resident follows a config sim switch at its next turn.
+        from caminus.ember.resident.store import atomic_json
+        from caminus.ember.resident import sim as simmod
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal whose prediction outlives a model switch.')
+            # the worker's config: a local brain, $0 (no prices, no provider)
+            worker=json.loads((self.home/'config.json').read_text())
+            worker.update(model='local-27b',provider='',prices=None,effort='')
+            rec=simmod.record(rt,gid,dict(change='cap delegate spend',predicted='a capped child reports partial',
+                                          problem_group='delegate · runaway'),cfg=worker)
+            self.assertEqual(rec['brain'],dict(provider='',model='local-27b',effort=''),
+                             'the predictor names the brain that wrote the prediction')
+            # the rewrite routes through the same validation the tool uses: restating a prediction field is the
+            # rewording the reviewer reproduced, whatever action name carries it in
+            with self.assertRaises(ValueError):
+                simmod.tool(rt,gid,dict(action='record',id=rec['id'],status='observed',observed='CI green',
+                                        change='a different change',predicted='a different prediction'))
+            # an observation may add only the outcome, its context and the error
+            obs=simmod.observe(rt,gid,rec['id'],'CI green; a capped child reports partial',
+                               eval_context='tests/ember/test_resident.py -k delegate',
+                               prediction_error='the reviewer also capped the parent')
+            self.assertEqual(obs['brain'],rec['brain'],'the observation carries the predictor\'s brain')
+            self.assertEqual(obs['observed_by'],dict(provider='',model='fixture',effort=''),
+                             'the observer is named beside it, not instead of it')
+            self.assertEqual(obs['ts'],rec['ts'],'the record keeps its own timestamp, not the observation\'s')
+            # and the closed record is not written again: a second observation could rewrite the first
+            with self.assertRaises(ValueError):
+                simmod.observe(rt,gid,rec['id'],'CI green twice')
+            listed=simmod._load(rt,limit=10)
+            self.assertEqual([(r['id'],r['status']) for r in listed],[(rec['id'],'observed')])
+            self.assertEqual(listed[0]['predicted'],rec['predicted'],'no version rewrote the prediction')
+            # the per-session switch reaches a running resident at its next turn, no restart
+            cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
+            atomic_json(self.home/'config.json',cfg)
+            rt._follow_config()
+            self.assertFalse(simmod.enabled(rt),'the daemon sees agent sim --off without a restart')
+            cfg['sim']=True;atomic_json(self.home/'config.json',cfg)
+            rt._follow_config()
+            self.assertTrue(simmod.enabled(rt))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_sim_export_is_not_a_tool_and_an_off_session_reads_nothing(self):
+        # the ways an append-only log of predictions can be bent: the agent's tool could write any path the model
+        # named (plan mode, before define_done); a record stamped the primary while the fallback answered it; an
+        # observation under another goal split the record; a record could be born with its outcome in hand; "off"
+        # hid nothing a read path could see; every version was its own search hit.
+        from caminus.ember.resident.store import atomic_json
+        from caminus.ember.resident.prompt import render
+        from caminus.ember.resident import sim as simmod
+        # the export is the CLI's alone: through plan mode, where the model could name a file, the tool refuses
+        victim=self.home/'victim.txt';victim.write_text('keep me\n')
+        self.replies(call('sim',dict(action='export',path=str(victim))),
+                     call('propose_plan',dict(plan='nothing to change yet')))
+        self.cmd('once',['--plan','--goal','Export the SIM log over a file.'],code=25)
+        self.assertEqual(victim.read_text(),'keep me\n','no tool argument writes a file')
+        results=[e['data']['result'] for e in self.cmd('events')
+                 if e['kind']=='tool_result' and e['data'].get('name')=='sim']
+        # refused before the call runs: the action enum no longer has export, so the error is the schema's
+        self.assertTrue(results[-1].get('error'),'export was refused')
+        rt=Runtime(self.home)
+        try:
+            self.assertNotIn('path',json.dumps([t for t in rt.tools if t['function']['name']=='sim'][0]))
+            gid=rt.store.enqueue('A goal whose turn the fallback answers.')
+            # the record names the brain that served the turn, not the agent's primary
+            class Fallback:
+                config=dict(model='claude-haiku-5-5',provider='anthropic')
+            rt.model=Fallback()
+            rec=simmod.record(rt,gid,dict(change='stamp the serving brain',predicted='the record names haiku',
+                                          ts=1.0))
+            self.assertEqual(rec['brain']['model'],'claude-haiku-5-5',"the fallback's record is not the primary's")
+            self.assertGreater(rec['ts'],1.0,'a caller-supplied ts is ignored: the log keeps its own clock')
+            rt.model=rt.primary
+            # a record cannot be born with its outcome in hand
+            with self.assertRaises(ValueError):
+                simmod.tool(rt,gid,dict(action='record',status='observed',change='x',predicted='y',observed='z'))
+            # an observation from another goal stays in the record's own goal, one record either way
+            other=rt.store.enqueue('Another goal that observes it.')
+            rec2=simmod.record(rt,gid,dict(change='zzmarker cap',predicted='one hit'))
+            simmod.observe(rt,other,rec2['id'],'CI green')
+            self.assertEqual(simmod.observe.__defaults__ is not None and
+                             [r['id'] for r in simmod._load(rt,gid,limit=10)].count(rec2['id']),1)
+            self.assertNotIn(rec2['id'],[r['id'] for r in simmod._load(rt,other,limit=10)])
+            # one search hit per record, with its newest text, not one per version
+            simhits=[h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')]
+            self.assertEqual(len(simhits),1,'an observed record is one history hit')
+            self.assertIn('CI green',simhits[0]['text'])
+            # off hides the tool, the prompt section and the search hits; on brings all three back
+            cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
+            atomic_json(self.home/'config.json',cfg);rt._follow_config()
+            self.assertNotIn('sim',[t['function']['name'] for t in rt.tools])
+            self.assertNotIn('SIM: predict',render(self.home,sim=False))
+            self.assertIn('SIM: predict',render(self.home))
+            self.assertEqual([h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')],[])
+            cfg['sim']=True;atomic_json(self.home/'config.json',cfg);rt._follow_config()
+            self.assertIn('sim',[t['function']['name'] for t in rt.tools])
+            self.assertEqual(len([h for h in rt.memory.search('zzmarker')['hits']
+                                  if h['where'].endswith('· sim')]),1)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_sim_off_refuses_records_until_it_is_turned_back_on(self):
+        cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
+        (self.home/'config.json').write_text(json.dumps(cfg))
+        self.replies(call('sim',dict(action='record',change='x',predicted='y')),
+                     call('finish',dict(summary='Could not record: the log is off.')))
+        self.cmd('once',['--goal','Record a prediction with the log off.'])
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data'].get('name')=='sim']
+        self.assertIn('SIM log is off',results[-1].get('error',''))
+        # an off session reads nothing back either, through either path: the CLI is a second read path an
+        # agent can reach through its terminal, so listing refuses just as the tool does
+        self.cmd('sim',[],code=1)
+        # the CLI is a read path too: an off session does not list or export what it did not record, so an
+        # agent that runs the CLI through its terminal cannot read the on arm's lessons (--on still works)
+        self.cmd('sim',['--export','--out',str(self.home/'off.jsonl')],code=1)
+        self.assertFalse((self.home/'off.jsonl').exists(),'an off session exports nothing')
+        # --off only writes sim=false, so it must not list either; it stays off
+        self.cmd('sim',['--off'],code=1)
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],False,'--off stays off')
+        self.cmd('sim',['--record','--change','x','--predicted','y'],code=1)
+        out=self.cmd('sim',['--on'])
+        self.assertTrue(json.loads((self.home/'config.json').read_text())['sim'])
+        self.assertEqual(self.cmd('sim',['--record','--change','x','--predicted','y'])['record']['status'],'recorded')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],True,'--on stays on')
+        self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
+
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
         rt=Runtime(self.home)
