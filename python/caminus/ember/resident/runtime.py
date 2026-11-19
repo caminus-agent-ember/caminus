@@ -80,6 +80,29 @@ CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fp
 # The flags of xxd and uniq that take a value: that value is not a file (xxd -l 64 f reads one file).
 VALUE_FLAGS = {'xxd': ('-l', '-s', '-c', '-g', '-o', '-n', '-len', '-seek', '-cols', '-groupsize', '-offset', '-name'),
                'uniq': ('-f', '-s', '-w')}
+# rocm-smi and amd-smi read the GPUs, but a reset, a clock / fan / power set or a bad-page retirement is a change - and
+# a GPU reset can take the owner's monitors or their model down. They are allow-listed flag by flag (#382 review:
+# `amd-smi reset -g 0` and `rocm-smi --gpureset -d 0` classified as read-only, because READ_ONLY had them whole):
+# every word that starts with '-' must be a known query flag, and amd-smi's first word must be a query subcommand.
+# Anything else - --gpureset, --resetclocks, --setfan, set, reset, partition - is a change. The list is deliberately
+# short: a query form it does not know is refused, and the parent can run it.
+ROCM_SMI_FLAGS = frozenset((
+    '-h', '--help', '-v', '--version', '-a', '--alldevices', '-l', '--listdevices', '-d', '--showdriverversion',
+    '--json', '--device', '--showallinfo', '--showbus', '--showclocks', '--showenergycounter', '--showeeprom',
+    '--showfan', '--showfwinfo', '--showgpuclocks', '--showhw', '--showmaxpower', '--showmemclocks',
+    '--showmeminfo', '--showmemvendor', '--showpagesinfo', '--showpendingretirement', '--showperflevel',
+    '--showpower', '--showproductname', '--showprofile', '--showrasinfo', '--showreplaycount', '--showremappedrows',
+    '--showretiredpages', '--showserial', '--showtemp', '--showtopo', '--showuniqueid', '--showuse',
+    '--showversion', '--showvoltage', '--showxgmierr'))
+AMD_SMI_QUERY = frozenset(('version', 'list', 'monitor', 'static', 'metric', 'firmware', 'topology'))
+AMD_SMI_FLAGS = frozenset(('-h', '--help', '-v', '--version', '--json', '--csv', '-g', '--gpu', '-w', '--watch',
+                          '-i', '--interval', '-n', '--iterations', '--asic', '--bus', '--vbios', '--board',
+                          '--driver', '--ras', '--vram', '--pcie', '--clock', '--usage', '--temp', '--power',
+                          '--voltage', '--limit', '--error'))
+# the long names date and file accept as reads (any other long name is refused: `--set` and `--compile` write)
+DATE_READ_LONG = frozenset(('utc', 'universal', 'rfc-2822', 'rfc-email', 'iso-8601', 'debug', 'help', 'version',
+                            'date', 'reference', 'file', 'resolution', 'rfc-3339'))
+DATE_VALUE_LONG = frozenset(('date', 'reference', 'file', 'resolution', 'rfc-3339', 'iso-8601'))
 
 
 # sed and awk read only in a narrow form, checked word by word (shlex) on an exact grammar; anything else is a change.
@@ -184,6 +207,95 @@ def _operands(args, takes_value):
     return out
 
 
+def _smi_query(words):
+    """rocm-smi / amd-smi in a known query form only (ROCM_SMI_FLAGS / AMD_SMI_QUERY). Every '-' word is a listed query
+    flag; amd-smi's first non-flag word is a query subcommand; other words are a flag's value or a device index."""
+    prog, args = words[0], words[1:]
+    if prog == 'amd-smi':
+        plain = [a for a in args if not a.startswith('-')]
+        if not plain or plain[0] not in AMD_SMI_QUERY:
+            return False
+    flags = ROCM_SMI_FLAGS if prog == 'rocm-smi' else AMD_SMI_FLAGS
+    for w in args:
+        if w.startswith('-') and w != '-' and w.split('=', 1)[0] not in flags:
+            return False
+    return True
+
+
+def _file_writes(w):
+    """file's arguments that write or run a program: -C / --compile writes a compiled magic file (x.mgc), -z /
+    --uncompress looks inside a compressed file by running its decompressor."""
+    if w.startswith('--'):
+        name = w[2:].split('=', 1)[0]
+        return bool(name) and (('compile'.startswith(name) and len(name) >= 2) or
+                               ('uncompress'.startswith(name) and len(name) >= 2))
+    return w.startswith('-') and w != '-' and bool(set(w[1:]) & {'C', 'z', 'Z'})
+
+
+# git arguments that run a program or write a file, which git accepts abbreviated to any unique prefix (so --out=x
+# writes what --output= does): --ext-diff / --textconv / --filters / --open-files-in-pager / --upload-pack /
+# --rsh-command / --output / --exec. A word is checked as a prefix of one of these (#382 review: `git show --textconv`,
+# `git cat-file --filters`, `git log --ext-diff` ran a filter or a diff driver).
+GIT_RUNS = ('ext-diff', 'textconv', 'filters', 'open-files-in-pager', 'upload-pack', 'rsh-command', 'output', 'exec',
+            'show-signature')
+
+
+def _git_runs(w):
+    if not w.startswith('--') or w == '--':
+        return False
+    name = w[2:].split('=', 1)[0]
+    return any(d.startswith(name) for d in GIT_RUNS)
+
+
+# binutils programs in READ_ONLY that load a plugin with --plugin (dlopen: it runs that file's code). Verified live:
+# `nm --plugin evil.so a.out` printed the plugin's output (#382 review, third round).
+PLUGIN_PROGS = frozenset(('nm', 'objdump', 'readelf'))
+
+
+def _plugin_load(prog, w):
+    if prog not in PLUGIN_PROGS or not w.startswith('--') or w == '--':
+        return False
+    name = w[2:].split('=', 1)[0]
+    return bool(name) and 'plugin'.startswith(name)
+
+
+def _date_sets(args):
+    """date writes the clock with -s / --set and with a bare operand (`date 010100002020`); a +FORMAT operand, -d,
+    -r, -f, -u, -I and -R only read. Any long name or short flag not known to read counts as a set."""
+    value_next = False
+    for w in args:
+        if value_next:
+            value_next = False
+            continue
+        if w.startswith('+'):
+            continue
+        if w.startswith('--'):
+            name = w[2:].split('=', 1)[0]
+            if '=' in w:
+                if name not in DATE_VALUE_LONG:
+                    return True
+                continue
+            if name in DATE_VALUE_LONG:
+                value_next = True
+            elif name not in DATE_READ_LONG:
+                return True           # (--set, --set=..., and any abbreviation or unknown name)
+            continue
+        if w.startswith('-') and w != '-':
+            for ch in w[1:]:
+                if ch == 's':
+                    return True
+                if ch in 'drf':
+                    value_next = True
+                    break             # the rest of the cluster is its value
+                if ch == 'I':
+                    break             # -I takes an optional attached value (hours, minutes, seconds, ns)
+                if ch not in 'uRhvc':
+                    return True
+            continue
+        return True                   # a bare operand sets the date
+    return False
+
+
 def _runs_programs(prog, words):
     """An argument that runs another program even though prog is read-only in this form: tar --checkpoint-action=exec
     (and its abbreviations), tar -I/-F/--use-compress-program/--info-script/--to-command, git grep -O /
@@ -238,6 +350,10 @@ def read_only_command(cmd):
                 continue                  # listing remotes ('git remote -v' was refused three times before a done check)
             if not sub or sub[0] not in READ_ONLY_GIT:
                 return False
+            if any(_git_runs(w) for w in words[1:]):
+                return False              # --ext-diff / --textconv / --filters / --show-signature run a program
+                                          # (or a filter from the repository's config); git abbreviates long names,
+                                          # so --out=x writes through what --output would (#382 review)
         elif words[0] in LISTING:
             if not any(w in LISTING[words[0]] for w in words[1:]) or any(
                     w in ('-x', 'x', '-d', '-o', 'e', 'a', 'u', 'd') or w.startswith(('-x', '-c', '-r', '-u', '-A'))
@@ -250,6 +366,18 @@ def read_only_command(cmd):
                                           # attached value like -T/opt is refused too: harmless); --compress-program runs one
         elif words[0] == 'xxd' and any(re.fullmatch(r'-[A-Za-z]*r[A-Za-z]*', w) or w == '-revert' for w in words[1:]):
             return False                  # xxd -r rebuilds a binary
+        elif words[0] in ('rocm-smi', 'amd-smi') and not _smi_query(words):
+            return False                  # a reset / clock / fan / partition set is a change (#382 review)
+        elif any(_plugin_load(words[0], w) for w in words[1:]):
+            return False                  # nm / objdump / readelf --plugin loads and runs a shared object
+        elif words[0] == 'file' and any(_file_writes(w) for w in words[1:]):
+            return False                  # file -C / --compile writes a compiled magic file, -z runs a decompressor
+        elif words[0] == 'date' and _date_sets(words[1:]):
+            return False                  # date -s / a bare operand sets the clock
+        elif words[0] == 'rg' and any(w.split('=', 1)[0] == '--hostname-bin' or
+                                      (w.startswith('-') and not w.startswith('--') and 'z' in w) or
+                                      w.split('=', 1)[0] in ('--search-zip',) for w in words[1:]):
+            return False                  # rg --hostname-bin / -z: run a command, or a decompressor
         elif words[0] in VALUE_FLAGS and len(_operands(words[1:], VALUE_FLAGS[words[0]])) > 1:
             return False                  # a second file argument is the output it writes ('-' counts: it is stdin)
     return True

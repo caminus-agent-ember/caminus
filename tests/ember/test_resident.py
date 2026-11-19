@@ -2791,9 +2791,48 @@ for line in sys.stdin:
                     'git grep -Oprog x',
                     'git grep --open-files-in-pager=sh x',
                     'git ls-remote --upload-pack=prog origin',
-                    'git ls-remote --rsh-command=prog origin'):
+                    'git ls-remote --rsh-command=prog origin',
+                    # a GPU reset takes the owner's monitors or their model down (#382 review: READ_ONLY held
+                    # rocm-smi and amd-smi whole, so any flag at all classified as a read)
+                    'amd-smi reset -g 0',
+                    'amd-smi set -g 0 --fan 100',
+                    'amd-smi partition set -g 0',
+                    'rocm-smi --gpureset -d 0',
+                    'rocm-smi --resetclocks',
+                    'rocm-smi --setfan 100',
+                    'rocm-smi -d 0 --setpoweroverdrive 200',
+                    # flags that write a file or run a program on read-only programs (#382 review, third round)
+                    'git log --output=x',
+                    'git log --out=x',              # (git abbreviates long options: --out= is --output=)
+                    'git log --ext-diff',
+                    'git show --textconv HEAD',
+                    'git cat-file --filters blob HEAD:f',
+                    'git grep --textconv x',
+                    'git grep --op=sh x',
+                    'awk \'BEGIN{system("touch awk_pwned")}\' f',
+                    'awk \'{print | "sh"}\' f',
+                    'rg --pre sh x',
+                    'rg --hostname-bin sh x',
+                    'rg -z x',
+                    'file -C -m x',
+                    'file --compile -m x',
+                    'file -z x.gz',
+                    'date -s 2020-01-01',
+                    'date --set=2020-01-01',
+                    'date 010100002020',
+                    # --plugin dlopens a shared object: verified live, `nm --plugin evil.so a.out` ran its constructor
+                    'nm --plugin x.so a.out',
+                    'nm --pl=x a.out',
+                    'objdump --plugin x.so -d a.out',
+                    'readelf --plugin=x.so -h a.out'):
             self.assertFalse(ro(cmd),cmd)
-        for cmd in ('tar -tf t.tar','git grep -n marker f.txt','git ls-remote origin','test -f f.txt'):
+        for cmd in ('tar -tf t.tar','git grep -n marker f.txt','git ls-remote origin','test -f f.txt',
+                    'git log -1 --stat','git show HEAD','git cat-file -p HEAD','git grep -n x',
+                    'rocm-smi','rocm-smi -a --json','rocm-smi -d 0 --showtemp','rocm-smi --showuse',
+                    'amd-smi list','amd-smi static --clock','amd-smi metric -g 0 --temp',
+                    'awk \'{print $1}\' f','awk -F: \'NR==2\' f','rg -n x','rg -n x f.txt',
+                    'file x','file -b x','date','date -u','date +%F','date -d yesterday','date -r f','date -Iseconds',
+                    'date --iso-8601','sed -n 1p f','nm a.out','objdump -d a.out','readelf -h a.out'):
             self.assertTrue(ro(cmd),cmd)
 
     def test_cancelling_the_parent_stops_the_child(self):
