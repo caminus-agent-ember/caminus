@@ -26,7 +26,7 @@ import time
 ROLES = ('worker', 'reviewer')
 DEFAULTS = dict(cap_usd=0.50, max_steps=12, max_seconds=600, max_children=4)
 REFUSED = ('write', 'edit', 'checkpoint', 'rollback', 'ask_user', 'ask_root', 'github_handoff', 'send_message',
-           'report', 'remember', 'schedule', 'lease', 'browser', 'propose_plan', 'delegate', 'advisor')
+           'report', 'remember', 'sim', 'schedule', 'lease', 'browser', 'propose_plan', 'delegate', 'advisor')
 CHILD_PROMPT = '''[delegate child of goal {parent}] You are a read-only child goal, run by that goal's delegate tool.
 
 TASK
@@ -59,6 +59,12 @@ def refused(name, args):
     if name == 'terminal' and args.get('command') and not read_only(args['command']):
         return ('a delegate child is read-only: terminal runs only a read-only command here, and typing into a '
                 'running shell is not reading')
+    if name == 'define_done' and args.get('gate') and not read_only(args['gate']):
+        # a gate runs in a shell at finish (and after a change turn): `define_done(gate='touch x && ...')` created
+        # the file and still reported completed (#382 review). A read-only gate proves as much and cannot run one.
+        return ('a delegate child is read-only: its gate must be a read-only command, because it runs in a shell '
+                'when the goal finishes. Check with a command that only reads (grep, test -f, ls), or leave gate '
+                'empty and report what you verified')
     if name.startswith('mcp__'):
         return 'a delegate child cannot call an MCP tool: it can change things this harness does not see'
     return None
@@ -184,16 +190,34 @@ def start(rt, parent, args, prepared=None):
 
 
 def run_child(rt, parent, job):
-    """Run the child through the loop and turn its goal into the short report the parent reads."""
+    """Run the child through the loop and turn its goal into the short report the parent reads.
+
+    The child's stop also watches the parent: cancelling or pausing the parent ends the child's loop at its next
+    check (#382 review: _stop alone is only the daemon's stop, so a cancelled parent's child ran on)."""
     child = job['child']
+    daemon_stop = getattr(rt, '_stop', None)
+
+    def parent_gone():
+        """True when the daemon is stopping, or the parent was cancelled, paused or failed while the child ran."""
+        if daemon_stop and daemon_stop():
+            return True
+        return rt.store.goal(parent)['state'] in ('cancelled', 'paused', 'error')
+
     try:
-        rt.run(target=child, stop=getattr(rt, '_stop', None))
+        rt.run(target=child, stop=parent_gone)
         g = rt.store.goal(child)
         state = g['state']
+        if rt.store.goal(parent)['state'] == 'cancelled' and state in ('working', 'queued', 'waiting_model'):
+            with rt.store.transaction():
+                rt.store.update(child, state='cancelled', error='its parent was cancelled while it ran')
+            g, state = rt.store.goal(child), 'cancelled'
+        err = g.get('error') or ''
         if state == 'completed':
             outcome = 'completed'
-        elif state == 'paused' and 'delegate' in (g.get('error') or ''):
-            outcome = 'capped'
+        elif state == 'paused' and ('delegate' in err or 'budget' in err):
+            outcome = 'capped'       # the dollar cap, the step budget or the time budget ended it
+        elif state == 'cancelled':
+            outcome = 'incomplete'   # its parent was cancelled: it did not finish its own work
         elif state in ('working', 'queued', 'waiting_model'):
             # it must not be left runnable: the next turn would pick the parent's brain (its model registration
             # is this process's), and no other runtime can serve it either
@@ -219,6 +243,7 @@ def run_child(rt, parent, job):
                               'delegate gets a fresh child.' % (report['summary'][:300] or state))
         return report
     finally:
+        rt._stop = daemon_stop
         rt.delegate_models.pop(child, None)
         rt.delegate_caps.pop(child, None)
 

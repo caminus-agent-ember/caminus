@@ -522,6 +522,11 @@ def resume_goal(store,gid,max_steps=None,max_seconds=None):
         g=store.goal(gid)
         if g['state'] in ('completed','cancelled'):
             raise ValueError('submit a new goal instead of replaying a finished one')
+        if store.delegate(gid):
+            # A delegate child's brain and caps lived in the process that ran it; resumed later it would run on
+            # the parent's brain with no cap (#382 review). Its report is already with its parent: delegate again.
+            raise ValueError('that goal is a delegate child, and its report is already with its parent: a resumed '
+                             'child would run uncapped on the wrong brain. Delegate again from the parent goal')
         store.update(gid,state='working',step_limit=g['steps']+max_steps if max_steps else None,
                      deadline=time.time()+max_seconds if max_seconds else None,error='')
 

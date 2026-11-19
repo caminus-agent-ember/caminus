@@ -68,7 +68,10 @@ type residentWorker struct {
 	Role      string  `json:"role"`
 	CapUSD    float64 `json:"cap_usd"`
 	SpendUSD  float64 `json:"spend_usd"`
-	Outcome   string  `json:"outcome"`
+	// AllowanceUSD is the OpenCode plan's own dollars a child used: a Go turn costs $0 of money and real
+	// allowance, and the cap counts both (#382 review), so the row must show both.
+	AllowanceUSD float64 `json:"allowance_usd"`
+	Outcome      string  `json:"outcome"`
 	Running   bool    `json:"running"`
 	Started   float64 `json:"started"`
 }

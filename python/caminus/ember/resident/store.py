@@ -303,16 +303,6 @@ class Store:
         r = self.db.execute('SELECT * FROM delegates WHERE child=?', (child,)).fetchone()
         return dict(r) if r else None
 
-    def delegates(self, parent=None, open_only=False):
-        """The children of a goal (all of them when parent is None), oldest first; open_only: the ones still running."""
-        sql, args = 'SELECT * FROM delegates', []
-        if parent:
-            sql += ' WHERE parent=?'
-            args.append(parent)
-        if open_only:
-            sql += (' AND ' if parent else ' WHERE ') + "outcome=''"
-        return [dict(r) for r in self.db.execute(sql + ' ORDER BY started', args)]
-
     def delegate_spend(self, child, usd=0.0, allowance=0.0):
         """Add one turn's spend to a child's ledger: usd is money the provider charged, allowance the OpenCode plan's
         own dollars used inside its allowance (a Go turn costs $0 of money and real allowance: both count, the two

@@ -32,7 +32,8 @@ type sessionCard struct {
 }
 
 // workersRow is what the card says about delegation (#342): the children running, and what they spent of their caps.
-// An empty string when there is nothing to say, the way an older resident's status reads.
+// An empty string when there is nothing to say, the way an older resident's status reads. The cap counts money and
+// the OpenCode plan's allowance, so the row shows the sum (a Go turn costs $0 of money).
 func workersRow(ws []residentWorker) string {
 	if len(ws) == 0 {
 		return ""
@@ -41,19 +42,26 @@ func workersRow(ws []residentWorker) string {
 	for _, w := range ws {
 		if w.Running {
 			running++
-			spent += w.SpendUSD
+			spent += w.SpendUSD + w.AllowanceUSD
 			cap += w.CapUSD
 		}
 	}
 	if running > 0 {
-		return fmt.Sprintf("%d %s · $%.2f of $%.2f", running, plural(running, "child", "children"), spent, cap)
+		return fmt.Sprintf("%s · $%.4f of $%.2f", plural(running, "child", "children"), spent, cap)
 	}
-	w := ws[len(ws)-1]
+	// The status sorts running children first and then newest first, so the first finished one is the last child.
+	w := ws[0]
+	for _, c := range ws {
+		if !c.Running {
+			w = c
+			break
+		}
+	}
 	out := w.Outcome
 	if out == "" {
 		out = "done"
 	}
-	return fmt.Sprintf("no children running · last %s $%.2f", out, w.SpendUSD)
+	return fmt.Sprintf("no children running · last %s $%.4f", out, w.SpendUSD+w.AllowanceUSD)
 }
 
 const cardW = 46 // a card's width with its frame: two fit a 100-column terminal, three a 140

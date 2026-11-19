@@ -60,7 +60,7 @@ INTERRUPT_HOLD = 120     # after an Esc, how long a goal waits for the message t
 # a file through a flag is left out: env, less, tree -o, xargs, timeout, nice ...).
 READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf', 'which',
                        'type', 'ps', 'df', 'du', 'stat', 'file', 'date', 'id', 'whoami', 'uname', 'rocm-smi', 'amd-smi',
-                       'free', 'uptime', 'sleep', 'true', 'diff',
+                       'free', 'uptime', 'sleep', 'true', 'diff', 'test',
                        # cd only moves this shell; the rest only print what they read (a CTF's first look at a binary
                        # or an archive was refused as a change before the done check)
                        'cd', 'strings', 'xxd', 'od', 'hexdump', 'readelf', 'objdump', 'nm', 'sha256sum', 'sha1sum',
@@ -184,6 +184,30 @@ def _operands(args, takes_value):
     return out
 
 
+def _runs_programs(prog, words):
+    """An argument that runs another program even though prog is read-only in this form: tar --checkpoint-action=exec
+    (and its abbreviations), tar -I/-F/--use-compress-program/--info-script/--to-command, git grep -O /
+    --open-files-in-pager, git ls-remote --upload-pack (#382 review: `tar -tf t.tar --checkpoint=1
+    '--checkpoint-action=exec=touch tar_pwned'` and `git grep -O<prog>` ran a script)."""
+    for w in words[1:]:
+        name = w[2:].split('=', 1)[0] if w.startswith('--') else ''
+        if name and ((('checkpoint-action'.startswith(name)) and len(name) >= 12) or
+                     (('use-compress-program'.startswith(name)) and len(name) >= 6) or
+                     (('info-script'.startswith(name)) and len(name) >= 6) or
+                     (('to-command'.startswith(name)) and len(name) >= 6) or
+                     (('upload-pack'.startswith(name)) and len(name) >= 6) or
+                     (('rsh-command'.startswith(name)) and len(name) >= 6)):
+            return True
+        if prog == 'tar' and w.startswith('--checkpoint'):
+            return True               # (--checkpoint itself only prints progress; refusing it too costs a listing little)
+        if prog == 'tar' and w.startswith('-') and not w.startswith('--') and ('I' in w or 'F' in w):
+            return True               # -I PROG / -F SCRIPT: a compress program or an info script to run
+        if prog == 'git' and len(words) > 1 and words[1] == 'grep' and (
+                w.startswith('-O') or w.startswith('--open-files-in-pager')):
+            return True
+    return False
+
+
 def read_only_command(cmd):
     """A terminal command that changes nothing: every part of a pipeline or && / || / ; chain is a read-only program
     with no changing argument (CHANGING). Anything unclear counts as a change (the per-turn gate runs; plan mode
@@ -201,6 +225,8 @@ def read_only_command(cmd):
         words = _plain_words(part)
         if not words or CHANGING.search(' '.join(words)):
             return False                  # (CHANGING again on the words: a quoted "-delete" or --pr''e is one)
+        if _runs_programs(words[0], words):
+            return False                  # (tar's -I / --checkpoint-action=exec, git grep -O ...: #382 review)
         if words[0] in ('sed', 'awk'):
             if not _plain_words(part, variables=False) or not (_sed_reads if words[0] == 'sed' else _awk_reads)(words):
                 return False

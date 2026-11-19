@@ -2760,6 +2760,79 @@ for line in sys.stdin:
             t.signal_running(signal.SIGTERM)
             self.wait(lambda:not t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'],10)
 
+    def test_a_child_gate_must_be_a_read_only_command(self):
+        # define_done's gate runs any shell command at finish (and after a change turn): a child called
+        # define_done(gate='touch gate_pwned && grep -q x f.txt'), finish ran it, and the report said completed
+        # (#382 review). A child's gate must read only, and a stored one is refused at finish too.
+        from caminus.ember.resident import delegate, judge
+        why=delegate.refused('define_done',dict(check='x',gate='touch gate_pwned && grep -q x f.txt'))
+        self.assertTrue(why and 'read-only command' in why,why)
+        self.assertIsNone(delegate.refused('define_done',dict(check='x',gate='grep -q x f.txt')))
+        self.assertIsNone(delegate.refused('define_done',dict(check='x')),'no gate is fine')
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            rt.store.update(child,gate="touch gate_pwned")
+            out=judge.review(rt,child,dict(summary='x'))
+            self.assertIn('read-only command',out['error'])
+            self.assertFalse((self.home/'gate_pwned').exists(),'the stored gate did not run')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_read_only_commands_cannot_run_programs(self):
+        # the filter is the only thing keeping a child's terminal read-only (#382 review): tar's checkpoint actions
+        # and compress programs, git grep -O and git ls-remote --upload-pack ran a script through it.
+        from caminus.ember.resident.runtime import read_only_command as ro
+        for cmd in ("tar -tf t.tar --checkpoint=1 '--checkpoint-action=exec=touch tar_pwned'",
+                    'tar -tf x --checkpoint-action=exec=sh',
+                    'tar -Iprog -cf out.tar x',
+                    'tar --use-compress-program=prog -cf out.tar x',
+                    'git grep -Oprog x',
+                    'git grep --open-files-in-pager=sh x',
+                    'git ls-remote --upload-pack=prog origin',
+                    'git ls-remote --rsh-command=prog origin'):
+            self.assertFalse(ro(cmd),cmd)
+        for cmd in ('tar -tf t.tar','git grep -n marker f.txt','git ls-remote origin','test -f f.txt'):
+            self.assertTrue(ro(cmd),cmd)
+
+    def test_cancelling_the_parent_stops_the_child(self):
+        # _stop is the daemon's stop, so a cancelled parent's child ran on (#382 review): the child's stop watches
+        # the parent, and a child stopped that way reports incomplete rather than running on its own brain later.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.update(parent,state='cancelled')
+            report=delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
+            self.assertEqual(report['outcome'],'incomplete')
+            self.assertEqual(rt.store.goal(child)['state'],'cancelled')
+            self.assertIn('parent was cancelled',rt.store.goal(child)['error'])
+            self.assertEqual(rt.store.delegate(child)['outcome'],'incomplete')
+            with rt.store.transaction():
+                rt.store.update(child,state='paused')
+            with self.assertRaises(ValueError) as caught:
+                resume_goal(rt.store,child)
+            self.assertIn('delegate child',str(caught.exception),'a resumed child would run uncapped on the parent brain')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_wait_is_clipped_to_the_goals_time_budget(self):
+        # one wait could block for its full 30 minutes against a 600 s child cap; the deadline was read only at the
+        # next tick (#382 review). A goal 2 s from its deadline waits about 2 s, not 1800.
+        from caminus.ember.resident import housemate
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Wait.',max_seconds=2)
+            t0=time.monotonic()
+            r=housemate.wait(rt,gid,'message',timeout=1800)
+            self.assertLess(time.monotonic()-t0,6)
+            self.assertEqual(r['happened'],'timeout')
+        finally:rt.mail.close();rt.store.close()
+
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
         rt=Runtime(self.home)
