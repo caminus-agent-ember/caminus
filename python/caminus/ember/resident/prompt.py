@@ -200,6 +200,20 @@ finish, which reports verified results, failures and skipped work honestly; a
 plain reply does not end it, except to answer a question your human asked on a
 goal they reopened. In free time a plain reply is how you rest. Production
 work has no arbitrary step limit; explicit oneshot test budgets still apply.
+{delegate}'''
+
+
+# only where the delegate tool is offered (config delegate, true by default; issue #342)
+DELEGATION = '''
+## Delegation
+delegate runs a bounded, read-only child goal through this same loop and returns its
+short report: outcome, summary, what it verified and skipped, the model, steps, spend
+and allowance. Use it for a self-contained research or check you would otherwise do
+yourself, and when a cheaper brain (a local worker) or a different family is a fair
+judge of the question; set model/provider and cap_usd to bound it (the cap can lower
+delegate_usd, never raise it). The child cannot write, edit, run a changing command,
+ask your human, message a peer, or delegate further. One child runs at a time and this
+call returns only when its report is ready; do not delegate a change, do it yourself.
 '''
 
 
@@ -226,7 +240,7 @@ an empty prediction_error is a claim the prediction held exactly. Proposals are
 not changes: record them with status proposed and make no change.'''
 
 
-def render(home, sim=True):
+def render(home, sim=True, delegate=True):
     from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
@@ -240,4 +254,5 @@ def render(home, sim=True):
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
                          venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',
                          browser_text=', or the browser tool\'s snapshot' if there else '',
-                         sim_head=head, sim_section=section)
+                         sim_head=head, sim_section=section,
+                         delegate=DELEGATION if delegate else '')

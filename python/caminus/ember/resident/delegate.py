@@ -1,0 +1,223 @@
+"""/delegate (issue #342, MVP): a child goal run through this harness's own goal loop.
+
+The parent states a task and what done looks like; the child is an ordinary goal of the same store - its own
+conversation, todo list, done check, gate, verify and spend row - with four limits that make it safe to run
+from inside another goal:
+
+- read-only: write, edit, checkpoint, rollback, ask_user, ask_root, github_handoff, send_message, report,
+  remember, schedule, lease, browser, propose_plan and a nested delegate are refused, and terminal runs only
+  a read-only command. The sandbox stays available: the folder it sees is a read-only bind at /work and /box
+  dies with the box, so a child can reproduce or check inside one without changing the human's files;
+- depth 1: a child cannot delegate, so the tree is one level deep by construction;
+- caps: a step limit, a time limit and a dollar cap. The cap is config `delegate_usd` (0.50 by default) and a
+  call's `cap_usd` may lower it, never raise it; reaching it pauses the child and the parent gets a partial
+  report. Spend is usd + the OpenCode plan's allowance, because inside a Go allowance a turn costs $0 of money
+  and real allowance;
+- a short structured report back: outcome (completed / capped / failed / incomplete), summary, what it
+  verified, what it skipped, steps, spend, allowance and its cap.
+
+MVP scope: one child at a time - the parent waits for its report - and the child runs in this process through
+Runtime.run(target=child, stop=rt._stop), so the loop's single-writer serialization keeps holding. Parallel
+children, a worktree per writing child and a card per child are the full version (#342, later).
+"""
+import time
+
+ROLES = ('worker', 'reviewer')
+DEFAULTS = dict(cap_usd=0.50, max_steps=12, max_seconds=600, max_children=4)
+REFUSED = ('write', 'edit', 'checkpoint', 'rollback', 'ask_user', 'ask_root', 'github_handoff', 'send_message',
+           'report', 'remember', 'schedule', 'lease', 'browser', 'propose_plan', 'delegate', 'advisor')
+CHILD_PROMPT = '''[delegate child of goal {parent}] You are a read-only child goal, run by that goal's delegate tool.
+
+TASK
+{task}
+
+WHAT DONE LOOKS LIKE (call define_done with this, then verify and finish)
+{done}
+
+Rules that differ from a top-level goal: you cannot write or edit a file, run a command that changes anything,
+ask your human, message a peer, or delegate further. You read, search, run read-only commands, use the sandbox,
+the web and machine, then define_done, verify and finish with what you found. Name files by path and line and
+quote the few lines that matter. Your parent reads only your structured report (summary, verified, skipped,
+spend), so the answer belongs in your finish summary: say plainly what you checked and what you could not.'''
+
+
+def read_only(cmd):
+    """runtime.read_only_command without the circular import (runtime imports this module)."""
+    from .runtime import read_only_command
+    return bool(cmd) and read_only_command(cmd)
+
+
+def refused(name, args):
+    """Why a delegate child may not run this call, or None. Checked by the runtime before the tool runs."""
+    if name in REFUSED:
+        return ('a delegate child is read-only: %s is not available in it. Report what you found; your parent '
+                'makes the change.' % name)
+    if name == 'terminal' and (args.get('stdin') is not None or
+                               (args.get('command') and not read_only(args['command']))):
+        return ('a delegate child is read-only: terminal runs only a read-only command here, and typing into a '
+                'running shell is not reading')
+    if name.startswith('mcp__'):
+        return 'a delegate child cannot call an MCP tool: it can change things this harness does not see'
+    return None
+
+
+def _caps(rt, args):
+    """(cap_usd, max_steps, max_seconds): the config's defaults, lowered by the call, never raised."""
+    cfg = rt.config
+    cap = float(cfg.get('delegate_usd', DEFAULTS['cap_usd']))
+    if args.get('cap_usd') is not None:
+        cap = min(cap, float(args['cap_usd']))
+    steps = int(cfg.get('delegate_max_steps', DEFAULTS['max_steps']))
+    if args.get('max_steps'):
+        steps = min(steps, int(args['max_steps']))
+    secs = int(cfg.get('delegate_max_seconds', DEFAULTS['max_seconds']))
+    if args.get('max_seconds'):
+        secs = min(secs, int(args['max_seconds']))
+    return max(0.0, cap), max(1, steps), max(1, secs)
+
+
+def _brain(rt, args):
+    """(Model, {model, provider}) the child runs: a call's model/provider from the catalog, the role's
+    configured delegate.<role>_model, or the parent's own brain (the default)."""
+    from .model import Model, remember_prices
+    from . import catalog
+    role = args.get('role') or 'worker'
+    name = str(args.get('model') or '').strip()
+    provider = str(args.get('provider') or '').strip() or None
+    if not name:
+        name = str((rt.config.get('delegate') or {}).get(role + '_model') or '').strip()
+    if not name:
+        return Model(dict(rt.config)), dict(model=rt.config.get('model'),
+                                            provider=rt.config.get('provider') or rt.config.get('provider_kind'))
+    cat = catalog.load(rt.home)
+    entry = catalog.find(cat, name, provider)
+    if entry is None:
+        entry = catalog.find(catalog.refresh(rt.home, rt.config), name, provider)
+    if entry is None:
+        raise ValueError(f'no model {name} in the catalog: `models --refresh` lists what the providers serve')
+    spec = catalog.providers(rt.config).get(entry['provider'])
+    if not spec:
+        raise ValueError('the provider of %s is no longer configured' % entry['id'])
+    endpoint, api = catalog.transport(spec, entry)
+    conf = dict(rt.config)
+    conf.update(model=entry['id'], provider=entry['provider'], provider_kind=spec['kind'], endpoint=endpoint, api=api)
+    for k in ('relay', 'prices', 'context', 'context_cap', 'thinking', 'model_variants', 'efforts', 'vision'):
+        conf.pop(k, None)                 # (the parent's brain's facts, not this one's)
+    if spec.get('relay'):
+        conf['relay'] = True
+    if entry.get('prices'):
+        conf['prices'] = entry['prices']
+        remember_prices(entry['id'], entry['prices'])
+    if entry.get('context'):
+        conf['context'] = int(entry['context'])
+    if entry.get('vision'):
+        conf['vision'] = True
+    if entry.get('variants'):
+        conf['model_variants'] = entry['variants']
+    return Model(conf), dict(model=entry['id'], provider=entry['provider'])
+
+
+def start(rt, parent, args):
+    """Validate, create the child goal and register its brain; the caller runs it after its transaction commits.
+    (Creating the goal is part of the parent's action, atomically; running it is not - the child needs turns of
+    its own, and a nested loop inside the write transaction would deadlock on BEGIN.)"""
+    task = str(args.get('task') or '').strip()
+    done = str(args.get('done_check') or '').strip()
+    if not task:
+        raise ValueError('delegate needs a task: what the child should find out or check')
+    if not done:
+        raise ValueError('delegate needs done_check: what done looks like for the child, as something it can '
+                         'check (it becomes the child\'s define_done)')
+    limit = int(rt.config.get('delegate_max_children', DEFAULTS['max_children']))
+    used = rt.store.db.execute('SELECT count(*) FROM delegates WHERE parent=?', (parent,)).fetchone()[0]
+    if used >= limit:
+        raise ValueError('this goal has used its %d delegate children (delegate_max_children): finish one, or '
+                         'do the rest yourself' % limit)
+    cap, steps, secs = _caps(rt, args)
+    model, who = _brain(rt, args)
+    role = args.get('role') or 'worker'
+    if role not in ROLES:
+        raise ValueError('role must be one of ' + ', '.join(ROLES))
+    child = rt.store._enqueue(CHILD_PROMPT.format(parent=parent[:8], task=task, done=done),
+                              max_steps=steps, max_seconds=secs, kind='delegate')
+    rt.store.delegate_add(child, parent, who.get('model') or '', who.get('provider') or '', role, cap)
+    rt.delegate_models[child] = model
+    rt.delegate_caps[child] = cap
+    rt.store.event('delegate_started', dict(child=child, model=who.get('model'), provider=who.get('provider'),
+                                           role=role, cap_usd=cap, max_steps=steps, max_seconds=secs), parent)
+    return dict(child=child, model=who.get('model'), provider=who.get('provider'), role=role, cap_usd=cap,
+                max_steps=steps, max_seconds=secs, outcome='running', _delegate_run=True,
+                note='the child runs now; this result is replaced by its report')
+
+
+def run_child(rt, parent, job):
+    """Run the child through the loop and turn its goal into the short report the parent reads."""
+    child = job['child']
+    try:
+        rt.run(target=child, stop=getattr(rt, '_stop', None))
+        g = rt.store.goal(child)
+        state = g['state']
+        if state == 'completed':
+            outcome = 'completed'
+        elif state == 'paused' and 'delegate' in (g.get('error') or ''):
+            outcome = 'capped'
+        elif state in ('working', 'queued', 'waiting_model'):
+            # it must not be left runnable: the next turn would pick the parent's brain (its model registration
+            # is this process's), and no other runtime can serve it either
+            with rt.store.transaction():
+                rt.store.update(child, state='paused', error='delegate child did not finish: its model was '
+                                                            'unreachable or it ran out of its budget')
+            g, state, outcome = rt.store.goal(child), 'paused', 'incomplete'
+        else:
+            outcome = 'failed'
+        row = rt.store.delegate(child) or {}
+        report = dict(child=child, role=job.get('role'), model=row.get('model') or job.get('model'),
+                      provider=row.get('provider') or job.get('provider'), outcome=outcome, state=state,
+                      summary=(g.get('summary') or g.get('error') or '')[:2000],
+                      done_check=(g.get('done_check') or '')[:1000],
+                      verified=state == 'completed' and rt.store.verified_since_steer(child),
+                      skipped=[it['text'] for it in rt.store.todo(child)['items'] if it['state'] != 'done'][:20],
+                      steps=int(g.get('steps') or 0), spend_usd=round(row.get('spend_usd') or 0.0, 6),
+                      allowance_usd=round(row.get('allowance_usd') or 0.0, 6), cap_usd=job.get('cap_usd') or 0.0)
+        rt.store.delegate_done(child, outcome, report)
+        rt.store.event('delegate_done', {k: v for k, v in report.items() if k not in ('summary', 'skipped')}, parent)
+        if outcome != 'completed':
+            report['note'] = ('the child did not complete: %s. Use what it found, or do the rest yourself; a new '
+                              'delegate gets a fresh child.' % (report['summary'][:300] or state))
+        return report
+    finally:
+        rt.delegate_models.pop(child, None)
+        rt.delegate_caps.pop(child, None)
+
+
+def capped(rt, gid):
+    """Pause a child whose spend (money + plan allowance) reached its cap; True when it was paused."""
+    row = rt.store.delegate(gid)
+    if not row:
+        return False
+    cap = float(row.get('cap_usd') or 0.0)
+    spend, allowance = float(row.get('spend_usd') or 0.0), float(row.get('allowance_usd') or 0.0)
+    if not cap or spend + allowance < cap:
+        return False
+    with rt.store.transaction():
+        rt.store.update(gid, state='paused', error='delegate spend cap reached: $%.4f of $%.4f' % (spend + allowance, cap))
+    rt.store.event('delegate_capped', dict(spend_usd=spend, allowance_usd=allowance, cap_usd=cap), gid)
+    return True
+
+
+def note_spend(rt, gid, usd, allowance):
+    """A child's turn: the per-subagent ledger (delegates.spend_usd / allowance_usd), the metric the cap reads."""
+    if gid not in (getattr(rt, 'delegate_caps', None) or ()):
+        return
+    rt.store.delegate_spend(gid, usd or 0.0, allowance or 0.0)
+
+
+def sweep(rt):
+    """At a runtime start, a child left runnable belongs to a run that ended (the store has one writer, and the
+    runtime lock proved no other process holds it): pause it so it cannot run later on the wrong brain."""
+    for r in rt.store.db.execute("SELECT child FROM delegates WHERE outcome=''").fetchall():
+        g = rt.store.goal(r['child'])
+        if g['state'] in ('queued', 'working', 'waiting_model'):
+            with rt.store.transaction():
+                rt.store.update(g['id'], state='paused', error='its runtime ended mid-delegation')
+            rt.store.delegate_done(g['id'], 'orphaned', dict(outcome='orphaned'))

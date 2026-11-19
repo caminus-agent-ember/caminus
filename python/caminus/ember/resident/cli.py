@@ -1079,6 +1079,8 @@ def main(argv=None,stdin=None):
                       advisor=(cfg.get('advisor') or {}).get('model'),   # (the panel names it while a review is asked)
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
                       **({'allowance_today':allowance_today} if allowance_today else {}),
+                      # delegate children (#342): the running ones and the newest finished, with their spend and cap
+                      workers=store.workers(),
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,
                       online_s=_online_s(heartbeat.get('pid')),**store.status()),True)
             store.close();return 0

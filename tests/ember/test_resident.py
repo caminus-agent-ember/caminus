@@ -2635,6 +2635,66 @@ for line in sys.stdin:
         self.assertEqual(self.cmd('sim',['--record','--change','x','--predicted','y'])['record']['status'],'recorded')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],True,'--on stays on')
         self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
+    def test_delegate_runs_a_read_only_child_and_reports_back(self):
+        # The parent states what done looks like, delegates a read to a child, and reads a short report: the child
+        # cannot write, its write attempt is refused, and the parent's own status shows the child and its spend.
+        (self.home/'f.txt').write_text('first\nmarker line\nlast\n')
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the marker line is quoted from f.txt')),
+            call('delegate',dict(task='Find the marker line in f.txt and quote it.',
+                                 done_check='the text of the marker line is in the summary')),
+            # the child's own turns: a write is refused (it is read-only), then it reads and finishes
+            call('write',dict(path=str(self.home/'child.txt'),content='x')),
+            call('terminal',dict(command='grep -n marker f.txt')),
+            call('define_done',dict(check='f.txt has a marker line')),
+            call('verify',dict(evidence='grep printed 2:marker line')),
+            call('finish',dict(summary='f.txt line 2 is "marker line".')),
+            # back in the parent: the delegate result was the child's report
+            call('verify',dict(evidence='the child quoted line 2 of f.txt')),
+            call('finish',dict(summary='The marker line is "marker line" (f.txt line 2).')))
+        goal=self.cmd('once',['--goal','Ask a child what the marker line says.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertFalse((self.home/'child.txt').exists(),'the child could not write')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        reports=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertTrue(reports and reports[-1].get('outcome')=='completed',reports)
+        self.assertEqual(reports[-1]['steps'],5,'the child ran five of its own turns')
+        self.assertTrue(reports[-1]['verified'])
+        self.assertGreaterEqual(reports[-1]['cap_usd'],0.0)
+        self.assertIn('marker line',reports[-1]['summary'])
+        # the refused write names the rule and is the child's own result, not the parent's
+        refused=[r['data']['result'] for r in events if r['data'].get('name')=='write']
+        self.assertEqual(len(refused),1)
+        self.assertIn('read-only',refused[0]['error'])
+        # the status a UI reads shows the child, its brain and the spend its cap reads
+        st=self.cmd('status')
+        self.assertEqual(len(st['workers']),1)
+        self.assertEqual(st['workers'][0]['child'],reports[-1]['child'])
+        self.assertFalse(st['workers'][0]['running'])
+        self.assertEqual(st['workers'][0]['outcome'],'completed')
+
+    def test_a_child_delegate_cannot_delegate_again_or_ask_the_human(self):
+        # depth 1 and no human: both refusals are the runtime's, whatever the model asks for
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the child was asked to overstep')),
+            call('delegate',dict(task='Ask your human whether to continue.',done_check='the answer is known')),
+            call('ask_user',dict(question='Shall I continue?',choices=['yes','no'])),
+            call('delegate',dict(task='Ask a grandchild.',done_check='a grandchild answered')),
+            call('define_done',dict(check='both calls were refused')),
+            call('verify',dict(evidence='both errors say so')),
+            call('finish',dict(summary='Both were refused: a child is read-only and one level deep.')),
+            call('verify',dict(evidence='the child reported both refusals')),
+            call('finish',dict(summary='The child could neither ask nor delegate.')))
+        self.cmd('once',['--goal','Have a child try to ask and delegate.'])
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        asked=[r['data']['result'] for r in events if r['data'].get('name')=='ask_user']
+        self.assertEqual(len(asked),1)
+        self.assertIn('read-only',asked[0]['error'])
+        inner=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertIn('read-only',inner[0]['error'],'a child cannot delegate again')
+        self.assertEqual(inner[-1]['outcome'],'completed')
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
@@ -6971,7 +7031,8 @@ for line in sys.stdin:
         # overflowed the window (the goal paused on a context error, and resuming repeated it).
         from caminus.ember.resident.model import ModelContextError
         class BoundedModel:
-            def context_size(self):return 16384
+            size=16384
+            def context_size(self):return self.size
             def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
             def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                 if self.tokens(messages,tools or [])+256>self.context_size():
@@ -6979,19 +7040,31 @@ for line in sys.stdin:
                 if tools:return call('finish',dict(summary='Compacted and continued.'))
                 return dict(role='assistant',content='Prior work verified; continue.')
         (self.home/'MEMORY.md').write_text('# memory\n'+'remembered fact. '*1700)
-        rt=Runtime(self.home,model=BoundedModel())
+        model=BoundedModel()
+        rt=Runtime(self.home,model=model)
         try:
             gid=rt.store.enqueue('Continue the long task.')
             rt.store.event('startup_discovery',dict(topic='skipped in this test'),gid)   # keeps the kept tail small
+            # The window is sized from the measured head, not fixed: MEMORY.md is clipped to INDEX_CAP, so a
+            # smaller file does not shrink the pinned head (the prompt, the tool schemas, the goal and the
+            # trailing context). A fixed 16K window left the summary 174 tokens of room, and one more prompt
+            # section (delegate's, #342) turned the compaction into a refusal instead of a summary.
+            while True:
+                size=model.size
+                reserve=min(rt._reply_limit(),size//4)
+                summary=max(2048,min(16384,size//64))
+                head=rt.model.tokens([rt.system(gid),rt.store.goal(gid)['messages'][0],rt.context_message(gid)],TOOLS)
+                if size-reserve-256-head-512>=summary:break
+                model.size*=2
             # The filler is sized from the measured request without it, so the precondition below (the history
             # alone fits with the reply budget, only the trailing context overflows) holds as tools are added.
             base=rt.store.goal(gid)['messages']+[dict(role='assistant',content='observation '*20) for _ in range(10)]
-            room=16384-4096-rt.model.tokens([rt.system(gid),*base],TOOLS)-600
+            room=size-reserve-rt.model.tokens([rt.system(gid),*base],TOOLS)-600
             messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*(room*4))]+base[len(rt.store.goal(gid)['messages']):]
             rt.store.update(gid,messages=messages)
             history=rt.model.tokens([rt.system(gid),*messages],TOOLS)
             # The history alone leaves room for the reply budget too, so only the trailing context overflows.
-            self.assertLess(history+4096,16384,'the history alone fits with the reply budget')
+            self.assertLess(history+reserve,size,'the history alone fits with the reply budget')
             result=rt.run(target=gid)
             self.assertEqual(result['state'],'completed',[(e['kind'],str(e['data'])[:160]) for e in rt.store.events()])
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
