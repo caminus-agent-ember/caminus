@@ -2696,6 +2696,70 @@ for line in sys.stdin:
         self.assertIn('read-only',inner[0]['error'],'a child cannot delegate again')
         self.assertEqual(inner[-1]['outcome'],'completed')
 
+    def test_delegate_rejects_a_zero_cap(self):
+        # cap_usd=0 used to disable the cap (#382 review: `if not cap` read a zero as "no cap"), so a child could
+        # run uncapped. A cap is positive now, and a row from before the fix (cap 0) pauses instead of running.
+        from caminus.ember.resident import delegate
+        self.gates_on()
+        (self.home/'f.txt').write_text('x\n')
+        self.replies(
+            call('define_done',dict(check='the zero cap was refused')),
+            call('delegate',dict(task='Read f.txt.',done_check='f.txt was read',cap_usd=0)),
+            call('terminal',dict(command='ls')),
+            call('verify',dict(evidence='the delegate error says cap_usd must be more than 0')),
+            call('finish',dict(summary='The zero cap was refused.')))
+        goal=self.cmd('once',['--goal','Try to delegate with no cap.'])
+        self.assertEqual(goal['state'],'completed')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        res=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertEqual(len(res),1)
+        self.assertIn('cap_usd must be more than 0',res[0]['error'])
+        self.assertEqual(self.cmd('status')['workers'],[],'no child ran')
+        rt=Runtime(self.home)
+        try:
+            parent,child=rt.store.enqueue('p'),rt.store.enqueue('c')
+            rt.store.delegate_add(child,parent,'','','worker',0.0)
+            self.assertTrue(delegate.capped(rt,child),'a stored $0 cap is a cap, not "unlimited"')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('cap reached',rt.store.goal(child)['error'])
+            with self.assertRaises(ValueError):
+                delegate._caps(rt,dict(cap_usd=0))
+            self.assertEqual(delegate._caps(rt,dict(cap_usd=0.25))[0],0.25)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_cannot_type_into_or_signal_a_terminal(self):
+        # A read-only child could send `signal`/`stdin` to a session another goal opened, and machine() hands out
+        # session ids (#382 review): input and signals are refused for a child, before the tool runs.
+        from caminus.ember.resident import delegate
+        sid='a'*32
+        for args in (dict(signal='TERM'),dict(session=sid,stdin='echo pwned\n'),dict(session=sid,signal='KILL')):
+            why=delegate.refused('terminal',args)
+            self.assertTrue(why and 'read-only' in why,args)
+        self.assertIsNone(delegate.refused('terminal',dict(session=sid)),'a poll of its own session is still reading')
+
+    def test_a_terminal_session_belongs_to_the_goal_that_opened_it(self):
+        # the other half of #382's P1: a job records the goal that opened it, and a delegate child may use only the
+        # sessions its own goal opened (a legacy job with no owner is not a child's either)
+        t=Terminal(self.home);jobs=self.home/'jobs'
+        sid=uuid.uuid4().hex
+        t.call(sid,dict(command='sleep 30',yield_ms=300),goal='goal-a')
+        legacy=uuid.uuid4().hex
+        t.call(legacy,dict(command='sleep 30',yield_ms=300))
+        try:
+            self.assertEqual(json.loads((jobs/sid/'request.json').read_text())['goal'],'goal-a')
+            with self.assertRaises(ValueError) as caught:
+                t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-b',child=True)
+            self.assertIn('another goal',str(caught.exception))
+            self.assertTrue(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-a',child=True)['running'],
+                            'a child may poll the session its own goal opened')
+            self.assertIn('phase',t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-b'),
+                          'a top-level goal is not restricted')
+            with self.assertRaises(ValueError):
+                t.call(uuid.uuid4().hex,dict(session=legacy,yield_ms=0),goal='goal-a',child=True)
+        finally:
+            t.signal_running(signal.SIGTERM)
+            self.wait(lambda:not t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'],10)
+
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
         rt=Runtime(self.home)

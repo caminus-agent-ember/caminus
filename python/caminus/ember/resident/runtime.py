@@ -1318,6 +1318,8 @@ class Runtime:
                         raise ValueError('invalid array item for '+key+' (each must be a '+item+')')
             gid_now = action['goal']
             refused = False
+            # a delegate child's terminal may use only the sessions its own goal opened (#382 review)
+            child_goal = bool(self.store.delegate(gid_now))
             signature = self._signature(name, args)
             if name == 'browser' and args.get('action') in browser.CHANGES and \
                     action['id'] in self.__dict__.get('_browser_skip', {}).get(gid_now, ()):
@@ -1339,8 +1341,9 @@ class Runtime:
                 raise ValueError('propose_plan is for a plan-first goal (one sent with --plan); this goal can act '
                                  'directly, or ask your human with ask_user')
             # A delegate child (#342) is read-only and is one level deep: write, edit, ask_user, ask_root,
-            # github_handoff, a further delegate and a terminal command that changes anything are refused here,
-            # before the tool runs, whatever the model asks for (delegate.py holds the list and the reason).
+            # github_handoff, a further delegate, a terminal command that changes anything and any terminal input
+            # or signal are refused here, before the tool runs, whatever the model asks for (delegate.py holds
+            # the list and the reason). A child's terminal also cannot use another goal's session (Terminal.call).
             if (why := delegate.refused(name, args)) and self.store.delegate(gid_now):
                 raise ValueError(why)
             # Step 8, the runtime half: a call that has already failed twice is not retried. The prompt
@@ -1355,6 +1358,10 @@ class Runtime:
                     raise ValueError('this exact call has already failed %d times (last error: %s). '
                                      'Change approach instead of retrying it.'
                                      % (prior['count'], (prior['last_error'] or '')[:160]))
+            # A delegate call's brain may come from the catalog, and a catalog refresh is a network call: resolving
+            # it inside the write transaction would hold the store's single writer for the length of a request
+            # (#382 review). Everything the call needs is resolved before BEGIN; start() below only writes.
+            prepared = delegate.prepare(self, args) if name == 'delegate' else None
             # Serialize action preparation with cancel. Polling stays outside
             # the transaction so a long command cannot block a human decision.
             with self.store.transaction():
@@ -1417,11 +1424,13 @@ class Runtime:
                 elif name == 'terminal':
                     # (launch or queue input only: reading here advanced the cursor, and the poll below then lost the
                     # output since the last poll)
-                    result = self.terminal.call(action['id'],{**args,'yield_ms':0,'_prepare':True})
+                    result = self.terminal.call(action['id'],{**args,'yield_ms':0,'_prepare':True},
+                                                goal=action['goal'], child=child_goal)
                 elif name == 'sandbox':
                     # (a new box is checked and launched here, like a terminal command; its polls read below)
                     box = sandbox.spec(self.home, action['goal'], args, self.config) if args.get('command') else {}
-                    result = self.terminal.call(action['id'], {**args, 'yield_ms': 0, '_prepare': True}, box=box)
+                    result = self.terminal.call(action['id'], {**args, 'yield_ms': 0, '_prepare': True}, box=box,
+                                                goal=action['goal'], child=child_goal)
                 elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch', 'browser', 'search') \
                         or name.startswith('mcp__'):
                     result = None         # catalog queries, network calls, waits and searches stay outside the write transaction
@@ -1439,7 +1448,7 @@ class Runtime:
                 elif name == 'delegate':
                     # The child goal is created here, inside the parent's transaction (atomic with its action); it
                     # runs after the transaction commits, below: a nested loop inside BEGIN would deadlock.
-                    result = delegate.start(self, action['goal'], args)
+                    result = delegate.start(self, action['goal'], args, prepared)
                 elif name in ('ask_user', 'ask_root', 'github_handoff'):
                     blocking = not self.config.get('nonblocking_approvals', True) or self.free.is_free(action['goal'])
                     result = self._bridge(action, args, park=blocking)
@@ -1492,7 +1501,8 @@ class Runtime:
                 # Preparation already launched or queued input. Polling must not
                 # relaunch a worker if cancellation raced after preparation.
                 result = self.terminal.call(action['id'], {k:v for k,v in args.items() if k not in ('command','stdin','signal','cwd','folder','hosts','timeout')} | {'session':result['session']},
-                                            **({'box': {}} if name == 'sandbox' else {}))
+                                            **({'box': {}} if name == 'sandbox' else {}),
+                                            goal=action['goal'], child=child_goal)
                 if result.get('connections'):
                     # every connection a box made or was refused, where the human sees it
                     self.store.event('sandbox_connections', dict(session=result['session'],

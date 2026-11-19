@@ -11,8 +11,9 @@ from inside another goal:
 - depth 1: a child cannot delegate, so the tree is one level deep by construction;
 - caps: a step limit, a time limit and a dollar cap. The cap is config `delegate_usd` (0.50 by default) and a
   call's `cap_usd` may lower it, never raise it; reaching it pauses the child and the parent gets a partial
-  report. Spend is usd + the OpenCode plan's allowance, because inside a Go allowance a turn costs $0 of money
-  and real allowance;
+  report. Only a missing / null cap is no cap: a zero or negative one is refused, because a stored zero used to
+  read as no cap at all. Spend is usd + the OpenCode plan's allowance, because inside a Go allowance a turn costs
+  $0 of money and real allowance;
 - a short structured report back: outcome (completed / capped / failed / incomplete), summary, what it
   verified, what it skipped, steps, spend, allowance and its cap.
 
@@ -52,8 +53,10 @@ def refused(name, args):
     if name in REFUSED:
         return ('a delegate child is read-only: %s is not available in it. Report what you found; your parent '
                 'makes the change.' % name)
-    if name == 'terminal' and (args.get('stdin') is not None or
-                               (args.get('command') and not read_only(args['command']))):
+    if name == 'terminal' and (args.get('stdin') is not None or args.get('signal')):
+        return ('a delegate child is read-only: its terminal cannot take input or signal a session (that session '
+                'may belong to another goal). It runs a read-only command of its own, or reports what is missing')
+    if name == 'terminal' and args.get('command') and not read_only(args['command']):
         return ('a delegate child is read-only: terminal runs only a read-only command here, and typing into a '
                 'running shell is not reading')
     if name.startswith('mcp__'):
@@ -62,18 +65,36 @@ def refused(name, args):
 
 
 def _caps(rt, args):
-    """(cap_usd, max_steps, max_seconds): the config's defaults, lowered by the call, never raised."""
+    """(cap_usd, max_steps, max_seconds): the config's defaults, lowered by the call, never raised.
+
+    A cap is a positive number; a missing or null config key takes the default. Zero or less is refused rather
+    than read as "unlimited": `cap_usd=0` used to disable a child's cap altogether (#382 review), and a cap
+    nobody can reach is not a cap."""
     cfg = rt.config
-    cap = float(cfg.get('delegate_usd', DEFAULTS['cap_usd']))
+    cap = cfg.get('delegate_usd', DEFAULTS['cap_usd'])
+    cap = DEFAULTS['cap_usd'] if cap is None else float(cap)
+    if cap <= 0:
+        raise ValueError('delegate_usd is %s: a cap of 0 does not mean unlimited, so no child can run under it. '
+                         'Set a positive cap (the default is %s)' % (cfg.get('delegate_usd'), DEFAULTS['cap_usd']))
     if args.get('cap_usd') is not None:
-        cap = min(cap, float(args['cap_usd']))
+        their = float(args['cap_usd'])
+        if their <= 0:
+            raise ValueError('cap_usd must be more than 0: it is what the child may spend, and 0 used to mean '
+                             '"uncapped". Omit it to use delegate_usd ($%s)' % cap)
+        cap = min(cap, their)
     steps = int(cfg.get('delegate_max_steps', DEFAULTS['max_steps']))
-    if args.get('max_steps'):
-        steps = min(steps, int(args['max_steps']))
+    if args.get('max_steps') is not None:
+        their = int(args['max_steps'])
+        if their <= 0:
+            raise ValueError('max_steps must be at least 1: a child that may take no step cannot do anything')
+        steps = min(steps, their)
     secs = int(cfg.get('delegate_max_seconds', DEFAULTS['max_seconds']))
-    if args.get('max_seconds'):
-        secs = min(secs, int(args['max_seconds']))
-    return max(0.0, cap), max(1, steps), max(1, secs)
+    if args.get('max_seconds') is not None:
+        their = int(args['max_seconds'])
+        if their <= 0:
+            raise ValueError('max_seconds must be at least 1: a child with no time cannot do anything')
+        secs = min(secs, their)
+    return cap, max(1, steps), max(1, secs)
 
 
 def _brain(rt, args):
@@ -117,10 +138,10 @@ def _brain(rt, args):
     return Model(conf), dict(model=entry['id'], provider=entry['provider'])
 
 
-def start(rt, parent, args):
-    """Validate, create the child goal and register its brain; the caller runs it after its transaction commits.
-    (Creating the goal is part of the parent's action, atomically; running it is not - the child needs turns of
-    its own, and a nested loop inside the write transaction would deadlock on BEGIN.)"""
+def prepare(rt, args):
+    """What start() needs that may wait or reach the network, resolved before the runtime opens its write
+    transaction: the caps, the role and the child's brain (a model from the catalog may need a refresh, which is
+    a network call, and the store has one writer: #382 review)."""
     task = str(args.get('task') or '').strip()
     done = str(args.get('done_check') or '').strip()
     if not task:
@@ -128,26 +149,38 @@ def start(rt, parent, args):
     if not done:
         raise ValueError('delegate needs done_check: what done looks like for the child, as something it can '
                          'check (it becomes the child\'s define_done)')
+    role = args.get('role') or 'worker'
+    if role not in ROLES:
+        raise ValueError('role must be one of ' + ', '.join(ROLES))
+    cap, steps, secs = _caps(rt, args)
+    model, who = _brain(rt, args)
+    return dict(task=task, done=done, role=role, cap_usd=cap, max_steps=steps, max_seconds=secs,
+                model=model, who=who)
+
+
+def start(rt, parent, args, prepared=None):
+    """Create the child goal and register its brain; the caller runs it after its transaction commits.
+    (Creating the goal is part of the parent's action, atomically; running it is not - the child needs turns of
+    its own, and a nested loop inside the write transaction would deadlock on BEGIN.) `prepared` is prepare()'s
+    result, which the runtime resolves before BEGIN (#382 review)."""
+    p = prepared or prepare(rt, args)
     limit = int(rt.config.get('delegate_max_children', DEFAULTS['max_children']))
     used = rt.store.db.execute('SELECT count(*) FROM delegates WHERE parent=?', (parent,)).fetchone()[0]
     if used >= limit:
         raise ValueError('this goal has used its %d delegate children (delegate_max_children): finish one, or '
                          'do the rest yourself' % limit)
-    cap, steps, secs = _caps(rt, args)
-    model, who = _brain(rt, args)
-    role = args.get('role') or 'worker'
-    if role not in ROLES:
-        raise ValueError('role must be one of ' + ', '.join(ROLES))
-    child = rt.store._enqueue(CHILD_PROMPT.format(parent=parent[:8], task=task, done=done),
-                              max_steps=steps, max_seconds=secs, kind='delegate')
-    rt.store.delegate_add(child, parent, who.get('model') or '', who.get('provider') or '', role, cap)
-    rt.delegate_models[child] = model
-    rt.delegate_caps[child] = cap
+    child = rt.store._enqueue(CHILD_PROMPT.format(parent=parent[:8], task=p['task'], done=p['done']),
+                              max_steps=p['max_steps'], max_seconds=p['max_seconds'], kind='delegate')
+    who = p['who']
+    rt.store.delegate_add(child, parent, who.get('model') or '', who.get('provider') or '', p['role'], p['cap_usd'])
+    rt.delegate_models[child] = p['model']
+    rt.delegate_caps[child] = p['cap_usd']
     rt.store.event('delegate_started', dict(child=child, model=who.get('model'), provider=who.get('provider'),
-                                           role=role, cap_usd=cap, max_steps=steps, max_seconds=secs), parent)
-    return dict(child=child, model=who.get('model'), provider=who.get('provider'), role=role, cap_usd=cap,
-                max_steps=steps, max_seconds=secs, outcome='running', _delegate_run=True,
-                note='the child runs now; this result is replaced by its report')
+                                           role=p['role'], cap_usd=p['cap_usd'], max_steps=p['max_steps'],
+                                           max_seconds=p['max_seconds']), parent)
+    return dict(child=child, model=who.get('model'), provider=who.get('provider'), role=p['role'],
+                cap_usd=p['cap_usd'], max_steps=p['max_steps'], max_seconds=p['max_seconds'], outcome='running',
+                _delegate_run=True, note='the child runs now; this result is replaced by its report')
 
 
 def run_child(rt, parent, job):
@@ -195,9 +228,12 @@ def capped(rt, gid):
     row = rt.store.delegate(gid)
     if not row:
         return False
-    cap = float(row.get('cap_usd') or 0.0)
+    cap = row.get('cap_usd')
+    if cap is None:
+        return False                      # only a missing cap is no cap: a stored 0 is a $0 cap, and it pauses
+    cap = float(cap)
     spend, allowance = float(row.get('spend_usd') or 0.0), float(row.get('allowance_usd') or 0.0)
-    if not cap or spend + allowance < cap:
+    if spend + allowance < cap:
         return False
     with rt.store.transaction():
         rt.store.update(gid, state='paused', error='delegate spend cap reached: $%.4f of $%.4f' % (spend + allowance, cap))
