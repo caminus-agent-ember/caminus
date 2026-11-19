@@ -74,9 +74,8 @@ func planView(g residentGoal, width int) textView {
 	return textView{open: true, title: "plan · goal " + shortGoal(g.ID), keys: keys, lines: lines}
 }
 
-// fetchMemoryView reads the session's memory file into the viewer: /memory.
 // fetchSimView reads the SIM log (issue #341): one structured record per harness change, newest first,
-// each naming the brain that wrote it and whether it is a prediction, a observation or a proposal.
+// each naming the brain that wrote it and whether it is a prediction, an observation or a proposal.
 func fetchSimView(m emberModel) tea.Cmd {
 	return func() tea.Msg {
 		var r struct {
@@ -93,6 +92,7 @@ func fetchSimView(m emberModel) tea.Cmd {
 	}
 }
 
+// fetchMemoryView reads the session's memory file into the viewer: /memory.
 func fetchMemoryView(m emberModel) tea.Cmd {
 	return func() tea.Msg {
 		var r struct {

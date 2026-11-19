@@ -7,17 +7,22 @@ evaluation context, and where the prediction was wrong (prediction_error). Recor
 new version with the same id and status 'observed', and the list / export collapse each id to its newest
 version. The prediction fields are frozen once written: an observation may add only `observed`,
 `eval_context`, `prediction_error` and `observed_ts`, and a closed (already observed) record is not written
-again. Every record carries the brain that made the prediction (provider, model, effort), so a weak-vs-strong
-run needs no code change; an observation adds `observed_by`, the brain that read the outcome. The per-session
-switch is config 'sim' (on unless a session turns it off); a running resident follows it at its next turn.
+again. Every record carries the brain that served the turn that wrote it (provider, model, effort), so a
+weak-vs-strong run needs no code change; an observation adds `observed_by`, the brain that read the outcome.
+The per-session switch is config 'sim' (on unless a session turns it off): a running resident follows it at
+its next turn, then hides the tool, the prompt section and the search hits, so an "off" arm cannot read the
+log it is being compared against.
 
 Statuses: 'proposed' (a post-goal reflection, no change made), 'recorded' (a prediction written before a
 harness change), 'observed' (the outcome after CI and reviews).
+
+The agent's tool is record / observe / list. The JSONL export belongs to the CLI alone (`caminus ember agent
+sim NAME --export`), which a human runs: the model cannot name a path, so no export can overwrite a file, in
+plan mode or anywhere else (review on #375, finding 1).
 """
+from contextlib import contextmanager
 import datetime
 import json
-import os
-from pathlib import Path
 import time
 import uuid
 
@@ -31,6 +36,14 @@ OBSERVED_FIELDS = ('observed', 'eval_context', 'prediction_error')
 def enabled(rt):
     """The per-session switch: config 'sim' is on unless a session stored false (an A/B arm turns it off)."""
     return bool(rt.config.get('sim', True))
+
+
+def serving(rt, cfg=None):
+    """The config of the brain answering this turn: the model's own when a runtime set one (a fallback turn),
+    else the agent's. Stamping rt.config alone mislabelled every record a fallback wrote as the primary's."""
+    if cfg:
+        return cfg
+    return getattr(getattr(rt, 'model', None), 'config', None) or rt.config
 
 
 def brain(cfg):
@@ -51,6 +64,17 @@ def _clean(value):
 
 def _event(store, gid, record):
     store.event('sim', record, gid)
+
+
+@contextmanager
+def _atomic(rt):
+    """One transaction around a check-then-insert: two writers (the daemon and the CLI) could both pass the
+    append-only check in autocommit and one observation would disappear (review on #375, finding 2)."""
+    if rt.store.db.in_transaction:
+        yield                         # (the daemon's dispatch already holds the store's transaction)
+    else:
+        with rt.store.transaction():
+            yield
 
 
 def _load(rt, gid=None, limit=200, statuses=None):
@@ -76,6 +100,11 @@ def _load(rt, gid=None, limit=200, statuses=None):
 
 def record(rt, gid, data, cfg=None):
     """A prediction, written before a harness change (or a proposal, when nothing is changed yet)."""
+    with _atomic(rt):
+        return _record(rt, gid, data, cfg)
+
+
+def _record(rt, gid, data, cfg=None):
     if not _clean(data.get('change')):
         raise ValueError('a SIM record needs `change`: the harness change it predicts (or would make)')
     if not _clean(data.get('predicted')):
@@ -87,6 +116,10 @@ def record(rt, gid, data, cfg=None):
     if status == 'observed' and not _clean(data.get('observed')):
         raise ValueError('an observed record needs `observed`: what CI and the reviews actually showed')
     rid = str(data.get('id') or '').strip()
+    if status == 'observed' and not rid:
+        # a record born closed carries the outcome before the change ran: no prediction anything can contradict
+        raise ValueError('an observation needs the id of the record it completes: write the prediction first '
+                         '(action record without status), then observe it')
     prior = None
     if rid:
         prior = next((d for d in _load(rt, limit=10000) if d['id'] == rid), None)
@@ -110,32 +143,41 @@ def record(rt, gid, data, cfg=None):
         # a version that leaves a field empty keeps the prediction's value: an observation adds the outcome, it
         # never blanks the change or the prediction it is measuring
         data = dict(prior, **{k: v for k, v in data.items() if _clean(v)})
-    writer = brain(cfg or rt.config)
-    rec = dict(id=rid or uuid.uuid4().hex[:8], ts=float((prior or {}).get('ts') or data.get('ts') or time.time()),
+    writer = brain(serving(rt, cfg))
+    # ts is always the log's own clock: a caller-supplied one could backdate a prediction and move it in `list`
+    rec = dict(id=rid or uuid.uuid4().hex[:8], ts=float((prior or {}).get('ts') or time.time()),
                goal=(prior or {}).get('goal') or gid, status=status,
                **{k: _clean(data.get(k)) for k in FIELDS},
                # the record names the brain that made the prediction; an observation adds who read it (finding 2)
                brain=(prior or {}).get('brain') or writer)
     if prior:
         rec['observed_by'] = writer
-    if data.get('observed_ts'):
-        rec['observed_ts'] = float(data['observed_ts'])
+    if status == 'observed':
+        rec['observed_ts'] = time.time()
+    elif prior and prior.get('observed_ts'):
+        rec['observed_ts'] = prior['observed_ts']
     if not rec['problem_group']:
         rec['problem_group'] = 'unclassified'
-    _event(rt.store, gid, rec)
+    if prior and prior.get('seq'):
+        # history_fts holds one row per event: drop the prior version's so a search names the record once, with
+        # its newest text, not once per version (review on #375, finding 7)
+        rt.store.db.execute('DELETE FROM history_fts WHERE rowid=?', (prior['seq'],))
+    # an observation lives in the record's goal, whatever goal its observer is in; the record is one record
+    _event(rt.store, rec.get('goal') or gid, rec)
     return rec
 
 
 def observe(rt, gid, rid, observed, eval_context='', prediction_error='', cfg=None):
     """The outcome after CI and the reviews, appended as a new version of a predicted record."""
-    prior = next((d for d in _load(rt, limit=10000) if d['id'] == rid), None)
-    if prior is None:
-        raise ValueError('no SIM record %s in this session: list them first' % rid)
     if not _clean(observed):
         raise ValueError('say what CI and the reviews showed, not that they passed')
-    data = dict(prior, status='observed', observed=observed, eval_context=eval_context,
-                prediction_error=prediction_error, observed_ts=time.time())
-    return record(rt, prior.get('goal') or gid, data, cfg)
+    with _atomic(rt):
+        prior = next((d for d in _load(rt, limit=10000) if d['id'] == rid), None)
+        if prior is None:
+            raise ValueError('no SIM record %s in this session: list them first' % rid)
+        data = dict(prior, status='observed', observed=observed, eval_context=eval_context,
+                    prediction_error=prediction_error)
+        return _record(rt, prior.get('goal') or gid, data, cfg)
 
 
 def render(rec):
@@ -165,43 +207,46 @@ def text(rt, gid=None, limit=20):
 
 
 def path_for(home):
+    from pathlib import Path
     return Path(home) / 'sim.jsonl'
 
 
 def export(rt, gid=None, path=None):
-    """Write the records as JSONL (one record per line, newest version only) and return (path, count, bytes)."""
+    """Write the records as JSONL (one record per line, newest version only) and return (path, count, bytes).
+
+    Reached by the CLI alone (`caminus ember agent sim NAME --export`), which a human runs. The agent's tool has
+    no export, so the model never names a file and no export can overwrite one, in plan mode or anywhere else
+    (review on #375, P1-2).
+    """
+    from pathlib import Path
+    from .store import atomic_write
     recs = _load(rt, gid, limit=100000)
     p = Path(path).expanduser() if path else path_for(rt.home)
     if not p.is_absolute():
-        p = Path(rt.home) / p
-    p.parent.mkdir(parents=True, exist_ok=True)
+        p = rt.home / p
     data = ''.join(json.dumps(rec, ensure_ascii=False) + '\n' for rec in recs).encode()
-    tmp = p.with_name(p.name + '.' + uuid.uuid4().hex[:6] + '.tmp')
-    tmp.write_bytes(data)
-    os.replace(tmp, p)
+    atomic_write(p, data)
     return p, len(recs), len(data)
 
 
 def tool(rt, gid, args):
-    """/sim as the agent's tool: record / observe / list / export."""
+    """/sim as the agent's tool: record / observe / list. The JSONL export is the CLI's (no model-chosen path)."""
+    if not enabled(rt):
+        # an off arm records nothing and reads nothing: the A/B compares the prompt, and a log the off arm could
+        # read would measure both arms against the same lessons (review on #375, finding 6)
+        raise ValueError('the SIM log is off in this session (config sim=false): it records and shows nothing. Turn '
+                         'it on with `caminus ember agent sim NAME --on`; a record it left open stays open until then')
     action = args.get('action')
     if action == 'record':
-        if not enabled(rt):
-            raise ValueError('the SIM log is off in this session (config sim=false): turn it on with `caminus ember '
-                             'agent sim NAME --on` if this session should record predictions')
         rec = record(rt, gid, args)
         return dict(record=rec, note='SIM record written: add the observation after CI and the reviews with '
                                      'action observe')
     if action == 'observe':
-        if not enabled(rt):
-            raise ValueError('the SIM log is off in this session (config sim=false)')
         rec = observe(rt, gid, str(args.get('id') or ''), args.get('observed'), args.get('eval_context', ''),
                       args.get('prediction_error', ''))
         return dict(record=rec)
     if action == 'list':
         recs = _load(rt, args.get('goal') and gid or None, args.get('limit', 20))
         return dict(records=recs, lines=text(rt, args.get('goal') and gid or None, args.get('limit', 20)))
-    if action == 'export':
-        p, n, nbytes = export(rt, gid, args.get('path'))
-        return dict(path=str(p), records=n, bytes=nbytes)
-    raise ValueError('action must be record, observe, list or export')
+    raise ValueError('action must be record, observe or list; the JSONL export is the CLI\'s: '
+                     '`caminus ember agent sim NAME --export`')

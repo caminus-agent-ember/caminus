@@ -694,7 +694,11 @@ def main(argv=None,stdin=None):
             emit(discover(home,a.topic,a.query),True)
             return 0
         if a.op=='prompt':
-            value=render_prompt(home)
+            try:
+                sim_on=bool(json.loads((home/'config.json').read_text()).get('sim',True))
+            except (OSError,ValueError):
+                sim_on=True
+            value=render_prompt(home,sim=sim_on)
             emit(dict(prompt=value),True) if a.json else print(value)
             return 0
         if a.op=='init':
@@ -824,7 +828,7 @@ def main(argv=None,stdin=None):
                     if a.json:emit(dict(name=a.name,path=str(p),records=n,bytes=nbytes),True)
                     else:print('%s: %d records, %d bytes' % (p,n,nbytes),flush=True)
                     return 0
-                out=sim.tool(rt,gid,dict(action='list',limit=a.limit,goal=bool(gid)))
+                out=dict(records=sim._load(rt,gid or None,a.limit),lines=sim.text(rt,gid or None,a.limit))
             finally:
                 store.close()
             if a.json:emit(dict(name=a.name,lines=out['lines'],records=out['records']),True)

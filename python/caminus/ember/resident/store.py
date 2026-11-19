@@ -25,23 +25,26 @@ def agent_home(name, home=None):
     return Path(home).expanduser().resolve() if home else Path.home() / 'homes' / name
 
 
-def atomic_json(path, value, mode=0o600, group=None):
+def atomic_write(path, data, mode=0o600, group=None):
+    """Write bytes so a reader sees the old file or the whole new one, never a half-written mix."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
-        with tmp.open('x') as f:
+        with tmp.open('xb') as f:
             tmp.chmod(mode)
             if group is not None:
-                import os
                 os.fchown(f.fileno(), -1, group)
-            json.dump(value, f, ensure_ascii=False)
+            f.write(data)
             f.flush()
-            import os
             os.fsync(f.fileno())
         tmp.replace(path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def atomic_json(path, value, mode=0o600, group=None):
+    atomic_write(path, json.dumps(value, ensure_ascii=False).encode(), mode, group)
 
 
 class Store:

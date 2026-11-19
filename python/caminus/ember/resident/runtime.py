@@ -357,12 +357,12 @@ TOOLS = [
               summary={'type':'string'}, pin={'type':'boolean'}, index={'type':'string'}, archive={'type':'string'})),
     tool('history_search', 'Full-text search over your own past: earlier goals, your replies, tool results, finish summaries, notes/index-archive.md (each matching line, up to half the limit, with the note it names), your journal and notes. No model call; each hit says its source (past goal, index archive, old index, journal, note; this goal last, without its own prompt) and where.',
          dict(query={'type':'string'}, limit={'type':'integer'}), ('query',)),
-    tool('sim', 'The self-improvement memory (SIM): one structured record per harness change, grouped by the recurring problem it belongs to. record a prediction BEFORE a harness change (problem_group, change, rationale, predicted outcome, eval_context), and observe the outcome AFTER CI and the reviews (what actually happened, and where the prediction was wrong). Every record carries the brain that wrote it (provider, model, effort), so weak-vs-strong runs need no code change; the session can switch the log off (config sim). status: record writes `recorded` (or `proposed` when nothing changes yet), observe writes `observed`. export writes the records as JSONL.',
-         dict(action={'type':'string','enum':['record','observe','list','export']},
+    tool('sim', 'The self-improvement memory (SIM): one structured record per harness change, grouped by the recurring problem it belongs to. record a prediction BEFORE a harness change (problem_group, change, rationale, predicted outcome, eval_context), and observe the outcome AFTER CI and the reviews (what actually happened, and where the prediction was wrong). Every record carries the brain that wrote it (provider, model, effort), so weak-vs-strong runs need no code change; the session can switch the log off (config sim). status: record writes `recorded` (or `proposed` when nothing changes yet), observe writes `observed`. list shows the records; the JSONL export belongs to the CLI (`caminus ember agent sim NAME --export`), not to this tool.',
+         dict(action={'type':'string','enum':['record','observe','list']},
               problem_group={'type':'string'}, change={'type':'string'}, rationale={'type':'string'},
               predicted={'type':'string'}, observed={'type':'string'}, eval_context={'type':'string'},
               prediction_error={'type':'string'}, status={'type':'string','enum':list(sim.STATUSES)},
-              id={'type':'string'}, path={'type':'string'}, limit={'type':'integer'},
+              id={'type':'string'}, limit={'type':'integer'},
               goal={'type':'boolean'}), ('action',)),
     tool('todo', 'Your plan for this goal as a checklist: each item pending, in_progress (one at a time) or done, plus what blocks you now. Send the whole list each time; it replaces the last one, is pinned into every turn (it survives compaction) and shows above your human\'s composer. finish refuses while items are unfinished unless open names what is left.',
          dict(items={'type':'array','items':{'type':'object','properties':{'text':{'type':'string'},
@@ -481,6 +481,8 @@ REPEAT_EXEMPT = {'wait', 'todo', 'note', 'remember', 'heartbeat', 'machine', 'ma
 # them, which the human sees in its connection log)
 PRE_DONE_ALLOWED = {'read', 'search', 'discover', 'history_search', 'web_search', 'web_fetch', 'machine', 'todo', 'ask_user',
                     'advisor', 'peers', 'mail', 'remember', 'note', 'wait', 'sandbox', 'sim'}
+# (sim stays: its tool writes only the event log, like remember writes notes, and the prediction belongs before
+# the change; its only file write, the JSONL export, is the CLI's and is not a tool action at all)
 
 class Runtime:
     def __init__(self, home, model=None, terminal=None):
@@ -530,9 +532,12 @@ class Runtime:
     @property
     def tools(self):
         """The tools the model sees: the harness's own (browser only where a Chrome or Chromium can run in a box),
-        then any configured MCP servers' (listed once)."""
+        then any configured MCP servers' (listed once). The SIM tool is hidden while the session's log is off, so an
+        A/B's off arm is not asked for predictions it cannot write (review on #375, finding 6)."""
         if getattr(self, '_tools', None) is None:
             own = [t for t in TOOLS if t['function']['name'] != 'browser' or not browser.available()]
+            if not sim.enabled(self):
+                own = [t for t in own if t['function']['name'] != 'sim']
             self._tools = own + (self.mcp.tools() if self.mcp.servers else [])
         return self._tools
 
@@ -543,7 +548,7 @@ class Runtime:
         agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, and the measured
         budget - therefore rides after the history instead (see :meth:`context_message`). A memory write used
         to invalidate the cache at the first token and force a full re-read of the whole transcript."""
-        return dict(role='system', content=render_prompt(self.home))
+        return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self)))
 
     def context_message(self,gid=None):
         """What the model knows about itself, delivered after the history so the cached prefix survives.
@@ -2191,6 +2196,8 @@ class Runtime:
                 self.config.pop(k, None)
         for k in ('question_timeout', 'question_away_max', 'judge_model', 'sim'):
             if k in fresh:
+                if k == 'sim' and bool(fresh[k]) != bool(self.config.get('sim', True)):
+                    self._tools = None        # an off session is not offered the sim tool, and an on one is
                 self.config[k] = fresh[k]
         for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
             if k in fresh:

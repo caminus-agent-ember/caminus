@@ -2553,6 +2553,64 @@ for line in sys.stdin:
             self.assertTrue(simmod.enabled(rt))
         finally:rt.mail.close();rt.store.close()
 
+    def test_review_fixes_the_export_is_not_a_tool_and_the_off_arm_cannot_read_the_log(self):
+        # the maintainer's review of 3d29564 (P1-2, P2 3-7): export left the agent's tool (it wrote any path the
+        # model named, in plan mode and before define_done); a record stamped the primary while the fallback
+        # answered; an observation under another goal split the record; a record could be born observed; "off"
+        # hid nothing a book could read; every version was its own search hit.
+        from caminus.ember.resident.store import atomic_json
+        from caminus.ember.resident.prompt import render
+        from caminus.ember.resident import sim as simmod
+        # P1-2 through plan mode, where the reviewer reproduced it: the tool refuses, and no file changes
+        victim=self.home/'victim.txt';victim.write_text('keep me\n')
+        self.replies(call('sim',dict(action='export',path=str(victim))),
+                     call('propose_plan',dict(plan='nothing to change yet')))
+        self.cmd('once',['--plan','--goal','Export the SIM log over a file.'],code=25)
+        self.assertEqual(victim.read_text(),'keep me\n','no tool argument writes a file')
+        results=[e['data']['result'] for e in self.cmd('events')
+                 if e['kind']=='tool_result' and e['data'].get('name')=='sim']
+        # refused before the call runs: the action enum no longer has export, so the error is the schema's
+        self.assertTrue(results[-1].get('error'),'export was refused')
+        rt=Runtime(self.home)
+        try:
+            self.assertNotIn('path',json.dumps([t for t in rt.tools if t['function']['name']=='sim'][0]))
+            gid=rt.store.enqueue('A goal whose turn the fallback answers.')
+            # P1-1: the record names the brain that served the turn, not the agent's primary
+            class Fallback:
+                config=dict(model='claude-haiku-5-5',provider='anthropic')
+            rt.model=Fallback()
+            rec=simmod.record(rt,gid,dict(change='stamp the serving brain',predicted='the record names haiku',
+                                          ts=1.0))
+            self.assertEqual(rec['brain']['model'],'claude-haiku-5-5',"the fallback's record is not the primary's")
+            self.assertGreater(rec['ts'],1.0,'a caller-supplied ts is ignored: the log keeps its own clock')
+            rt.model=rt.primary
+            # P2-5: a record cannot be born with its outcome in hand
+            with self.assertRaises(ValueError):
+                simmod.tool(rt,gid,dict(action='record',status='observed',change='x',predicted='y',observed='z'))
+            # P2-3: an observation from another goal stays in the record's own goal, one record either way
+            other=rt.store.enqueue('Another goal that observes it.')
+            rec2=simmod.record(rt,gid,dict(change='zzmarker cap',predicted='one hit'))
+            simmod.observe(rt,other,rec2['id'],'CI green')
+            self.assertEqual(simmod.observe.__defaults__ is not None and
+                             [r['id'] for r in simmod._load(rt,gid,limit=10)].count(rec2['id']),1)
+            self.assertNotIn(rec2['id'],[r['id'] for r in simmod._load(rt,other,limit=10)])
+            # P2-7: one search hit per record, with its newest text, not one per version
+            simhits=[h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')]
+            self.assertEqual(len(simhits),1,'an observed record is one history hit')
+            self.assertIn('CI green',simhits[0]['text'])
+            # P2-6: off hides the tool, the prompt section and the search hits; on brings all three back
+            cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
+            atomic_json(self.home/'config.json',cfg);rt._follow_config()
+            self.assertNotIn('sim',[t['function']['name'] for t in rt.tools])
+            self.assertNotIn('SIM: predict',render(self.home,sim=False))
+            self.assertIn('SIM: predict',render(self.home))
+            self.assertEqual([h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')],[])
+            cfg['sim']=True;atomic_json(self.home/'config.json',cfg);rt._follow_config()
+            self.assertIn('sim',[t['function']['name'] for t in rt.tools])
+            self.assertEqual(len([h for h in rt.memory.search('zzmarker')['hits']
+                                  if h['where'].endswith('· sim')]),1)
+        finally:rt.mail.close();rt.store.close()
+
     def test_sim_off_refuses_records_until_it_is_turned_back_on(self):
         cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
         (self.home/'config.json').write_text(json.dumps(cfg))
