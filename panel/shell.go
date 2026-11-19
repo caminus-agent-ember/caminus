@@ -397,6 +397,7 @@ type status struct {
 	queue        int
 	compactions  int     // times this goal's history was compacted; -1 hides the bubble (no goal in view)
 	online       float64 // how long the agent has been online, seconds; 0 hides it
+	freeTime     bool    // no goal in view and the daemon listens: the free-time schedule is on
 	cacheHit     float64 // today's input from the prompt cache, 0-1; negative hides it
 	keys         []string
 }
@@ -462,7 +463,11 @@ func statusLine(s status, w int) string {
 		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %.0f%% cached", g.cache, s.cacheHit*100)))
 	}
 	if s.online > 0 {
-		segs = append(segs, strings.TrimSpace(g.online+" online "+upFor(s.online)))
+		loc := " online " + upFor(s.online)
+		if s.freeTime {
+			loc += " · free time runs on its own schedule" // (#334) the side panel's one unique line, kept
+		}
+		segs = append(segs, strings.TrimSpace(g.online+loc))
 	}
 
 	return footBar(segs, s.keys, w)

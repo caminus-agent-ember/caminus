@@ -763,27 +763,35 @@ func (m emberModel) onlineSeconds() float64 {
 	return m.resident.OnlineS + time.Since(m.statusAt).Seconds()
 }
 
-// sidePanel is the right column: the goal's whole todo list at the top, then what runs now. (A thoughts box sat above
-// the tasks until the owner asked for the tasks in its place; the reply being written streams into the transcript.)
-func (m emberModel) sidePanel(sw, height int) string {
-	rows := []string{}
+// freeTime: no goal is in view and the daemon listens, so free time runs on its own schedule. (#334) The side
+// panel used to be the only place that said so; the status line's online segment carries it now that the panel
+// keeps tasks only.
+func (m emberModel) freeTime() bool {
+	if m.daemonDown() {
+		return false
+	}
+	return m.goalInView() == nil
+}
+
+// goalInView is the goal the side panel and the activity line speak about: the one the agent is on, else the one
+// picked in the session list while it waits its turn (queued or paused), so its plan still shows; nil between goals.
+func (m emberModel) goalInView() *residentGoal {
 	goal := m.activeGoal()
 	if goal == nil {
 		if sel := m.selectedResidentGoal(); sel != nil && (sel.State == "queued" || sel.State == "paused") {
 			goal = sel
 		}
 	}
+	return goal
+}
+
+// sidePanel is the right column: the goal's whole todo list, with what blocks it. (A thoughts box sat above the
+// tasks until the owner asked for the tasks in its place; the reply being written streams into the transcript. A
+// "now" section followed the tasks until #334: the activity line above the composer carries the live state.)
+func (m emberModel) sidePanel(sw, height int) string {
+	rows := []string{}
+	goal := m.goalInView()
 	textSt := lipgloss.NewStyle().Foreground(cText)
-	wrap := func(text string, indent int, st lipgloss.Style, limit int) []string {
-		lines := strings.Split(ansi.Wordwrap(text, max(8, sw-indent-1), " "), "\n")
-		if len(lines) > limit {
-			lines = append(lines[:limit-1], ansi.Truncate(lines[limit-1], max(8, sw-indent-2), "")+"…")
-		}
-		for i, ln := range lines {
-			lines[i] = strings.Repeat(" ", indent) + st.Render(ln)
-		}
-		return lines
-	}
 	if goal != nil {
 		if items := m.todoItems(goal.ID); len(items) > 0 {
 			done := 0
@@ -811,14 +819,8 @@ func (m emberModel) sidePanel(sw, height int) string {
 			}
 		}
 	}
-	now, command := m.nowState(goal)
-	if len(rows) > 0 {
-		rows = append(rows, "") // (with no todo list, now is the top row)
-	}
-	rows = append(rows, sectionHead("now", cBlue, "", sw), " "+emberBusy.Render(now))
-	if command != "" {
-		rows = append(rows, wrap(command, 3, textSt, 8)...)
-	}
+	// (#334) tasks only here: the activity line above the composer is the one home for live
+	// state (todoPinned, fed by the same nowState).
 	used := len(rows)
 	for len(rows) < height {
 		rows = append(rows, "")
@@ -2351,12 +2353,7 @@ func (m emberModel) todoPinned() string {
 	if m.chat.question != nil || m.sideWidth() > 0 {
 		return "" // the question's own box says the agent waits for you; a wide terminal shows it in the side panel
 	}
-	goal := m.activeGoal()
-	if goal == nil {
-		if sel := m.selectedResidentGoal(); sel != nil && (sel.State == "queued" || sel.State == "paused") {
-			goal = sel
-		}
-	}
+	goal := m.goalInView()
 	// the task: the current todo item, else the goal itself
 	task, dots := "", ""
 	if goal != nil {
@@ -3437,7 +3434,7 @@ func (m emberModel) chatFoot(w int) string {
 	}
 	statusBar := statusLine(status{brain: residentText(withEffort(m.resident.Model, m.resident.Effort)), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
-		speed: speed, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
+		speed: speed, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), freeTime: m.freeTime(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip
 	// (no line under the status line: the occasional states ride among its keys and a message sits on the composer's
 	// frame, so nothing appears and goes below it)

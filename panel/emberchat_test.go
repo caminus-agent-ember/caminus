@@ -1796,6 +1796,32 @@ func TestStatusLineShowsSpendOnAPaidBrain(t *testing.T) {
 	}
 }
 
+// (#334) the side panel said "listening (free time runs on its own schedule)" and nothing else did; the status
+// line's online segment carries that note now that the panel keeps tasks only.
+func TestTheStatusLineCarriesTheFreeTimeNote(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	// a goal is working: the note is not said (free time runs only with no goal in view)
+	m.resident.OnlineS, m.resident.DaemonAlive = 18*60, true
+	if foot := ansi.Strip(m.chatFoot(200)); !strings.Contains(foot, "online 18m") || strings.Contains(foot, "free time") {
+		t.Fatalf("a working goal is no free time: %q", foot)
+	}
+	// the goal completed and nothing else is in view: the online segment says free time runs
+	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574,
+		DaemonAlive: true, LastEvent: 2, OnlineS: 18 * 60, Goals: []residentGoal{{ID: "original", State: "completed", Prompt: "a goal"}}}})
+	if foot := ansi.Strip(m.chatFoot(200)); !strings.Contains(foot, "online 18m") || !strings.Contains(foot, "free time runs on its own schedule") {
+		t.Fatalf("the free-time note is gone with the panel's now section: %q", foot)
+	}
+	// a stopped daemon runs no free time at all, and the online clock hides with it
+	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574,
+		DaemonAlive: false, LastEvent: 3, OnlineS: 18 * 60, Goals: []residentGoal{{ID: "original", State: "completed", Prompt: "a goal"}}}})
+	if foot := ansi.Strip(m.chatFoot(200)); strings.Contains(foot, "free time") || strings.Contains(foot, "online ") {
+		t.Fatalf("a stopped daemon shows no online clock and no free time: %q", foot)
+	}
+}
+
 func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
 	var got []string
 	old := notifyRun
@@ -2134,7 +2160,7 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	side := func(row string) string { return ansi.Cut(row, m.transcriptWidth(max(20, m.width)), m.width) } // the right column's cells
 	frame := ansi.Strip(m.render())
 	rows := fits(frame)
-	for _, want := range []string{"tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
+	for _, want := range []string{"tasks  1 of 3 done", "◐ write the CLI", "make test", "Checking the CVEs."} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("missing %q:\n%s", want, frame)
 		}
@@ -2143,6 +2169,13 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	top := lipgloss.Height(m.chatHead(m.width))
 	if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") {
 		t.Fatalf("the first row of the right column is the tasks heading, got %q:\n%s", s, frame)
+	}
+	// (#334) tasks only: the live state lives in the activity line above the composer, so no "now" section sits
+	// under the tasks (it showed "between steps" while the activity line had the turn running)
+	for i := top; i < len(rows); i++ {
+		if s := strings.TrimSpace(side(rows[i])); strings.HasPrefix(s, "now ") {
+			t.Fatalf("the side panel carries a now section again (row %d): %q", i, s)
+		}
 	}
 	if strings.Contains(frame, "thoughts") || strings.Contains(frame, "first the NVD feed") || strings.Contains(frame, "tabbed") {
 		t.Fatalf("no thoughts box on a wide terminal:\n%s", frame)
