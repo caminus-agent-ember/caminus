@@ -2859,6 +2859,22 @@ for line in sys.stdin:
             self.assertIn('delegate child',str(caught.exception),'a resumed child would run uncapped on the parent brain')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_finished_delegate_child_cannot_be_continued(self):
+        # `send --continue` on a completed goal revived it with no delegate check, so a child ran again on the
+        # default brain with no cap (#382 review, and resume_goal refuses the same move). Same answer on both paths.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():rt.store.update(child,state='completed')
+        finally:rt.mail.close();rt.store.close()
+        refused=self.cmd('send',['--goal-id',child,'--continue','--stdin'],code=1,stdin='Keep going.')
+        self.assertIn('delegate child',refused['error'])
+        store=Store(self.home)
+        try:self.assertEqual(store.goal(child)['state'],'completed','the refused continue must not revive the child')
+        finally:store.close()
+
     def test_a_wait_is_clipped_to_the_goals_time_budget(self):
         # one wait could block for its full 30 minutes against a 600 s child cap; the deadline was read only at the
         # next tick (#382 review). A goal 2 s from its deadline waits about 2 s, not 1800.

@@ -1299,6 +1299,13 @@ def main(argv=None,stdin=None):
                     if state=='cancelled' or state=='completed' and not a.continue_goal:
                         raise ValueError('goal finished; submit a new goal instead of steering it')
                     if state=='completed':
+                        if store.delegate(a.goal_id):
+                            # resume_goal refuses this for the same reason: a child's brain and caps die with the
+                            # process that ran it, so a continued child would run uncapped on another brain, and
+                            # its report is already with its parent (#382 review). Same write lock as the revive.
+                            raise ValueError('that goal is a delegate child, and its report is already with its '
+                                             'parent: a continued child would run uncapped on the wrong brain. '
+                                             'Delegate again from the parent goal')
                         store.update(a.goal_id,state='working',summary='',error='',deadline=None,step_limit=None)
                         store.event('goal_continued',{},a.goal_id)
                     store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',
