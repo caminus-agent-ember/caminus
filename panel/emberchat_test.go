@@ -62,6 +62,87 @@ func TestChatRetainsTranscriptAndScrollAnchorOnRefresh(t *testing.T) {
 	}
 }
 
+// (#358) A paused goal earlier in the list must not shadow the one that is working: the header, the task list
+// and the composer followed the paused goal while the transcript streamed the working one.
+func TestTheHeaderAndTasksFollowTheWorkingGoalNotAPausedOne(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.DaemonAlive = true
+	m.resident.Goals = []residentGoal{
+		{ID: "041c4309aa", State: "paused", Prompt: "the weekly SIM backlog", Steps: 41},
+		{ID: "e0990951bb", State: "working", Prompt: "fix the ember bugs", Steps: 7},
+	}
+	m.goalSel, m.chat.target = 0, "041c4309aa" // as a refresh left it: the paused goal shown
+	m.residentEvents = []residentEvent{
+		{Seq: 5, Goal: "e0990951bb", Kind: "todo", Data: map[string]any{"items": []any{
+			map[string]any{"text": "open the PR", "state": "in_progress"},
+		}}},
+	}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{
+		{Seq: 6, Goal: "e0990951bb", Kind: "assistant", Data: map[string]any{"content": "pushing the branch"}},
+	}})
+	if g := m.selectedResidentGoal(); g == nil || g.ID != "e0990951bb" {
+		t.Fatalf("the selection followed %v, want the working goal", g)
+	}
+	if m.chat.target != "e0990951bb" {
+		t.Fatalf("the composer targets %q, want the working goal", m.chat.target)
+	}
+	h := ansi.Strip(m.chatHead(140))
+	if !strings.Contains(h, "fix the ember bugs") || strings.Contains(h, "weekly SIM backlog") {
+		t.Fatalf("the header speaks about the working goal:\n%s", h)
+	}
+	if strings.Contains(h, "paused") {
+		t.Fatalf("the header shows the paused goal's state:\n%s", h)
+	}
+	if p := ansi.Strip(m.sidePanel(40, 8)); !strings.Contains(p, "open the PR") {
+		t.Fatalf("the tasks are the working goal's:\n%s", p)
+	}
+	if title := m.composerTitle(); title != "to goal e0990951" {
+		t.Fatalf("the composer says %q, want the working goal", title)
+	}
+}
+
+// (#358) A goal picked by hand in the overlay stays shown, and the header says it is not the running one, so
+// "paused" never reads as what the agent is doing.
+func TestTheHeaderMarksAGoalPickedByHandAsNotTheRunningOne(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.DaemonAlive = true
+	m.resident.Goals = []residentGoal{
+		{ID: "041c4309aa", State: "paused", Prompt: "the weekly SIM backlog", Steps: 41},
+		{ID: "e0990951bb", State: "working", Prompt: "fix the ember bugs", Steps: 7},
+	}
+	m.chat.pickedGoal = "041c4309aa" // chosen in the Goals overlay: a refresh does not move off it
+	m.goalSel = 0
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{
+		{Seq: 6, Goal: "e0990951bb", Kind: "assistant", Data: map[string]any{"content": "pushing the branch"}},
+	}})
+	if g := m.selectedResidentGoal(); g == nil || g.ID != "041c4309aa" {
+		t.Fatalf("a goal picked by hand moved to %v", g)
+	}
+	h := ansi.Strip(m.chatHead(140))
+	if !strings.Contains(h, "viewing paused") || !strings.Contains(h, "e0990951 working") {
+		t.Fatalf("the header marks the picked goal as not the running one:\n%s", h)
+	}
+}
+
+// (#358) A stopped daemon runs nothing: its goals' last states are stale, so a refresh must not follow a goal
+// whose state still says "working" over the one the owner is reading.
+func TestAStoppedDaemonDoesNotFollowAStaleWorkingGoal(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.DaemonAlive = false
+	m.resident.Goals = []residentGoal{
+		{ID: "041c4309aa", State: "paused", Prompt: "the weekly SIM backlog", Steps: 41},
+		{ID: "e0990951bb", State: "working", Prompt: "fix the ember bugs", Steps: 7},
+	}
+	m.goalSel, m.chat.target = 0, "041c4309aa"
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident})
+	if g := m.selectedResidentGoal(); g == nil || g.ID != "041c4309aa" {
+		t.Fatalf("a stopped daemon moved the shown goal to %v", g)
+	}
+	if m.chat.target != "041c4309aa" {
+		t.Fatalf("a stopped daemon retargeted the composer to %q", m.chat.target)
+	}
+}
+
 func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
 	m := chatFixture(t)
 	m.chat.compose.SetValue("Use existing tools.\nKeep café and 漢字 intact.")
