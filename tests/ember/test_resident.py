@@ -3151,24 +3151,33 @@ for line in sys.stdin:
         self.assertIn('stopped',waited[-1]['happened'],'the agent learns why its wait ended')
 
     def test_a_terminal_worker_stopped_by_sigterm_reads_stopped(self):
-        t=Terminal(self.home);sid=uuid.uuid4().hex
-        out=t.call(sid,dict(command='sleep 300',yield_ms=300))
-        self.assertTrue(out['running'])
-        os.kill(out['worker'],signal.SIGTERM)
+        t=Terminal(self.home);jobs=self.home/'jobs'
+        def recorded(session,key):
+            # The launch poll's answer is a snapshot of state.json, not the record: a worker still starting has no
+            # `pid` yet, and one not yet scheduled has no state at all (the race CI hit, #352). Read what the worker
+            # wrote, waiting for the field, and take the pid from the record rather than from that first answer.
+            p=jobs/session/'state.json'
+            return self.wait(lambda:json.loads(p.read_text()).get(key) if p.exists() else None,10)
+        sid=uuid.uuid4().hex
+        t.call(sid,dict(command='sleep 300',yield_ms=300))
+        self.assertTrue(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'])
+        worker,command=recorded(sid,'worker'),recorded(sid,'pid')
+        os.kill(worker,signal.SIGTERM)
         self.wait(lambda:t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['phase']=='stopped',10)
-        state=json.loads((self.home/'jobs'/sid/'state.json').read_text())
+        state=json.loads((jobs/sid/'state.json').read_text())
         self.assertEqual(state['phase'],'stopped','the worker records its own end')
         self.assertFalse(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'])
-        self.wait(lambda:not os.path.exists(f'/proc/{out["pid"]}') or
-                  open(f'/proc/{out["pid"]}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)   # its command ended too
+        self.wait(lambda:not os.path.exists(f'/proc/{command}') or
+                  open(f'/proc/{command}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)   # its command ended too
         # a worker that could not write (SIGKILL) leaves "running" behind: every reader says stopped, not running
         # (its command ignores the pty's hang-up, so it outlives the worker: the emergency stop must still reach it)
         sid2=uuid.uuid4().hex
-        out2=t.call(sid2,dict(command="trap '' HUP; echo TRAPPED; sleep 300",yield_ms=300))
+        t.call(sid2,dict(command="trap '' HUP; echo TRAPPED; sleep 300",yield_ms=300))
         # the worker dies only once the shell has set the trap: a login profile can take longer than the first poll,
         # and a hang-up before the trap ends the command with its worker (the race CI hit)
         self.wait(lambda:'TRAPPED' in t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=200,offset=0))['output'],20)
-        os.kill(out2['worker'],signal.SIGKILL)
+        worker2,command2=recorded(sid2,'worker'),recorded(sid2,'pid')
+        os.kill(worker2,signal.SIGKILL)
         try:
             self.wait(lambda:json.loads((self.home/'jobs'/sid2/'state.json').read_text())['phase']=='running' and
                       t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['phase']=='stopped',10)
@@ -3180,13 +3189,13 @@ for line in sys.stdin:
                 self.assertIn('ended',housemate.wait(rt,gid,'session',sid2,timeout=3)['happened'])
                 self.assertNotIn(sid2,[s['session'] for s in housemate.machine(rt)['my_running_sessions']])
             finally:rt.mail.close();rt.store.close()
-            os.killpg(out2['pid'],0)                      # the command is still alive here
+            os.killpg(command2,0)                         # the command is still alive here
             self.assertEqual(t.signal_running(signal.SIGTERM),[sid2],'the emergency stop still reaches its command')
-            self.wait(lambda:not os.path.exists(f'/proc/{out2["pid"]}') or
-                      open(f'/proc/{out2["pid"]}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)
+            self.wait(lambda:not os.path.exists(f'/proc/{command2}') or
+                      open(f'/proc/{command2}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)
             self.assertEqual(t.signal_running(signal.SIGTERM),[],'a stopped job its worker ended is not signalled again')
         finally:
-            try:os.killpg(out2['pid'],signal.SIGKILL)
+            try:os.killpg(command2,signal.SIGKILL)
             except ProcessLookupError:pass
 
     def test_a_gate_ends_when_the_runtime_stops(self):
