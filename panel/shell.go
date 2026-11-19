@@ -463,11 +463,13 @@ func statusLine(s status, w int) string {
 		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %.0f%% cached", g.cache, s.cacheHit*100)))
 	}
 	if s.online > 0 {
-		loc := " online " + upFor(s.online)
-		if s.freeTime {
-			loc += " · free time runs on its own schedule" // (#334) the side panel's one unique line, kept
-		}
-		segs = append(segs, strings.TrimSpace(g.online+loc))
+		segs = append(segs, strings.TrimSpace(g.online+" online "+upFor(s.online)))
+	}
+	if s.online > 0 && s.freeTime {
+		// (#334) the one line the side panel's now section alone carried. Its own segment, after the online clock:
+		// footBar drops the newest segment first when the line is short of room, so a narrow terminal loses the note
+		// before it loses the clock (inside the clock's segment, the longer segment took both away at 160 columns).
+		segs = append(segs, "free time runs on its own schedule")
 	}
 
 	return footBar(segs, s.keys, w)

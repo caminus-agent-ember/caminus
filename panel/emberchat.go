@@ -2351,7 +2351,7 @@ func (m emberModel) slashMenuKey(k string) (emberModel, bool) {
 func (m emberModel) todoPinned() string {
 	w := max(20, m.width)
 	if m.chat.question != nil || m.sideWidth() > 0 {
-		return "" // the question's own box says the agent waits for you; a wide terminal shows it in the side panel
+		return "" // the question's own box says the agent waits for you; a wide terminal lists tasks in the panel and live state in the activity line
 	}
 	goal := m.goalInView()
 	// the task: the current todo item, else the goal itself

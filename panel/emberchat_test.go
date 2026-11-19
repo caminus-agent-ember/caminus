@@ -1822,6 +1822,37 @@ func TestTheStatusLineCarriesTheFreeTimeNote(t *testing.T) {
 	}
 }
 
+// (#334) the free-time note rides in the status line, but it must never push the online clock out. footBar drops the
+// newest segment when the line is short of room, so while the note sat inside the clock's segment the longer segment
+// took the clock away with it at 160 columns. The clock must read the same with and without the note, at every width.
+func TestTheFreeTimeNoteNeverTakesTheOnlineClockWithIt(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	plain := status{brain: "local-model", cwd: "~/homes/agent/caminus", used: 1000, window: 1048574,
+		usd: -1, usdDay: -1, speed: replySpeed{write: 31, read: 1240, source: "engine"},
+		queue: 0, compactions: 0, online: 18 * 60, cacheHit: -1, keys: []string{"ctrl+n new", "tab goals"}}
+	noted := plain
+	noted.freeTime = true
+	shown := 0
+	for w := 60; w <= 220; w += 4 {
+		without, with := ansi.Strip(statusLine(plain, w)), ansi.Strip(statusLine(noted, w))
+		clock := strings.Contains(without, "online 18m")
+		if got := strings.Contains(with, "online 18m"); got != clock {
+			t.Fatalf("at %d columns the free-time note changed whether the online clock shows (%v with the note, %v without): %q", w, got, clock, with)
+		}
+		if strings.Contains(with, "free time runs on its own schedule") {
+			shown++
+			if !clock {
+				t.Fatalf("at %d columns the note shows without the clock it belongs to: %q", w, with)
+			}
+		}
+	}
+	if shown == 0 {
+		t.Fatal("the note never showed at any width: the status line lost it")
+	}
+}
+
 func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
 	var got []string
 	old := notifyRun
