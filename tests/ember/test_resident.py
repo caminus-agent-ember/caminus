@@ -114,7 +114,7 @@ def pdf(*runs):
 
 
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[];models={};props={};gets=[];status={};web_hits={}
+    queues={};seen=[];judges={};judge_seen=[];reflects={};reflect_seen=[];models={};props={};gets=[];status={};web_hits={}
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
@@ -151,6 +151,15 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
             self.respond(dict(input_tokens=len(json.dumps(body))//4));return
         key=self.path.split('/')[1]
         msgs=body.get('messages') or [{}]
+        if str(msgs[0].get('content','')).startswith('REFLECT'):
+            # the post-goal reflection (#341) has its own queue and its own record, like the judge: a goal test's
+            # replies and its view of the conversation stay its own. The default proposes nothing, so the tests
+            # written before it existed see the same SIM log they saw then.
+            self.reflect_seen.append((key,body))
+            rq=self.reflects.get(key)
+            answer=rq.popleft() if rq else dict(skip=True,reason='the fixture proposes nothing')
+            self.respond(dict(choices=[dict(message=dict(role='assistant',content=json.dumps(answer)),finish_reason='stop')],
+                              usage=dict(prompt_tokens=30,completion_tokens=10)));return
         if not str(msgs[0].get('content','')).startswith('JUDGE'):self.seen.append((key,body))
         else:
             self.judge_seen.append((key,body))
@@ -208,6 +217,7 @@ class Resident(unittest.TestCase):
         return json.loads(p.stdout)
     def replies(self,*messages):Endpoint.queues[self.key]=deque(messages)
     def verdicts(self,*values):Endpoint.judges[self.key]=deque(values)
+    def reflect(self,*values):Endpoint.reflects[self.key]=deque(values)
     def steers(self,gid):
         import sqlite3
         db=sqlite3.connect(self.home/'agent.sqlite3');db.row_factory=sqlite3.Row
@@ -8153,6 +8163,105 @@ for line in sys.stdin:
         msg=str(erm.exception)
         self.assertIn('mkdir -p',msg);self.assertIn('chmod 2770',msg)
         self.assertIn('sudo',msg)
+
+    def test_a_finished_goal_leaves_one_proposed_record_from_a_cheap_call(self):
+        # #341: at the end of a graded goal, one short call asks what harness change would have made it faster or
+        # more reliable, and writes the answer as a 'proposed' SIM record: a queue a person reads, never a change.
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.reflect(dict(problem_group='delegate · a child that runs away',
+                          change='caps on by default',rationale='a runaway child bills and stalls the parent',
+                          predicted='CI green and a capped child reports partial'))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed','the reflection never changes how the goal ended')
+        seen=[b for k,b in Endpoint.reflect_seen if k==self.key]
+        self.assertEqual(len(seen),1,'exactly one reflection call')
+        self.assertTrue(seen[0]['messages'][0]['content'].startswith('REFLECT'))
+        self.assertNotIn('tools',seen[0],'the reflection call has no tools')
+        self.assertEqual(seen[0]['max_tokens'],4096,'a short call: thinking off, room for a JSON answer')
+        rec=self.cmd('sim',['--status','proposed'])['records'][0]
+        self.assertEqual((rec['status'],rec['goal']),( 'proposed',goal['id']))
+        self.assertEqual(rec['brain'],dict(provider='',model='fixture',effort=''))
+        self.assertIn('delegate · a child that runs away',rec['problem_group'])
+        self.assertIn('judge met',rec['eval_context'],'the call sees how the finish judge read the goal')
+        self.assertEqual(rec['observed'],'','a proposal carries no outcome: nothing has run yet')
+        # the proposal is a queue: the CLI lists only proposals while asked, and observing it later is allowed
+        self.assertEqual([r['id'] for r in self.cmd('sim',['--status','proposed'])['records']],[rec['id']])
+        out=self.cmd('sim',['--observe',rec['id'],'--observed','the reviewer rejected the default; kept opt-in'])
+        self.assertEqual(out['record']['status'],'observed')
+
+    def test_the_reflection_is_retried_strictly_then_recorded_as_failed(self):
+        # a reply that is not the JSON asked for is asked once more, with the shape spelled out; a second unreadable
+        # reply is an event on a completed goal, never a failed goal.
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.reflect('I think the harness is fine actually.', 'Still not JSON.')
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        seen=[b for k,b in Endpoint.reflect_seen if k==self.key]
+        self.assertEqual(len(seen),2,'unreadable once, asked once more')
+        self.assertIn('Answer with only the JSON object',seen[1]['messages'][-1]['content'])
+        events=[e for e in self.cmd('events') if e['kind']=='reflection_failed']
+        self.assertEqual(len(events),1)
+        self.assertIn('could not be read',events[0]['data']['reason'])
+        self.assertEqual(self.cmd('sim',[])['records'],[])
+
+    def test_an_off_sim_log_or_a_free_stretch_asks_for_no_reflection(self):
+        # the reflection writes into the SIM log, so an off arm records nothing (an A/B's off arm must not learn
+        # here); free time is not graded work and is not reflected on; config reflect false turns it off.
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
+        (self.home/'config.json').write_text(json.dumps(cfg))
+        self.assertEqual(self.cmd('once',['--goal','Create the file.'])['state'],'completed')
+        self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'sim off: no reflection call')
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        cfg['sim']=True;cfg['reflect']=False
+        (self.home/'config.json').write_text(json.dumps(cfg))
+        self.assertEqual(self.cmd('once',['--goal','Create the file again.'])['state'],'completed')
+        self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'reflect false: no reflection call')
+        # free time is not graded work: the log is on again, and a stretch still asks for no reflection
+        cfg.pop('reflect',None);(self.home/'config.json').write_text(json.dumps(cfg))
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Free time.',kind='free')
+            self.assertIsNone(reflect.maybe(rt,gid,'rested',''))
+            self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'free time: no reflection call')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_failed_reflection_is_an_event_and_never_loses_the_finished_goal(self):
+        # a model outage at goal end must not turn a completed goal into an error: the goal stays completed and
+        # the failure is on the record.
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.reflect(dict(problem_group='x',change='y',predicted='z'))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        from caminus.ember.resident import reflect
+        class Dead:
+            config={}
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):raise ValueError('the server is gone')
+        rt=Runtime(self.home)
+        try:
+            rt.model=Dead()
+            gid=rt.store.enqueue('Judge me.')
+            rt.store.update(gid,done_check='x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(rt.store.goal(gid)['state'],'working','the reflection touches no goal state')
+        finally:rt.mail.close();rt.store.close()
 
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""

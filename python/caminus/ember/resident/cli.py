@@ -368,8 +368,10 @@ def parser():
             p.add_argument('--observed',help='what CI and the reviews actually showed')
             p.add_argument('--prediction-error',help='where the prediction was wrong (empty: it held exactly)')
             p.add_argument('--eval-context',help='what ran: the tests, the CI job, the reviewer')
-            p.add_argument('--status',choices=('proposed','recorded'),
-                           help='proposed: a post-goal reflection that changes nothing yet')
+            p.add_argument('--status',choices=('proposed','recorded','observed'),
+                           help='with --record: proposed (a reflection that changes nothing yet) or recorded (the '
+                                'default); alone: list only the records at this status (proposed is the reflection '
+                                'queue a person reads)')
             p.add_argument('--goal-id',help='the goal the record belongs to (default: the session, no goal)')
             p.add_argument('--export',action='store_true',help='write the records as JSONL')
             p.add_argument('--out',help='with --export: the file (default: sim.jsonl in the agent home)')
@@ -809,8 +811,12 @@ def main(argv=None,stdin=None):
                 atomic_json(home/'config.json',cfg)
             gid=store.resolve(a.goal_id) if a.goal_id else None
             rt=SimpleNamespace(store=store,home=home,config=cfg)
+            statuses=(a.status,) if a.status and not (a.record or a.observe) else None
             try:
                 if a.record:
+                    if a.status=='observed':
+                        raise ValueError('an observation completes an existing record: use --observe ID (a record '
+                                         'born observed would carry the outcome before the change ran)')
                     rec=sim.tool(rt,gid,dict(action='record',problem_group=a.problem_group,change=a.change,
                                              rationale=a.rationale,predicted=a.predicted,
                                              eval_context=a.eval_context,status=a.status))['record']
@@ -834,7 +840,8 @@ def main(argv=None,stdin=None):
                     if a.json:emit(dict(name=a.name,path=str(p),records=n,bytes=nbytes),True)
                     else:print('%s: %d records, %d bytes' % (p,n,nbytes),flush=True)
                     return 0
-                out=dict(records=sim._load(rt,gid or None,a.limit),lines=sim.text(rt,gid or None,a.limit))
+                out=dict(records=sim._load(rt,gid or None,a.limit,statuses),
+                         lines=sim.text(rt,gid or None,a.limit,statuses))
             finally:
                 store.close()
             if a.json:emit(dict(name=a.name,lines=out['lines'],records=out['records']),True)
