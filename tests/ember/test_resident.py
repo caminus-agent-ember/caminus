@@ -2507,6 +2507,52 @@ for line in sys.stdin:
         finally:rt.mail.close();rt.store.close()
         self.assertEqual(self.cmd('sim',[])['records'][-1]['status'],'observed','the prediction was not rewritten')
 
+    def test_an_observation_is_append_only_and_keeps_the_predictors_brain(self):
+        # the review on #375: an observation could rewrite the prediction fields by naming the record's id,
+        # and it was stamped with the observer's session model instead of the predictor's. Both are closed here:
+        # a $0 local worker predicts, the paid session model observes, and the observation changes nothing it
+        # should not. A running resident follows a config sim switch at its next turn (finding 3).
+        from caminus.ember.resident.store import atomic_json
+        from caminus.ember.resident import sim as simmod
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal whose prediction outlives a model switch.')
+            # the worker's config: a local brain, $0 (no prices, no provider)
+            worker=json.loads((self.home/'config.json').read_text())
+            worker.update(model='local-27b',provider='',prices=None,effort='')
+            rec=simmod.record(rt,gid,dict(change='cap delegate spend',predicted='a capped child reports partial',
+                                          problem_group='delegate · runaway'),cfg=worker)
+            self.assertEqual(rec['brain'],dict(provider='',model='local-27b',effort=''),
+                             'the predictor names the brain that wrote the prediction')
+            # the rewrite routes through the same validation the tool uses: restating a prediction field is the
+            # rewording the reviewer reproduced, whatever action name carries it in
+            with self.assertRaises(ValueError):
+                simmod.tool(rt,gid,dict(action='record',id=rec['id'],status='observed',observed='CI green',
+                                        change='a different change',predicted='a different prediction'))
+            # an observation may add only the outcome, its context and the error
+            obs=simmod.observe(rt,gid,rec['id'],'CI green; a capped child reports partial',
+                               eval_context='tests/ember/test_resident.py -k delegate',
+                               prediction_error='the reviewer also capped the parent')
+            self.assertEqual(obs['brain'],rec['brain'],'the observation carries the predictor\'s brain')
+            self.assertEqual(obs['observed_by'],dict(provider='',model='fixture',effort=''),
+                             'the observer is named beside it, not instead of it')
+            self.assertEqual(obs['ts'],rec['ts'],'the record keeps its own timestamp, not the observation\'s')
+            # and the closed record is not written again: a second observation could rewrite the first
+            with self.assertRaises(ValueError):
+                simmod.observe(rt,gid,rec['id'],'CI green twice')
+            listed=simmod._load(rt,limit=10)
+            self.assertEqual([(r['id'],r['status']) for r in listed],[(rec['id'],'observed')])
+            self.assertEqual(listed[0]['predicted'],rec['predicted'],'no version rewrote the prediction')
+            # the per-session switch reaches a running resident at its next turn, no restart
+            cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
+            atomic_json(self.home/'config.json',cfg)
+            rt._follow_config()
+            self.assertFalse(simmod.enabled(rt),'the daemon sees agent sim --off without a restart')
+            cfg['sim']=True;atomic_json(self.home/'config.json',cfg)
+            rt._follow_config()
+            self.assertTrue(simmod.enabled(rt))
+        finally:rt.mail.close();rt.store.close()
+
     def test_sim_off_refuses_records_until_it_is_turned_back_on(self):
         cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
         (self.home/'config.json').write_text(json.dumps(cfg))

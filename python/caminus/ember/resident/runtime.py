@@ -2189,7 +2189,7 @@ class Runtime:
         for k in self.MODEL_KEYS:
             if k not in fresh:
                 self.config.pop(k, None)
-        for k in ('question_timeout', 'question_away_max', 'judge_model'):
+        for k in ('question_timeout', 'question_away_max', 'judge_model', 'sim'):
             if k in fresh:
                 self.config[k] = fresh[k]
         for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)

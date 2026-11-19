@@ -5,8 +5,11 @@ group it belongs to, the change, why, the predicted outcome, the observed outcom
 evaluation context, and where the prediction was wrong (prediction_error). Records are append-only events
 (kind 'sim', history_text indexes the text fields, so history_search finds them); an observation appends a
 new version with the same id and status 'observed', and the list / export collapse each id to its newest
-version. Every record names the brain that wrote it (provider, model, effort), so a weak-vs-strong run needs
-no code change; the per-session switch is config 'sim' (on unless a session turns it off).
+version. The prediction fields are frozen once written: an observation may add only `observed`,
+`eval_context`, `prediction_error` and `observed_ts`, and a closed (already observed) record is not written
+again. Every record carries the brain that made the prediction (provider, model, effort), so a weak-vs-strong
+run needs no code change; an observation adds `observed_by`, the brain that read the outcome. The per-session
+switch is config 'sim' (on unless a session turns it off); a running resident follows it at its next turn.
 
 Statuses: 'proposed' (a post-goal reflection, no change made), 'recorded' (a prediction written before a
 harness change), 'observed' (the outcome after CI and reviews).
@@ -21,6 +24,8 @@ import uuid
 FIELDS = ('problem_group', 'change', 'rationale', 'predicted', 'observed', 'eval_context', 'prediction_error')
 TEXT_CAP = 8000               # one field's characters; the whole point is a compact record
 STATUSES = ('proposed', 'recorded', 'observed')
+# an observation may add only these; the prediction fields are frozen once written (review on #375, finding 1)
+OBSERVED_FIELDS = ('observed', 'eval_context', 'prediction_error')
 
 
 def enabled(rt):
@@ -82,6 +87,7 @@ def record(rt, gid, data, cfg=None):
     if status == 'observed' and not _clean(data.get('observed')):
         raise ValueError('an observed record needs `observed`: what CI and the reviews actually showed')
     rid = str(data.get('id') or '').strip()
+    prior = None
     if rid:
         prior = next((d for d in _load(rt, limit=10000) if d['id'] == rid), None)
         if prior is None:
@@ -91,11 +97,27 @@ def record(rt, gid, data, cfg=None):
             # the prediction after the fact, which is the one thing this log exists to prevent.
             raise ValueError('SIM record %s already exists: a prediction is append-only, so record a new one or '
                              'append the outcome with action observe' % rid)
+        if prior.get('status') == 'observed':
+            # and once the outcome is in, the record is closed: a second observation could rewrite the first
+            raise ValueError('SIM record %s is already observed: a closed record is not rewritten, record a new '
+                             'prediction if the change is made again' % rid)
+        for k in FIELDS:
+            if k in OBSERVED_FIELDS or not _clean(data.get(k)):
+                continue
+            if _clean(data.get(k)) != _clean(prior.get(k)):
+                raise ValueError('SIM record %s is append-only: `%s` was written with the prediction, so an '
+                                 'observation cannot restate or change it' % (rid, k))
         # a version that leaves a field empty keeps the prediction's value: an observation adds the outcome, it
         # never blanks the change or the prediction it is measuring
         data = dict(prior, **{k: v for k, v in data.items() if _clean(v)})
-    rec = dict(id=rid or uuid.uuid4().hex[:8], ts=float(data.get('ts') or time.time()), goal=gid, status=status,
-               **{k: _clean(data.get(k)) for k in FIELDS}, brain=brain(cfg or rt.config))
+    writer = brain(cfg or rt.config)
+    rec = dict(id=rid or uuid.uuid4().hex[:8], ts=float((prior or {}).get('ts') or data.get('ts') or time.time()),
+               goal=(prior or {}).get('goal') or gid, status=status,
+               **{k: _clean(data.get(k)) for k in FIELDS},
+               # the record names the brain that made the prediction; an observation adds who read it (finding 2)
+               brain=(prior or {}).get('brain') or writer)
+    if prior:
+        rec['observed_by'] = writer
     if data.get('observed_ts'):
         rec['observed_ts'] = float(data['observed_ts'])
     if not rec['problem_group']:
