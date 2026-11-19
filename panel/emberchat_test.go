@@ -1853,6 +1853,44 @@ func TestTheFreeTimeNoteNeverTakesTheOnlineClockWithIt(t *testing.T) {
 	}
 }
 
+// (#334) the side panel's now section showed the running command on a wide terminal at any height; the activity
+// line took that state over, so its small-terminal height gate must not hide it there now that the panel is gone.
+func TestAWideShortTerminalKeepsTheActivityLine(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.width, m.height = 160, 18
+	m.syncChat()
+	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Unix())
+	if m.sideWidth() == 0 {
+		t.Fatalf("160 columns must show the side panel (sideWidth %d)", m.sideWidth())
+	}
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "make test") {
+		t.Fatalf("a wide terminal under 20 rows lost the running command with the panel's now section:\n%s", frame)
+	}
+	if rows := strings.Split(frame, "\n"); len(rows) > m.height {
+		t.Fatalf("%d rows overflow %d with the activity line:\n%s", len(rows), m.height, frame)
+	}
+	// a narrow terminal is unchanged: under 20 rows it keeps its rows and draws no activity line (the todo line above
+	// the composer still names the running command, which is not the activity line)
+	n := chatFixture(t)
+	n.width, n.height = 100, 18
+	n.syncChat()
+	n.chat.group.running, n.chat.group.runningSince = "make test", float64(time.Now().Unix())
+	if n.sideWidth() != 0 {
+		t.Fatalf("100 columns must not show the side panel (sideWidth %d)", n.sideWidth())
+	}
+	act := strings.TrimSpace(ansi.Strip(n.activityLine(max(18, n.width-2))))
+	if act == "" {
+		t.Fatal("the fixture has no activity line to test the narrow gate with")
+	}
+	if frame := ansi.Strip(n.render()); strings.Contains(frame, act) {
+		t.Fatalf("a narrow small terminal drew the activity line it keeps its rows from (%q):\n%s", act, frame)
+	}
+}
+
 func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
 	var got []string
 	old := notifyRun

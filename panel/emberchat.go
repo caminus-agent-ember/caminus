@@ -1973,7 +1973,9 @@ func (m emberModel) chatBottom() string {
 	if line := m.todoPinned(); line != "" {
 		out = line + "\n" + out
 	}
-	if act := m.activityLine(max(18, m.width-2)); act != "" && m.height >= 20 { // (a small terminal keeps its rows)
+	// (a small terminal keeps its rows; a wide one had this state in the side panel's now section at any height
+	// until #334, so the activity line must show there whatever the height)
+	if act := m.activityLine(max(18, m.width-2)); act != "" && (m.height >= 20 || m.sideWidth() > 0) {
 		out = act + "\n" + out // above the todo list, where the work is described
 	}
 	if line := m.waitingLine(); line != "" && m.chat.question == nil {
