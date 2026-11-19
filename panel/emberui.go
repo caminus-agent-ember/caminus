@@ -2,9 +2,12 @@
 // Copyright (C) 2026 jdominick05
 
 // caminus-panel env: the human side of the agent environment as a TUI (`caminus ember ui`,
-// docs/specs/spec-ember.md section 7). The Python CLI runs it with the paths as flags:
+// docs/specs/spec-ember.md section 7). The Python CLI execs it as `caminus ember`, with the settings in the
+// environment, so a terminal showing the foreground command line shows no bridge, audit or ssh key path (issue
+// #317); the same settings are still flags, and a flag wins over its variable:
 //
-//	caminus-panel env --user NAME --bridge DIR --audit FILE --key FILE
+//	caminus-panel env [--user NAME] [--bridge DIR] [--audit FILE] [--key FILE] [--cli JSON]
+//	  (defaults: $CAMINUS_ENV_USER, $CAMINUS_ENV_BRIDGE, $CAMINUS_ENV_AUDIT, $CAMINUS_ENV_KEY, $CAMINUS_EMBER_CLI)
 //
 // Tabs (tab / shift-tab or 1-6), all live:
 //
@@ -172,13 +175,23 @@ type sshOutMsg struct {
 	err  error
 }
 
+// emberSetting is one setting from its flag, else from the environment: `caminus ember ui` execs this panel with no
+// flags at all, so that a terminal showing the foreground command line shows `caminus ember`, never the ssh key and
+// bridge paths (issue #317). An explicit flag still wins, so every old caller and the demo keep working.
+func emberSetting(flagValue, env string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv(env)
+}
+
 func emberMain(args []string) {
 	fs := flag.NewFlagSet("ember", flag.ExitOnError)
-	user := fs.String("user", "", "the agent user")
-	bridge := fs.String("bridge", "", "the bridge directory")
-	audit := fs.String("audit", "", "the audit log path")
-	key := fs.String("key", "", "the harness ssh key")
-	cli := fs.String("cli", "", "JSON argv of the caminus CLI (for starting server jobs)")
+	user := fs.String("user", "", "the agent user (default: $CAMINUS_ENV_USER)")
+	bridge := fs.String("bridge", "", "the bridge directory (default: $CAMINUS_ENV_BRIDGE)")
+	audit := fs.String("audit", "", "the audit log path (default: $CAMINUS_ENV_AUDIT)")
+	key := fs.String("key", "", "the harness ssh key (default: $CAMINUS_ENV_KEY)")
+	cli := fs.String("cli", "", "JSON argv of the caminus CLI (for starting server jobs; default: $CAMINUS_EMBER_CLI)")
 	agent := fs.String("agent", "resident", "resident agent name")
 	draft := fs.String("draft", "", "text the composer starts with (a new goal, sent on Enter)")
 	demo := fs.Bool("demo", false, "the demo (tools/ember_demo.py): no SSH, and an approved root command is recorded, never run")
@@ -192,6 +205,13 @@ func emberMain(args []string) {
 			*key = "none"
 		}
 	}
+	// The environment fills only what neither a flag nor -demo gave: a flag wins, so the demo and every old caller are
+	// unchanged, and `caminus ember ui` (no flags at all) still gets all five.
+	*user = emberSetting(*user, "CAMINUS_ENV_USER")
+	*bridge = emberSetting(*bridge, "CAMINUS_ENV_BRIDGE")
+	*audit = emberSetting(*audit, "CAMINUS_ENV_AUDIT")
+	*key = emberSetting(*key, "CAMINUS_ENV_KEY")
+	*cli = emberSetting(*cli, "CAMINUS_EMBER_CLI")
 	if *user == "" || *bridge == "" || *audit == "" || *key == "" {
 		fmt.Fprintln(os.Stderr, "caminus-panel env: --user --bridge --audit --key are all required")
 		os.Exit(2)

@@ -27,6 +27,27 @@ func writeReq(t *testing.T, bridge, id, cmd string, ts float64) {
 	}
 }
 
+// emberSetting is the order `caminus ember ui` relies on: it execs this panel with no flags, so the settings must come
+// from the environment; an explicit flag (the demo, an old caller, a person) still wins.
+func TestEmberSettingsComeFromTheFlagsElseTheEnvironment(t *testing.T) {
+	t.Setenv("CAMINUS_ENV_USER", "env-agent")
+	t.Setenv("CAMINUS_ENV_BRIDGE", "/env/bridge")
+	t.Setenv("CAMINUS_EMBER_CLI", `["env-cli"]`)
+	if got := emberSetting("", "CAMINUS_ENV_USER"); got != "env-agent" {
+		t.Fatalf("an empty flag reads the environment: %q", got)
+	}
+	if got := emberSetting("/flag/bridge", "CAMINUS_ENV_BRIDGE"); got != "/flag/bridge" {
+		t.Fatalf("an explicit flag wins over the environment: %q", got)
+	}
+	if got := emberSetting("", "CAMINUS_ENV_AUDIT_UNSET_HERE"); got != "" {
+		t.Fatalf("neither a flag nor the environment stays empty (the required check reports it): %q", got)
+	}
+	// the panel's five settings, in the demo's hands too: -demo fills only what is still empty
+	if got := emberSetting("/flag/key", "CAMINUS_ENV_KEY"); got != "/flag/key" {
+		t.Fatalf("the key follows the same order: %q", got)
+	}
+}
+
 func TestLoadRequestsSkipsAnsweredAndSorts(t *testing.T) {
 	bridge := t.TempDir()
 	writeReq(t, bridge, "b", "second", 200)

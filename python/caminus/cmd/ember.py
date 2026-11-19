@@ -501,9 +501,12 @@ def _ui():
               'or set CAMINUS_PANEL)', file=sys.stderr)
         return 1
     from .manage import cli_argv
-    os.execve(b, [b, 'ember', '--user', settings.user(), '--bridge', settings.bridge_dir(),
-                  '--audit', settings.audit_path(), '--key', settings.key_path(),
-                  '--cli', json.dumps(cli_argv())], dict(os.environ))
+    # argv is just `caminus ember`: a terminal that shows the foreground command line shows that, never the bridge,
+    # audit and ssh key paths (issue #317). The panel reads these five from the environment (panel/emberui.go).
+    env = dict(os.environ, CAMINUS_ENV_USER=settings.user(), CAMINUS_ENV_BRIDGE=settings.bridge_dir(),
+               CAMINUS_ENV_AUDIT=settings.audit_path(), CAMINUS_ENV_KEY=settings.key_path(),
+               CAMINUS_EMBER_CLI=json.dumps(cli_argv()))
+    os.execve(b, ['caminus', 'ember'], env)
 
 
 def _spawn(a, tr):
