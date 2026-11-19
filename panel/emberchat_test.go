@@ -3806,6 +3806,39 @@ func TestTheStatusLineShowsWhereTheAgentWorks(t *testing.T) {
 	}
 }
 
+func TestTheStatusLineExpandsTheRuntimesVariablesInALeadingCd(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.Home = "/srv/agent/homes/resident"
+	call := func(args string) residentEvent {
+		return residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{
+			"function": map[string]any{"name": "terminal", "arguments": args}}}}}
+	}
+	// #310: terminal.py sets env["WORKSPACE"] = the session's home and runs the command through a shell, so a
+	// leading `cd "$WORKSPACE/..."` really changes the folder. The status line showed the literal "$WORKSPACE".
+	for _, c := range []struct{ command, want string }{
+		{`cd "$WORKSPACE/caminus" && git status`, "~/homes/resident/caminus"},
+		{`cd ${WORKSPACE}/caminus && git status`, "~/homes/resident/caminus"},
+		{`cd "$HOME/projects" && ls`, "~/projects"},
+		{`cd ${HOME} && ls`, "~"},
+	} {
+		m.residentEvents = []residentEvent{call(fmt.Sprintf(`{"command":%q}`, c.command))}
+		if got := m.agentCwd(); got != c.want {
+			t.Fatalf("%s: %q, want %q", c.command, got, c.want)
+		}
+	}
+	// Anything else the shell would expand — another variable, a command substitution, a ${VAR:-default} modifier
+	// — is nothing this status line can know: the folder stays where it was instead of inventing a path.
+	for _, command := range []string{
+		`cd "$OTHER/x" && ls`, `cd "$(pwd)/x" && ls`, "cd `pwd`/x && ls",
+		"cd ${WORKSPACE:-/tmp} && ls", `cd $WORKSPACEFOO/x && ls`,
+	} {
+		m.residentEvents = []residentEvent{call(fmt.Sprintf(`{"command":%q,"cwd":"~/projects/inventory"}`, command))}
+		if got := m.agentCwd(); got != "~/projects/inventory" {
+			t.Fatalf("%s: the folder stays where it was, not %q", command, got)
+		}
+	}
+}
+
 func TestAHostCommandStopsAtItsLimitEvenWithAChildRunning(t *testing.T) {
 	saved := hostRunLimit
 	hostRunLimit = time.Second
