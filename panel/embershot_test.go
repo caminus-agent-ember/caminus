@@ -23,7 +23,7 @@ const shotWidth, shotHeight = 170, 40
 
 // TestEmberShot writes ember-chat.svg, the README's picture of Ember's chat (`caminus ember ui`), from the program's
 // own drawing: its real render() painted with the default theme's background as its View does, at shotWidth, so the
-// side pane (tasks, now), the live reply streaming in the transcript, the activity line and the status line show. The goal is made up (a stock-list bug:
+// side pane (tasks), the live reply streaming in the transcript, the activity line and the status line show. The goal is made up (a stock-list bug:
 // read, a done check, a failing test, a wrong path, the fix, the tests running again); nothing from a real machine
 // goes in. tools/release/panel_shot.py redraws it with panel.svg at every release.
 //
@@ -45,7 +45,7 @@ func TestEmberShot(t *testing.T) {
 	protect := max(0, m.height-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(shotWidth)))
 	frame = paintBackground(frame, protect, shotWidth, shotHeight, true)
 	plain := ansi.Strip(frame)
-	for _, want := range []string{"inventory.py", "tasks", "now", "swift-1.5", "tok/s"} {
+	for _, want := range []string{"inventory.py", "tasks", "swift-1.5", "tok/s"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("the picture lost %q (the side pane and the status line must show):\n%s", want, plain)
 		}
@@ -70,7 +70,7 @@ func TestEmberShot(t *testing.T) {
 }
 
 // shotEmber: a goal in progress on Swift 1.5: read, a done check, a todo list, an edit (a diff), a failing test run (an
-// error line), the fix, and the tests running now; the side pane, the activity line and the status pills.
+// error line), the fix, and the tests running now; the side pane's tasks, the activity line and the status pills.
 func shotEmber(t *testing.T, w, h int) emberModel {
 	m := emberModel{agentName: "resident", tab: 6, width: w, height: h, mode: "normal", sshOK: true}
 	m.initChat()
