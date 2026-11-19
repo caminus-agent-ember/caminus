@@ -248,6 +248,7 @@ one call waits for output), `discover`, the loop's tools and the bridge
 | `read`, `search`, `edit`, `write` | Files without the terminal: numbered windows (`start`, `lines`); file names by glob and text by regex; exact, unique replacement (CRLF and mode kept, atomic); whole-file writes; edits return a diff |
 | `todo` | The goal's checklist (see the loop) |
 | `remember`, `history_search` | A one-fact note with its index line; full-text search over the agent's own past goals, results, journal and notes |
+| `sim` | The SIM log when the session has it on (config.json `sim`, default on; `ember agent sim NAME --on/--off`): `record` a prediction before a harness change (problem group, change, rationale, predicted, eval context), `observe` it after CI and the reviews (observed, eval context, the prediction error if known), `list` the records with `history_search` finding them by text. Append-only: a recorded prediction is never rewritten; a second `observe` only adds the observation. Nothing automatic reads it, and the agent's tool has no export (the CLI has `--export`) |
 | `wait` | Block without model calls until a time, a file, a port, a process, a terminal session or a message; a message, cancellation or new work ends it early |
 | `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
 | `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |

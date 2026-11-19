@@ -2553,15 +2553,15 @@ for line in sys.stdin:
             self.assertTrue(simmod.enabled(rt))
         finally:rt.mail.close();rt.store.close()
 
-    def test_review_fixes_the_export_is_not_a_tool_and_the_off_arm_cannot_read_the_log(self):
-        # the maintainer's review of 3d29564 (P1-2, P2 3-7): export left the agent's tool (it wrote any path the
-        # model named, in plan mode and before define_done); a record stamped the primary while the fallback
-        # answered; an observation under another goal split the record; a record could be born observed; "off"
-        # hid nothing a book could read; every version was its own search hit.
+    def test_sim_export_is_not_a_tool_and_an_off_session_reads_nothing(self):
+        # the ways an append-only log of predictions can be bent: the agent's tool could write any path the model
+        # named (plan mode, before define_done); a record stamped the primary while the fallback answered it; an
+        # observation under another goal split the record; a record could be born with its outcome in hand; "off"
+        # hid nothing a read path could see; every version was its own search hit.
         from caminus.ember.resident.store import atomic_json
         from caminus.ember.resident.prompt import render
         from caminus.ember.resident import sim as simmod
-        # P1-2 through plan mode, where the reviewer reproduced it: the tool refuses, and no file changes
+        # the export is the CLI's alone: through plan mode, where the model could name a file, the tool refuses
         victim=self.home/'victim.txt';victim.write_text('keep me\n')
         self.replies(call('sim',dict(action='export',path=str(victim))),
                      call('propose_plan',dict(plan='nothing to change yet')))
@@ -2575,7 +2575,7 @@ for line in sys.stdin:
         try:
             self.assertNotIn('path',json.dumps([t for t in rt.tools if t['function']['name']=='sim'][0]))
             gid=rt.store.enqueue('A goal whose turn the fallback answers.')
-            # P1-1: the record names the brain that served the turn, not the agent's primary
+            # the record names the brain that served the turn, not the agent's primary
             class Fallback:
                 config=dict(model='claude-haiku-5-5',provider='anthropic')
             rt.model=Fallback()
@@ -2584,21 +2584,21 @@ for line in sys.stdin:
             self.assertEqual(rec['brain']['model'],'claude-haiku-5-5',"the fallback's record is not the primary's")
             self.assertGreater(rec['ts'],1.0,'a caller-supplied ts is ignored: the log keeps its own clock')
             rt.model=rt.primary
-            # P2-5: a record cannot be born with its outcome in hand
+            # a record cannot be born with its outcome in hand
             with self.assertRaises(ValueError):
                 simmod.tool(rt,gid,dict(action='record',status='observed',change='x',predicted='y',observed='z'))
-            # P2-3: an observation from another goal stays in the record's own goal, one record either way
+            # an observation from another goal stays in the record's own goal, one record either way
             other=rt.store.enqueue('Another goal that observes it.')
             rec2=simmod.record(rt,gid,dict(change='zzmarker cap',predicted='one hit'))
             simmod.observe(rt,other,rec2['id'],'CI green')
             self.assertEqual(simmod.observe.__defaults__ is not None and
                              [r['id'] for r in simmod._load(rt,gid,limit=10)].count(rec2['id']),1)
             self.assertNotIn(rec2['id'],[r['id'] for r in simmod._load(rt,other,limit=10)])
-            # P2-7: one search hit per record, with its newest text, not one per version
+            # one search hit per record, with its newest text, not one per version
             simhits=[h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')]
             self.assertEqual(len(simhits),1,'an observed record is one history hit')
             self.assertIn('CI green',simhits[0]['text'])
-            # P2-6: off hides the tool, the prompt section and the search hits; on brings all three back
+            # off hides the tool, the prompt section and the search hits; on brings all three back
             cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
             atomic_json(self.home/'config.json',cfg);rt._follow_config()
             self.assertNotIn('sim',[t['function']['name'] for t in rt.tools])
@@ -2626,6 +2626,9 @@ for line in sys.stdin:
         # agent that runs the CLI through its terminal cannot read the on arm's lessons (--on still works)
         self.cmd('sim',['--export','--out',str(self.home/'off.jsonl')],code=1)
         self.assertFalse((self.home/'off.jsonl').exists(),'an off session exports nothing')
+        # --off only writes sim=false, so it must not list either; it stays off
+        self.cmd('sim',['--off'],code=1)
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],False,'--off stays off')
         self.cmd('sim',['--record','--change','x','--predicted','y'],code=1)
         out=self.cmd('sim',['--on'])
         self.assertTrue(json.loads((self.home/'config.json').read_text())['sim'])

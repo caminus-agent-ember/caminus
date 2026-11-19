@@ -237,8 +237,7 @@ def export(rt, gid=None, path=None):
     """Write the records as JSONL (one record per line, newest version only) and return (path, count, bytes).
 
     Reached by the CLI alone (`caminus ember agent sim NAME --export`), which a human runs. The agent's tool has
-    no export, so the model never names a file and no export can overwrite one, in plan mode or anywhere else
-    .
+    no export, so the model never names a file and no export can overwrite one, in plan mode or anywhere else.
     """
     from pathlib import Path
     from .store import atomic_write
