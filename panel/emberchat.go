@@ -779,8 +779,9 @@ func (m emberModel) freeTime() bool {
 	return goal == nil
 }
 
-// sidePanel is the right column: the goal's whole todo list at the top, then what runs now. (A thoughts box sat above
-// the tasks until the owner asked for the tasks in its place; the reply being written streams into the transcript.)
+// sidePanel is the right column: the goal's whole todo list, with what blocks it. (A thoughts box sat above the
+// tasks until the owner asked for the tasks in its place; the reply being written streams into the transcript. A
+// "now" section followed the tasks until #334: the activity line above the composer carries the live state.)
 func (m emberModel) sidePanel(sw, height int) string {
 	rows := []string{}
 	goal := m.activeGoal()
