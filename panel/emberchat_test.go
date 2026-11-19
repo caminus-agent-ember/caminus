@@ -3928,8 +3928,20 @@ func TestTheStatusLineExpandsTheRuntimesVariablesInALeadingCd(t *testing.T) {
 			t.Fatalf("%s: %q, want %q", c.command, got, c.want)
 		}
 	}
-	// Anything else the shell would expand — another variable, a command substitution, a ${VAR:-default} modifier
-	// — is nothing this status line can know: the folder stays where it was instead of inventing a path.
+	// The quote context decides expansion, as it does in the shell: a variable inside single quotes is a literal
+	// part of the folder's name (the shell expands nothing there), and a word stitched from quoted and unquoted
+	// pieces expands exactly as the shell would expand it, with no quote left behind. Trimming the outer quotes
+	// instead expanded '$WORKSPACE' and carried the inner quotes into the path.
+	for _, c := range []struct{ command, want string }{
+		{`cd "$WORKSPACE"'/caminus' && git status`, "~/homes/resident/caminus"},
+		{`cd '$WORKSPACE'/x && ls`, `~/homes/resident/$WORKSPACE/x`},
+		{`cd "$HOME"'/projects' && ls`, "~/projects"},
+	} {
+		m.residentEvents = []residentEvent{call(fmt.Sprintf(`{"command":%q}`, c.command))}
+		if got := m.agentCwd(); got != c.want {
+			t.Fatalf("%s: %q, want %q", c.command, got, c.want)
+		}
+	}
 	for _, command := range []string{
 		`cd "$OTHER/x" && ls`, `cd "$(pwd)/x" && ls`, "cd `pwd`/x && ls",
 		"cd ${WORKSPACE:-/tmp} && ls", `cd $WORKSPACEFOO/x && ls`,
