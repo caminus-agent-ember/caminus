@@ -269,6 +269,63 @@ def main():
     ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r), 'fits none of the free cards')
     check(ok, f'place: a model too big for every card refused ({msg})')
 
+    # -- the refusal names each card's state and what holds it (KFD's per-process VRAM), and what the model needs there --
+    check('0.1 of 24.0 GB in use' in msg and '0.1 of 20.0 GB in use' in msg and '20,464 MiB' not in msg,
+          f'refusal: in use and total per card, not the totals alone ({msg})')
+    kfd = os.path.join(r, 'sys', 'class', 'kfd', 'kfd')
+    for node, gid in (('1', 1111), ('2', 2222)):                     # (the XTX is KFD node 1, the XT node 2)
+        w(os.path.join(kfd, 'topology', 'nodes', node, 'gpu_id'), f'{gid}\n')
+    for pid, gid, gib, argv, comm in ((4242, 2222, 19, ['python3', '-m', 'caminus', 'serve', '--model', '/m/x/ThinkingCap.gguf',
+                                                                     '--port', '8093'], 'caminus'),
+                                      (4343, 1111, 21, ['llama-server', '-m', 'x.gguf'], 'llama-server')):
+        w(os.path.join(kfd, 'proc', str(pid), f'vram_{gid}'), f'{gib * GIB}\n')
+        w(os.path.join(r, 'proc', str(pid), 'cmdline'), '\0'.join(argv) + '\0')
+        w(os.path.join(r, 'proc', str(pid), 'comm'), comm + '\n')
+    w(os.path.join(kfd, 'proc', '4444', 'vram_1111'), f'{8 * GIB}\n')             # (another tool's `serve`: not Caminus)
+    w(os.path.join(r, 'proc', '4444', 'cmdline'), '\0'.join(['vllm', 'serve', '--model', '/m/Qwen3-30B-A3B-Q4_K_M.gguf', '--port', '8000']) + '\0')
+    w(os.path.join(r, 'proc', '4444', 'comm'), 'vllm\n')
+    users = H.gpu_users(r)
+    check(users.get(129) == [(4242, 'ThinkingCap.gguf on :8093', 19 * 1024, 8093)]
+          and sorted(users.get(128, [])) == [(4343, 'llama-server', 21 * 1024, None), (4444, 'vllm', 8 * 1024, None)],
+          f'gpu_users: per card, a caminus serve named by its model and port, another process (vllm serve too) by its name ({users})')
+    os.remove(os.path.join(kfd, 'proc', '4444', 'vram_1111'))
+    explain = lambda g: H.need_text(19.8 * 1024, 19.5 * 1024, 21.4 * 1024, 32768, 8192 if g['label'] == 'XTX' else None, 4096)
+    ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=explain),
+                      'XT card2: 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093); needs 19.8 GB + 1.9 GB reserved at 32,768 '
+                      'positions, 0.3 GB short; not even 4,096 positions fit now. XTX card1: 0.1 of 24.0 GB in use (llama-server); needs',
+                      'fits 8,192 now')
+    check(ok and '0000:0' not in msg, f'refusal: each free card with what holds it and the model\'s need from explain ({msg})')
+    check(H.need_text(23.1 * 1024, 22.0 * 1024, 23.3 * 1024) == "needs about 23.1 GB + 1.3 GB reserved by its files' size, 1.1 GB short; "
+          "no context fits by that rule (no projection here)", 'refusal: the size rule\'s need, from the same formatter')
+    # refused by 10 MiB: rounded to 0.1 GB, in use + needs + reserved reads 23.9 of 24.0; the shortfall, rounded up, says
+    # it does not fit (a card of 24,576 MiB, 3,020 in use, need 19,500, room 19,490)
+    t = H.need_text(19500, 19490, 24576 - 3020, 32768, None, 4096)
+    check(t.startswith('needs 19.0 GB + 2.0 GB reserved at 32,768 positions, 0.1 GB short;') and
+          'short' not in H.need_text(19480, 19490, 24576 - 3020, 32768, 36864, 4096),
+          f'refusal: 10 MiB short says 0.1 GB short; one that fits says no shortfall ({t!r})')
+    ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=lambda g: 1 / 0),
+                      'XT card2: 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093)')
+    check(ok and 'ZeroDivision' not in msg, f'refusal: an explain that cannot run leaves the card\'s state alone ({msg})')
+    # held / not held: a card another Caminus server holds is named with that server (caminus start passes the registry's
+    # label; the same server is not named twice from KFD's files), a plain held set says another server holds it
+    gs = H.gpus(r)
+    ok, msg = refuses(lambda: H.one(gs, lambda g: False, held={'0000:06:00.0': ('ThinkingCap.gguf on :8093', 8093)}, root=r, explain=explain),
+                      'XT card2: 0.1 of 20.0 GB in use; held by ThinkingCap.gguf on :8093. XTX card1: 0.1 of 24.0 GB in use (llama-server); needs')
+    check(ok and msg.count('needs') == 1, f'refusal: a held card named with its holder, the model\'s need only on the free one ({msg})')
+    # (the registry's path may be another spelling of the server's --model (a symlink, a relative path): the same server,
+    #  by its port, is still named once)
+    ok, msg = refuses(lambda: H.one(gs, lambda g: False, held={'0000:06:00.0': ('thinkingcap on :8093', 8093)}, root=r, explain=explain),
+                      'XT card2: 0.1 of 20.0 GB in use; held by thinkingcap on :8093. XTX')
+    check(ok and 'ThinkingCap.gguf' not in msg, f'refusal: a held card\'s server named once whatever its path\'s spelling ({msg})')
+    ok, msg = refuses(lambda: H.one(gs, lambda g: False, held={'0000:06:00.0'}, root=r), 'held by another Caminus server')
+    check(ok, f'refusal: a held card without a label ({msg})')
+    # comm is the name cut at 15 bytes: maybe inside a character; the refusal still names the card
+    with open(os.path.join(r, 'proc', '4343', 'comm'), 'wb') as f:
+        f.write('llama-serv\u00e9\u00e9\u00e9'.encode()[:15] + b'\n')
+    users = H.gpu_users(r)
+    check(users.get(128, [(0, '', 0, None)])[0][1].startswith('llama-serv') and '\ufffd' in users[128][0][1],
+          f'gpu_users: a process name cut inside a character reads with a replacement, no UnicodeDecodeError ({users.get(128)})')
+
     # -- gfx names ----------------------------------------------------------------------------------------------------------
     check([H.gfx_name(v) for v in (110000, 110001, 100306, 90010)] == ['gfx1100', 'gfx1101', 'gfx1036', 'gfx90a'], 'gfx names')
 

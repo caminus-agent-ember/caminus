@@ -357,7 +357,7 @@ def fit_report(argv):
 
     def project(o):
         keep_default_draft(A, o, lambda fits: host.place(A.cards, fits=fits, split_of=A.split), log=lambda *a, **kw: None)
-        placement = host.place(A.cards, fits=lambda cs: A.fits(o, cs), split_of=A.split)
+        placement = host.place(A.cards, fits=lambda cs: A.fits(o, cs), split_of=A.split, explain=lambda g: A.need_text(o, g))
         plan = A.context_fit(o, placement['cards'])
         if o['max_ctx'] != 'auto' and o['max_ctx'] > plan.native_ctx:
             raise ValueError(f'fit currently reports native context only (at most {plan.native_ctx} positions)')
@@ -434,7 +434,7 @@ def main(argv=None):
     from ..device import host as _host
     keep_default_draft(A, opt, lambda fits: _host.place(A.cards, fits=fits, split_of=A.split))
     try:
-        pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
+        pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split, explain=lambda g: A.need_text(opt, g))
         pl_extra = A.placement_extra(opt, pl['cards'])   # (decided once here; build reads it back: the drafter's card)
     except (_host.PlacementError, ValueError) as e:     # (ValueError: a refusal raised while fitting, e.g. no MTP block)
         print(f'caminus serve: {e}', file=sys.stderr)

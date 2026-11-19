@@ -25,6 +25,7 @@ Placement (the rules the user settled, G1-G5):
   addressing card 0 / card 1 by role.
 A refusal is a PlacementError whose message names the card and the reason (the panel and doctor show it as is)."""
 import glob
+import math
 import os
 import re
 
@@ -45,7 +46,7 @@ class PlacementError(RuntimeError):
 
 def _read(p):
     try:
-        with open(p) as f:
+        with open(p, errors='replace') as f:     # (proc/<pid>/comm is cut at 15 bytes, maybe inside a character)
             return f.read().strip()
     except OSError:
         return None
@@ -241,8 +242,8 @@ def ranked(gs):
     return sorted(usable(gs), key=_rank)
 
 
-def describe(g):
-    return (f"{g['label']} {g['card']}" if g['label'] != g['card'] else g['card']) + f" ({g['pci']})"
+def describe(g, pci=True):
+    return (f"{g['label']} {g['card']}" if g['label'] != g['card'] else g['card']) + (f" ({g['pci']})" if pci else '')
 
 
 def pair(gs, held=()):
@@ -272,17 +273,123 @@ def link_side(cards):
     return 0 if a < b else 1
 
 
-def one(gs, fits, held=()):
-    """the card of a one-card model: the smallest free usable card that fits(card) says it fits (ties: PCI address)"""
-    free = sorted([g for g in usable(gs) if g['pci'] not in held], key=lambda g: (g['total_mib'], g['pci'] or g['card']))
+def serve_argv_of(argv):
+    """whether a command line runs the Caminus server: tools/caminus_serve.py, or the caminus CLI's serve command
+    (`caminus serve`, `python -m caminus serve`, a boot script importing caminus.__main__); never another tool's `serve`"""
+    if any(a.endswith('caminus_serve.py') for a in argv):
+        return True
+    if 'serve' not in argv:
+        return False
+    head = argv[:argv.index('serve')]
+    return any(os.path.basename(a) == 'caminus' or a == 'caminus' or 'caminus.__main__' in a for a in head)
+
+
+def argv_flag(argv, k):
+    """the value after flag k in a command line, None when k is absent or last"""
+    i = argv.index(k) if k in argv else -1
+    return argv[i + 1] if 0 <= i < len(argv) - 1 else None
+
+
+def gpu_users(root='/'):
+    """{render minor: [(pid, label, MiB, port)]}: the processes holding VRAM on each GPU now, from KFD's per-process files
+    (proc/<pid>/vram_<gpu_id>, the GPU's id from topology/nodes/<n>/gpu_id). A Caminus server is named by its model and
+    port from its command line (caminus serve --model FILE --port N; port: that number), any other process by its name
+    (port None)"""
+    from .. import models
+    kfd = os.path.join(root, 'sys', 'class', 'kfd', 'kfd')
+    minor_of = {}
+    for p in glob.glob(os.path.join(kfd, 'topology', 'nodes', '*', 'gpu_id')):
+        gid = _int(_read(p))
+        props = _read(os.path.join(os.path.dirname(p), 'properties')) or ''
+        m = re.search(r'^drm_render_minor (\d+)$', props, re.M)
+        if gid and m:
+            minor_of[gid] = int(m.group(1))
+    out = {}
+    for d in glob.glob(os.path.join(kfd, 'proc', '*')):
+        pid = os.path.basename(d)
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            with open(os.path.join(root, 'proc', pid, 'cmdline'), 'rb') as f:
+                argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
+        except OSError:
+            argv = []
+        label = _read(os.path.join(root, 'proc', pid, 'comm')) or 'a process'
+        model, port = argv_flag(argv, '--model'), _int(argv_flag(argv, '--port'))
+        if not (serve_argv_of(argv) and model):
+            port = None
+        else:
+            label = models.model_name(model) + (f' on :{port}' if port else '')
+        for v in glob.glob(os.path.join(d, 'vram_*')):
+            mib = (_int(_read(v)) or 0) / 2 ** 20
+            minor = minor_of.get(_int(v.rsplit('_', 1)[1]))
+            if minor is not None and mib >= 1:
+                out.setdefault(minor, []).append((int(pid), label, mib, port))
+    return out
+
+
+def used_mib(g):
+    """the VRAM in use on card g now (sysfs mem_info_vram_used, MiB), None when it cannot be read"""
+    used = _int(_read(os.path.join(g['dev'], 'mem_info_vram_used'))) if g.get('dev') else None
+    return None if used is None or used < 0 else used / 2 ** 20
+
+
+def card_text(g, users=None, holder=None, port=None):
+    """one card's state for a refusal: 'XTX card1: 21.3 of 24.0 GB in use (llama-server)' (the DRM name tells the cards
+    apart; the PCI address is left out to keep a two-card refusal readable on one panel row each). users: gpu_users()'s
+    entries for this card (the processes holding its VRAM). holder: the Caminus server that holds it (caminus start's
+    registry, '<model> on :<port>'): '...; held by thinkingcap on :8093'; port: its port, so that server is not named
+    again from users (by port, not by name: its --model path may be another spelling of the registry's)"""
+    used = used_mib(g)
+    users = [u for u in users or () if port is None or u[3] != port]
+    held = ', '.join(f'{label} {mib / 1024:.1f} GB' if len(users) > 1 else label for _, label, mib, _ in users)
+    return (f"{describe(g, pci=False)}: " + (f"{used / 1024:.1f} of {g['total_mib'] / 1024:.1f} GB in use" if used is not None else
+            f"{g['total_mib'] / 1024:.1f} GB, use unknown") + (f' ({held})' if held else '') + (f'; held by {holder}' if holder else ''))
+
+
+def need_text(need_mib, room_mib, free_mib, ctx=None, most=None, lowest=None):
+    """what the model needs on one card, for one()'s refusal (an explain(card) returns it; the refusal's head and the
+    command name the model): the need, what the fit keeps beside it on that card ("reserved": the card's free memory
+    free_mib less the room room_mib the need was compared with, so the guard line's gap below the total, the margins, a
+    display's or the prompt cache's reserve, the projection's slack, a drafter) and how far short it is, rounded up, so
+    the figures never read as fitting when each is rounded: 'needs 19.8 GB + 1.9 GB reserved at 32,768 positions, 0.4 GB
+    short; fits 8,192 now'. ctx: the context asked for (None: a size rule by the files, no projection here, which no
+    smaller context changes); most: the most context that fits now (None: not even lowest positions)"""
+    short = math.ceil(round((need_mib - room_mib) / 1024 * 10, 6)) / 10   # (round first: 0.3 GB is not 0.30000000000000004)
+    head = (f"needs {'about ' if ctx is None else ''}{need_mib / 1024:.1f} GB + {max(0.0, free_mib - room_mib) / 1024:.1f} GB "
+            f"reserved" + (f' at {ctx:,} positions' if ctx is not None else " by its files' size")
+            + (f', {short:.1f} GB short' if short > 0 else ''))
+    if ctx is None:
+        return head + '; no context fits by that rule (no projection here)'
+    return head + '; ' + (f'fits {most:,} now' if most else f'not even {lowest:,} positions fit now')
+
+
+def one(gs, fits, held=(), explain=None, root='/'):
+    """the card of a one-card model: the smallest free usable card that fits(card) says it fits (ties: PCI address). held:
+    the PCI addresses other servers hold, or {pci: (the holder's label, its port)} (caminus start). When none fits, the refusal names
+    every usable card: a free one with what is in use and by what (card_text) and, from explain(card), what the model
+    needs there and the most context that fits now (need_text); a held one with its holder"""
+    cards = sorted(usable(gs), key=lambda g: (g['total_mib'], g['pci'] or g['card']))
+    free = [g for g in cards if g['pci'] not in held]
     for g in free:
         if fits(g):
             return g
-    if not usable(gs):
+    if not cards:
         raise PlacementError('no supported card (RX 7900 XTX / XT) on this host')
     if not free:
         raise PlacementError('every supported card is in use')
-    raise PlacementError('the model fits none of the free cards: ' + ', '.join(f"{describe(g)} {g['total_mib']:,} MiB" for g in free))
+    users = gpu_users(root)
+
+    def text(g):
+        if g['pci'] in held:
+            label, port = (held.get(g['pci']) if isinstance(held, dict) else None) or ('another Caminus server', None)
+            return card_text(g, users.get(g.get('minor')), label, port)
+        try:
+            t = explain(g) if explain else ''
+        except Exception:                       # noqa: BLE001 - a projection that cannot run here: the card's state alone
+            t = ''
+        return card_text(g, users.get(g.get('minor'))) + (f'; {t}' if t else '')
+    raise PlacementError('the model fits none of the free cards: ' + '. '.join(text(g) for g in cards))
 
 
 def hip_visible(cards):
@@ -312,13 +419,14 @@ def problems(gs):
     return out
 
 
-def place(n_cards, fits=None, env=None, root='/', split_of=None):
+def place(n_cards, fits=None, env=None, root='/', split_of=None, explain=None):
     """the cards a server runs on, chosen before the GPU runtime starts (caminus serve): dict(cards, split, hip_visible,
     note). n_cards: the architecture's card count (1 or 2). fits(cards) -> bool: the model's projection at the minimum
     context on those cards (None: every card fits; the engine's own check still runs). env: HIP_VISIBLE_DEVICES, when set,
     limits the choice to those GPUs (HIP's own indices) and is rewritten so process device i is the engine's card i: a
     two-card model's pair is put in engine order whatever order it was given in. Unsupported cards are refused by name.
-    split_of(cards): the model's own split (caminus.arch.Arch.split); default split()"""
+    split_of(cards): the model's own split (caminus.arch.Arch.split); default split(). explain(card): what a one-card model
+    needs on that card, for the refusal when it fits none (one)"""
     env = os.environ if env is None else env
     gs = gpus(root)
     given = (env.get('HIP_VISIBLE_DEVICES') or '').strip()
@@ -347,7 +455,7 @@ def place(n_cards, fits=None, env=None, root='/', split_of=None):
                                  f"context (32,768 positions) with a working prompt cache, with what they hold now (caminus ps: another "
                                  f"server or program may be using them)")
     else:
-        cards = [one(pool, lambda g: ok([g]))]
+        cards = [one(pool, lambda g: ok([g]), explain=explain, root=root)]
         sp = None
     return dict(cards=cards, split=sp, hip_visible=hip_visible(cards),
                 note=' + '.join(describe(c) for c in cards) + (', split ' + split_note(sp) if sp else ''))

@@ -195,14 +195,6 @@ def _plain(v):
     return v.tolist() if hasattr(v, 'tolist') else v
 
 
-def _read_int(p):
-    try:
-        with open(p) as f:
-            return int(f.read().strip())
-    except (OSError, ValueError):
-        return None
-
-
 def usable_ctx(max_ctx, T):
     """the context a server answers with on an engine of max_ctx positions and T tokens per pass: max_ctx less T - 2 (the
     speculative loop keeps prompt + max_new <= max_ctx - (T - 2)); a T = 1 engine keeps its max_ctx (K3Session.max_ctx)"""
@@ -311,7 +303,7 @@ class Arch:
         Explicit host cards use metadata/sysfs only, before HIP starts. Runtime
         callers omit cards and read capacity's actual guard caps and usage.
         """
-        from .device import capacity
+        from .device import capacity, host
         from .device.context_fit import ContextFit
         n_ctx, devs, slot, need = self.auto_need(opt, int(opt.get('auto_cache_slots', 4)), cards=cards)
         extra = self.extras_mib(opt, devs, cards=cards)
@@ -322,11 +314,10 @@ class Arch:
             # line. Placement must do the same before its cache/display reserve.
             caps = []
             for c in cards:
-                used = _read_int(os.path.join(c['dev'], 'mem_info_vram_used'))
-                if used is None or used < 0:
-                    from .device.host import PlacementError
-                    raise PlacementError(f'cannot read valid current VRAM usage for {c.get("pci") or c["dev"]}')
-                caps.append((c['line_mib'] - capacity.MARGIN_MIB, used / 2 ** 20))
+                used = host.used_mib(c)
+                if used is None:
+                    raise host.PlacementError(f'cannot read valid current VRAM usage for {c.get("pci") or c["dev"]}')
+                caps.append((c['line_mib'] - capacity.MARGIN_MIB, used))
             reserve = [capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB for c in cards]
         if not (len(devs) == len(caps) == len(reserve) == len(extra)):
             raise ValueError('context fit: card, projection and reserve counts differ')
@@ -364,11 +355,30 @@ class Arch:
             plan = self.context_fit(opt, cards)
         except NotImplementedError:
             return True
+        return plan.fits(self.asked_ctx(opt, plan))
+
+    def asked_ctx(self, opt, plan):
+        """the context fits checks: an explicit --max-ctx, else (auto) the architecture's floor, at most the model's own"""
         try:
-            want = int(opt.get('max_ctx'))              # an explicit --max-ctx: that context; auto: the architecture's floor
+            want = int(opt.get('max_ctx'))
         except (TypeError, ValueError):
             want = self.min_ctx(opt)
-        return plan.fits(min(want, plan.native_ctx))
+        return min(want, plan.native_ctx)
+
+    def need_text(self, opt, card):
+        """for a refusal on one card (a caminus.device.host dict): what the model needs there at the context fits checks,
+        the room fits compares it with and the card's free memory, and the most context that fits now, from the
+        projection fits reads (caminus.device.host.need_text words it). '' without a projection here"""
+        from .device import host
+        try:
+            plan = self.context_fit(opt, [card])
+            want = self.asked_ctx(opt, plan)
+            need, = plan.need_mib(want)
+            free = card['total_mib'] - host.used_mib(card)
+            most = plan.maximum()
+        except Exception:                       # noqa: BLE001 - no projection for this entry or file: the caller says less
+            return ''
+        return host.need_text(need, plan.room_mib[0], free, want, most, min(AUTO_STEP, plan.native_ctx))
 
     def draft_refusal(self, draft, path=None):
         """why this entry must not serve --draft `draft` for the GGUF at path (a sentence for the error), or None. Without a
