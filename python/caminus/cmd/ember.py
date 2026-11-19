@@ -7,7 +7,7 @@ work runs as the second user over SSH; root waits for your approval.
   caminus ember run [--shell] CMD...   run CMD as the agent user (argv, or one shell string with --shell)
   caminus ember shell                  an interactive session as the agent user (run any agent by hand)
   caminus ember prompt                 print ROBOTS.md, the agent environment's own instructions
-  caminus ember ui                     the TUI: queued root requests + the live audit log (caminus-panel env)
+  caminus ember ui                     the TUI: queued root requests + the live audit log (caminus-panel ember)
   caminus ember spawn --name N -- CMD...   start CMD detached in the agent user (log ~/env-logs/N.log, pid ~/env-jobs/N.pid)
   caminus ember jobs                   the detached jobs (name, pid, alive, log)
   caminus ember stop NAME              kill a detached job
@@ -74,7 +74,7 @@ def _parser():
 
     sub.add_parser('prompt', help="print ROBOTS.md, the agent environment's own instructions")
 
-    sub.add_parser('ui', help='the TUI: queued root requests + the live audit log (caminus-panel env)')
+    sub.add_parser('ui', help='the TUI: queued root requests + the live audit log (caminus-panel ember)')
 
     p = sub.add_parser('agent', add_help=False, help='resident agent: install/init/start/send/once/status/events/resume/cancel')
     p.add_argument('args', nargs=argparse.REMAINDER)

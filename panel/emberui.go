@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 jdominick05
 
-// caminus-panel env: the human side of the agent environment as a TUI (`caminus ember ui`,
+// caminus-panel ember: the human side of the agent environment as a TUI (`caminus ember ui`,
 // docs/specs/spec-ember.md section 7). The Python CLI execs it as `caminus ember`, with the settings in the
 // environment, so a terminal showing the foreground command line shows no bridge, audit or ssh key path (issue
 // #317); the same settings are still flags, and a flag wins over its variable:
 //
-//	caminus-panel env [--user NAME] [--bridge DIR] [--audit FILE] [--key FILE] [--cli JSON]
+//	caminus-panel ember [--user NAME] [--bridge DIR] [--audit FILE] [--key FILE] [--cli JSON]
 //	  (defaults: $CAMINUS_ENV_USER, $CAMINUS_ENV_BRIDGE, $CAMINUS_ENV_AUDIT, $CAMINUS_ENV_KEY, $CAMINUS_EMBER_CLI)
 //
 // Tabs (tab / shift-tab or 1-6), all live:
@@ -213,13 +213,13 @@ func emberMain(args []string) {
 	*key = emberSetting(*key, "CAMINUS_ENV_KEY")
 	*cli = emberSetting(*cli, "CAMINUS_EMBER_CLI")
 	if *user == "" || *bridge == "" || *audit == "" || *key == "" {
-		fmt.Fprintln(os.Stderr, "caminus-panel env: --user --bridge --audit --key are all required")
+		fmt.Fprintln(os.Stderr, "caminus-panel ember: --user --bridge --audit --key are all required")
 		os.Exit(2)
 	}
 	var cliArgv []string
 	if *cli != "" {
 		if err := json.Unmarshal([]byte(*cli), &cliArgv); err != nil {
-			fmt.Fprintln(os.Stderr, "caminus-panel env: bad --cli JSON:", err)
+			fmt.Fprintln(os.Stderr, "caminus-panel ember: bad --cli JSON:", err)
 			os.Exit(2)
 		}
 	}
@@ -244,7 +244,7 @@ func emberMain(args []string) {
 	}
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "caminus-panel env:", err)
+		fmt.Fprintln(os.Stderr, "caminus-panel ember:", err)
 		os.Exit(1)
 	}
 }

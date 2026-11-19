@@ -469,14 +469,13 @@ def main():
     # `caminus ember ui` execs the panel as just `caminus ember`: a terminal that shows the foreground command line
     # shows that, never the bridge, audit and ssh key paths (issue #317). The five settings travel in the environment.
     seen_ui = {}
-    _pb = _manage.panel_binary
+    _pb, _execve = _manage.panel_binary, os.execve
     _manage.panel_binary = lambda: '/opt/caminus-panel'
     os.execve = lambda path, argv, env: seen_ui.update(path=path, argv=argv, env=env)
     try:
         rc = cmd_env._ui()
     finally:
-        del os.execve
-        _manage.panel_binary = _pb
+        os.execve, _manage.panel_binary = _execve, _pb   # (put both back: `del` would remove os.execve for good)
     check(rc is None and seen_ui.get('path') == '/opt/caminus-panel' and seen_ui.get('argv') == ['caminus', 'ember']
           and not any('/' in a for a in seen_ui['argv']),
           'ui: execs the panel as `caminus ember`, with no path in the argv a terminal shows')
