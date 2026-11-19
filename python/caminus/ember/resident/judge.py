@@ -54,6 +54,9 @@ Evidence rules:
 - A command's exit code and output, a file's content, a test result: these are evidence.
 - An approval or decision by the human needs a real human message in the steers, not the agent's say-so.
 - The done check and every steer must be satisfied, not most of them.
+- The agent's own todo list (its plan) is part of the brief. An item it still has open is work the agent itself says is
+  not done: say not_yet unless the finish's LEFT OPEN accounts for every open item, or the evidence shows the item no
+  longer applies.
 - If the work is done but the proof depends on something still running or not yet observable (a build, a test run,
   CI, a service starting, a scheduled job), say wait, and name what to wait for.
 - You never decide that a goal cannot be done. If the agent says it cannot be done, or gives up, that is not evidence
@@ -174,6 +177,18 @@ def evidence(rt, gid, summary, open_work, images=None, sees=False):
     steers = [s['text'] for s in rt.store.steers(gid)]
     if steers:
         parts.append('HUMAN STEERS (newest last):\n' + '\n'.join('- ' + s[:600] for s in steers[-10:]))
+    # The agent's own plan, which this brief was missing: a goal passed its gate and finished with five of six todo
+    # items open, because the one thing that decides "done" was never shown the list. An item the agent left open is
+    # work the agent itself says is not done.
+    todo = rt.store.todo(gid)
+    if todo['items']:
+        mark = {'done': '[x]', 'in_progress': '[>]', 'pending': '[ ]'}
+        left = [it for it in todo['items'] if it['state'] != 'done']
+        parts.append("The agent's own plan (its todo list; it writes and updates this):\n"
+                     + '\n'.join('- ' + mark.get(it['state'], '[ ]') + ' ' + it['text'] for it in todo['items'])
+                     + (f'\n{len(left)} still open' if left else '\nall done'))
+        if todo['blockers']:
+            parts.append('WHAT THE AGENT SAYS BLOCKS IT NOW:\n' + '\n'.join('- ' + str(b)[:300] for b in todo['blockers']))
     events = rt.store.db.execute(
         "SELECT kind,data FROM events WHERE goal=? AND kind IN ('verified','tool_result') ORDER BY seq DESC LIMIT ?",
         (gid, EVIDENCE_RESULTS * 2)).fetchall()
