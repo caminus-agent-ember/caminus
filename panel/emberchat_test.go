@@ -124,6 +124,25 @@ func TestTheHeaderMarksAGoalPickedByHandAsNotTheRunningOne(t *testing.T) {
 	}
 }
 
+// (#358) A stopped daemon runs nothing: its goals' last states are stale, so a refresh must not follow a goal
+// whose state still says "working" over the one the owner is reading.
+func TestAStoppedDaemonDoesNotFollowAStaleWorkingGoal(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.DaemonAlive = false
+	m.resident.Goals = []residentGoal{
+		{ID: "041c4309aa", State: "paused", Prompt: "the weekly SIM backlog", Steps: 41},
+		{ID: "e0990951bb", State: "working", Prompt: "fix the ember bugs", Steps: 7},
+	}
+	m.goalSel, m.chat.target = 0, "041c4309aa"
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident})
+	if g := m.selectedResidentGoal(); g == nil || g.ID != "041c4309aa" {
+		t.Fatalf("a stopped daemon moved the shown goal to %v", g)
+	}
+	if m.chat.target != "041c4309aa" {
+		t.Fatalf("a stopped daemon retargeted the composer to %q", m.chat.target)
+	}
+}
+
 func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
 	m := chatFixture(t)
 	m.chat.compose.SetValue("Use existing tools.\nKeep café and 漢字 intact.")

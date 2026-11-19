@@ -382,7 +382,7 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 	// (#358) a goal is running and the shown one is not: follow the running goal, so the header, the task list and
 	// the composer speak about the goal whose work streams below. A goal picked by hand in the overlay stays shown
 	// and chatHead marks it as not the running one.
-	if g := m.selectedResidentGoal(); g != nil && g.ID != m.chat.pickedGoal && !goalRunning(g.State) {
+	if g := m.selectedResidentGoal(); g != nil && m.resident.DaemonAlive && g.ID != m.chat.pickedGoal && !goalRunning(g.State) {
 		for i := range m.resident.Goals {
 			if goalRunning(m.resident.Goals[i].State) {
 				m.goalSel = i
@@ -398,9 +398,9 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 	m.syncChat()
 }
 
-// liveGoalIndex is the goal being worked on (or waiting for you), else one waiting its turn (queued or paused),
-// else the newest goal not cancelled; -1 for none. A paused goal earlier in the list must not shadow the goal
-// that is working: the header, the composer and the task list followed the paused one. (#358)
+// liveGoalIndex is the goal being worked on (or waiting for you), else the newest one waiting its turn (queued
+// or paused), else the newest goal not cancelled; -1 for none. A paused goal earlier in the list must not shadow
+// the goal that is working: the header, the composer and the task list followed the paused one. (#358)
 func (m emberModel) liveGoalIndex() int {
 	for i, g := range m.resident.Goals {
 		if goalRunning(g.State) {
@@ -661,8 +661,8 @@ func (m emberModel) chatHead(w int) string {
 		}
 		// (#358) the shown goal is not the running one: say so, or its "paused" reads as what the agent is doing
 		// while the transcript below streams another goal's work.
-		if w := m.activeGoal(); w != nil && w.ID != sel.ID && !goalRunning(sel.State) {
-			state = "viewing " + sel.State + " · " + shortGoal(w.ID) + " working"
+		if run := m.activeGoal(); run != nil && run.ID != sel.ID && !goalRunning(sel.State) {
+			state = "viewing " + sel.State + " · " + shortGoal(run.ID) + " working"
 		}
 	}
 	if sel := m.selectedResidentGoal(); sel != nil && sel.State == "working" && m.waitingForYou(sel.ID) {
