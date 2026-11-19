@@ -519,6 +519,32 @@ class Resident(unittest.TestCase):
         self.assertIn('blocked by: no editor',bodies[-1])
         self.assertTrue(any('todo list still has unfinished items (check it)' in b for b in bodies),'finish refused while an item is open')
 
+    def test_a_multi_step_goal_with_no_todo_list_is_told_to_make_one(self):
+        # #318: the stale-todo nudge sits inside `if todo['items']`, so it can only fire for a goal that already
+        # did the right thing. A review goal ran 170 tool calls over 35 minutes with no list and was never asked
+        # for one. The threshold is TODO_NONE (10 steps), a short goal stays quiet.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Review the change.')
+            rt.store.update(gid,steps=3)
+            self.assertNotIn('without a todo list',rt.context_message(gid)['content'],'a short goal is not asked for a plan')
+            rt.store.update(gid,steps=12)
+            line=rt.context_message(gid)['content']
+            self.assertIn('without a todo list',line,'a long goal with no list is told to write one')
+            self.assertIn('todo tool',line)
+            # the line is derived, not consumed: the pre-turn compaction probe calls this too, and a one-shot
+            # marker written here would be spent by that probe before the model ever saw it
+            self.assertIn('without a todo list',rt.context_message(gid)['content'],'still there on the next read')
+            rt._todo(gid,[dict(text='one',state='in_progress')],[])
+            self.assertNotIn('without a todo list',rt.context_message(gid)['content'],'a goal with a list gets the stale nudge, not this one')
+            # ... and after a compaction with still no list, which is exactly when the transcript that held the
+            # plan, if there ever was one, is gone
+            other=rt.store.enqueue('Review the other change.')
+            rt.store.update(other,steps=2)
+            rt.store.event('compacted',dict(before=10,after=2),other)
+            self.assertIn('without a todo list',rt.context_message(other)['content'],'a compaction asks for the plan again')
+        finally:rt.mail.close();rt.store.close()
+
     def test_status_gives_each_queued_goal_its_place_in_the_run_order(self):
         rt=Runtime(self.home)
         try:

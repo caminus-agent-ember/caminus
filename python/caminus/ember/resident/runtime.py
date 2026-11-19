@@ -243,6 +243,7 @@ RUNTIME_HEADER = ('EMBER RUNTIME (from your harness, rebuilt this turn; not part
 ADVISE_RETRIP = 10      # steps after a watchdog's advisor consult within which a new trip pauses the goal
 BUSY_WAIT_S = 3600      # how long a goal waits out a provider's capacity errors (429 / 503 / 529) before it stops
 TODO_STALE = 8          # steps without a todo update, with items open, before the loop state mentions it
+TODO_NONE = 10          # steps with no todo list at all before the loop state asks for one
 COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
 RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the runtime file this daemon runs (its sha)
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
@@ -621,6 +622,19 @@ class Runtime:
                 if since >= TODO_STALE:
                     lines.append(f'LOOP: your todo list has not changed in {since} steps: mark items done as you finish '
                                  'them (todo), so your human sees progress and you resume from it after a compaction.')
+        else:
+            # #318: the stale nudge above lives inside `if todo['items']`, so it can only fire for a goal that
+            # already did the right thing: a 170-call, 35-minute review goal with no list was never asked for one.
+            # Ask once the goal is clearly multi-step, and again after a compaction, which is exactly when the
+            # transcript that might have held the plan is summarized away. Derived every turn rather than recorded:
+            # the pre-turn compaction probe calls this too, so a one-shot marker written here would be spent by
+            # that probe before the model ever saw it.
+            compacted = self.store.db.execute(
+                "SELECT 1 FROM events WHERE goal=? AND kind='compacted' LIMIT 1", (gid,)).fetchone()
+            if g.get('steps', 0) >= TODO_NONE or compacted:
+                lines.append('LOOP: %d steps without a todo list: this is a multi-step goal, so write a short one '
+                             'with the todo tool — your human sees progress, and you resume from it after a '
+                             'compaction.' % g.get('steps', 0))
         if todo['blockers']:
             lines.append('LOOP: blocked by: ' + ' | '.join(todo['blockers']))
         if not self.store.verified_since_steer(gid):
