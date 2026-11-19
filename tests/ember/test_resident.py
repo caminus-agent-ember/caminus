@@ -8236,6 +8236,12 @@ for line in sys.stdin:
             gid=rt.store.enqueue('Free time.',kind='free')
             self.assertIsNone(reflect.maybe(rt,gid,'rested',''))
             self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'free time: no reflection call')
+            # graded work only: a goal with no done check has no standard it was measured against, so a proposal
+            # from it would restate the goal (and a plain two-turn conversation stays two model calls)
+            gid=rt.store.enqueue('No done check.')
+            rt.store.update(gid,state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'done',''))
+            self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'no done check: no reflection call')
         finally:rt.mail.close();rt.store.close()
 
     def test_a_failed_reflection_is_an_event_and_never_loses_the_finished_goal(self):

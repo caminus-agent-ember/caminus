@@ -42,6 +42,11 @@ def maybe(rt, gid, summary='', open_work=''):
         g = rt.store.goal(gid)
         if not g or g.get('kind', 'work') in FREE_KINDS:
             return None
+        if not g.get('done_check'):
+            # graded work only: a goal with no done check has no judge and no standard it was measured against,
+            # so a proposal from it would restate the goal rather than name a harness problem. (It also keeps a
+            # plain two-turn conversation two model calls, as the session tests count them.)
+            return None
         if not sim.enabled(rt) or not rt.config.get('reflect', True):
             return None
         if rt.stopping():
