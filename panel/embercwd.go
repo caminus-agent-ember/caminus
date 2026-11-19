@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -47,7 +48,7 @@ func (m emberModel) agentCwd() string {
 			found = true
 			cwd = resolveIn(home, home, args.Cwd)
 			if g := leadingCd.FindStringSubmatch(args.Command); g != nil {
-				if dir, ok := expandRuntimeVars(home, strings.Trim(g[1], `"'`)); ok {
+				if dir, ok := expandWord(home, g[1]); ok {
 					cwd = resolveIn(home, cwd, dir)
 				}
 			}
@@ -82,49 +83,84 @@ func resolveIn(home, base, p string) string {
 	return path.Clean(path.Join(base, p))
 }
 
-// expandRuntimeVars replaces the two variables the resident's own shell sets — $WORKSPACE / ${WORKSPACE}, the
-// session's home (terminal.py's env["WORKSPACE"]), and $HOME / ${HOME}, the agent account's home — in a leading
-// cd's folder. ok is false when the folder holds anything else the shell would expand (another variable, a
-// ${VAR:-default} modifier, a command substitution): the status line cannot know that folder, and a guessed one
-// is worse than the one it already shows.
-func expandRuntimeVars(home, p string) (string, bool) {
-	if strings.Contains(p, "`") || strings.Contains(p, "$(") {
-		return "", false
-	}
+// expandWord expands the variables the resident's own shell sets (WORKSPACE, the session's home from terminal.py's
+// env["WORKSPACE"], and HOME, the agent account's home) in a leading cd's folder, following the shell's quote
+// rules: a variable inside single quotes is a literal part of the name (the shell expands nothing there), and a
+// word stitched from quoted and unquoted pieces is expanded piece by piece with no quote left behind. ok is false
+// when the folder holds anything the shell would expand and this status line cannot know (another variable, a
+// ${VAR:-default} modifier, a command substitution, an unclosed quote): a guessed folder is worse than the one it
+// already shows.
+func expandWord(home, word string) (string, bool) {
 	acct := path.Dir(path.Dir(home))
-	var b strings.Builder
-	for i := 0; i < len(p); {
-		if p[i] != '$' {
-			b.WriteByte(p[i])
-			i++
-			continue
-		}
-		rest, name, consumed := p[i:], "", 0
-		if strings.HasPrefix(rest, "${") {
-			if end := strings.IndexByte(rest, '}'); end > 2 {
-				name, consumed = rest[2:end], end+1
-			}
-		} else {
-			j := 1
-			for j < len(rest) && (rest[j] == '_' || rest[j] >= '0' && rest[j] <= '9' ||
-				rest[j] >= 'a' && rest[j] <= 'z' || rest[j] >= 'A' && rest[j] <= 'Z') {
-				j++
-			}
-			if j > 1 {
-				name, consumed = rest[1:j], j
-			}
-		}
+	bad := false
+	get := func(name string) string {
 		switch name {
 		case "WORKSPACE":
-			b.WriteString(home)
+			return home
 		case "HOME":
-			b.WriteString(acct)
-		default:
-			return "", false
+			return acct
 		}
-		i += consumed
+		bad = true
+		return ""
 	}
-	return b.String(), true
+	var out, run strings.Builder
+	// flush expands the run of characters the shell would expand (unquoted, or inside double quotes). A command
+	// substitution is not something this status line can know, and os.Expand would hand it back as literal text,
+	// which reads as a folder that does not exist.
+	flush := func() bool {
+		seg := run.String()
+		if seg == "" {
+			return true
+		}
+		run.Reset()
+		if strings.Contains(seg, "`") || strings.Contains(seg, "$(") {
+			return false
+		}
+		out.WriteString(os.Expand(seg, get))
+		return !bad
+	}
+	quote := byte(0) // 0 unquoted, '\'' inside single quotes, '"' inside double quotes
+	for i := 0; i < len(word); i++ {
+		c := word[i]
+		switch {
+		case c == '\'' && quote != '"':
+			if quote == '\'' {
+				quote = 0
+				continue
+			}
+			if !flush() {
+				return "", false
+			}
+			quote = '\''
+		case c == '"' && quote != '\'':
+			if quote == '"' {
+				quote = 0
+				continue
+			}
+			if !flush() {
+				return "", false
+			}
+			quote = '"'
+		case c == '\\' && quote != '\'' && i+1 < len(word):
+			// the escape names a literal character, so it ends the expandable run
+			if !flush() {
+				return "", false
+			}
+			i++
+			if quote == '"' && !strings.ContainsRune("$`\"\\", rune(word[i])) {
+				out.WriteByte('\\') // inside double quotes a backslash is literal before any other character
+			}
+			out.WriteByte(word[i])
+		case quote == '\'':
+			out.WriteByte(c)
+		default:
+			run.WriteByte(c)
+		}
+	}
+	if quote != 0 || !flush() {
+		return "", false
+	}
+	return out.String(), true
 }
 
 // clipPath keeps a path's end, the part that says where: "…/inventory/tests".
