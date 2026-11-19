@@ -397,6 +397,7 @@ type status struct {
 	queue        int
 	compactions  int     // times this goal's history was compacted; -1 hides the bubble (no goal in view)
 	online       float64 // how long the agent has been online, seconds; 0 hides it
+	freeTime     bool    // no goal in view and the daemon listens: the free-time schedule is on
 	cacheHit     float64 // today's input from the prompt cache, 0-1; negative hides it
 	keys         []string
 }
@@ -463,6 +464,12 @@ func statusLine(s status, w int) string {
 	}
 	if s.online > 0 {
 		segs = append(segs, strings.TrimSpace(g.online+" online "+upFor(s.online)))
+	}
+	if s.online > 0 && s.freeTime {
+		// (#334) the one line the side panel's now section alone carried. Its own segment, after the online clock:
+		// footBar drops the newest segment first when the line is short of room, so a narrow terminal loses the note
+		// before it loses the clock (inside the clock's segment, the longer segment took both away at 160 columns).
+		segs = append(segs, "free time runs on its own schedule")
 	}
 
 	return footBar(segs, s.keys, w)

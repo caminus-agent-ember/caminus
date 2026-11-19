@@ -272,7 +272,7 @@ that one, in place: Ctrl+O opens them all) or folds it again, picks a card in th
 the jump-to-newest pill. Taking the mouse turns the terminal's own selection off, so the chat selects text itself:
 
 - **Drag to copy.** Drag over any text on the screen: the conversation and its cards (folded or open), the side pane
-  (tasks, now), the header, the composer, the status line, the session picker and every dialog. Releasing the
+  (the tasks), the header, the composer, the status line, the session picker and every dialog. Releasing the
   button copies the plain text to the clipboard (wl-copy on Wayland, xclip or xsel on X11, and OSC 52 for terminals that
   take it, such as a remote session). The copy has no colours or styling; its lines break where the screen breaks them.
   The status line says how many lines it copied. An open card drawn as Markdown (Ctrl+Y, docs/resident-agent.md) is

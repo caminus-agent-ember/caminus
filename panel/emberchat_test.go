@@ -1796,6 +1796,101 @@ func TestStatusLineShowsSpendOnAPaidBrain(t *testing.T) {
 	}
 }
 
+// (#334) the side panel said "listening (free time runs on its own schedule)" and nothing else did; the status
+// line's online segment carries that note now that the panel keeps tasks only.
+func TestTheStatusLineCarriesTheFreeTimeNote(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	// a goal is working: the note is not said (free time runs only with no goal in view)
+	m.resident.OnlineS, m.resident.DaemonAlive = 18*60, true
+	if foot := ansi.Strip(m.chatFoot(200)); !strings.Contains(foot, "online 18m") || strings.Contains(foot, "free time") {
+		t.Fatalf("a working goal is no free time: %q", foot)
+	}
+	// the goal completed and nothing else is in view: the online segment says free time runs
+	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574,
+		DaemonAlive: true, LastEvent: 2, OnlineS: 18 * 60, Goals: []residentGoal{{ID: "original", State: "completed", Prompt: "a goal"}}}})
+	if foot := ansi.Strip(m.chatFoot(200)); !strings.Contains(foot, "online 18m") || !strings.Contains(foot, "free time runs on its own schedule") {
+		t.Fatalf("the free-time note is gone with the panel's now section: %q", foot)
+	}
+	// a stopped daemon runs no free time at all, and the online clock hides with it
+	m.receiveResident(residentMsg{agent: "resident", status: residentStatus{Name: "resident", Model: "local-model", Context: 1048574,
+		DaemonAlive: false, LastEvent: 3, OnlineS: 18 * 60, Goals: []residentGoal{{ID: "original", State: "completed", Prompt: "a goal"}}}})
+	if foot := ansi.Strip(m.chatFoot(200)); strings.Contains(foot, "free time") || strings.Contains(foot, "online ") {
+		t.Fatalf("a stopped daemon shows no online clock and no free time: %q", foot)
+	}
+}
+
+// (#334) the free-time note rides in the status line, but it must never push the online clock out. footBar drops the
+// newest segment when the line is short of room, so while the note sat inside the clock's segment the longer segment
+// took the clock away with it at 160 columns. The clock must read the same with and without the note, at every width.
+func TestTheFreeTimeNoteNeverTakesTheOnlineClockWithIt(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	plain := status{brain: "local-model", cwd: "~/homes/agent/caminus", used: 1000, window: 1048574,
+		usd: -1, usdDay: -1, speed: replySpeed{write: 31, read: 1240, source: "engine"},
+		queue: 0, compactions: 0, online: 18 * 60, cacheHit: -1, keys: []string{"ctrl+n new", "tab goals"}}
+	noted := plain
+	noted.freeTime = true
+	shown := 0
+	for w := 60; w <= 220; w += 4 {
+		without, with := ansi.Strip(statusLine(plain, w)), ansi.Strip(statusLine(noted, w))
+		clock := strings.Contains(without, "online 18m")
+		if got := strings.Contains(with, "online 18m"); got != clock {
+			t.Fatalf("at %d columns the free-time note changed whether the online clock shows (%v with the note, %v without): %q", w, got, clock, with)
+		}
+		if strings.Contains(with, "free time runs on its own schedule") {
+			shown++
+			if !clock {
+				t.Fatalf("at %d columns the note shows without the clock it belongs to: %q", w, with)
+			}
+		}
+	}
+	if shown == 0 {
+		t.Fatal("the note never showed at any width: the status line lost it")
+	}
+}
+
+// (#334) the side panel's now section showed the running command on a wide terminal at any height; the activity
+// line took that state over, so its small-terminal height gate must not hide it there now that the panel is gone.
+func TestAWideShortTerminalKeepsTheActivityLine(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.width, m.height = 160, 18
+	m.syncChat()
+	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Unix())
+	if m.sideWidth() == 0 {
+		t.Fatalf("160 columns must show the side panel (sideWidth %d)", m.sideWidth())
+	}
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "make test") {
+		t.Fatalf("a wide terminal under 20 rows lost the running command with the panel's now section:\n%s", frame)
+	}
+	if rows := strings.Split(frame, "\n"); len(rows) > m.height {
+		t.Fatalf("%d rows overflow %d with the activity line:\n%s", len(rows), m.height, frame)
+	}
+	// a narrow terminal is unchanged: under 20 rows it keeps its rows and draws no activity line (the todo line above
+	// the composer still names the running command, which is not the activity line)
+	n := chatFixture(t)
+	n.width, n.height = 100, 18
+	n.syncChat()
+	n.chat.group.running, n.chat.group.runningSince = "make test", float64(time.Now().Unix())
+	if n.sideWidth() != 0 {
+		t.Fatalf("100 columns must not show the side panel (sideWidth %d)", n.sideWidth())
+	}
+	act := strings.TrimSpace(ansi.Strip(n.activityLine(max(18, n.width-2))))
+	if act == "" {
+		t.Fatal("the fixture has no activity line to test the narrow gate with")
+	}
+	if frame := ansi.Strip(n.render()); strings.Contains(frame, act) {
+		t.Fatalf("a narrow small terminal drew the activity line it keeps its rows from (%q):\n%s", act, frame)
+	}
+}
+
 func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
 	var got []string
 	old := notifyRun
@@ -2134,7 +2229,7 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	side := func(row string) string { return ansi.Cut(row, m.transcriptWidth(max(20, m.width)), m.width) } // the right column's cells
 	frame := ansi.Strip(m.render())
 	rows := fits(frame)
-	for _, want := range []string{"tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
+	for _, want := range []string{"tasks  1 of 3 done", "◐ write the CLI", "make test", "Checking the CVEs."} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("missing %q:\n%s", want, frame)
 		}
@@ -2143,6 +2238,13 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	top := lipgloss.Height(m.chatHead(m.width))
 	if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") {
 		t.Fatalf("the first row of the right column is the tasks heading, got %q:\n%s", s, frame)
+	}
+	// (#334) tasks only: the live state lives in the activity line above the composer, so no "now" section sits
+	// under the tasks (it showed "between steps" while the activity line had the turn running)
+	for i := top; i < len(rows); i++ {
+		if s := strings.TrimSpace(side(rows[i])); strings.HasPrefix(s, "now ") {
+			t.Fatalf("the side panel carries a now section again (row %d): %q", i, s)
+		}
 	}
 	if strings.Contains(frame, "thoughts") || strings.Contains(frame, "first the NVD feed") || strings.Contains(frame, "tabbed") {
 		t.Fatalf("no thoughts box on a wide terminal:\n%s", frame)
