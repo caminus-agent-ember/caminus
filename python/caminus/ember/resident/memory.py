@@ -328,7 +328,7 @@ class Memory:
         fts = ' '.join('"%s"*' % t.replace('"', '')[:max(4, len(t) - 3)] if len(t) > 5 else '"%s"*' % t for t in terms)
         # The running goal (gid) is not the past: its own prompt matched every search drawn from it and came first,
         # labelled a past goal, so it is left out (the agent has it); its other hits are 'this goal' and come last.
-        # A session with the SIM log off must not read its records: that is the A/B's off arm (review on #375, 6).
+        # A session with the SIM log off must not read its records: that is the A/B's off arm.
         try:
             no_sim = not self.rt.config.get('sim', True)
         except AttributeError:            # (a bare store in a test or a CLI helper: no session switch to read)

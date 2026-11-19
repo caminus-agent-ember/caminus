@@ -2508,10 +2508,10 @@ for line in sys.stdin:
         self.assertEqual(self.cmd('sim',[])['records'][-1]['status'],'observed','the prediction was not rewritten')
 
     def test_an_observation_is_append_only_and_keeps_the_predictors_brain(self):
-        # the review on #375: an observation could rewrite the prediction fields by naming the record's id,
-        # and it was stamped with the observer's session model instead of the predictor's. Both are closed here:
-        # a $0 local worker predicts, the paid session model observes, and the observation changes nothing it
-        # should not. A running resident follows a config sim switch at its next turn (finding 3).
+        # an observation must not rewrite the prediction fields by naming the record's id, and it must be
+        # stamped with the predictor's brain rather than the observer's session model. Both hold here: a $0
+        # local worker predicts, the paid session model observes, and the observation changes nothing it should
+        # not. A running resident follows a config sim switch at its next turn.
         from caminus.ember.resident.store import atomic_json
         from caminus.ember.resident import sim as simmod
         rt=Runtime(self.home)
@@ -2619,12 +2619,19 @@ for line in sys.stdin:
         self.cmd('once',['--goal','Record a prediction with the log off.'])
         results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data'].get('name')=='sim']
         self.assertIn('SIM log is off',results[-1].get('error',''))
-        self.assertEqual(self.cmd('sim',[])['records'],[])
+        # an off session reads nothing back either, through either path: the CLI is a second read path an
+        # agent can reach through its terminal, so listing refuses just as the tool does
+        self.cmd('sim',[],code=1)
+        # the CLI is a read path too: an off session does not list or export what it did not record, so an
+        # agent that runs the CLI through its terminal cannot read the on arm's lessons (--on still works)
+        self.cmd('sim',['--export','--out',str(self.home/'off.jsonl')],code=1)
+        self.assertFalse((self.home/'off.jsonl').exists(),'an off session exports nothing')
         self.cmd('sim',['--record','--change','x','--predicted','y'],code=1)
         out=self.cmd('sim',['--on'])
         self.assertTrue(json.loads((self.home/'config.json').read_text())['sim'])
         self.assertEqual(self.cmd('sim',['--record','--change','x','--predicted','y'])['record']['status'],'recorded')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],True,'--on stays on')
+        self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')

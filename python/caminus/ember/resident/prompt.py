@@ -235,7 +235,7 @@ def render(home, sim=True):
     packages=', '.join(module for _, module in AGENT_PACKAGES)
     there = not available()
     # Off: the heading and the paragraph both go; a heading over an empty section still asked for a record the
-    # runtime would refuse, and an A/B's off arm must not be steered by what the on arm learned (review on #375, 5)
+    # runtime would refuse, and an A/B's off arm must not be steered by what the on arm learned
     head, section = ('## SIM: predict, then measure\n', SIM_ON) if sim else ('', '')
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
                          venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',

@@ -823,6 +823,11 @@ def main(argv=None,stdin=None):
                     if a.json:emit(dict(name=a.name,record=rec,id=rec['id']),True)
                     else:print('%s: observed · %s' % (rec['id'],(rec['observed'] or '')[:120]),flush=True)
                     return 0
+                if not sim.enabled(rt) and not (a.on or a.off):
+                    # the CLI is a second read path: an agent can run it through its terminal, so an "off" arm
+                    # must not read the lessons the "on" arm learned there either (`--on` still turns it back on)
+                    raise ValueError('the SIM log is off in this session (config sim=false): its records are not '
+                                     'listed or exported. Turn it on with `--on` to read them')
                 if a.export:
                     p,n,nbytes=sim.export(rt,gid,a.out)
                     if a.json:emit(dict(name=a.name,path=str(p),records=n,bytes=nbytes),True)

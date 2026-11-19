@@ -533,7 +533,7 @@ class Runtime:
     def tools(self):
         """The tools the model sees: the harness's own (browser only where a Chrome or Chromium can run in a box),
         then any configured MCP servers' (listed once). The SIM tool is hidden while the session's log is off, so an
-        A/B's off arm is not asked for predictions it cannot write (review on #375, finding 6)."""
+        A/B's off arm is not asked for predictions it cannot write."""
         if getattr(self, '_tools', None) is None:
             own = [t for t in TOOLS if t['function']['name'] != 'browser' or not browser.available()]
             if not sim.enabled(self):

@@ -18,18 +18,20 @@ harness change), 'observed' (the outcome after CI and reviews).
 
 The agent's tool is record / observe / list. The JSONL export belongs to the CLI alone (`caminus ember agent
 sim NAME --export`), which a human runs: the model cannot name a path, so no export can overwrite a file, in
-plan mode or anywhere else (review on #375, finding 1).
+plan mode or anywhere else.
 """
 from contextlib import contextmanager
 import datetime
 import json
+import sqlite3
 import time
 import uuid
 
 FIELDS = ('problem_group', 'change', 'rationale', 'predicted', 'observed', 'eval_context', 'prediction_error')
 TEXT_CAP = 8000               # one field's characters; the whole point is a compact record
 STATUSES = ('proposed', 'recorded', 'observed')
-# an observation may add only these; the prediction fields are frozen once written (review on #375, finding 1)
+# an observation may add only these: the prediction fields are frozen once written, so the bet the record
+# measures cannot be restated after the outcome is known
 OBSERVED_FIELDS = ('observed', 'eval_context', 'prediction_error')
 
 
@@ -69,12 +71,32 @@ def _event(store, gid, record):
 @contextmanager
 def _atomic(rt):
     """One transaction around a check-then-insert: two writers (the daemon and the CLI) could both pass the
-    append-only check in autocommit and one observation would disappear (review on #375, finding 2)."""
+    append-only check in autocommit, and one observation would silently disappear."""
     if rt.store.db.in_transaction:
         yield                         # (the daemon's dispatch already holds the store's transaction)
     else:
         with rt.store.transaction():
             yield
+
+
+def _get(rt, rid):
+    """One record's newest version by id, without decoding the whole log on every write.
+
+    A write only needs the record it appends to; scanning the log for it made every record and every
+    observation slower as the log grew. The scan remains the fallback for an SQLite without JSON1.
+    """
+    try:
+        rows = rt.store.db.execute(
+            "SELECT seq, ts, goal, data FROM events WHERE kind='sim' AND json_extract(data,'$.id')=? "
+            "ORDER BY seq DESC LIMIT 1", (rid,)).fetchall()
+    except sqlite3.OperationalError:
+        return next((d for d in _load(rt, limit=100000) if d['id'] == rid), None)
+    if not rows:
+        return None
+    r = rows[0]
+    d = json.loads(r['data'])
+    d.update(goal=d.get('goal') or r['goal'], ts=d.get('ts') or r['ts'], seq=r['seq'])
+    return d
 
 
 def _load(rt, gid=None, limit=200, statuses=None):
@@ -122,7 +144,7 @@ def _record(rt, gid, data, cfg=None):
                          '(action record without status), then observe it')
     prior = None
     if rid:
-        prior = next((d for d in _load(rt, limit=10000) if d['id'] == rid), None)
+        prior = _get(rt, rid)
         if prior is None:
             raise ValueError('no SIM record %s in this session' % rid)
         if status != 'observed':
@@ -148,7 +170,7 @@ def _record(rt, gid, data, cfg=None):
     rec = dict(id=rid or uuid.uuid4().hex[:8], ts=float((prior or {}).get('ts') or time.time()),
                goal=(prior or {}).get('goal') or gid, status=status,
                **{k: _clean(data.get(k)) for k in FIELDS},
-               # the record names the brain that made the prediction; an observation adds who read it (finding 2)
+               # the record names the brain that made the prediction; an observation adds the brain that read it
                brain=(prior or {}).get('brain') or writer)
     if prior:
         rec['observed_by'] = writer
@@ -160,7 +182,7 @@ def _record(rt, gid, data, cfg=None):
         rec['problem_group'] = 'unclassified'
     if prior and prior.get('seq'):
         # history_fts holds one row per event: drop the prior version's so a search names the record once, with
-        # its newest text, not once per version (review on #375, finding 7)
+        # its newest text, not once per version
         rt.store.db.execute('DELETE FROM history_fts WHERE rowid=?', (prior['seq'],))
     # an observation lives in the record's goal, whatever goal its observer is in; the record is one record
     _event(rt.store, rec.get('goal') or gid, rec)
@@ -172,7 +194,7 @@ def observe(rt, gid, rid, observed, eval_context='', prediction_error='', cfg=No
     if not _clean(observed):
         raise ValueError('say what CI and the reviews showed, not that they passed')
     with _atomic(rt):
-        prior = next((d for d in _load(rt, limit=10000) if d['id'] == rid), None)
+        prior = _get(rt, rid)
         if prior is None:
             raise ValueError('no SIM record %s in this session: list them first' % rid)
         data = dict(prior, status='observed', observed=observed, eval_context=eval_context,
@@ -216,7 +238,7 @@ def export(rt, gid=None, path=None):
 
     Reached by the CLI alone (`caminus ember agent sim NAME --export`), which a human runs. The agent's tool has
     no export, so the model never names a file and no export can overwrite one, in plan mode or anywhere else
-    (review on #375, P1-2).
+    .
     """
     from pathlib import Path
     from .store import atomic_write
@@ -233,7 +255,7 @@ def tool(rt, gid, args):
     """/sim as the agent's tool: record / observe / list. The JSONL export is the CLI's (no model-chosen path)."""
     if not enabled(rt):
         # an off arm records nothing and reads nothing: the A/B compares the prompt, and a log the off arm could
-        # read would measure both arms against the same lessons (review on #375, finding 6)
+        # read would measure both arms against the same lessons
         raise ValueError('the SIM log is off in this session (config sim=false): it records and shows nothing. Turn '
                          'it on with `caminus ember agent sim NAME --on`; a record it left open stays open until then')
     action = args.get('action')
