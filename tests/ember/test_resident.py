@@ -519,6 +519,48 @@ class Resident(unittest.TestCase):
         self.assertIn('blocked by: no editor',bodies[-1])
         self.assertTrue(any('todo list still has unfinished items (check it)' in b for b in bodies),'finish refused while an item is open')
 
+    def test_the_judge_sees_the_todo_list_and_a_finish_names_what_is_still_open(self):
+        # #322: the done gate passed with 5 of 6 items open, because the one thing that decides "done" (the judge)
+        # was never shown the agent's own plan: nothing in its brief said an item was still open.
+        self.gates_on()
+        Endpoint.judge_seen.clear()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('todo',dict(items=[dict(text='write it',state='done'),dict(text='check it',state='pending')])),
+                     call('verify',dict(evidence='the file is there')),
+                     call('finish',dict(summary='Wrote the file.',open='check it: left for the human')))
+        self.assertEqual(self.cmd('once',['--goal','Write the file.'])['state'],'completed')
+        brief=[b for k,b in Endpoint.judge_seen if k==self.key][0]['messages'][1]['content']
+        self.assertIn("agent's own plan",brief,'the judge is told this list is the agent\'s plan')
+        self.assertIn('[x] write it',brief);self.assertIn('[ ] check it',brief)
+        self.assertIn('1 still open',brief)
+        rule=[b for k,b in Endpoint.judge_seen if k==self.key][0]['messages'][0]['content']
+        self.assertIn('todo list',rule,'the judge is told what an open item means')
+        bodies=[json.dumps(b) for k,b in Endpoint.seen if k==self.key]
+        self.assertTrue(any('still open' in b and '[ ] check it' in b for b in bodies),
+                        'before it finished, the agent was shown its open item and the nudge')
+        events=[e for e in self.cmd('events') if e['kind']=='finish_open_todo']
+        self.assertTrue(events,'the finish with an item still open is on the record')
+
+    def test_the_todo_nudge_fires_after_a_verify_or_a_compaction_with_items_open(self):
+        # #322 point 2: the stale nudge waits TODO_STALE steps, so a short goal can verify and finish with every
+        # item still open and never be prompted; a compaction loses the list the same way.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            rt._todo(gid,[dict(text='one',state='in_progress'),dict(text='two',state='pending')],[])
+            self.assertNotIn('still open',rt.context_message(gid)['content'])
+            rt.store.event('verified',dict(evidence='the file is there'),gid)
+            line=rt.context_message(gid)['content']
+            self.assertIn('verified after your last todo update',line)
+            self.assertIn('2 items still open',line)
+            rt._todo(gid,[dict(text='one',state='done'),dict(text='two',state='done')],[])
+            self.assertNotIn('still open',rt.context_message(gid)['content'],'all done: nothing to nudge')
+            rt._todo(gid,[dict(text='one',state='in_progress')],[])
+            self.assertNotIn('still open',rt.context_message(gid)['content'])
+            rt.store.event('compacted',dict(before=10,after=2),gid)
+            self.assertIn('compacted after your last todo update',rt.context_message(gid)['content'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_status_gives_each_queued_goal_its_place_in_the_run_order(self):
         rt=Runtime(self.home)
         try:
