@@ -62,18 +62,18 @@ type residentStatus struct {
 }
 
 type residentWorker struct {
-	Child     string  `json:"child"`
-	Parent    string  `json:"parent"`
-	Model     string  `json:"model"`
-	Role      string  `json:"role"`
-	CapUSD    float64 `json:"cap_usd"`
-	SpendUSD  float64 `json:"spend_usd"`
+	Child    string  `json:"child"`
+	Parent   string  `json:"parent"`
+	Model    string  `json:"model"`
+	Role     string  `json:"role"`
+	CapUSD   float64 `json:"cap_usd"`
+	SpendUSD float64 `json:"spend_usd"`
 	// AllowanceUSD is the OpenCode plan's own dollars a child used: a Go turn costs $0 of money and real
 	// allowance, and the cap counts both (#382 review), so the row must show both.
 	AllowanceUSD float64 `json:"allowance_usd"`
 	Outcome      string  `json:"outcome"`
-	Running   bool    `json:"running"`
-	Started   float64 `json:"started"`
+	Running      bool    `json:"running"`
+	Started      float64 `json:"started"`
 }
 
 // replySpeed is a session's speed as its status reports it: a Caminus server's own read (prompt) and write

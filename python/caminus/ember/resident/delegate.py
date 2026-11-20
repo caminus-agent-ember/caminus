@@ -5,9 +5,10 @@ conversation, todo list, done check, gate, verify and spend row - with four limi
 from inside another goal:
 
 - read-only: write, edit, checkpoint, rollback, ask_user, ask_root, github_handoff, send_message, report,
-  remember, schedule, lease, browser, propose_plan and a nested delegate are refused, and terminal runs only
-  a read-only command. The sandbox stays available: the folder it sees is a read-only bind at /work and /box
-  dies with the box, so a child can reproduce or check inside one without changing the human's files;
+  remember, sim, schedule, lease, browser, propose_plan, a nested delegate and the advisor are refused, and
+  terminal runs only a read-only command (allow-listed per program). The sandbox stays available: the folder it
+  sees is a read-only bind at /work and /box dies with the box, so a child can reproduce or check inside one
+  without changing the human's files;
 - depth 1: a child cannot delegate, so the tree is one level deep by construction;
 - caps: a step limit, a time limit and a dollar cap. The cap is config `delegate_usd` (0.50 by default) and a
   call's `cap_usd` may lower it, never raise it; reaching it pauses the child and the parent gets a partial
@@ -17,8 +18,17 @@ from inside another goal:
 - a short structured report back: outcome (completed / capped / failed / incomplete), summary, what it
   verified, what it skipped, steps, spend, allowance and its cap.
 
+- the count is capped too: start() counts this parent's children in the store and refuses past
+  `delegate_max_children` (4 by default), so a parent cannot grow an unbounded tree;
+- the child's stop watches the parent: a cancelled, paused or failed parent ends the child's loop at its next
+  check (the daemon's `_stop` alone did not, and a cancelled parent's child ran on - #382 review), and a child
+  stopped that way reports `incomplete` rather than running on its own brain later;
+- a finished child is not resumable: `cli.resume_goal` refuses a delegate child (and so does `continue` on one),
+  because its brain registration and caps lived in the process that ran it; a resumed child would run on the
+  parent's brain with no cap. Delegate again from the parent instead.
+
 MVP scope: one child at a time - the parent waits for its report - and the child runs in this process through
-Runtime.run(target=child, stop=rt._stop), so the loop's single-writer serialization keeps holding. Parallel
+Runtime.run(target=child, stop=parent_gone), so the loop's single-writer serialization keeps holding. Parallel
 children, a worktree per writing child and a card per child are the full version (#342, later).
 """
 import time

@@ -1136,10 +1136,13 @@ class Resident(unittest.TestCase):
 
     def test_first_looks_are_read_only_and_a_refusal_before_the_done_check_does_not_trip_the_watchdog(self):
         from caminus.ember.resident.runtime import read_only_command as ro
-        for c in ('cd /ctf && ls -la && unzip -l handout.zip','strings a.out | grep flag','xxd f | head','tar -tf x.tar',
+        for c in ('cd /ctf && ls -la && unzip -l handout.zip','strings a.out | grep flag','xxd f | head',
                   '7z l x.7z','readelf -h bin','sha256sum f','sort a | uniq -c'):
             self.assertTrue(ro(c),c)
-        for c in ('unzip handout.zip','tar -xf x.tar','7z x x.7z','unzip -l x.zip -d out','cd /ctf && rm f','sort a > b'):
+        # tar is not a read any more: even listing runs -z / -j / -J / -Z's decompressor and its option surface is
+        # the largest of all (#382 review, fourth round). unzip -l and 7z l still list.
+        for c in ('unzip handout.zip','tar -xf x.tar','tar -tf x.tar','7z x x.7z','unzip -l x.zip -d out','cd /ctf && rm f',
+                  'sort a > b'):
             self.assertFalse(ro(c),c)
         self.gates_on()
         self.verdicts(dict(verdict='met',reason='x exists'))
@@ -1625,11 +1628,15 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
         from caminus.ember.resident import runtime as R
-        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort -S1ofile in','sort -k2,2o in','sort --out=/x/f in','sort --o=f in','sort --compress-p=sh in',
+        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort --out=/x/f in','sort --o=f in','sort --compress-p=sh in',
                     'sort --compress-program=sh in','sort in | uniq - out.txt',
                     'xxd - out.bin','xxd -rp dump bin'):
             self.assertFalse(R.read_only_command(cmd),cmd)
-        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in','sort --reverse in','sort --numeric-sort in'):
+        # -S and -k consume the next letters as their value, so these carry no -o flag at all: sort itself rejects them
+        # ("invalid suffix in --buffer-size argument '1ofile'", "stray character in field spec") and writes nothing.
+        # The old deny-list refused any letter `o` anywhere, which was a refusal of reads; the parser does not.
+        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in','sort --reverse in',
+                    'sort --numeric-sort in','sort -S1ofile in','sort -k2,2o in'):
             self.assertTrue(R.read_only_command(cmd),cmd)
         rt=Runtime(self.home)
         try:
@@ -2826,13 +2833,56 @@ for line in sys.stdin:
                     'objdump --plugin x.so -d a.out',
                     'readelf --plugin=x.so -h a.out'):
             self.assertFalse(ro(cmd),cmd)
-        for cmd in ('tar -tf t.tar','git grep -n marker f.txt','git ls-remote origin','test -f f.txt',
+        for cmd in ('git grep -n marker f.txt','git ls-remote origin','test -f f.txt',
                     'git log -1 --stat','git show HEAD','git cat-file -p HEAD','git grep -n x',
                     'rocm-smi','rocm-smi -a --json','rocm-smi -d 0 --showtemp','rocm-smi --showuse',
                     'amd-smi list','amd-smi static --clock','amd-smi metric -g 0 --temp',
                     'awk \'{print $1}\' f','awk -F: \'NR==2\' f','rg -n x','rg -n x f.txt',
                     'file x','file -b x','date','date -u','date +%F','date -d yesterday','date -r f','date -Iseconds',
                     'date --iso-8601','sed -n 1p f','nm a.out','objdump -d a.out','readelf -h a.out'):
+            self.assertTrue(ro(cmd),cmd)
+
+    def test_read_only_allow_lists_refuse_abbreviations_and_clusters(self):
+        # #382 review, fourth round: a deny-list can only lose. getopt accepts any unambiguous abbreviation of a long
+        # name (`tar --use=` is --use-compress-program, `--rsh=` is --rsh-command) and a short cluster can hide an
+        # option (`git grep -iOprog`). So each program names the options a read may pass and every other word - an
+        # unlisted flag, an abbreviation, a cluster with one unlisted letter - is a change. These are the review's
+        # reproductions, then an abbreviation of each long option the old deny-lists knew by full name.
+        from caminus.ember.resident.runtime import read_only_command as ro
+        for cmd in ("tar --use=sh -cf out.tar x", "tar --rsh=sh -cf out.tar x",
+                    "tar --rmt-command=sh -cf out.tar x", "tar --index-file=/tmp/x -cf out.tar x",
+                    "git grep -iO'prog' x", 'git grep -iOprog x',
+                    # tar did all of these through a listing form; it is not a read at all now
+                    'tar -tf x.tar', 'tar -tf x.tar --checkpoint=1 --checkpoint-action=exec=sh', 'tar -Iprog -cf o x',
+                    # abbreviations of each long option the third round refused by its full spelling
+                    'git log --out=x', 'git log --o=x', 'git log --ext-d=x', 'git show --textc HEAD',
+                    'git cat-file --filter blob HEAD:f', 'git grep --op=sh x', 'git log --exec=x',
+                    'git log --upload-p=x', 'git log --show-sign=x', 'git log -1 --no-ext-dif',
+                    'rg --pre sh x', 'rg --pr=sh x', 'rg --hostname-bin sh x', 'rg --search-zip x', 'rg --search-z',
+                    'file --comp -m x', 'file --uncomp x.gz', 'nm --plug=x.so a.out', 'objdump --pl x.so -d a.out',
+                    'sort --out=/x/f in', 'sort --compress-p=sh in', 'sort --compress=sh in',
+                    'xxd --revert dump bin', 'xxd -rp dump bin', 'xxd -r dump bin',
+                    'unzip --he x.zip',               # (a lone --help lists nothing)
+                    # a value-taking long name whose value begins with '-', and a cluster that hides a refused letter
+                    'sort --output -x in', 'ls -laZ', 'head -5n f',
+                    # operands that are not read: a second file is the output the program writes
+                    'uniq a b', 'xxd a b',
+                    # git subcommands that write, and a bare git
+                    'git', 'git add x', 'git commit -m x', 'git checkout -b y', 'git branch newname', 'git branch -D main',
+                    'git remote add x y', 'git remote set-url origin z', 'git stash', 'git reflog expire --all'):
+            self.assertFalse(ro(cmd),cmd)
+        # and the reads these programs really do, including clustered short flags, `--` before a dash operand, and
+        # explicit no-<driver> options (which turn a driver off rather than run one)
+        for cmd in ('git grep -in x', 'git grep -n -- -x f', 'grep -- -x f', 'git log --no-ext-diff -1',
+                    'git diff --no-textconv --stat', 'git log --oneline -5', 'git log --pretty=oneline -3',
+                    'sort -rn in', 'sort -k2,2 -t, in', 'sort --reverse in', 'xxd -l 64 f', 'xxd -s 16 -c 8 f',
+                    'uniq -c f', 'uniq -f 1 f', 'cut -d: -f1 f', 'fold -w 40 f', 'file -b x', 'file --mime-type x',
+                    'find . -maxdepth 2 -name "*.py"', 'find . -type f -newer a', 'ls --color=never -la',
+                    'head -n 20 f', 'head -5 f', 'tail -n 5 f', 'unzip -l x.zip', '7z l x.7z',
+                    'git status --porcelain', 'git branch -a', 'git branch --list', 'git remote -v',
+                    'git remote show origin', 'git rev-parse --short HEAD', 'git describe --tags --always',
+                    'date -u', 'date +%F', 'date -d yesterday', 'date --iso-8601', 'ps aux', 'df -h', 'du -sh .',
+                    'free -h', 'readelf -h a.out', 'objdump -d a.out', 'nm a.out', 'strings -n 4 a.out'):
             self.assertTrue(ro(cmd),cmd)
 
     def test_cancelling_the_parent_stops_the_child(self):

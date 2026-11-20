@@ -56,50 +56,350 @@ GATE_TURN_TIMEOUT = 120  # a per-turn gate gets two minutes (the finish gate kee
 GATE_SLOW = 30           # a gate slower than this runs per turn at most every GATE_SLOW_EVERY seconds
 GATE_SLOW_EVERY = 600
 INTERRUPT_HOLD = 120     # after an Esc, how long a goal waits for the message that steers it
-# Programs that only read, whatever their arguments (anything that can start another program, open a shell or write
-# a file through a flag is left out: env, less, tree -o, xargs, timeout, nice ...).
-READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd', 'wc', 'echo', 'printf', 'which',
-                       'type', 'ps', 'df', 'du', 'stat', 'file', 'date', 'id', 'whoami', 'uname', 'rocm-smi', 'amd-smi',
-                       'free', 'uptime', 'sleep', 'true', 'diff', 'test',
-                       # cd only moves this shell; the rest only print what they read (a CTF's first look at a binary
-                       # or an archive was refused as a change before the done check)
-                       'cd', 'strings', 'xxd', 'od', 'hexdump', 'readelf', 'objdump', 'nm', 'sha256sum', 'sha1sum',
-                       'md5sum', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath',
-                       # (their --help lists no flag that writes a file or runs a program)
-                       'nl', 'tac', 'rev', 'cmp', 'comm', 'paste', 'fold'))
-# Archive tools in their listing-only forms (any other form extracts or writes)
-LISTING = {'unzip': ('-l', '-v', '-Z', '-Z1'), '7z': ('l',), 'tar': ('-t', '-tf', '-tvf', '-tzf', '-tjf', '-tJf', 't', 'tf', 'tvf')}
-READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files', 'shortlog', 'describe',
-                           'ls-remote', 'grep', 'cat-file', 'show-ref'))
+class _Allow:
+    """The exact options one read-only program may be given (#382 review, fourth round).
+
+    A deny-list of dangerous spellings lost three rounds: tar accepts `--use=` and `--rsh=` as abbreviations of
+    --use-compress-program and --rsh-command, --rmt-command and --index-file (which writes a file) were never
+    listed, and `git grep -iOprog` hid -O in a short cluster. So every program now names each option a read may
+    pass, and every other word - an unlisted flag, an abbreviated long name, a short cluster with an unlisted
+    letter - counts as a change. A flag's value is not inspected: it is the next word, exactly as getopt(3)
+    hands it to the program. `tar` is gone: listing needs -z / -j / -J / -Z, each of which makes tar run a
+    decompressor, and its option surface is the largest of all. `unzip -l` and `7z l` still list archives.
+    """
+    __slots__ = ('short', 'short_value', 'long', 'long_value', 'long_opt', 'max_operands', 'first',
+                 'numbers', 'require', 'dash')
+
+    def __init__(self, short='', short_value='', long=(), long_value=(), long_opt=(), max_operands=None,
+                 first=None, numbers=False, require=(), dash=False):
+        self.short = frozenset(short)
+        self.short_value = frozenset(short_value)
+        self.long = frozenset(long)
+        self.long_value = frozenset(long_value)
+        self.long_opt = frozenset(long_opt)     # bare or =VALUE (--porcelain, --color, --date)
+        self.max_operands = max_operands
+        self.first = frozenset(first) if first else None
+        self.numbers = numbers                 # a bare -N count (head -5, git log -5)
+        self.require = frozenset(require)      # at least one of these flags must appear (unzip lists with -l/-v/-Z)
+        self.dash = dash                       # long names also take one dash (find -name, -type)
+
+
+_HELP = ('help', 'version')
+# Every program a read-only command may name, with the flags it may be given. Not here: env, less, tree, xargs,
+# timeout, nice, tee (they run a program or write a file by design); sed and awk have their own grammars below.
+ALLOWED = {
+    'ls': _Allow('aAbBcCdDfFgGhHiIklLmnNopqQrRsStTuUvxX1', 'Bqw', (
+        'all', 'almost-all', 'author', 'classify', 'dereference', 'directory', 'dired', 'escape', 'file-type',
+        'group-directories-first', 'hide', 'human-readable', 'hyperlink', 'ignore', 'ignore-backups',
+        'indicator-style', 'inode', 'literal', 'no-group', 'numeric-uid-gid', 'quote-name', 'recursive', 'reverse',
+        'show-control-chars', 'si', 'size', 'sort', 'tabsize', 'time', 'time-style', 'width', 'zero', 'context',
+        *_HELP), ('block-size', 'color', 'colour', 'format', 'hide', 'hyperlink', 'ignore', 'indicator-style',
+                  'quoting-style', 'sort', 'tabsize', 'time', 'time-style', 'width'), ('color', 'hyperlink')),
+    'cat': _Allow('AbeEnstTuv', '', ('show-all', 'number-nonblank', 'show-ends', 'number', 'squeeze-blank',
+                                     'show-tabs', 'show-nonprinting', *_HELP)),
+    'head': _Allow('qvz', 'cn', ('lines', 'bytes', 'quiet', 'silent', 'verbose', 'zero-terminated', *_HELP),
+                   numbers=True),
+    'tail': _Allow('qvz', 'cn', ('lines', 'bytes', 'quiet', 'silent', 'verbose', 'zero-terminated', *_HELP),
+                   numbers=True),                      # -f / -F / --pid: follow, never needed by a read
+    'grep': _Allow('EFGPiyvwxclLoqsbHhnTZzrRdDIUaA', 'efmBCD', (
+        'basic-regexp', 'extended-regexp', 'fixed-strings', 'perl-regexp', 'regexp', 'file', 'ignore-case',
+        'no-ignore-case', 'invert-match', 'word-regexp', 'line-regexp', 'count', 'files-with-matches',
+        'files-without-match', 'only-matching', 'quiet', 'silent', 'no-messages', 'line-number', 'with-filename',
+        'no-filename', 'label', 'line-buffered', 'binary-files', 'text', 'binary', 'directories', 'devices',
+        'include', 'exclude', 'exclude-from', 'exclude-dir', 'null', 'null-data', 'color', 'colour',
+        'initial-tab', 'byte-offset', 'only-matching', 'group-separator', 'no-group-separator', 'mmap',
+        'recursive', 'dereference-recursive', 'dereference', 'no-dereference', 'after-context', 'before-context',
+        'context', 'max-count', *_HELP), ('after-context', 'before-context', 'context', 'label', 'binary-files',
+                                          'directories', 'devices', 'include', 'exclude', 'exclude-from',
+                                          'exclude-dir', 'group-separator'), ('color', 'colour', 'binary-files')),
+    'rg': _Allow('abcdfhijklmnoqrsuvwxyABCDEFGHIJKLMNOPQRSTUVW', 'eABCMTfgjmtr',
+                 ('files', 'files-with-matches', 'files-without-match', 'count', 'count-matches', 'line-number',
+                  'column', 'no-line-number', 'no-column', 'ignore-case', 'smart-case', 'case-sensitive',
+                  'word-regexp', 'line-regexp', 'invert-match', 'only-matching', 'quiet', 'max-count', 'regexp',
+                  'file', 'glob', 'iglob', 'glob-case-insensitive', 'type', 'type-not', 'type-list', 'type-add',
+                  'hidden', 'no-hidden', 'no-ignore', 'ignore', 'no-ignore-vcs', 'no-ignore-parent',
+                  'no-ignore-global', 'no-ignore-dot', 'max-depth', 'max-filesize', 'threads', 'multiline',
+                  'no-multiline', 'heading', 'no-heading', 'pretty', 'replace', 'trim', 'passthru', 'byte-offset',
+                  'line-buffered', 'null', 'null-data', 'no-messages', 'binary', 'text', 'stats', 'debug',
+                  'follow', 'no-follow', 'one-file-system', 'mmap', 'no-mmap', 'unrestricted', 'json', 'vimgrep',
+                  'pcre2', 'no-pcre2', 'engine', 'crlf', 'no-crlf', 'no-require-git', 'no-config', *_HELP),
+                 ('after-context', 'before-context', 'context', 'max-count', 'regexp', 'file', 'glob', 'iglob',
+                  'type', 'type-not', 'type-add', 'max-depth', 'max-filesize', 'threads', 'replace',
+                  'encoding', 'sort', 'sortr', 'colors', 'engine'), ('color',)),
+    'find': _Allow('HLP', 'OD', (
+        'help', 'version', 'maxdepth', 'mindepth', 'depth', 'mount', 'xdev', 'noleaf', 'follow', 'daystart',
+        'nowarn', 'warn', 'ignore_readdir_race', 'noignore_readdir_race', 'name', 'iname', 'path', 'ipath',
+        'wholename', 'iwholename', 'regex', 'iregex', 'type', 'xtype', 'size', 'mtime', 'atime', 'ctime',
+        'mmin', 'amin', 'cmin', 'newer', 'anewer', 'cnewer', 'empty', 'perm', 'user', 'group', 'uid', 'gid',
+        'nouser', 'nogroup', 'links', 'inum', 'samefile', 'lname', 'ilname', 'readable', 'writable',
+        'executable', 'true', 'false', 'not', 'a', 'and', 'o', 'or', 'print', 'print0', 'ls', 'printf',
+        'prune', 'quit', 'fstype', 'used', 'context', 'files0-from', 'regextype'), (),
+        ('maxdepth', 'mindepth', 'size', 'mtime', 'atime', 'ctime', 'mmin', 'amin', 'cmin', 'newer', 'anewer',
+         'cnewer', 'newerat', 'newerct', 'newermt', 'newerBt', 'perm', 'user', 'group', 'uid', 'gid', 'links',
+         'inum', 'samefile', 'lname', 'ilname', 'fstype', 'used', 'context', 'files0-from', 'regextype',
+         'printf', 'name', 'iname', 'path', 'ipath', 'wholename', 'iwholename', 'regex', 'iregex', 'type',
+         'xtype'), dash=True),
+    'wc': _Allow('clLmw', '', ('bytes', 'chars', 'lines', 'max-line-length', 'words', 'files0-from', *_HELP),
+                 ('files0-from',)),
+    'echo': _Allow('neE', '', _HELP),
+    'printf': _Allow('', '', _HELP),
+    'which': _Allow('as', '', ('all', 'skip-dot', 'skip-tilde', 'show-dot', 'show-tilde', 'tty-only', 'read-alias',
+                               'skip-alias', 'read-functions', 'skip-functions', *_HELP)),
+    'type': _Allow('atpPf', '', _HELP),
+    'ps': _Allow('AaCdefGHhjlMNopPrsTtUuvXyZ', 'gOo', (
+        'deselect', 'Group', 'group', 'pid', 'ppid', 'quick-pid', 'sid', 'tty', 'user', 'User', 'forest',
+        'format', 'context', 'headers', 'no-headers', 'cols', 'columns', 'width', 'rows', 'lines', 'signames',
+        'sort', 'help', 'version'), ('Group', 'group', 'pid', 'ppid', 'quick-pid', 'sid', 'tty', 'user', 'User',
+                                     'format', 'cols', 'columns', 'width', 'rows', 'lines', 'sort')),
+    'df': _Allow('aBhiHklPvT', 'tx', ('all', 'human-readable', 'si', 'inodes', 'local', 'no-sync', 'output',
+                                      'portability', 'sync', 'total', 'print-type', *_HELP),
+                 ('block-size', 'type', 'exclude-type'), ('output',)),
+    'du': _Allow('0aAbcDhHklLmPsStvxX', 'Bdt', (
+        'all', 'apparent-size', 'bytes', 'total', 'max-depth', 'human-readable', 'inodes', 'count-links',
+        'dereference', 'dereference-args', 'no-dereference', 'separate-dirs', 'summarize', 'si',
+        'one-file-system', 'null', 'exclude', 'exclude-from', 'files0-from', 'time', 'time-style', *_HELP),
+                 ('block-size', 'max-depth', 'threshold', 'exclude', 'exclude-from', 'files0-from', 'time',
+                  'time-style')),
+    'stat': _Allow('Lt', 'cf', ('dereference', 'file-system', 'format', 'printf', 'terse', *_HELP),
+                   ('format', 'printf')),
+    'file': _Allow('bcdhiklLnpPrsv', 'efFm', (
+        'brief', 'checking-printout', 'debug', 'dereference', 'exclude', 'exclude-quiet', 'extension',
+        'files-from', 'keep-going', 'list', 'magic-file', 'mime', 'mime-encoding', 'mime-type', 'no-buffer',
+        'no-dereference', 'no-pad', 'no-sandbox', 'parameter', 'preserve-date', 'print0', 'raw', 'special-files',
+        'apple', *_HELP), ('files-from', 'magic-file', 'separator', 'exclude', 'extension')),
+    'date': _Allow(),                       # checked by _date_sets: a bare operand sets the clock
+    'id': _Allow('aGgnruUz', '', ('context', *_HELP)),
+    'whoami': _Allow('', '', _HELP),
+    'uname': _Allow('asnrvmpio', '', ('all', 'kernel-name', 'nodename', 'kernel-release', 'kernel-version',
+                                      'machine', 'processor', 'hardware-platform', 'operating-system', *_HELP)),
+    'free': _Allow('bkmghwvltsc', '', ('bytes', 'kibi', 'mebi', 'gibi', 'tebi', 'si', 'wide', 'low', 'human',
+                                       'total', 'seconds', 'count', *_HELP), ('seconds', 'count')),
+    'uptime': _Allow('ps', '', ('pretty', 'since', *_HELP)),
+    'sleep': _Allow('', '', _HELP),
+    'true': _Allow('', '', _HELP),
+    'diff': _Allow('abBcCdDeEfFhiIlnNpPqrstTuvwWXyZ', 'CUF', (
+        'normal', 'brief', 'ed', 'rcs', 'side-by-side', 'context', 'unified', 'expand-tabs', 'initial-tab',
+        'tabsize', 'suppress-blank-empty', 'minimal', 'ignore-all-space', 'ignore-space-change',
+        'ignore-space-at-eol', 'ignore-blank-lines', 'ignore-case', 'ignore-file-name-case',
+        'no-ignore-file-name-case', 'ignore-matching-lines', 'ignore-tab-expansion', 'ignore-trailing-space',
+        'ignore-cr-at-eol', 'strip-trailing-cr', 'text', 'new-file', 'unidirectional-new-file', 'recursive',
+        'no-dereference', 'report-identical-files', 'starting-file', 'show-c-function', 'show-function-line',
+        'speed-large-files', 'color', 'palette', 'left-column', 'suppress-common-lines', 'width', 'from-file',
+        'to-file', 'label', 'ifdef', 'GTYPE-group-format', 'LTYPE-line-format', 'line-format', 'horizon-lines',
+        'exclude', 'exclude-from', 'help', 'version'), ('tabsize', 'width', 'from-file', 'to-file', 'label',
+                                                        'GTYPE-group-format', 'LTYPE-line-format', 'line-format',
+                                                        'horizon-lines', 'exclude', 'exclude-from'),
+                 ('color', 'palette')),
+    'test': _Allow('bcdefghkLnp r sStuwxzOGN'.replace(' ', ''), '', ()),
+    'cd': _Allow('LPe@', '', ()),
+    'pwd': _Allow('LP', '', _HELP),
+    'strings': _Allow('adfow', 'ntes U'.replace(' ', ''), (
+        'all', 'data', 'print-file-name', 'bytes', 'radix', 'include-all-whitespace', 'encoding',
+        'output-separator', 'unicode', *_HELP), ('bytes', 'radix', 'encoding', 'output-separator'),
+                 ),
+    'xxd': _Allow('abCdeEhipuv', 'clnosg', (
+        'bits', 'cols', 'color', 'decimal', 'include', 'name', 'group', 'offset', 'seek', 'len', 'groupsize',
+        'uppercase', 'help', 'version'), ('cols', 'len', 'offset', 'seek', 'groupsize', 'name', 'group'),
+                 ('color',), max_operands=1),          # -r / -R (rebuild a binary) are not listed
+    'od': _Allow('abc dDefhHiIlLoOsSvVxX'.replace(' ', ''), 'AjNStw', (
+        'address-radix', 'skip-bytes', 'read-bytes', 'strings', 'format', 'output-duplicates', 'traditional',
+        'endian', 'width', 'help', 'version'), ('address-radix', 'skip-bytes', 'read-bytes', 'strings', 'format',
+                                                'endian', 'width')),
+    'hexdump': _Allow('bcCdovx', 'efns', ('help', 'version'), ('format', 'format-file', 'length', 'skip')),
+    'readelf': _Allow('aAcCdDeghHIjlLnPprRsStTuvVwWxXz', 'j', (
+        'all', 'arch-specific', 'debug-dump', 'dyn-syms', 'dynamic', 'file-header', 'hex-dump', 'histogram',
+        'notes', 'relocs', 'section-details', 'section-groups', 'section-headers', 'sections', 'segments',
+        'string-dump', 'symbols', 'syms', 'unwind', 'version-info', 'wide', 'ctf', 'ctf-parent', 'ctf-strings',
+        'ctf-symbols', 'dwarf-depth', 'dwarf-start', 'got-contents', 'lto-syms', 'no-demangle',
+        'no-extra-sym-info', 'no-recurse-limit', 'recurse-limit', 'sym-base', 'unicode', *_HELP),
+                  ('hex-dump', 'string-dump', 'section', 'dwarf-depth', 'dwarf-start', 'sym-base', 'ctf-parent',
+                   'ctf-strings', 'ctf-symbols', 'got-contents'), ('debug-dump', 'arch-specific')),
+    'objdump': _Allow('aCdDfFgGhHijLlmpPrRsStTvVwWxXzZ', 'AbmM', (
+        'adjust-vma', 'all-headers', 'archive-headers', 'debugging', 'debugging-tags', 'decompress',
+        'disassemble', 'disassemble-all', 'disassembler-color', 'disassembler-options', 'disassemble-zeroes',
+        'dwarf', 'dwarf-check', 'dwarf-depth', 'dwarf-start', 'dynamic-reloc', 'dynamic-syms', 'file-headers',
+        'file-offsets', 'file-start-context', 'full-contents', 'help', 'info', 'inlines', 'insn-width',
+        'line-numbers', 'no-addresses', 'no-recurse-limit', 'prefix', 'prefix-addresses', 'prefix-strip',
+        'private', 'private-headers', 'process-links', 'recurse-limit', 'reloc', 'section', 'show-all-symbols',
+        'source', 'special-syms', 'stabs', 'start-address', 'stop-address', 'syms', 'unicode', 'version',
+        'wide'), ('adjust-vma', 'architecture', 'disassembler-options', 'dwarf-depth', 'dwarf-start',
+                  'insn-width', 'prefix', 'prefix-strip', 'section', 'start-address', 'stop-address'),
+        ('disassembler-color', 'visualize-jumps')),
+    'nm': _Allow('aABCDfghlnpPrSsUuvVWxz', 't', (
+        'defined-only', 'extern-only', 'dynamic', 'debug-syms', 'demangle', 'no-demangle', 'format', 'print-size',
+        'radix', 'line-numbers', 'no-sort', 'portability', 'reverse-sort', 'numeric-sort', 'size-sort',
+        'sort-common', 'special-syms', 'synthetic', 'undefined-only', 'with-symbol-versions', *_HELP),
+                 ('format', 'radix')),
+    'sha256sum': _Allow('bclw', '', ('binary', 'check', 'quiet', 'status', 'warn', 'strict', 'zero', 'tag',
+                                     'ignore-missing', *_HELP)),
+    'sha1sum': _Allow('bclw', '', ('binary', 'check', 'quiet', 'status', 'warn', 'strict', 'zero', 'tag',
+                                   'ignore-missing', *_HELP)),
+    'md5sum': _Allow('bclw', '', ('binary', 'check', 'quiet', 'status', 'warn', 'strict', 'zero', 'tag',
+                                  'ignore-missing', *_HELP)),
+    'sort': _Allow('bCdfghimMnrRsVuVz', 'kStT', (
+        'batch-size', 'buffer-size', 'check', 'check-silent', 'debug', 'dictionary-order', 'general-numeric-sort',
+        'human-numeric-sort', 'ignore-case', 'ignore-leading-blanks', 'ignore-nonprinting', 'key', 'merge',
+        'month-sort', 'numeric-sort', 'parallel', 'random-sort', 'random-source', 'reverse', 'stable', 'sort',
+        'temporary-directory', 'unique', 'version-sort', 'zero-terminated', *_HELP),
+                 ('batch-size', 'buffer-size', 'field-separator', 'files0-from', 'key', 'parallel', 'random-source',
+                  'sort', 'temporary-directory')),
+    'uniq': _Allow('cdDiu z'.replace(' ', ''), 'fsw', (
+        'all-repeated', 'check-chars', 'count', 'group', 'ignore-case', 'repeated', 'skip-chars', 'skip-fields',
+        'unique', 'zero-terminated', *_HELP), ('check-chars', 'skip-chars', 'skip-fields'), max_operands=1),
+    'cut': _Allow('s', 'bcdf', ('complement', 'only-delimited', 'zero-terminated', 'output-delimiter', *_HELP),
+                  ('bytes', 'characters', 'delimiter', 'fields', 'output-delimiter')),
+    'tr': _Allow('cdst', '', ('complement', 'delete', 'squeeze-repeats', 'truncate-set1', *_HELP)),
+    'basename': _Allow('az', 's', ('multiple', 'suffix', 'zero', *_HELP), ('suffix',)),
+    'dirname': _Allow('z', '', ('zero', *_HELP)),
+    'realpath': _Allow('eEmLqPsz', '', ('canonicalize', 'canonicalize-existing', 'canonicalize-missing', 'logical',
+                                        'physical', 'quiet', 'strip', 'zero', 'relative-to', 'relative-base',
+                                        *_HELP), ('relative-to', 'relative-base')),
+    'nl': _Allow('p', 'bdfhilnsvw', (
+        'body-numbering', 'section-delimiter', 'footer-numbering', 'header-numbering', 'join-blank-lines',
+        'line-increment', 'no-renumber', 'number-format', 'number-separator', 'number-width',
+        'starting-line-number', *_HELP), ('body-numbering', 'section-delimiter', 'footer-numbering',
+                                          'header-numbering', 'join-blank-lines', 'line-increment', 'number-format',
+                                          'number-separator', 'number-width', 'starting-line-number')),
+    'tac': _Allow('br', 's', ('before', 'regex', 'separator', *_HELP), ('separator',)),
+    'rev': _Allow('', '', _HELP),
+    'cmp': _Allow('blsv', 'in', ('print-bytes', 'ignore-initial', 'print-chars', 'quiet', 'silent', 'verbose',
+                                 *_HELP), ('ignore-initial', 'print-chars'), max_operands=2),
+    'comm': _Allow('123', '', ('check-order', 'nocheck-order', 'total', 'zero-terminated', 'output-delimiter',
+                               *_HELP), ('output-delimiter',), max_operands=2),
+    'paste': _Allow('sz', 'd', ('serial', 'zero-terminated', 'delimiters', *_HELP), ('delimiters',)),
+    'fold': _Allow('bs', 'w', ('bytes', 'characters', 'spaces', 'width', *_HELP), ('width',)),
+    # archive listing only: any other subcommand extracts or writes (tar is gone: see _Allow)
+    'unzip': _Allow('lvtqZ1', '', ('help',), require=('l', 'v', 'Z', 't')),
+    '7z': _Allow('', '', (), first=('l',)),
+    # the GPUs are read with a known query flag only: a reset, a clock / fan / power set or a bad-page retirement
+    # is a change, and a GPU reset can take the owner's monitors or their model down.
+    'rocm-smi': _Allow('hval', 'd', (
+        'all', 'json', 'showallinfo', 'showbus', 'showclocks', 'showenergycounter', 'showeeprom', 'showfan',
+        'showfwinfo', 'showgpuclocks', 'showhw', 'showmaxpower', 'showmemclocks', 'showmeminfo', 'showmemvendor',
+        'showpagesinfo', 'showpendingretirement', 'showperflevel', 'showpower', 'showproductname', 'showprofile',
+        'showrasinfo', 'showreplaycount', 'showremappedrows', 'showretiredpages', 'showserial', 'showtemp',
+        'showtopo', 'showuniqueid', 'showuse', 'showversion', 'showvoltage', 'showxgmierr', *_HELP),
+                              ('device',)),
+    'amd-smi': _Allow('hvgwin', '', (
+        'json', 'csv', 'asic', 'bus', 'vbios', 'board', 'driver', 'ras', 'vram', 'pcie', 'clock', 'usage', 'temp',
+        'power', 'voltage', 'limit', 'error', *_HELP), ('gpu', 'watch', 'interval', 'iterations'),
+                       first=('version', 'list', 'monitor', 'static', 'metric', 'firmware', 'topology')),
+}
+# git's read subcommands, each with the flags it may be given. The review's `git grep -iOprog` cluster, `git log
+# --out=x` (an abbreviation of --output) and --ext-diff / --textconv / --filters (they run a driver) are all
+# refusals now: none of those names is below.
+GIT = {
+    '--version': _Allow('', '', (), max_operands=0),
+    '--help': _Allow('', '', (), max_operands=0),
+    'version': _Allow('', '', (), max_operands=0),
+    'status': _Allow('sbvzu', '', ('short', 'branch', 'long', 'verbose', 'null', 'untracked-files', 'ignored',
+                                   'ignore-submodules', 'column', 'no-column', 'ahead-behind', 'no-ahead-behind',
+                                   'renames', 'no-renames', 'porcelain', 'show-stash', 'no-optional-locks', *_HELP),
+                     (), ('porcelain', 'untracked-files', 'ignored', 'ignore-submodules', 'column'), max_operands=0),
+    'log': _Allow('pucmszg', 'nUSGL', (
+        'oneline', 'graph', 'decorate', 'no-decorate', 'stat', 'shortstat', 'numstat', 'name-only', 'name-status',
+        'summary', 'patch', 'no-patch', 'raw', 'abbrev-commit', 'no-abbrev-commit', 'full-history', 'first-parent',
+        'merges', 'no-merges', 'reverse', 'all', 'not', 'branches', 'tags', 'remotes', 'no-walk', 'walk-reflogs',
+        'topo-order', 'date-order', 'author-date-order', 'ancestry-path', 'simplify-by-decoration', 'dense',
+        'sparse', 'boundary', 'left-right', 'cherry-pick', 'source', 'use-mailmap', 'no-use-mailmap',
+        'relative-date', 'notes', 'no-notes', 'show-notes', 'standard-notes', 'no-standard-notes', 'max-count',
+        'skip', 'since', 'since-as-filter', 'until', 'after', 'before', 'author', 'committer', 'grep', 'all-match',
+        'invert-grep', 'regexp-ignore-case', 'basic-regexp', 'extended-regexp', 'fixed-strings', 'perl-regexp',
+        'encoding', 'expand-tabs', 'no-expand-tabs', 'show-linear-break', 'glob', 'exclude', 'exclude-hidden',
+        'decorate-refs', 'decorate-refs-exclude', 'clear-decorations', 'no-ext-diff', 'no-textconv', 'follow',
+        'no-renames', 'find-renames', 'diff-filter', 'patch-with-stat', 'patch-with-raw', 'cc', 'combined',
+        'no-color', 'color', 'pretty', 'format', 'date', 'pretty', 'no-walk', 'ignore-missing', *_HELP),
+                    ('max-count', 'skip', 'since', 'since-as-filter', 'until', 'after', 'before', 'author',
+                     'committer', 'grep', 'encoding', 'show-linear-break', 'glob', 'exclude', 'exclude-hidden',
+                     'decorate-refs', 'decorate-refs-exclude', 'diff-filter', 'format', 'pretty', 'date',
+                     'unified', 'inter-hunk-context', 'word-diff-regex', 'src-prefix', 'dst-prefix', 'line-prefix',
+                     'notes', 'show-notes', 'standard-notes', 'relative-date'), ('color', 'decorate', 'notes',
+                                                                                  'pretty', 'date', 'expand-tabs'),
+                    numbers=True),
+    'diff': _Allow('pRwabsBdDs', 'UC', (
+        'patch', 'no-patch', 'stat', 'numstat', 'shortstat', 'name-only', 'name-status', 'summary', 'raw',
+        'full-index', 'binary', 'abbrev', 'find-renames', 'no-renames', 'find-copies', 'find-copies-harder',
+        'diff-filter', 'diff-algorithm', 'minimal', 'patience', 'histogram', 'ignore-all-space',
+        'ignore-space-change', 'ignore-space-at-eol', 'ignore-blank-lines', 'ignore-cr-at-eol',
+        'ignore-matching-lines', 'text', 'color', 'no-color', 'color-words', 'word-diff', 'word-diff-regex',
+        'no-ext-diff', 'no-textconv', 'exit-code', 'quiet', 'no-index', 'reverse', 'src-prefix', 'dst-prefix',
+        'line-prefix', 'output-indicator-new', 'output-indicator-old', 'output-indicator-context', 'check',
+        'cached', 'staged', 'merge-base', 'ours', 'theirs', 'relative', 'unified', 'inter-hunk-context',
+        'function-context', 'no-function-context', 'ignore-submodules', 'submodule', 'ita-visible-in-index',
+        'find-renames', 'stat-width', 'stat-name-width', 'stat-count', *_HELP),
+                  ('diff-filter', 'diff-algorithm', 'ignore-matching-lines', 'word-diff-regex', 'src-prefix',
+                   'dst-prefix', 'line-prefix', 'relative', 'unified', 'inter-hunk-context', 'ignore-submodules',
+                   'submodule', 'stat-width', 'stat-name-width', 'stat-count', 'abbrev'),
+                  ('color', 'color-words', 'word-diff', 'function-context', 'find-renames', 'find-copies',
+                   'find-copies-harder', 'ita-visible-in-index')),
+    'show': _Allow('pucmszg', 'nUSGL', (
+        'oneline', 'graph', 'decorate', 'no-decorate', 'stat', 'shortstat', 'numstat', 'name-only', 'name-status',
+        'summary', 'patch', 'no-patch', 'raw', 'abbrev-commit', 'no-abbrev-commit', 'first-parent', 'reverse',
+        'no-walk', 'notes', 'no-notes', 'show-notes', 'standard-notes', 'no-standard-notes', 'max-count', 'skip',
+        'pretty', 'format', 'date', 'no-color', 'color', 'no-ext-diff', 'no-textconv', 'no-renames',
+        'find-renames', 'diff-filter', 'src-prefix', 'dst-prefix', 'line-prefix', 'unified', 'text', 'binary',
+        'encoding', 'expand-tabs', 'no-expand-tabs', 'show-linear-break', *_HELP),
+                  ('max-count', 'skip', 'pretty', 'format', 'date', 'diff-filter', 'src-prefix', 'dst-prefix',
+                   'line-prefix', 'unified', 'encoding', 'show-linear-break', 'notes', 'show-notes',
+                   'standard-notes', 'abbrev'), ('color', 'decorate', 'notes', 'pretty', 'date', 'expand-tabs'),
+                  numbers=True),
+    'branch': _Allow('arv', '', ('list', 'show-current', 'all', 'remotes', 'verbose', 'no-color', 'column',
+                                 'no-column', 'ignore-case', 'no-abbrev', 'abbrev', *_HELP),
+                     ('sort', 'contains', 'merged', 'no-contains', 'no-merged', 'points-at', 'format'),
+                     ('color', 'column'), max_operands=0),
+    'remote': _Allow('v', '', ('verbose',), (), (), max_operands=2, first=('show', 'get-url')),
+    'rev-parse': _Allow('', '', (
+        'all', 'branches', 'tags', 'remotes', 'not', 'verify', 'short', 'abbrev-ref', 'symbolic',
+        'symbolic-full-name', 'sq', 'local-env-vars', 'git-dir', 'show-toplevel', 'show-cdup', 'show-prefix',
+        'show-superproject-working-tree', 'is-inside-work-tree', 'is-inside-git-dir', 'is-bare-repository',
+        'is-shallow-repository', 'resolve-git-dir', 'show-object-format', 'shared-index-path', 'since', 'after',
+        'until', 'before', 'default', 'prefix', 'glob', 'exclude', 'exclude-hidden', 'disambiguate',
+        'end-of-options', 'sq-quote', *_HELP), ('short', 'abbrev-ref', 'resolve-git-dir', 'show-object-format',
+                                                'since', 'after', 'until', 'before', 'default', 'prefix', 'glob',
+                                                'exclude', 'exclude-hidden', 'disambiguate'),
+                  ('short', 'abbrev-ref', 'show-object-format')),
+    'blame': _Allow('bceflnstwpM', 'LCS', (
+        'root', 'show-stats', 'show-name', 'show-number', 'show-email', 'porcelain', 'line-porcelain',
+        'incremental', 'reverse', 'contents', 'date', 'encoding', 'abbrev', 'since', 'progress', 'score-debug',
+        'ignore-rev', 'ignore-revs-file', 'color-lines', 'color-by-age', 'minimal', 'first-parent', *_HELP),
+                  ('reverse', 'contents', 'date', 'encoding', 'abbrev', 'since', 'ignore-rev', 'ignore-revs-file',
+                   'score-debug'), ('color-lines', 'color-by-age')),
+    'ls-files': _Allow('cdimosuktz', '', (
+        'cached', 'deleted', 'modified', 'others', 'ignored', 'stage', 'unmerged', 'killed', 'zero', 'debug',
+        'exclude-standard', 'exclude', 'exclude-from', 'exclude-per-directory', 'directory',
+        'no-empty-directory', 'eol', 'full-name', 'error-unmatch', 'with-tree', 'abbrev', 'deduplicate',
+        'recurse-submodules', 'sparse', 'format', *_HELP), ('exclude', 'exclude-from', 'exclude-per-directory',
+                                                            'with-tree', 'abbrev', 'format')),
+    'shortlog': _Allow('snecw', '', ('summary', 'numbered', 'email', 'committer', 'group', 'format', 'date',
+                                     'no-merges', 'merges', *_HELP), ('group', 'format', 'date')),
+    'describe': _Allow('', '', ('tags', 'long', 'short', 'always', 'first-parent', 'exact-match', 'contains',
+                                'debug', 'all', 'abbrev', 'candidates', 'match', 'exclude', 'dirty', 'broken',
+                                *_HELP), ('abbrev', 'candidates', 'match', 'exclude'), ('dirty', 'broken')),
+    'ls-remote': _Allow('htq', '', ('heads', 'tags', 'refs', 'get-url', 'exit-code', 'symref', 'sort', 'quiet',
+                                    *_HELP), ('sort',)),
+    'grep': _Allow('iIwvclLonhHabqzEFGP', 'efmABC', (
+        'cached', 'untracked', 'no-index', 'full-name', 'line-number', 'column', 'no-line-number', 'no-column',
+        'ignore-case', 'invert-match', 'word-regexp', 'line-regexp', 'count', 'only-matching', 'quiet', 'all-match',
+        'extended-regexp', 'basic-regexp', 'fixed-strings', 'perl-regexp', 'break', 'heading', 'show-function',
+        'recurse-submodules', 'no-recurse-submodules', 'color', 'no-color', 'null', 'and', 'or', 'not',
+        'files-with-matches', 'files-without-match', 'max-depth', 'threads', 'encoding', 'function-context',
+        'after-context', 'before-context', 'context', *_HELP), ('e', 'regexp', 'f', 'file', 'm', 'max-count',
+                                                                 'max-depth', 'threads', 'encoding', 'A',
+                                                                 'after-context', 'B', 'before-context', 'C',
+                                                                 'context'), ('color',)),
+    'cat-file': _Allow('tsep', '', ('batch', 'batch-check', 'batch-all-objects', 'buffer', 'follow-symlinks',
+                                    'allow-unknown-type', 'unordered', *_HELP), (), ()),
+    'show-ref': _Allow('dhsq', '', ('head', 'heads', 'tags', 'dereference', 'hash', 'verify', 'exists', 'quiet',
+                                    'abbrev', 'exclude-existing', *_HELP), ('abbrev',), ('exclude-existing',)),
+}
 # Arguments that make a read-only program act: find's -exec / -execdir / -ok / -okdir / -delete / -fprint* / -fls,
 # git's --output, rg's --pre (it runs a command on each file), and any redirection, substitution or tee.
 NULL_REDIRECT = re.compile(r'(?<![\w>])(?:\d|&)?>>?\s*/dev/null\b|(?<![\w>])\d?>&\d\b')
 CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b|--pre\b')
 
 
-# The flags of xxd and uniq that take a value: that value is not a file (xxd -l 64 f reads one file).
-VALUE_FLAGS = {'xxd': ('-l', '-s', '-c', '-g', '-o', '-n', '-len', '-seek', '-cols', '-groupsize', '-offset', '-name'),
-               'uniq': ('-f', '-s', '-w')}
-# rocm-smi and amd-smi read the GPUs, but a reset, a clock / fan / power set or a bad-page retirement is a change - and
-# a GPU reset can take the owner's monitors or their model down. They are allow-listed flag by flag (#382 review:
-# `amd-smi reset -g 0` and `rocm-smi --gpureset -d 0` classified as read-only, because READ_ONLY had them whole):
-# every word that starts with '-' must be a known query flag, and amd-smi's first word must be a query subcommand.
-# Anything else - --gpureset, --resetclocks, --setfan, set, reset, partition - is a change. The list is deliberately
-# short: a query form it does not know is refused, and the parent can run it.
-ROCM_SMI_FLAGS = frozenset((
-    '-h', '--help', '-v', '--version', '-a', '--alldevices', '-l', '--listdevices', '-d', '--showdriverversion',
-    '--json', '--device', '--showallinfo', '--showbus', '--showclocks', '--showenergycounter', '--showeeprom',
-    '--showfan', '--showfwinfo', '--showgpuclocks', '--showhw', '--showmaxpower', '--showmemclocks',
-    '--showmeminfo', '--showmemvendor', '--showpagesinfo', '--showpendingretirement', '--showperflevel',
-    '--showpower', '--showproductname', '--showprofile', '--showrasinfo', '--showreplaycount', '--showremappedrows',
-    '--showretiredpages', '--showserial', '--showtemp', '--showtopo', '--showuniqueid', '--showuse',
-    '--showversion', '--showvoltage', '--showxgmierr'))
-AMD_SMI_QUERY = frozenset(('version', 'list', 'monitor', 'static', 'metric', 'firmware', 'topology'))
-AMD_SMI_FLAGS = frozenset(('-h', '--help', '-v', '--version', '--json', '--csv', '-g', '--gpu', '-w', '--watch',
-                          '-i', '--interval', '-n', '--iterations', '--asic', '--bus', '--vbios', '--board',
-                          '--driver', '--ras', '--vram', '--pcie', '--clock', '--usage', '--temp', '--power',
-                          '--voltage', '--limit', '--error'))
-# the long names date and file accept as reads (any other long name is refused: `--set` and `--compile` write)
+# date's long names: a bare read name, or a name that takes a value. Any other (--set, an abbreviation, an
+# unknown) is a change; a bare operand sets the clock (checked by _date_sets).
 DATE_READ_LONG = frozenset(('utc', 'universal', 'rfc-2822', 'rfc-email', 'iso-8601', 'debug', 'help', 'version',
                             'date', 'reference', 'file', 'resolution', 'rfc-3339'))
 DATE_VALUE_LONG = frozenset(('date', 'reference', 'file', 'resolution', 'rfc-3339', 'iso-8601'))
@@ -185,80 +485,6 @@ def _awk_reads(words):
     return bool(AWK_PRINT.fullmatch(args[0])) and not any(a.startswith('-') and a != '-' for a in args[1:])
 
 
-def _sort_writes(w):
-    """A sort argument that writes a file or runs a program: -o in any short form (-ro, -oout, -S1ofile; an o in an
-    attached value like -T/opt is refused too, harmlessly), and --output / --compress-program or any unambiguous
-    abbreviation GNU accepts (--out=F, --compress-p=P)."""
-    if w.startswith('--'):
-        name = w[2:].split('=', 1)[0]
-        return bool(name) and ('output'.startswith(name) or ('compress-program'.startswith(name) and len(name) >= 2))
-    return w.startswith('-') and 'o' in w
-
-
-def _operands(args, takes_value):
-    out, skip = [], False
-    for w in args:
-        if skip:
-            skip = False
-        elif w in takes_value:
-            skip = True
-        elif w == '-' or not w.startswith('-'):
-            out.append(w)
-    return out
-
-
-def _smi_query(words):
-    """rocm-smi / amd-smi in a known query form only (ROCM_SMI_FLAGS / AMD_SMI_QUERY). Every '-' word is a listed query
-    flag; amd-smi's first non-flag word is a query subcommand; other words are a flag's value or a device index."""
-    prog, args = words[0], words[1:]
-    if prog == 'amd-smi':
-        plain = [a for a in args if not a.startswith('-')]
-        if not plain or plain[0] not in AMD_SMI_QUERY:
-            return False
-    flags = ROCM_SMI_FLAGS if prog == 'rocm-smi' else AMD_SMI_FLAGS
-    for w in args:
-        if w.startswith('-') and w != '-' and w.split('=', 1)[0] not in flags:
-            return False
-    return True
-
-
-def _file_writes(w):
-    """file's arguments that write or run a program: -C / --compile writes a compiled magic file (x.mgc), -z /
-    --uncompress looks inside a compressed file by running its decompressor."""
-    if w.startswith('--'):
-        name = w[2:].split('=', 1)[0]
-        return bool(name) and (('compile'.startswith(name) and len(name) >= 2) or
-                               ('uncompress'.startswith(name) and len(name) >= 2))
-    return w.startswith('-') and w != '-' and bool(set(w[1:]) & {'C', 'z', 'Z'})
-
-
-# git arguments that run a program or write a file, which git accepts abbreviated to any unique prefix (so --out=x
-# writes what --output= does): --ext-diff / --textconv / --filters / --open-files-in-pager / --upload-pack /
-# --rsh-command / --output / --exec. A word is checked as a prefix of one of these (#382 review: `git show --textconv`,
-# `git cat-file --filters`, `git log --ext-diff` ran a filter or a diff driver).
-GIT_RUNS = ('ext-diff', 'textconv', 'filters', 'open-files-in-pager', 'upload-pack', 'rsh-command', 'output', 'exec',
-            'show-signature')
-
-
-def _git_runs(w):
-    if not w.startswith('--') or w == '--':
-        return False
-    name = w[2:].split('=', 1)[0]
-    return any(d.startswith(name) for d in GIT_RUNS)
-
-
-# binutils programs in READ_ONLY that load a plugin with --plugin (dlopen: it runs that file's code). Verified live:
-# `nm --plugin evil.so a.out` printed the plugin's output (#382 review, third round).
-PLUGIN_PROGS = frozenset(('nm', 'objdump', 'readelf'))
-
-
-def _plugin_load(prog, w):
-    if prog not in PLUGIN_PROGS or not w.startswith('--') or w == '--':
-        return False
-    name = w[2:].split('=', 1)[0]
-    return bool(name) and 'plugin'.startswith(name)
-
-
 def _date_sets(args):
     """date writes the clock with -s / --set and with a bare operand (`date 010100002020`); a +FORMAT operand, -d,
     -r, -f, -u, -I and -R only read. Any long name or short flag not known to read counts as a set."""
@@ -296,34 +522,69 @@ def _date_sets(args):
     return False
 
 
-def _runs_programs(prog, words):
-    """An argument that runs another program even though prog is read-only in this form: tar --checkpoint-action=exec
-    (and its abbreviations), tar -I/-F/--use-compress-program/--info-script/--to-command, git grep -O /
-    --open-files-in-pager, git ls-remote --upload-pack (#382 review: `tar -tf t.tar --checkpoint=1
-    '--checkpoint-action=exec=touch tar_pwned'` and `git grep -O<prog>` ran a script)."""
-    for w in words[1:]:
-        name = w[2:].split('=', 1)[0] if w.startswith('--') else ''
-        if name and ((('checkpoint-action'.startswith(name)) and len(name) >= 12) or
-                     (('use-compress-program'.startswith(name)) and len(name) >= 6) or
-                     (('info-script'.startswith(name)) and len(name) >= 6) or
-                     (('to-command'.startswith(name)) and len(name) >= 6) or
-                     (('upload-pack'.startswith(name)) and len(name) >= 6) or
-                     (('rsh-command'.startswith(name)) and len(name) >= 6)):
-            return True
-        if prog == 'tar' and w.startswith('--checkpoint'):
-            return True               # (--checkpoint itself only prints progress; refusing it too costs a listing little)
-        if prog == 'tar' and w.startswith('-') and not w.startswith('--') and ('I' in w or 'F' in w):
-            return True               # -I PROG / -F SCRIPT: a compress program or an info script to run
-        if prog == 'git' and len(words) > 1 and words[1] == 'grep' and (
-                w.startswith('-O') or w.startswith('--open-files-in-pager')):
-            return True
-    return False
+def _allow_ok(spec, args):
+    """Every word of args fits spec (_Allow): a listed short flag, a short cluster of listed letters, a listed long
+    name, or an operand. An unlisted flag, an abbreviation of a long name (getopt would accept it, so this refuses
+    every --out= that is not exactly --output=), a short cluster with one unlisted letter, or more operands than
+    the program reads all mean: not a read."""
+    used, i, operands = set(), 0, []
+    while i < len(args):
+        w = args[i]
+        if w == '-' or not w.startswith('-'):
+            operands.append(w)
+            i += 1
+            continue
+        if w == '--':
+            operands.extend(args[i + 1:])
+            break
+        if w.startswith('--'):
+            name, eq, _ = w[2:].partition('=')
+            if name in spec.long_opt:
+                i += 1
+            elif name in spec.long_value:
+                i += 1 if eq else 2
+            elif eq or name not in spec.long:
+                return False
+            else:
+                i += 1
+            continue
+        body = w[1:]
+        if spec.numbers and body.isdigit():
+            i += 1
+            continue
+        if spec.dash and body in spec.long:
+            i += 1
+            continue
+        if spec.dash and body in spec.long_value:
+            i += 2
+            continue
+        j, ok = 0, True
+        while j < len(body):
+            ch = body[j]
+            if ch in spec.short:
+                used.add(ch)
+                j += 1
+            elif ch in spec.short_value:
+                used.add(ch)
+                i += 0 if j + 1 < len(body) else 1    # the rest of the word, or the next one, is its value
+                break
+            else:
+                ok = False
+                break
+        if not ok:
+            return False
+        i += 1
+    if spec.require and not (spec.require & used):
+        return False                  # unzip without -l / -v / -Z / -t extracts
+    if spec.first and operands and operands[0] not in spec.first:
+        return False                  # amd-smi's subcommand, 7z's, git remote show
+    return spec.max_operands is None or len(operands) <= spec.max_operands
 
 
 def read_only_command(cmd):
-    """A terminal command that changes nothing: every part of a pipeline or && / || / ; chain is a read-only program
-    with no changing argument (CHANGING). Anything unclear counts as a change (the per-turn gate runs; plan mode
-    refuses it)."""
+    """A terminal command that changes nothing: every part of a pipeline or && / || / ; chain is a program in
+    ALLOWED or GIT (sed and awk on their own grammars) given only options listed for it (_allow_ok). Anything else
+    counts as a change (the per-turn gate runs; plan mode refuses it)."""
     if not isinstance(cmd, str) or not cmd.strip():
         return False
     # a redirection to /dev/null or between streams writes nothing: 'find / ... 2>/dev/null' was refused as a change
@@ -337,49 +598,21 @@ def read_only_command(cmd):
         words = _plain_words(part)
         if not words or CHANGING.search(' '.join(words)):
             return False                  # (CHANGING again on the words: a quoted "-delete" or --pr''e is one)
-        if _runs_programs(words[0], words):
-            return False                  # (tar's -I / --checkpoint-action=exec, git grep -O ...: #382 review)
-        if words[0] in ('sed', 'awk'):
-            if not _plain_words(part, variables=False) or not (_sed_reads if words[0] == 'sed' else _awk_reads)(words):
+        prog, args = words[0], words[1:]
+        if prog in ('sed', 'awk'):
+            if not _plain_words(part, variables=False) or not (_sed_reads if prog == 'sed' else _awk_reads)(words):
                 return False
-        elif words[0] == 'git':
-            sub = words[1:2]
-            if sub == ['branch'] and all(w in ('-a', '-r', '-v', '-vv', '--list', '--show-current') for w in words[2:]):
-                continue                  # listing branches; with any other argument it creates or deletes one
-            if sub == ['remote'] and (words[2:] in ([], ['-v'], ['--verbose']) or words[2:3] in (['show'], ['get-url'])):
-                continue                  # listing remotes ('git remote -v' was refused three times before a done check)
-            if not sub or sub[0] not in READ_ONLY_GIT:
+        elif prog == 'git':
+            spec = GIT.get(args[0]) if args else None
+            if spec is None or not _allow_ok(spec, args[1:]):
+                return False              # (no --output, --ext-diff, --textconv, --filters, -O ...: #382 review)
+        elif prog == 'date':
+            if _date_sets(args):
+                return False              # date -s / a bare operand sets the clock
+        else:
+            spec = ALLOWED.get(prog)
+            if spec is None or not _allow_ok(spec, args):
                 return False
-            if any(_git_runs(w) for w in words[1:]):
-                return False              # --ext-diff / --textconv / --filters / --show-signature run a program
-                                          # (or a filter from the repository's config); git abbreviates long names,
-                                          # so --out=x writes through what --output would (#382 review)
-        elif words[0] in LISTING:
-            if not any(w in LISTING[words[0]] for w in words[1:]) or any(
-                    w in ('-x', 'x', '-d', '-o', 'e', 'a', 'u', 'd') or w.startswith(('-x', '-c', '-r', '-u', '-A'))
-                    for w in words[1:]):
-                return False
-        elif words[0] not in READ_ONLY:
-            return False
-        elif words[0] == 'sort' and any(_sort_writes(w) for w in words[1:]):
-            return False                  # sort -o FILE writes it, in any short form (-ro, -oout, -S1ofile; an 'o' in an
-                                          # attached value like -T/opt is refused too: harmless); --compress-program runs one
-        elif words[0] == 'xxd' and any(re.fullmatch(r'-[A-Za-z]*r[A-Za-z]*', w) or w == '-revert' for w in words[1:]):
-            return False                  # xxd -r rebuilds a binary
-        elif words[0] in ('rocm-smi', 'amd-smi') and not _smi_query(words):
-            return False                  # a reset / clock / fan / partition set is a change (#382 review)
-        elif any(_plugin_load(words[0], w) for w in words[1:]):
-            return False                  # nm / objdump / readelf --plugin loads and runs a shared object
-        elif words[0] == 'file' and any(_file_writes(w) for w in words[1:]):
-            return False                  # file -C / --compile writes a compiled magic file, -z runs a decompressor
-        elif words[0] == 'date' and _date_sets(words[1:]):
-            return False                  # date -s / a bare operand sets the clock
-        elif words[0] == 'rg' and any(w.split('=', 1)[0] == '--hostname-bin' or
-                                      (w.startswith('-') and not w.startswith('--') and 'z' in w) or
-                                      w.split('=', 1)[0] in ('--search-zip',) for w in words[1:]):
-            return False                  # rg --hostname-bin / -z: run a command, or a decompressor
-        elif words[0] in VALUE_FLAGS and len(_operands(words[1:], VALUE_FLAGS[words[0]])) > 1:
-            return False                  # a second file argument is the output it writes ('-' counts: it is stdin)
     return True
 def weak_gate(gate):
     """Why a gate can't tell done from not done, or ''. A real goal's first gates were `true` (passes always) and
