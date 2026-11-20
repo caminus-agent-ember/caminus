@@ -26,9 +26,7 @@ The record says *what* to change and the command line says *how*, because a prop
 proposal about code names `--arm-checkout DIR`: `base` runs this checkout and `arm` runs DIR, so DIR should be this
 tree plus the change, and the diff between the two arms is then only that change.
 """
-from contextlib import contextmanager
 from pathlib import Path
-import fcntl
 import json
 import sys
 
