@@ -132,6 +132,12 @@ class Agent(Local):
         return self._ssh(f'cat {shlex.quote(path)} 2>/dev/null', 60).stdout
 
 
+def kind(explicit, brains):
+    """The host a run uses: an explicit --host, else `agent` for a real brain (on `local` a real model gets a shell
+    as you). One function so `lab.py run` and `lab.py propose` cannot disagree about which host and which rule."""
+    return explicit or ('agent' if any(getattr(b, 'real', False) for b in brains) else 'local')
+
+
 def make(kind, out, checkout):
     if kind == 'local':
         return Local(out)

@@ -51,7 +51,7 @@ def cmd_run(a):
     suite = runner.load_suite(a.suite)
     arms = runner.load_arms(a.arm, a.arms)
     bs = [brains_mod.parse(s, a.parallel) for s in a.brain]
-    host_kind = a.host or ('agent' if any(b.real for b in bs) else 'local')
+    host_kind = hosts_mod.kind(a.host, bs)
     if host_kind == 'local' and any(b.real for b in bs) and not a.unsafe_local:
         raise SystemExit('a real model on the local host gets a shell as you: use --host agent (or --unsafe-local)')
     out = Path(a.out).resolve()

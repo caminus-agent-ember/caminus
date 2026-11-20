@@ -89,8 +89,9 @@ def arms_from_proposal(prop, base_checkout=None, arm_checkout=None):
 
 
 def host_kind(a, brains):
-    """The host `cmd_run` will pick, computed the same way: an explicit --host, else `agent` for a real brain."""
-    return a.host or ('agent' if any(getattr(b, 'real', False) for b in brains) else 'local')
+    """The host `cmd_run` will pick: `hosts.kind` is the one place that rule lives."""
+    import hosts as hosts_mod
+    return hosts_mod.kind(a.host, brains)
 
 
 def approval_missing(a, brains):
