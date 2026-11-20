@@ -220,8 +220,8 @@ r1 = sim_record(ph)
 po = S / 'propose'
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve',
         '--config', '{"sim": false}', '--only', 'read', '--out', str(po), '--dry-run')
-check(p.returncode == 0 and f"proposal {r1['id']}" in p.stdout and 'runs: 2' in p.stdout and not po.exists(),
-      f'propose: --dry-run prints the plan and creates nothing ({p.returncode}; {p.stdout[-300:]})')
+check(p.returncode == 0 and f"proposal {r1['id']}" in p.stdout and 'runs: 6' in p.stdout and not po.exists(),
+      f'propose: --dry-run prints the plan (2 arms x 3 repeats) and creates nothing ({p.returncode}; {p.stdout[-300:]})')
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'anthropic:8091#claude-haiku-5-5',
         '--config', '{"sim": false}', '--out', str(po))
 check(p.returncode != 0 and '--approve-paid' in (p.stderr + p.stdout) and not po.exists(),
@@ -243,7 +243,7 @@ arm_home = [json.loads((po / 'runs' / r['id'] / 'home' / 'config.json').read_tex
 base_home = [json.loads((po / 'runs' / r['id'] / 'home' / 'config.json').read_text())
              for r in report.load(po) if r['arm'] == 'base']
 check(p.returncode == 0 and closed['status'] == 'observed' and 'no difference' in closed['observed']
-      and 'scripted:solve 1/1 -> 1/1' in closed['observed'],
+      and 'scripted:solve 3/3 -> 3/3' in closed['observed'],
       f'propose: the runs close the record with the per-brain numbers ({p.returncode}; '
       f'{closed["observed"][:200]}; {p.stderr[-200:]})')
 check(closed['observed_by']['model'] == 'emberlab' and closed['brain']['model'] == 'm',
@@ -258,6 +258,27 @@ p = lab('propose', '--sim-home', str(ph), '--record', 'nostore', '--brain', 'scr
         '--config', '{"sim": false}', '--out', str(po))
 check(p.returncode != 0 and 'no SIM record' in (p.stderr + p.stdout),
       'propose: a record the log does not hold is refused before anything runs')
+# a second experiment in the same --out would reuse the first one's rows by id (task.brain.arm.rN)
+shared = S / 'propose-shared'
+r2 = sim_record(ph, status='proposed')
+p = lab('propose', '--sim-home', str(ph), '--record', r2['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(shared))
+check(p.returncode == 0 and proposal.load_record(ph, r2['id'])['status'] == 'observed',
+      f'propose: the first experiment in a folder closes its record ({p.returncode}; {p.stderr[-200:]})')
+r3 = sim_record(ph, status='proposed')
+p = lab('propose', '--sim-home', str(ph), '--record', r3['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": true}', '--only', 'read', '--out', str(shared))
+check(p.returncode != 0 and 'fresh --out' in (p.stderr + p.stdout)
+      and proposal.load_record(ph, r3['id'])['status'] != 'observed',
+      f'propose: a shared --out with different arms is refused and the record stays open ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
+r4 = sim_record(ph, status='proposed')
+p = lab('propose', '--sim-home', str(ph), '--record', r4['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(shared))
+check(p.returncode == 0 and '0 to do' in p.stdout
+      and proposal.load_record(ph, r4['id'])['status'] == 'observed',
+      f'propose: the same arms resume the folder and close the record ({p.returncode}; '
+      f'{(p.stdout + p.stderr)[-300:]})')
 
 # ---- tui
 if shutil.which('tmux'):

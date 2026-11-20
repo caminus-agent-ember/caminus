@@ -143,11 +143,14 @@ def main(argv=None):
     p.add_argument('--json', action='store_true')
 
     p = sub.add_parser('propose')
-    p.add_argument('--sim-home', required=True, help="the resident's home whose SIM log holds the record")
+    p.add_argument('--sim-home', required=True,
+                   help="the resident's home whose SIM log holds the record (it may be live: each write is one "
+                        'BEGIN IMMEDIATE transaction, WAL, busy_timeout, the path `caminus ember agent sim` uses)')
     p.add_argument('--record', required=True, help='the id of a `proposed` SIM record')
     p.add_argument('--suite', default='basic')
     p.add_argument('--brain', action='append', required=True)
-    p.add_argument('--repeats', type=int, default=1)
+    p.add_argument('--repeats', type=int, default=3,
+                   help='runs per cell (default 3: report.compare calls fewer noise-prone)')
     p.add_argument('--only', help='comma-separated task keys')
     p.add_argument('--host', choices=('local', 'agent'))
     p.add_argument('--jobs', type=int, default=4)

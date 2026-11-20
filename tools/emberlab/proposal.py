@@ -26,13 +26,16 @@ The record says *what* to change and the command line says *how*, because a prop
 proposal about code names `--arm-checkout DIR`: `base` runs this checkout and `arm` runs DIR, so DIR should be this
 tree plus the change, and the diff between the two arms is then only that change.
 """
+from contextlib import contextmanager
 from pathlib import Path
+import fcntl
 import json
 import sys
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import brains as brains_mod     # noqa: E402
+import hosts as hosts_mod       # noqa: E402
 import report as report_mod     # noqa: E402
 import runner                   # noqa: E402
 
@@ -88,12 +91,6 @@ def arms_from_proposal(prop, base_checkout=None, arm_checkout=None):
     return [base, arm]
 
 
-def host_kind(a, brains):
-    """The host `cmd_run` will pick: `hosts.kind` is the one place that rule lives."""
-    import hosts as hosts_mod
-    return hosts_mod.kind(a.host, brains)
-
-
 def approval_missing(a, brains):
     """What the owner still has to allow before this run starts: the plan alone never starts one."""
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
@@ -102,7 +99,7 @@ def approval_missing(a, brains):
     if paid and not a.approve_paid:
         missing.append("--approve-paid (billed through the owner's relay: " + ', '.join(paid) + ')')
     # the same rule as cmd_run, paid brains included: on the local host a real model gets a shell as you
-    if real and host_kind(a, brains) == 'local' and not (a.unsafe_local or a.unsafe_free):
+    if real and hosts_mod.kind(a.host, brains) == 'local' and not (a.unsafe_local or a.unsafe_free):
         missing.append('--unsafe-local (a real model runs as you on the local host: ' + ', '.join(real) + ')')
     return missing
 
@@ -185,8 +182,17 @@ def cmd_propose(a, run):
         return 0
     out.mkdir(parents=True, exist_ok=True)
     arms_file = out / 'arms.json'
-    arms_file.write_text(json.dumps({x.name: dict(checkout=str(x.checkout), config=x.config, env=x.env)
-                                     for x in arms}, indent=1))
+    arm_spec = {x.name: dict(checkout=str(x.checkout), config=x.config, env=x.env) for x in arms}
+    if arms_file.exists():
+        # a run id is task.brain.arm.rN: two experiments sharing a folder would reuse each other's rows by id
+        try:
+            prior = json.loads(arms_file.read_text())
+        except ValueError:
+            raise SystemExit(f'{arms_file} is not JSON: use a fresh --out')
+        if prior != arm_spec:
+            raise SystemExit(f'{out} holds runs for different arms: use a fresh --out (a shared folder would reuse '
+                             "the other experiment's rows by id)")
+    arms_file.write_text(json.dumps(arm_spec, indent=1))
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
     runs = type('Run', (), dict(suite=a.suite, brain=list(a.brain), arm=None, arms=str(arms_file), out=str(out),
                                 repeats=a.repeats, only=a.only, host=a.host,

@@ -182,7 +182,7 @@ python -I tools/emberlab/lab.py compare DIR --base base --arm candidate
 turns one into an experiment and closes it with what the runs showed:
 
 ```sh
-python -I tools/emberlab/lab.py propose --sim-home ~/homes/CyberExpert --record ID \
+python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
   --suite basic --brain anthropic:8091#claude-haiku-5-5 --config '{"sim": false}' --repeats 3 --out DIR
 ```
 
