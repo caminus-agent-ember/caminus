@@ -1,12 +1,14 @@
 """The owner's language, named in the prompt and held with one nudge (issue #354).
 
-Seen 2026-11-19 on the CyberExpert session: mid-goal a DeepSeek reply switched to Chinese ("分支已推送。现在开
-PR (base ember-next)。") while the owner works in English. The chat is what the owner reads and the done judge
-grades, so a reply in the wrong language is not usable. Two halves, both cheap enough for every turn:
+A reply that switches language mid-goal ("分支已推送。现在开 PR (base ember-next)。" while the owner works in
+English) is not usable: the chat is what the owner reads and the done judge grades. Two halves, both cheap
+enough for every turn:
 
 - the owner's language is a session setting (`caminus ember agent language --to LANGUAGE`, key `language` in
   config.json). Without one it is derived from the owner's own prompts (the first eight goals, prose only, a
   letter census): when one script holds DERIVE_SHARE of their letters it names the language, else English.
+  Latin is the exception: English, Spanish and French are one script, so Latin-script goals name no language
+  and the session keeps English until `--to` names it.
   `prompt.py` names it, so the brain is told which language to keep to in replies, notes, files, commit
   messages and GitHub text.
 - after every stored assistant reply, `check` censuses the prose's letters by script. When a majority of the
@@ -86,7 +88,7 @@ _SCRIPTS_FOR['中文'] = ('Han',)
 _SCRIPTS_FOR['汉语'] = ('Han',)
 _SCRIPTS_FOR['한국어'] = ('Hangul',)
 
-_LANG_OF = {'Latin': 'English', 'Cyrillic': 'Russian', 'Greek': 'Greek', 'Arabic': 'Arabic', 'Hebrew': 'Hebrew',
+_LANG_OF = {'Cyrillic': 'Russian', 'Greek': 'Greek', 'Arabic': 'Arabic', 'Hebrew': 'Hebrew',
             'Devanagari': 'Hindi', 'Thai': 'Thai', 'Hangul': 'Korean', 'Kana': 'Japanese', 'Han': 'Chinese'}
 
 _FENCE = re.compile(r'```.*?```', re.S)
@@ -127,7 +129,15 @@ def units(text):
 
 
 def drift(text, scripts):
-    """(script, share) when a strict majority of the reply's units is in one script the owner does not write in."""
+    """(script, share) when a strict majority of the reply's units is in one script the owner does not write in.
+
+    A reply in a spaceless script borrows Latin terms — `git push origin pr-390`, `pytest tests/x.py` — inside
+    the clauses that also carry the owner's script; those are terms, not the reply's language, and counting
+    them would nudge a correct Chinese reply back to Chinese. A clause that is entirely in another script is
+    still the reply switching, so a real drift is caught.
+    """
+    if any(s in SPACELESS for s in (scripts or ())):
+        text = _without_borrowed(text, scripts)
     per, total = units(text)
     if total < MIN_UNITS or not scripts:
         return None
@@ -136,6 +146,19 @@ def drift(text, scripts):
         return None
     script = max((s for s in per if s not in scripts), key=lambda s: per[s])
     return script, other / total
+
+
+_CLAUSE = re.compile(r'[.!?;,\u3002\uff01\uff1f\uff1b\uff0c\n]')
+
+
+def _without_borrowed(text, own):
+    """`text` with the Latin runs of every clause that also has one of `own`'s scripts dropped."""
+    kept = []
+    for clause in _CLAUSE.split(prose(text)):
+        if any(script_of(ch) in own for ch in clause):
+            clause = ''.join(ch for ch in clause if script_of(ch) != 'Latin')
+        kept.append(clause)
+    return ' '.join(kept)
 
 
 def named(name, source):
@@ -167,6 +190,11 @@ def derive(prompts):
     another script is English, and one excerpt cannot name the session (a wrong name changes the prompt and
     nudges every reply of it). Fenced code is not the owner's prose either. Japanese is kanji and kana
     together, so Kana shares the count with Han instead of splitting it.
+
+    Latin is the exception: English, Spanish, French and German are one script, so a Latin-majority corpus
+    names no language (None, and the caller keeps the documented default). Naming it English would tell a
+    Spanish owner "your human works in English" and steer their replies there; `--to LANGUAGE` is the setting
+    for an owner who writes a Latin-script language other than English.
     """
     joined = '\n'.join(p or '' for p in prompts)
     per, total = letters(joined)
@@ -177,6 +205,8 @@ def derive(prompts):
         return None
     if script == 'Han' and per.get('Kana', 0) >= .15 * (per['Han'] + per.get('Kana', 0)):
         script = 'Kana'                            # kanji and kana together: Japanese, not Chinese
+    if script == 'Latin':
+        return None                                # one script, many languages: not a derivation
     if (language := _LANG_OF.get(script)):
         return named(language, 'your goals')
     return None
@@ -188,12 +218,17 @@ _GOALS = 'SELECT prompt FROM goals ORDER BY COALESCE(position, created), created
 def owner(rt):
     """The owner's language for this session: config `language`, else the letters of their goals, else English.
 
-    Cached on the runtime: the answer cannot change between goals, and a turn that is plainly English should not
-    pay for a query and a census per reply (an autopilot review of #390 asked for this).
+    A corpus that names a language names it once, for good: a later goal cannot rename the session, so the
+    prompt (a cached prefix) changes only until the first decisive goal. While the corpus is undecided the
+    answer is cached on the runtime by goal count, so a turn that is plainly English pays for no census, and a
+    short first goal does not pin the session before one that names it.
     """
     name = str((getattr(rt, 'config', None) or {}).get('language') or '').strip()
     if name:
         return named(name, 'config')
+    sticky = getattr(rt, '_language_named', None)
+    if sticky:
+        return sticky
     try:
         count = rt.store.db.execute('SELECT COUNT(*) FROM goals').fetchone()[0]
     except sqlite3.Error:
@@ -206,6 +241,8 @@ def owner(rt):
     except sqlite3.Error:
         prompts = []
     who = derive(prompts) or named(DEFAULT, 'default')
+    if who['source'] == 'your goals':
+        rt._language_named = who
     if count is not None:
         rt._language_owner = (count, who)
     return who

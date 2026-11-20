@@ -2637,9 +2637,9 @@ for line in sys.stdin:
         self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
 
     def test_a_reply_that_slides_into_chinese_is_nudged_in_english(self):
-        # issue #354, seen on a DeepSeek session: mid-goal a reply switched to Chinese while the owner works in
-        # English. The prompt names the language; a reply whose most units are in another script is an event
-        # carrying the brain that wrote it, and the goal's next turn reads one short nudge back to English.
+        # issue #354: mid-goal a reply switched to Chinese while the owner works in English. The prompt names the
+        # language; a reply whose most units are in another script is an event carrying the brain that wrote it,
+        # and the goal's next turn reads one short nudge back to English.
         chinese='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
         slid=call('terminal',dict(command='printf ok'));slid['content']=chinese
         self.replies(slid,call('finish',dict(summary='Opened the pull request.')))
@@ -2690,30 +2690,75 @@ for line in sys.stdin:
         # the owner's language is a session setting (`agent language --to LANGUAGE`), read by `agent prompt`
         # before a turn, so the setting and the prompt cannot disagree; `--auto` drops it and the owner's own
         # goals name the language again.
-        self.assertEqual(self.cmd('language',[]),dict(language='English',scripts=['Latin'],source='default',check=True))
+        out=self.cmd('language',[])
+        self.assertEqual((out['language'],out['scripts'],out['source'],out['check']),
+                         ('English',['Latin'],'default',True),'no setting and no derivation: the default')
+        self.assertIn('--to LANGUAGE',out['note'],'the default says it is one, and how to name a language')
         self.assertIn('Your human works in English',self.cmd('prompt',[])['prompt'])
         out=self.cmd('language',['--to','Chinese'])
         self.assertEqual(out,dict(language='Chinese',scripts=['Han'],source='config',check=True))
         self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
         self.assertIn('Your human works in Chinese',self.cmd('prompt',[])['prompt'])
         self.cmd('language',['--to','Chinese','--auto'],code=1)
-        self.assertEqual(self.cmd('language',['--auto']),dict(language='English',scripts=['Latin'],source='default',
-                                                                check=True))
+        out=self.cmd('language',['--auto'])
+        self.assertEqual((out['language'],out['scripts'],out['source'],out['check']),
+                         ('English',['Latin'],'default',True))
         self.assertNotIn('language',json.loads((self.home/'config.json').read_text()))
 
     def test_a_goal_that_pastes_another_script_does_not_name_the_session(self):
-        # the autopilot review of #390: `derive` counted units over the first goal, so an English goal with a
-        # pasted Chinese log line named the session Chinese, and every English reply then drifted. Letters over
-        # prose across all the owner's prompts keep it English, and a goal that is really Chinese still names it.
+        # `derive` must not count a pasted excerpt (a fenced block, an inline span, a log line) as the owner's
+        # voice: letters over prose, so a goal that is really Chinese still names Chinese and an English goal
+        # around a Chinese log line does not.
         from caminus.ember.resident import language
-        self.assertEqual(language.derive(['Fix the failing push step. Log: \u6d4b\u8bd5\u5931\u8d25\u4e86\uff0c'
-                                          '\u5206\u652f\u5df2\u63a8\u9001\uff0c\u8bf7\u68c0\u67e5\u3002'])['name'],
-                         'English','a pasted CJK log line does not outvote the owner')
+        self.assertIsNone(language.derive(['Fix the failing push step. Log: \u6d4b\u8bd5\u5931\u8d25\u4e86\uff0c'
+                                           '\u5206\u652f\u5df2\u63a8\u9001\uff0c\u8bf7\u68c0\u67e5\u3002']),
+                          'a pasted CJK log line does not outvote the owner')
         self.assertEqual(language.derive(['\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
                                           '\u7136\u540e\u5f00 PR\u3002'])['name'],'Chinese','a Chinese goal still names it')
-        self.assertEqual(language.derive(['Fix the failing push step. ```\u5206\u652f\u5df2\u63a8\u9001\u3002```'])['name'],
-                         'English', 'a fenced block is not the owner\'s prose')
-        self.assertEqual(language.derive(['ok']),None,'too few letters cannot name a language')
+        self.assertIsNone(language.derive(['Fix the failing push step. ```\u5206\u652f\u5df2\u63a8\u9001\u3002```']),
+                          'a fenced block is not the owner\'s prose')
+        self.assertIsNone(language.derive(['ok']),'too few letters cannot name a language')
+
+    def test_a_latin_script_corpus_names_no_language_and_says_so(self):
+        # one Latin script is English, Spanish, French and German alike: letters cannot name a language from
+        # it, so a Spanish owner keeps the documented default instead of being told they work in English, and
+        # `agent language` says the answer is the default rather than a derivation.
+        from caminus.ember.resident import language
+        self.assertIsNone(language.derive(['Arregla el paso de push y revisa el log, por favor. El objetivo '
+                                           'esta en el informe, revisalo y dime.']),
+                          'a Latin corpus names no language')
+        self.assertIsNone(language.derive(['Fix the failing push step and open the pull request against ember-next.']),
+                          'English prose is a Latin corpus too: the default, not a derivation')
+        out=self.cmd('language',[])
+        self.assertEqual((out['language'],out['source']),('English','default'))
+        self.assertIn('--to LANGUAGE',out['note'])
+
+    def test_a_chinese_owners_reply_with_english_terms_is_not_a_drift(self):
+        # a reply in a spaceless script borrows Latin terms inside its own clauses (git push, pytest paths,
+        # gh commands): those are terms, not the reply switching language, and counting them nudged a correct
+        # Chinese reply back to Chinese. A clause that is in another script entirely is still a drift.
+        from caminus.ember.resident import language
+        zh=('\u8bf7\u8fd0\u884c pytest tests/ember/test_resident.py\uff0c\u7136\u540e\u7528 git push origin '
+            'pr-390 \u63a8\u9001\u5206\u652f\uff0c\u518d\u7528 gh pr create --base ember-next\u3002')
+        self.assertIsNone(language.drift(zh,('Han',)),'English terms inside Chinese clauses are not a drift')
+        self.assertEqual(language.drift('I pushed the branch and opened the pull request against ember-next, '
+                                        'please review it.',('Han',))[0],'Latin','an English reply still drifts')
+
+    def test_a_named_language_is_not_renamed_by_a_later_goal(self):
+        # `derive` reads the first eight goals, so a ninth goal could otherwise flip the name - and the prompt
+        # is a cached prefix that must not change as goals are added. Once the goals name a language it is the
+        # session's; while they cannot (a Latin corpus), the answer is the default and a later goal may name it.
+        from caminus.ember.resident import language
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'],'Chinese')
+            for _ in range(9):
+                rt.store.enqueue('Fix the failing push step and open the pull request against ember-next.')
+            self.assertEqual(language.owner(rt)['name'],'Chinese',
+                             'a named language is the session\'s, not the first eight goals\'')
+        finally:
+            rt.mail.close();rt.store.close()
 
     def test_an_unlisted_language_says_the_drift_check_is_off(self):
         # `--to Esperanto` has no script table: the prompt still asks for it, but nothing can judge a drift.

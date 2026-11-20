@@ -821,6 +821,11 @@ def main(argv=None,stdin=None):
             if not who['scripts']:
                 out['note']=('no script table for %s: the prompt asks for it, but a reply that drifts into another '
                              'script is not detected' % who['name'])
+            elif who['source']=='default':
+                # One Latin script is English, Spanish, French and German alike, so goals written in it cannot
+                # name a language: say that the answer is the default and how to name one.
+                out['note']=('the default, not derived from your goals: one Latin script is English, Spanish, '
+                             'French and German alike, so `--to LANGUAGE` names the language you work in')
             emit(out,a.json)
             return 0
         if a.op=='sim':
