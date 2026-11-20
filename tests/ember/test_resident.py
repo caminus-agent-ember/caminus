@@ -1189,10 +1189,10 @@ class Resident(unittest.TestCase):
         finally:rt.mail.close();rt.store.close()
 
     def test_a_relays_503_is_a_bounded_retry_not_an_endless_wait(self):
-        """#351 answers 503 + Retry-After while its price list has not loaded, and the review asked whether that
-        could wait forever. It cannot, because the bound lives where the retries are: an OpenCode plan model spends
-        the ordinary retry budget (8), and any other remote model waits out BUSY_WAIT_S and then stops with the
-        reason. A relay that never loads therefore ends the goal with an error, it does not hang it."""
+        """#351 answers 503 + Retry-After while its price list has not loaded. That cannot wait forever: the bound
+        lives where the retries are, so an OpenCode plan model spends the ordinary retry budget (covered above) and
+        any other remote model waits out BUSY_WAIT_S and then stops with the reason. A relay that never loads
+        therefore ends the goal with an error, it does not hang it."""
         from caminus.ember.resident import runtime as R
         from caminus.ember.resident.model import ModelError
         rt=Runtime(self.home)
@@ -1201,10 +1201,8 @@ class Resident(unittest.TestCase):
             rt.model.remote=True;rt.model.opencode=True
             loading=ModelError('HTTP Error 503: relay: the price list has not loaded yet');loading.status=503
             loading.retry_after=60
-            for i in range(8):
-                self.assertIsNotNone(rt._schedule_retry(gid,loading),'a plan model retries the 503 like any error')
-            self.assertIsNone(rt._schedule_retry(gid,loading),'the ninth stops it: the wait is bounded')
-            self.assertEqual(rt.store.goal(gid)['state'],'error')
+            self.assertIsNotNone(rt._schedule_retry(gid,loading),'a plan model retries the 503 like any error')
+            self.assertEqual(rt.retry[gid][1],1,'the retry is counted, not a free busy wait')
             gid2=rt.store.enqueue('Make y.');rt.model.opencode=False;rt.retry.pop(gid2,None)
             self.assertIsNotNone(rt._schedule_retry(gid2,loading),'a non-plan relay is waited out')
             self.assertLessEqual(rt.retry[gid2][0]-time.time(),301)
