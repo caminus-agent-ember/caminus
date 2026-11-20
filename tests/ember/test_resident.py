@@ -2804,7 +2804,11 @@ for line in sys.stdin:
             self.assertIsNone(delegate.refused('write',delegate.in_worktree(row,'write',dict(path=path)),row),path)
         for cmd in ('cd %s && echo x > ../escape.txt'%wt,'cd %s && echo x>../escape.txt'%wt,
                     'cd %s && cat<../passwd'%wt,'cd %s && echo hi 2>../err'%wt,
-                    'cd %s && echo x > /tmp/escape.txt'%wt,'cd %s && cd .. && touch escape.txt'%wt):
+                    'cd %s && echo x > /tmp/escape.txt'%wt,'cd %s && cd .. && touch escape.txt'%wt,
+                    'cd %s && echo x >/tmp/escape2.txt'%wt,'cd %s && echo x >~/escape3'%wt,
+                    'cd %s && sh -c "echo x > /tmp/escape4"'%wt,'cd %s && bash -c "echo x > /tmp/escape4"'%wt,
+                    'cd %s && eval "echo x > /tmp/escape5"'%wt,'cd %s && /bin/sh -c x'%wt,
+                    'cd %s && xargs touch'%wt,'cd %s && echo x --out=/tmp/escape6'%wt):
             why=delegate.refused('terminal',dict(command=cmd),row)
             self.assertTrue(why and 'worktree' in why,(cmd,why))
         # a bare `cd ..` reads nothing, so it stays read-only (a read-only command may read anywhere); only a

@@ -86,13 +86,22 @@ def _inside(wt, path):
     return p == wt or p.startswith(wt + os.sep)
 
 
+# Programs that run another command from a string, or start a shell of their own: a text check cannot see what
+# their argument does (a nested `sh -c "echo x > /tmp/evil"` hides its path inside one word), so a writing child
+# may not call them (#384 review).
+NESTED = frozenset('sh bash dash zsh ksh csh tcsh fish eval exec source xargs env sudo doas su chroot '
+                   'unshare nsenter script'.split())
+
+
 def _escaping(cmd, wt):
     """Why a writing child's command could change something outside its worktree, or ''.
 
-    Best effort on the command text, not a sandbox (see the module docstring): the command must start with
-    `cd <worktree> &&`, and no word may name an absolute path outside it, a `..` path component, a `$` expansion or
-    a `~` home. A word that reads `<worktree>/...` is fine. Words are split with punctuation, so a redirect glued
-    to its target (`echo x >../out`) still yields `../out` as its own word.
+    Best effort on the command text, not a sandbox (see the module docstring): a program that computes a path at
+    run time (`python3 -c "open(...)"`) can still write anywhere, and no text check can see it; what the file
+    tools do is exact (`_inside`). The command must start with `cd <worktree> &&`; no word may name a program
+    that runs another command (`sh -c`, `eval`, `xargs`), an absolute path outside the worktree, a `..`
+    component, a `$` expansion or a `~` home; and the value of `--opt=path` is checked as a path too. Words are
+    split with punctuation, so a redirect glued to its target (`echo x >../out`) yields `../out` as a word.
     """
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=';&|()<>`')
@@ -103,10 +112,14 @@ def _escaping(cmd, wt):
     if len(words) < 3 or words[0] != 'cd' or words[1] != wt or words[2] != '&&':
         return 'it must start with `cd %s && `' % wt
     for w in words[3:]:
+        prog = w.rsplit('/', 1)[-1]
+        if prog in NESTED or prog.lstrip('-') in NESTED:
+            return '%s runs another command, which this check cannot see' % w
         if w.startswith('~') or '$' in w:
             return '%s could resolve outside the worktree' % w
-        if not _inside(wt, w):
-            return '%s climbs out of the worktree' % w
+        for p in ([w, w.split('=', 1)[1]] if '=' in w else [w]):
+            if not _inside(wt, p):
+                return '%s climbs out of the worktree' % w
     return ''
 
 
@@ -155,6 +168,12 @@ def refused(name, args, row=None):
         if path.startswith('/') and not _inside(wt, path):
             return ('a writing child changes files inside its worktree (%s): name the file relative to it; the '
                     'files outside are your parent\'s to change' % wt)
+    if write and wt and name in ('read', 'search'):
+        # a writing child's world is its worktree: reading the parent's tree (or a home) from it leaks what the
+        # parent did not hand it, and the PR body says such a read is refused (#384 review)
+        path = str(in_worktree(row, name, args).get('path') or '')
+        if path.startswith('/') and not _inside(wt, path):
+            return ('a writing child reads inside its worktree (%s): name the file relative to it' % wt)
     if write and wt and name == 'checkpoint':
         outside = [str(p) for p in (in_worktree(row, name, args).get('paths') or [])
                    if str(p).startswith('/') and not _inside(wt, str(p))]
