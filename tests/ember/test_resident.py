@@ -2668,6 +2668,24 @@ for line in sys.stdin:
         self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
         self.assertEqual(self.steers(goal['id']),[])
 
+    def test_a_goal_that_keeps_drifting_is_nudged_again_only_after_the_interval(self):
+        # a reply that keeps drifting is detected on every turn, so the interval counts from the last *nudged*
+        # drift (not the last detection): turn 2 drifts but is not nudged, turn 4 is nudged again. Counting from
+        # the detection would push the next nudge back on every turn and never fire a second time.
+        from caminus.ember.resident import language
+        chinese='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        turns=[]
+        for _ in range(4):
+            turn=call('terminal',dict(command='printf ok'));turn['content']=chinese;turns.append(turn)
+        self.replies(*turns,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        drifts=[e['data'] for e in self.cmd('events') if e['kind']=='language_drift']
+        self.assertTrue(len(drifts)>=3,'every drifting reply is an event')
+        self.assertEqual([s['kind'] for s in self.steers(goal['id'])],['nudge','nudge'],'two nudges read, one per interval')
+        self.assertTrue(drifts[0]['nudged'] and not drifts[1]['nudged'],'the turn after a nudge is detected, not nudged')
+        self.assertTrue(any(d['nudged'] for d in drifts[language.DRIFT_EVERY:]),'the interval brings the nudge back')
+
     def test_the_language_setting_names_the_prompt_and_auto_derives_it_again(self):
         # the owner's language is a session setting (`agent language NAME --to LANGUAGE`), read by `agent prompt`
         # before a turn, so the setting and the prompt cannot disagree; `--auto` drops it and the first goal's
