@@ -89,6 +89,12 @@ LOAD_BACKOFF = (10, 30, 60, 300)
 # The wait a refusal names while the owner's price file cannot be read: the file is re-read on every request, so
 # this only tells the agent how long to wait before the retry that may find the file written.
 PRICE_FILE_RETRY = 60
+# Seconds a last good price table outlives the price file becoming unreadable. A file caught mid-rewrite (truncate,
+# then write) must keep pricing the models it priced a moment ago, so the table is not dropped on the first failed
+# read; but a file the owner DELETED must not meter at its old rates forever. After this grace the relay drops the
+# table and stops answering 503 for the file: a request then gets the same 403 as any unpriced model, and the first
+# request that can read the file prices again (the file is re-read on every request).
+PRICE_FILE_GRACE = 900
 # A decode-rate ceiling for output a stream does not show (Meta bills its models' reasoning but sends it empty), used
 # only to bound a reply cut before its usage came. Meta publishes no speed: an assumed ceiling (unverified), above the
 # decode rates hosted APIs usually report, so a hang-up errs high rather than booking one token.
@@ -325,6 +331,7 @@ class OwnerPrices:
         self.path, self.log, self.table, self.mtime, self.lock = Path(os.path.expanduser(path)), log, {}, None, threading.Lock()
         self.fetch, self.names, self.names_at = fetch, {}, 0.0
         self.error = ''                                    # why the file last could not be read ('' once it could)
+        self.error_at = 0.0                                # when this unreadable streak began (0.0 = no failure)
         self.names_error = ''                              # why the model list (for aliases) last could not be read
 
     def get(self, model):
@@ -338,7 +345,7 @@ class OwnerPrices:
                             table[k] = (float(v['input']), float(v['output']), float(v.get('cache_read', v['input'])))
                         else:
                             table[k] = (float(v[0]), float(v[1]), float(v[2] if len(v) > 2 else v[0]))
-                    self.table, self.mtime, self.error = table, mt, ''
+                    self.table, self.mtime, self.error, self.error_at = table, mt, '', 0.0
                     self.log('prices: %d models from %s' % (len(table), self.path))
             except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
                 # logged on the first failure too: a price file missing at start (a relay that starts before the owner
@@ -349,6 +356,17 @@ class OwnerPrices:
                 why = '%s: %s' % (type(e).__name__, e.strerror if isinstance(e, OSError) else str(e)[:200])
                 if why != self.error:
                     self.log('price file unreadable: %s (%s)' % (why, self.path))
+                now = time.time()
+                if not self.error_at:
+                    self.error_at = now                     # the first failed read of this streak
+                elif self.table and now - self.error_at > PRICE_FILE_GRACE:
+                    # the file has been unreadable long enough to be gone, not caught mid-rewrite: the last good
+                    # table is dropped, so nothing is metered at rates whose file no longer exists (before this,
+                    # a deleted file priced every model at its old rates forever). The refusal stays the 503 wait:
+                    # the owner may restore the file, and a wait spends nothing.
+                    self.log('price file unreadable for %ds: dropping the last good table (%d models)'
+                             % (round(now - self.error_at), len(self.table)))
+                    self.table, self.error_at = {}, now     # one line per grace, not one per request
                 self.error, self.mtime = why, None
             if model in self.table or not self.fetch:
                 return self.table.get(model)
@@ -381,6 +399,11 @@ class OwnerPrices:
         transient as a list that has not loaded. Only a model that is not priced is asked at all (do_POST asks this
         after get() answered None), and the file is re-read on the next request, so the wait named is the agent's."""
         with self.lock:
+            if self.names and not self.names_error and model not in self.names:
+                # the file's absence says nothing about a NAME, the provider's own list does: a name that list does
+                # not know is a typo, and waiting an hour on a 503 for it hides that. Refused at once (the caller's
+                # 403 "no price for"), whatever the file is doing. A name it does know still waits below.
+                return None
             if self.error:
                 return (503, 'api_error', 'the relay cannot read its price file (%s), so %r cannot be priced yet; '
                         'the owner re-reads it on change, no restart, so retry in %ds'

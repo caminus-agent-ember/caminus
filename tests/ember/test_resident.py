@@ -4928,8 +4928,37 @@ for line in sys.stdin:
             self.assertEqual(code, 403)
             self.assertIn(b'no price for', body)
             self.assertNotIn(b'cannot read its price file', body)
+            # a file that stays unreadable past the grace is gone, not caught mid-rewrite: the last good table is
+            # dropped, so a deleted file stops metering at its old rates (it used to price them forever)
+            pf.unlink()
+            self.assertEqual(prices.get('open-mistral-4'), (0.4, 2.0, 0.4), 'the first failed read keeps the table (mid-rewrite)')
+            self.assertFalse(any('dropping the last good table' in l for l in log), log)
+            prices.error_at -= relay.PRICE_FILE_GRACE + 1     # (the same file, unreadable for over 15 minutes)
+            self.assertIsNone(prices.get('open-mistral-4'), 'past the grace the stale table is dropped, not priced')
+            self.assertEqual(prices.refusal('open-mistral-4')[0], 503, 'the file may come back: a wait, not a 403')
+            self.assertEqual(sum('dropping the last good table' in l for l in log), 1, log)
+            self.assertIsNone(prices.get('open-mistral-4'))
+            self.assertEqual(sum('dropping the last good table' in l for l in log), 1, 'one line per grace, not per request')
         finally:
             stop()
+
+    def test_a_name_the_model_list_does_not_know_fails_at_once_even_with_the_price_file_missing(self):
+        """The wait a missing price file asks for is about the FILE; a name the provider's own list does not carry is
+        about the MODEL. Waiting up to an hour on a 503 (busy, retry) for a typo hides it, so the list's answer is
+        taken at once (the caller's 403 'no price for'). A name the list does know still waits: the file may price it
+        as soon as it can be read again, and the wait spends nothing."""
+        from caminus.ember import relay
+        pf, lines = self.home/('prices-'+uuid.uuid4().hex+'.json'), []
+        self.assertFalse(pf.exists())
+        listed = dict(data=[dict(id='mistral-large-2512', aliases=['mistral-large-latest'])])
+        op = relay.OwnerPrices(str(pf), lines.append, fetch=lambda: listed)
+        self.assertIsNone(op.get('mistral-large-latest'))
+        self.assertTrue(any('price file unreadable: FileNotFoundError' in l for l in lines), lines)
+        status, kind, message, wait = op.refusal('mistral-large-latest')
+        self.assertEqual((status, kind), (503, 'api_error'), 'a known name waits for the file to come back')
+        self.assertIn('cannot read its price file', message)
+        self.assertGreater(wait, 0)
+        self.assertIsNone(op.refusal('mistral-larg'), 'a name the list does not know is refused at once, never waited out')
 
     def test_an_alias_whose_model_list_never_loaded_is_a_503_waited_out_not_a_403(self):
         """Mistral's aliases come from the provider's own model list. While that list has never loaded, a name the
