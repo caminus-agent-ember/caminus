@@ -23,8 +23,8 @@ for a real model on the local host. `--dry-run` stops after the plan.
       --brain anthropic:8091#claude-haiku-5-5 --repeats 3 --config '{"sim": false}'
 
 The record says *what* to change and the command line says *how*, because a proposal in words is not a switch. A
-proposal about code names `--arm-checkout DIR`: both arms then run on that checkout, and the diff between them is
-still only the switch.
+proposal about code names `--arm-checkout DIR`: `base` runs this checkout and `arm` runs DIR, so DIR should be this
+tree plus the change, and the diff between the two arms is then only that change.
 """
 from pathlib import Path
 import json
@@ -196,9 +196,12 @@ def cmd_propose(a, run):
         raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')
     verdict = report_mod.compare(report_mod.load(out), 'base', 'arm')
     print(report_mod.compare_md(verdict), flush=True)
+    measured = (f"tools/emberlab propose: suite {suite['name']}, brains "
+                f"{', '.join(b.label() for b in brains)}, repeats {a.repeats}, {out}")
+    # sim.observe overwrites eval_context, so the proposing turn's own context is carried forward, then the run's
+    prior_ctx = (rec.get('eval_context') or '').strip()
     write_observation(home, a.record, observed_text(verdict),
-                      eval_context=f"tools/emberlab propose: suite {suite['name']}, brains "
-                                   f"{', '.join(b.label() for b in brains)}, repeats {a.repeats}, {out}",
+                      eval_context=f'{prior_ctx} | measured: {measured}' if prior_ctx else measured,
                       prediction_error=a.prediction_error or '', goal=a.goal)
     print(f"SIM record {a.record}: observed", flush=True)
     return 0 if verdict['verdict'].startswith(('better', 'no difference')) else 1
