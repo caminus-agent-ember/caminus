@@ -64,6 +64,47 @@ func workersRow(ws []residentWorker) string {
 	return fmt.Sprintf("no children running · last %s $%.4f", out, w.SpendUSD+w.AllowanceUSD)
 }
 
+// workersLines is one line per child for the session card (#342 full): what it may do, the goal it was given, the
+// steps and spend it used of its caps, and for a writing child the worktree branch it changes. Running children
+// come first (the status sorts them so); the card shows at most `room` of them and says how many more there are.
+// An older resident sends no permissions, and the line then says "child" rather than guessing read-only.
+func workersLines(ws []residentWorker, room int) []string {
+	if len(ws) == 0 || room <= 0 {
+		return nil
+	}
+	out := make([]string, 0, min(len(ws), room))
+	for i, w := range ws {
+		if i == room {
+			out = append(out, fmt.Sprintf("+%d more children", len(ws)-room))
+			break
+		}
+		what := w.Permissions
+		if what == "" {
+			what = "child"
+		}
+		if w.Branch != "" {
+			what += " " + w.Branch
+		}
+		state := w.Outcome
+		if w.Running {
+			state = "running"
+		} else if state == "" {
+			state = "done"
+		}
+		steps := ""
+		if w.Steps > 0 {
+			steps = fmt.Sprintf(" · %d steps", w.Steps)
+		}
+		goal := w.Goal
+		if goal == "" {
+			goal = w.Child
+		}
+		out = append(out, fmt.Sprintf("%s · %s · %s%s · $%.4f of $%.2f", what, state, goal, steps,
+			w.SpendUSD+w.AllowanceUSD, w.CapUSD))
+	}
+	return out
+}
+
 const cardW = 46 // a card's width with its frame: two fit a 100-column terminal, three a 140
 
 // cardWidth is a card's width at terminal width w: cardW, narrower on a small terminal.
@@ -206,6 +247,9 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 	}
 	if w := workersRow(c.workers); w != "" { // (#342) only when the session has children
 		rows = append(rows, emberDim.Render(emberClip(residentText(w), inner-2)))
+		for _, line := range workersLines(c.workers, 3) { // (#342 full) a line per child, three at most
+			rows = append(rows, emberDim.Render(emberClip(residentText(line), inner-2)))
+		}
 	}
 	out := []string{top}
 	for _, r := range rows {

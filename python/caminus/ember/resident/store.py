@@ -123,7 +123,10 @@ class Store:
             provider TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'worker',
             cap_usd REAL NOT NULL DEFAULT 0, spend_usd REAL NOT NULL DEFAULT 0,
             allowance_usd REAL NOT NULL DEFAULT 0, outcome TEXT NOT NULL DEFAULT '',
-            report TEXT, started REAL NOT NULL, ended REAL);
+            report TEXT, started REAL NOT NULL, ended REAL,
+            permissions TEXT NOT NULL DEFAULT 'read', worktree TEXT NOT NULL DEFAULT '',
+            branch TEXT NOT NULL DEFAULT '', base TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '',
+            sim TEXT NOT NULL DEFAULT '');
           CREATE INDEX IF NOT EXISTS delegates_parent ON delegates(parent,started);
         ''')
         self._migrate()
@@ -231,6 +234,12 @@ class Store:
         have = {r['name'] for r in self.db.execute('PRAGMA table_info(failures)')}
         if have and 'last_error' not in have:
             self.db.execute('ALTER TABLE failures ADD COLUMN last_error TEXT')
+        have = {r['name'] for r in self.db.execute('PRAGMA table_info(delegates)')}
+        for name, decl in (('permissions', "TEXT NOT NULL DEFAULT 'read'"), ('worktree', "TEXT NOT NULL DEFAULT ''"),
+                           ('branch', "TEXT NOT NULL DEFAULT ''"), ('base', "TEXT NOT NULL DEFAULT ''"),
+                           ('repo', "TEXT NOT NULL DEFAULT ''"), ('sim', "TEXT NOT NULL DEFAULT ''")):
+            if have and name not in have:
+                self.db.execute('ALTER TABLE delegates ADD COLUMN ' + name + ' ' + decl)
         # history_search: a full-text index over the events that are history. A database from before it is indexed
         # once, here, from its events.
         fresh = not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='history_fts'").fetchone()
@@ -293,15 +302,29 @@ class Store:
             '(SELECT MAX(seq) FROM events WHERE goal=? AND kind=? AND data NOT LIKE ?),0) LIMIT 1',
             (gid, 'verified', gid, 'steers_applied', '%"redirect": false%')).fetchone())
 
-    def delegate_add(self, child, parent, model, provider, role, cap_usd):
-        """Register a delegate child: its brain, its role and its dollar cap (the metric the cap reads is this row's
-        spend_usd + allowance_usd, kept by delegate_spend)."""
-        self.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) VALUES(?,?,?,?,?,?,?)',
-                        (child, parent, model or '', provider or '', role, float(cap_usd or 0.0), time.time()))
+    def delegate_add(self, child, parent, model, provider, role, cap_usd, permissions='read', worktree='', branch='',
+                     base='', repo='', sim=''):
+        """Register a delegate child: its brain, its role, the permissions it may use and its dollar cap (the metric
+        the cap reads is this row's spend_usd + allowance_usd, kept by delegate_spend). A writing child's repo,
+        worktree, branch and base commit are recorded so its report and the parent's merge/discard can name them."""
+        self.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,permissions,worktree,branch,base,'
+                        'repo,sim,started) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (child, parent, model or '', provider or '', role, float(cap_usd or 0.0), permissions or 'read',
+                         worktree or '', branch or '', base or '', repo or '', sim or '', time.time()))
 
     def delegate(self, child):
         r = self.db.execute('SELECT * FROM delegates WHERE child=?', (child,)).fetchone()
         return dict(r) if r else None
+
+    def delegates(self, parent=None, open_only=False):
+        """The children of a goal (all of them when parent is None), oldest first; open_only: the ones still running."""
+        sql, args = 'SELECT * FROM delegates', []
+        if parent:
+            sql += ' WHERE parent=?'
+            args.append(parent)
+        if open_only:
+            sql += (' AND ' if parent else ' WHERE ') + "outcome=''"
+        return [dict(r) for r in self.db.execute(sql + ' ORDER BY started', args)]
 
     def delegate_spend(self, child, usd=0.0, allowance=0.0):
         """Add one turn's spend to a child's ledger: usd is money the provider charged, allowance the OpenCode plan's
@@ -318,13 +341,16 @@ class Store:
 
     def workers(self):
         """What a UI shows of delegation: the running children and the newest finished ones, with the spend the cap
-        reads (money and plan allowance, kept apart so a $0 Go turn still shows its allowance)."""
+        reads (money and plan allowance, kept apart so a $0 Go turn still shows its allowance), what each may do and
+        the goal it is working on."""
         rows = [dict(r) for r in self.db.execute(
-            'SELECT child,parent,model,provider,role,cap_usd,spend_usd,allowance_usd,outcome,started,ended '
-            'FROM delegates ORDER BY outcome=\'\' DESC, started DESC LIMIT 20')]
+            'SELECT d.child,d.parent,d.model,d.provider,d.role,d.cap_usd,d.spend_usd,d.allowance_usd,d.permissions,'
+            'd.worktree,d.branch,d.outcome,d.started,d.ended,g.prompt,g.steps FROM delegates d '
+            'LEFT JOIN goals g ON g.id=d.child ORDER BY d.outcome=\'\' DESC, d.started DESC LIMIT 20')]
         for r in rows:
             r['spend_usd'], r['allowance_usd'] = round(r['spend_usd'], 6), round(r['allowance_usd'], 6)
             r['running'] = not r['outcome']
+            r['goal'] = ' '.join(str(r.pop('prompt') or '').split())[:120]
         return rows
 
     def clear_precondition_failures(self, gid, text):

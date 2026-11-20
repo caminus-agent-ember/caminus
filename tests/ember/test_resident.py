@@ -2681,6 +2681,113 @@ for line in sys.stdin:
         self.assertFalse(st['workers'][0]['running'])
         self.assertEqual(st['workers'][0]['outcome'],'completed')
 
+    def test_parallel_children_run_in_the_background_and_collect_reads_them(self):
+        # wait=false: the child is an ordinary queued goal. The parent parks (waiting_children) and the loop's
+        # settle wakes it with one message naming the reports; collect hands it the structured ones. The child's
+        # own turns run between the parent's, on the same one loop.
+        (self.home/'a.txt').write_text('alpha\nbeta\n')
+        (self.home/'b.txt').write_text('gamma\n')
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='each child quoted its file')),
+            call('delegate',dict(task='Quote the second line of a.txt.',done_check='a.txt line 2 is quoted',
+                                 wait=False)),
+            # the child's own turns: it reads and finishes (the parent is parked meanwhile)
+            call('define_done',dict(check='a.txt second line is quoted')),
+            call('terminal',dict(command='sed -n 2p a.txt')),
+            call('verify',dict(evidence='sed printed beta')),
+            call('finish',dict(summary='a.txt line 2 is beta.')),
+            # the parent wakes with the report in its inbox and reads the structured one
+            call('collect',dict()),
+            call('verify',dict(evidence='collect shows the child completed with its summary')),
+            call('finish',dict(summary='The child quoted beta from a.txt.')))
+        goal=self.cmd('once',['--goal','Have a child quote a.txt.'])
+        self.assertEqual(goal['state'],'completed')
+        events=[e for e in self.cmd('events')]
+        started=[e for e in events if e['kind']=='delegate_started']
+        self.assertEqual(len(started),1)
+        self.assertFalse(started[0]['data']['wait'])
+        parked=[e for e in events if e['kind']=='delegate_parked']
+        self.assertEqual(len(parked),1,'the parent parked on its running child')
+        woken=[e for e in events if e['kind']=='delegate_reports']
+        self.assertEqual(len(woken),1,'settle woke the parent with the report')
+        results=[e['data']['result'] for e in events if e['kind']=='tool_result' and e['data'].get('name')=='collect']
+        self.assertEqual(len(results),1)
+        self.assertEqual(len(results[0]['children']),1)
+        self.assertEqual(results[0]['children'][0]['outcome'],'completed')
+        self.assertIn('beta',results[0]['children'][0]['summary'])
+        self.assertEqual(results[0]['running'],[])
+
+    def test_a_writing_child_changes_only_its_worktree(self):
+        # permissions=write: the delegate makes a worktree off HEAD, the child writes inside it, and its report
+        # names the branch, the changed file and the merge / discard commands. A path outside the worktree, and a
+        # command that would leave it, are refused; the parent's tree never changes.
+        repo=self.home/'repo'
+        repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the child wrote a file in its worktree')),
+            call('delegate',dict(task='Add NOTES.md with one line.',done_check='NOTES.md has one line',
+                                 permissions='write',repo=str(repo),wait=True)),
+            # the child's own turns: its done check first (a change before it is refused), then an absolute path
+            # outside the worktree is refused, then it writes and reads inside it (a relative path is the worktree's)
+            call('define_done',dict(check='NOTES.md has one line')),
+            call('write',dict(path=str(self.home/'escape.txt'),content='x')),
+            call('write',dict(path='NOTES.md',content='one line\n')),
+            call('read',dict(path='NOTES.md')),
+            call('verify',dict(evidence='read printed "one line" from the worktree')),
+            call('finish',dict(summary='Wrote NOTES.md in the worktree.')),
+            call('verify',dict(evidence='the report names NOTES.md and the branch')),
+            call('finish',dict(summary='The child wrote NOTES.md on its branch.')))
+        goal=self.cmd('once',['--goal','Have a writing child add NOTES.md.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertFalse((self.home/'escape.txt').exists(),'the absolute path outside the worktree was refused')
+        self.assertFalse((repo/'NOTES.md').exists(),'the parent\'s tree is untouched until it merges')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        refused=[r['data']['result'] for r in events if r['data'].get('name')=='write']
+        self.assertTrue(refused and 'worktree' in refused[0]['error'],refused)
+        reports=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        rep=reports[-1]
+        self.assertEqual(rep['outcome'],'completed',rep)
+        self.assertEqual(rep['permissions'],'write')
+        self.assertTrue(rep['worktree'].startswith(str(self.home/'worktrees')),rep['worktree'])
+        self.assertIn('NOTES.md',rep['files'])
+        self.assertTrue(rep['branch'].startswith('delegate/'))
+        self.assertIn('git -C',rep['merge'])
+        self.assertIn('worktree remove',rep['discard'])
+        self.assertIn('NOTES.md',rep['diffstat'])
+        self.assertEqual(rep['base'],subprocess.run(['git','-C',str(repo),'rev-parse','HEAD'],
+                                                     capture_output=True,text=True).stdout.strip())
+
+    def test_a_writing_child_cannot_leave_its_worktree_with_a_command(self):
+        # a writing child's terminal command must start inside its worktree and stay there: `cd ..` and an absolute
+        # path out of it are refused before anything runs
+        repo=self.home/'repo2'
+        repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the escaping command was refused')),
+            call('delegate',dict(task='Try to write outside your worktree.',done_check='the escape failed',
+                                 permissions='write',repo=str(repo))),
+            call('terminal',dict(command='cd %s && echo x > escape.txt' % self.home)),
+            call('terminal',dict(command='cd . && touch ..%sgone.txt' % os.sep)),
+            call('define_done',dict(check='both escape attempts were refused')),
+            call('verify',dict(evidence='both errors name the worktree')),
+            call('finish',dict(summary='Both attempts were refused.')),
+            call('verify',dict(evidence='the child reported both refusals')),
+            call('finish',dict(summary='The child could not leave its worktree.')))
+        self.cmd('once',['--goal','Have a writing child try to escape.'])
+        self.assertFalse((self.home/'escape.txt').exists())
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        errs=[r['data']['result'].get('error','') for r in events if r['data'].get('name')=='terminal']
+        self.assertTrue(any('worktree' in e for e in errs),errs)
+
     def test_a_child_delegate_cannot_delegate_again_or_ask_the_human(self):
         # depth 1 and no human: both refusals are the runtime's, whatever the model asks for
         self.gates_on()
@@ -2698,9 +2805,9 @@ for line in sys.stdin:
         events=[e for e in self.cmd('events') if e['kind']=='tool_result']
         asked=[r['data']['result'] for r in events if r['data'].get('name')=='ask_user']
         self.assertEqual(len(asked),1)
-        self.assertIn('read-only',asked[0]['error'])
+        self.assertIn('delegate child',asked[0]['error'])
         inner=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
-        self.assertIn('read-only',inner[0]['error'],'a child cannot delegate again')
+        self.assertIn('delegate child',inner[0]['error'],'a child cannot delegate again')
         self.assertEqual(inner[-1]['outcome'],'completed')
 
     def test_delegate_rejects_a_zero_cap(self):

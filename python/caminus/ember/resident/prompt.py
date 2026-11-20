@@ -206,14 +206,30 @@ work has no arbitrary step limit; explicit oneshot test budgets still apply.
 # only where the delegate tool is offered (config delegate, true by default; issue #342)
 DELEGATION = '''
 ## Delegation
-delegate runs a bounded, read-only child goal through this same loop and returns its
-short report: outcome, summary, what it verified and skipped, the model, steps, spend
-and allowance. Use it for a self-contained research or check you would otherwise do
-yourself, and when a cheaper brain (a local worker) or a different family is a fair
-judge of the question; set model/provider and cap_usd to bound it (the cap can lower
-delegate_usd, never raise it). The child cannot write, edit, run a changing command,
-ask your human, message a peer, or delegate further. One child runs at a time and this
-call returns only when its report is ready; do not delegate a change, do it yourself.
+delegate runs a bounded child goal through this same loop and returns its short report:
+outcome, summary, what it verified and skipped, the model, steps, spend and allowance.
+Use it for a self-contained research or check you would otherwise do yourself, for a
+change that is easy to keep apart, and when a cheaper brain (a local worker) or a
+different family is a fair judge of the question; set model/provider and the caps to
+bound it (a call can lower the config's limits, never raise them).
+
+- `permissions: read` (the default) cannot change anything: no write, edit, checkpoint
+  or rollback, and its terminal runs only a read-only command it can prove.
+- `permissions: write` changes files only inside the worktree the delegate creates for
+  it, on a branch off HEAD. Your tree stays untouched. Its report names the worktree,
+  branch, base commit, the files it changed, a diffstat, and the `git merge` / discard
+  commands: read the diff before you merge, and say what you checked. A writing child is
+  trusted as you are - the worktree keeps its changes apart, it is not a jail.
+- A child cannot ask your human, message a peer, hand off to GitHub, remember, write a
+  SIM record, browse, or delegate further (one level deep). It reports; you act.
+- With `wait: true` (the default) the call returns when the report is ready. With
+  `wait: false` the child runs in the background, this goal waits (waiting_children) and
+  their reports arrive as one message; `collect` reads the structured ones and names the
+  running children. Up to delegate_max_children (4) children per goal, and each child
+  gets its own SIM record (`recorded` at the start, its outcome when it closes).
+
+A child's summary is a claim, not your verification: check what you act on, and do not
+delegate the change you are accountable for and cannot check.
 '''
 
 
