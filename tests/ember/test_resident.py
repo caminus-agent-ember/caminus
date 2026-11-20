@@ -4756,6 +4756,169 @@ for line in sys.stdin:
             self.assertEqual(code,402);self.assertEqual(calls,[])
         finally:stop()
 
+    def test_a_first_price_load_that_fails_is_retried_not_remembered_as_a_refusal(self):
+        """#351: the OpenCode Go relay's first load of the plan's list failed at boot (a unit 12 s after boot, before
+        the network), and every request was then refused '403 no price for MODEL' for two hours (a 912-step goal ended
+        in error) with nothing in the log. A failed load is logged, retried on LOAD_BACKOFF's schedule, and until one
+        succeeds the refusal is a 503 the agent waits on, never a fact it is told about the model."""
+        import http.client
+        from caminus.ember import relay
+        good = dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2)))])
+        tries, lines = [], []
+        def fetch():
+            tries.append(1)
+            if len(tries) == 1:
+                raise http.client.BadStatusLine('')   # (not an OSError: it escaped get() and dropped the connection)
+            return good
+        prices = relay.ListPrices(lines.append, fetch, backoff=(0.3,))
+        self.assertIsNone(prices.get('zai-org/GLM-5.2'))
+        self.assertEqual(len(tries), 1)
+        self.assertTrue(any('price list unavailable (1 in a row)' in l and 'BadStatusLine' in l for l in lines), lines)
+        status, kind, message, wait = prices.refusal('zai-org/GLM-5.2')
+        self.assertEqual((status, kind), (503, 'api_error'))
+        self.assertIn('has not loaded', message)
+        self.assertGreater(wait, 0, 'the refusal says when the next try is')
+        time.sleep(0.4)                                # (the retry window the refusal named)
+        self.assertEqual(prices.get('zai-org/GLM-5.2'), (0.6, 2.2, 0.6), 'loaded on the retry, no restart')
+        self.assertIsNone(prices.refusal('zai-org/GLM-5.2'))
+        # a good list that simply does not price the model is still a fact about the model (403, with the plan's hint)
+        self.assertIsNone(prices.get('some/unpriced-model'))
+        self.assertIsNone(prices.refusal('some/unpriced-model'))
+        # an empty list is a failed load, not a list that prices nothing: it must not be remembered for an hour
+        empty = relay.ListPrices(lines.append, lambda: dict(data=[]), backoff=(0.3,))
+        self.assertIsNone(empty.get('zai-org/GLM-5.2'))
+        self.assertEqual(empty.refusal('zai-org/GLM-5.2')[0], 503)
+
+    def test_a_failed_hourly_refresh_waits_out_its_backoff_instead_of_fetching_every_request(self):
+        """A refresh that fails is a failed load too. _due() used to test only 'the hour is up' once the table had
+        loaded, so a provider that went down was fetched again on every single request (the opposite of the backoff
+        that exists so a down provider is not hammered), while the stale table kept serving the old prices."""
+        from caminus.ember import relay
+        good = dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2)))])
+        calls, lines = [], []
+        def fetch():
+            calls.append(1)
+            if len(calls) == 1:
+                return good
+            raise OSError('network is down')
+        prices = relay.ListPrices(lines.append, fetch, backoff=(300,))
+        self.assertEqual(prices.get('zai-org/GLM-5.2'), (0.6, 2.2, 0.6))
+        prices.at -= relay.PRICE_REFRESH + 1                 # (the hourly refresh is now due)
+        self.assertEqual(prices.get('zai-org/GLM-5.2'), (0.6, 2.2, 0.6), 'the loaded table still serves')
+        self.assertEqual(len(calls), 2)
+        for _ in range(5):                                   # every later request inside the backoff: no fetch
+            self.assertEqual(prices.get('zai-org/GLM-5.2'), (0.6, 2.2, 0.6))
+        self.assertEqual(len(calls), 2, 'a refresh that failed is not retried on every request')
+        self.assertTrue(any('price list unavailable (1 in a row)' in l for l in lines), lines)
+
+    def test_the_relay_serves_a_priced_request_once_a_later_price_load_succeeds(self):
+        """The issue's test, through the relay: the first POST meets a list that has not loaded (503, Retry-After,
+        nothing forwarded); the next, after the retry window, is priced and metered, with no restart."""
+        import urllib.error, urllib.request
+        from caminus.ember import relay
+        ok = json.dumps(dict(choices=[dict(message=dict(content='hi'),finish_reason='stop')],
+                             usage=dict(prompt_tokens=10,completion_tokens=10))).encode()
+        tries, plog = [], []
+        def fetch():
+            tries.append(1)
+            if len(tries) == 1:
+                raise OSError('network is down')
+            return dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2)))])
+        prices = relay.ListPrices(plog.append, fetch, backoff=(0.3,))
+        base, calls, ledger, log, stop = self._relay('deepinfra', lambda c: (200, ok, 'application/json'), cap=5.0,
+                                                     prices=prices)
+        try:
+            req = urllib.request.Request(base + '/v1/openai/chat/completions',
+                                         json.dumps(dict(model='zai-org/GLM-5.2', messages=[])).encode(),
+                                         {'Content-Type': 'application/json'})
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(caught.exception.code, 503)
+            self.assertIn(b'has not loaded', caught.exception.read())
+            self.assertIn('Retry-After', caught.exception.headers)
+            self.assertEqual(calls, [], 'a price list that has not loaded forwards nothing')
+            time.sleep(0.4)
+            code, body = self._post(base + '/v1/openai/chat/completions', dict(model='zai-org/GLM-5.2', messages=[]))
+            self.assertEqual(code, 200, body)
+            self.assertAlmostEqual(ledger.spent(), (10*0.6 + 10*2.2)/1e6, places=9)
+            self.assertTrue(any('price list unavailable' in l for l in plog), plog)
+        finally:
+            stop()
+
+    def test_a_price_file_missing_at_start_is_logged_and_named_in_the_refusal(self):
+        """Mistral's prices are the owner's file. A relay that started before it existed refused every model with
+        'no price for MODEL (add it to the relay's --prices file)', which reads as a wrong model name, and logged
+        nothing at all. Now the first failure is logged, the refusal says the file cannot be read (never its path:
+        the text reaches the agent), and the owner's file appearing is read on the next request."""
+        import urllib.error, urllib.request
+        from caminus.ember import relay
+        ok = json.dumps(dict(choices=[dict(message=dict(content='hi'),finish_reason='stop')],
+                             usage=dict(prompt_tokens=1_000_000,completion_tokens=1_000_000))).encode()
+        pf, log = self.home/'mistral-prices.json', []
+        self.assertFalse(pf.exists())
+        prices = relay.OwnerPrices(pf, log.append)
+        base, calls, ledger, plog, stop = self._relay('mistral', lambda c: (200, ok, 'application/json'), cap=5.0,
+                                                      prices=prices)
+        try:
+            req = urllib.request.Request(base + '/v1/chat/completions',
+                                         json.dumps(dict(model='open-mistral-4', messages=[])).encode(),
+                                         {'Content-Type': 'application/json'})
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(caught.exception.code, 403)
+            body = caught.exception.read()
+            self.assertIn(b'cannot read its price file', body)
+            self.assertNotIn(str(self.home).encode(), body, "the owner's path is not the agent's business")
+            self.assertEqual(calls, [])
+            self.assertTrue(any('price file unreadable: FileNotFoundError' in l for l in log), log)
+            self.assertEqual(sum('price file unreadable' in l for l in log), 1, 'logged once, not once a request')
+            pf.write_text(json.dumps({'open-mistral-4': [0.4, 2.0]}))
+            code, body = self._post(base + '/v1/chat/completions', dict(model='open-mistral-4', messages=[]))
+            self.assertEqual(code, 200, body)
+            self.assertAlmostEqual(ledger.spent(), 0.4 + 2.0, places=6)
+            # a readable file that does not price the model is the model's fact again: the file's advice, not "unreadable"
+            code, body = self._post(base + '/v1/chat/completions', dict(model='open-mistral-9', messages=[]))
+            self.assertEqual(code, 403)
+            self.assertIn(b'no price for', body)
+            self.assertNotIn(b'cannot read its price file', body)
+        finally:
+            stop()
+
+    def test_an_alias_whose_model_list_never_loaded_is_a_503_waited_out_not_a_403(self):
+        """Mistral's aliases come from the provider's own model list. While that list has never loaded, a name the
+        owner's file does not price may simply be an alias of one it does, so it is not a fact about the model: the
+        refusal is a 503 with the wait, never the 403 that stops a goal. A list that is down is fetched on the 60 s
+        rule, not on every request: the 503 makes the agent retry, so refetching each time would hammer a provider
+        that is already down (names_at used to stay 0 after a failure, which did exactly that)."""
+        from caminus.ember import relay
+        pf = self.home/('prices-'+uuid.uuid4().hex+'.json')
+        pf.write_text(json.dumps({'mistral-large-2512': [0.7, 2.1]}))
+        listed = dict(data=[dict(id='mistral-large-2512', aliases=['mistral-large-latest'])])
+        calls, lines, down = [], [], [True]
+        def fetch():
+            calls.append(1)
+            if down[0]:
+                raise OSError('network is down')
+            return listed
+        op = relay.OwnerPrices(str(pf), lines.append, fetch=fetch)
+        self.assertIsNone(op.get('mistral-large-latest'))
+        status, kind, message, wait = op.refusal('mistral-large-latest')
+        self.assertEqual((status, kind), (503, 'api_error'))
+        self.assertIn('has not loaded', message)
+        self.assertGreater(wait, 0, 'the refusal says when the next try is')
+        for _ in range(3):
+            self.assertIsNone(op.get('mistral-large-latest'))
+            self.assertEqual(op.refusal('mistral-large-latest')[0], 503)
+        self.assertEqual(len(calls), 1, 'a model list that failed is retried on the 60 s rule, not on every request')
+        self.assertEqual(sum('model list unavailable' in l for l in lines), 1, "logged once, not once a request")
+        down[0] = False                                      # (the provider is back)
+        op.names_at -= 61                                    # (the 60 s rule says try again)
+        self.assertEqual(op.get('mistral-large-latest'), (0.7, 2.1, 0.7), 'the alias resolves, no restart')
+        self.assertIsNone(op.refusal('mistral-large-latest'))
+        # a name the loaded list does not know is the model's fact again: the 403 with the file's advice
+        self.assertIsNone(op.get('nope'))
+        self.assertIsNone(op.refusal('nope'))
+
     def test_a_client_hang_up_closes_upstream_even_while_upstream_is_silent(self):
         """An interrupt closes the resident's call; the relay saw that only at its next write, after upstream's next
         line, so a long prompt read or a model thinking kept the provider generating. Now it closes upstream at once."""

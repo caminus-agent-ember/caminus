@@ -82,6 +82,10 @@ PROVIDERS = {
 }
 SESSION_ID = re.compile(r'[A-Za-z0-9_-]{8,128}')   # an x-opencode-session the relay forwards (Ember sends uuid4 hex)
 PRICE_REFRESH = 3600
+# Seconds between attempts after a price list fails to load, then the last one again until it loads: a relay that
+# starts before the network does (a systemd unit 12 s after boot) is refused by nothing while it waits, and does not
+# hammer a provider that is down. The last delay is not PRICE_REFRESH: an hour is the window this bug cost.
+LOAD_BACKOFF = (10, 30, 60, 300)
 # A decode-rate ceiling for output a stream does not show (Meta bills its models' reasoning but sends it empty), used
 # only to bound a reply cut before its usage came. Meta publishes no speed: an assumed ceiling (unverified), above the
 # decode rates hosted APIs usually report, so a hang-up errs high rather than booking one token.
@@ -206,31 +210,75 @@ def opencode_rates(m):
 class ListPrices:
     """Per-model prices from the provider's own model list (DeepInfra's, OpenCode's), refreshed hourly; a model it
     publishes no price for, or one rates() leaves out, is refused. fetch: () -> the list; rates: a row -> its rates
-    or None; rows keeps each priced row by id (OpenCode's peak-hour multipliers are read from it)."""
+    or None; rows keeps each priced row by id (OpenCode's peak-hour multipliers are read from it).
 
-    def __init__(self, log, fetch, rates=deepinfra_rates):
-        self.log, self.fetch, self.rates = log, fetch, rates
+    A load that fails is retried on LOAD_BACKOFF's schedule (a relay that starts before the network does must not
+    refuse every model until someone restarts it), and until the list has loaded once a model is not refused as
+    unpriced: refusal() answers 503 with the next try instead, so the agent waits rather than stopping its goal."""
+
+    def __init__(self, log, fetch, rates=deepinfra_rates, backoff=LOAD_BACKOFF):
+        self.log, self.fetch, self.rates, self.backoff = log, fetch, rates, tuple(backoff)
         self.table, self.rows, self.at, self.lock = {}, {}, 0.0, threading.Lock()
+        self.tries, self.next, self.error = 0, 0.0, ''      # (the failed loads in a row, when the next may run, why)
+
+    def _due(self, model, now):
+        if now < self.next:                                 # a load failed: its backoff, whatever made it due
+            return False                                    # (a refresh that fails must not run on every request)
+        if not self.at:                                     # never loaded: the first request loads it
+            return True
+        if now - self.at > PRICE_REFRESH:
+            return True
+        return model not in self.table and now - self.at > 60
+
+    def _load(self, now):
+        try:
+            table, rows = {}, {}
+            for m in self.fetch().get('data') or []:
+                # an entry with a null price or no id is skipped, never the whole table (a TypeError there
+                # dropped the client's connection and left every model unpriced)
+                try:
+                    r = self.rates(m) if m.get('id') else None
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if r is not None:
+                    table[m['id']], rows[m['id']] = r, m
+            if not table:
+                # a list that prices nothing is a truncated or empty reply, not a list: every model stays unpriced
+                raise ValueError('no priced model in the list')
+            self.table, self.rows, self.at = table, rows, now
+            self.tries, self.next, self.error = 0, 0.0, ''
+            self.log('prices: %d priced models' % len(table))
+        except (OSError, ValueError, AttributeError, http.client.HTTPException) as e:
+            # http.client.HTTPException too: BadStatusLine and IncompleteRead are not OSErrors, and one escaping here
+            # dropped the client's connection (the price list was simply never loaded)
+            self.tries += 1
+            delay = self.backoff[min(self.tries, len(self.backoff)) - 1]
+            self.next = now + delay
+            self.error = '%s: %s' % (type(e).__name__, str(e)[:200])
+            self.log('price list unavailable (%d in a row): %s; next try in %ds'
+                     % (self.tries, self.error, round(delay)))
 
     def get(self, model):
         with self.lock:
-            if time.time() - self.at > PRICE_REFRESH or (model not in self.table and time.time() - self.at > 60):
-                try:
-                    table, rows = {}, {}
-                    for m in self.fetch().get('data') or []:
-                        # an entry with a null price or no id is skipped, never the whole table (a TypeError there
-                        # dropped the client's connection and left every model unpriced)
-                        try:
-                            r = self.rates(m) if m.get('id') else None
-                        except (TypeError, ValueError, AttributeError):
-                            continue
-                        if r is not None:
-                            table[m['id']], rows[m['id']] = r, m
-                    self.table, self.rows, self.at = table, rows, time.time()
-                    self.log('prices: %d priced models' % len(table))
-                except (OSError, ValueError, AttributeError) as e:
-                    self.log('price list unavailable: %s' % type(e).__name__)
+            now = time.time()
+            if self._due(model, now):
+                self._load(now)
             return self.table.get(model)
+
+    def refusal(self, model):
+        """(status, kind, message, retry_after) while the list has never loaded, or None once it has: a model a good
+        list does not price is a fact about the model, a list that never loaded is not."""
+        with self.lock:
+            if self.at or not self.error:
+                return None
+            wait = max(0, math.ceil(self.next - time.time()))
+            return (503, 'api_error', 'the price list has not loaded yet (%s), so %r cannot be priced yet; the relay '
+                    'tries again in %ds' % (self.error, model, wait), wait)
+
+    def prime(self):
+        """Load once now, off the request path: a relay that starts before the network does logs the failure and
+        retries on the schedule while its port answers."""
+        threading.Thread(target=self.get, args=(None,), daemon=True, name='relay-price-prime').start()
 
     def multiplier(self, model):
         """the largest price multiplier the model's rules apply now (catalog.opencode_multiplier); 1 without rules"""
@@ -266,6 +314,8 @@ class OwnerPrices:
     def __init__(self, path, log, fetch=None):
         self.path, self.log, self.table, self.mtime, self.lock = Path(os.path.expanduser(path)), log, {}, None, threading.Lock()
         self.fetch, self.names, self.names_at = fetch, {}, 0.0
+        self.error = ''                                    # why the file last could not be read ('' once it could)
+        self.names_error = ''                              # why the model list (for aliases) last could not be read
 
     def get(self, model):
         with self.lock:
@@ -278,12 +328,16 @@ class OwnerPrices:
                             table[k] = (float(v['input']), float(v['output']), float(v.get('cache_read', v['input'])))
                         else:
                             table[k] = (float(v[0]), float(v[1]), float(v[2] if len(v) > 2 else v[0]))
-                    self.table, self.mtime = table, mt
+                    self.table, self.mtime, self.error = table, mt, ''
                     self.log('prices: %d models from %s' % (len(table), self.path))
             except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
-                if self.table or self.mtime is not None:
-                    self.log('price file unreadable: %s' % type(e).__name__)
-                self.table, self.mtime = {}, None
+                # logged on the first failure too: a price file missing at start (a relay that starts before the owner
+                # wrote it) refused every model with no line in the log, and the log is all the owner has. The message
+                # keeps no path (FileNotFoundError's text carries it): this text reaches the agent, the log does not.
+                why = '%s: %s' % (type(e).__name__, e.strerror if isinstance(e, OSError) else str(e)[:200])
+                if why != self.error:
+                    self.log('price file unreadable: %s (%s)' % (why, self.path))
+                self.error, self.table, self.mtime = why, {}, None
             if model in self.table or not self.fetch:
                 return self.table.get(model)
             if time.time() - self.names_at > PRICE_REFRESH or (model not in self.names and time.time() - self.names_at > 60):
@@ -293,12 +347,32 @@ class OwnerPrices:
                         group = [m['id'], *(m.get('aliases') or [])]
                         for n in group:
                             names.setdefault(n, set()).update(group)
-                    self.names, self.names_at = names, time.time()
-                except (OSError, ValueError, KeyError, TypeError) as e:
-                    self.log('model list unavailable: %s' % type(e).__name__)
+                    self.names, self.names_at, self.names_error = names, time.time(), ''
+                except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
+                    why = '%s: %s' % (type(e).__name__, str(e)[:200])
+                    if why != self.names_error:
+                        self.log('model list unavailable: %s' % why)
+                    # a failed fetch still moves the clock: names_at used to stay 0, so every request fetched a list
+                    # that was down (the 60 s rule below is the retry, not every call)
+                    self.names_at, self.names_error = time.time(), why
             for other in sorted(self.names.get(model, ())):
                 if other in self.table:
                     return self.table[other]
+            return None
+
+    def refusal(self, model):
+        """(status, kind, message, retry_after) for a model this relay cannot price, or None when it has no better
+        account than 'no price for MODEL'. Two causes are not about the model: a price file that cannot be read (the
+        message names the file, never its path: this text reaches the agent) and a model list that has not loaded,
+        which may be what prices the alias the call used (503, so the agent waits instead of stopping its goal)."""
+        with self.lock:
+            if self.error and not self.table:
+                return (403, 'permission_error', 'the relay cannot read its price file (%s), so %r cannot be priced: '
+                        'the owner re-reads it on change, no restart' % (self.error, model), None)
+            if self.fetch and self.names_error and model not in self.names:
+                wait = max(0, math.ceil(60 - (time.time() - self.names_at)))
+                return (503, 'api_error', 'the price list has not loaded yet (%s), so the name %r cannot be resolved to '
+                        'a priced model; the relay tries again in %ds' % (self.names_error, model, wait), wait)
             return None
 
 
@@ -317,13 +391,15 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
         def log_message(self, *a):
             pass
 
-        def refuse(self, status, kind, message):
+        def refuse(self, status, kind, message, retry_after=None):
             err = dict(type='error', error=dict(type=kind, message='relay: ' + message)) \
                 if messages_wire(self.path.split('?')[0]) else dict(error=dict(message='relay: ' + message, type=kind, code=status))
             raw = json.dumps(err).encode()
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(raw)))
+            if retry_after is not None:
+                self.send_header('Retry-After', str(retry_after))
             self.end_headers()
             self.wfile.write(raw)
             log('refused %d %s' % (status, message))
@@ -430,6 +506,12 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             else:
                 rates = prices.get(model) if isinstance(model, str) else None
                 if rates is None:
+                    # a price table that could not be read, or a list that has not loaded, is not a fact about the
+                    # model: it says so, and whether to wait, instead of the 'no price' that stops the agent's goal
+                    why = getattr(prices, 'refusal', None)
+                    better = why(model) if why else None
+                    if better:
+                        return self.refuse(*better)
                     return self.refuse(403, 'permission_error', 'no price for %r: it cannot be metered%s' % (
                         # (no file path: this text reaches the agent, which has no business with the owner's files)
                         model, ' (add it to the relay\'s --prices file as "%s": [input, output] USD per million tokens; '
@@ -922,6 +1004,10 @@ def main(argv=None):
                                                        install_args=install_args))
     if a.ttl > 0:
         threading.Timer(a.ttl, srv.shutdown).start()
+    if getattr(prices, 'prime', None):
+        # load the price list off the request path: a relay that starts before the network does logs the failure and
+        # retries on its schedule while the port answers, instead of refusing the first request for a model it prices
+        prices.prime()
     root = '/v1/openai' if a.provider == 'deepinfra' else spec.get('root') or '/v1'
     log('start %s port %d cap $%.2f ttl %ds%s (spent today $%.4f)' % (
         a.provider, port, a.cap_usd, a.ttl, ' models %s' % sorted(models) if a.provider == 'anthropic' else '',
