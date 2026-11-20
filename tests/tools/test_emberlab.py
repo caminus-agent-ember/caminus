@@ -279,6 +279,18 @@ check(p.returncode == 0 and '0 to do' in p.stdout
       and proposal.load_record(ph, r4['id'])['status'] == 'observed',
       f'propose: the same arms resume the folder and close the record ({p.returncode}; '
       f'{(p.stdout + p.stderr)[-300:]})')
+# a checkout that MOVED (a commit, a rebase) is a different arm even at the same path: `lab.py run` skips every id
+# already in results.jsonl, so without this a new record would be closed with the previous rows (#385 review P1)
+moved = json.loads((shared / 'arms.json').read_text())
+moved['arm']['commit'] = 'deadbeef0000'
+(shared / 'arms.json').write_text(json.dumps(moved))
+r5 = sim_record(ph, status='proposed')
+p = lab('propose', '--sim-home', str(ph), '--record', r5['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(shared))
+check(p.returncode != 0 and 'fresh --out' in (p.stderr + p.stdout) and 'commit' in (p.stderr + p.stdout)
+      and proposal.load_record(ph, r5['id'])['status'] != 'observed',
+      f'propose: a folder whose checkout moved is refused and the record stays open ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
 
 # ---- tui
 if shutil.which('tmux'):
