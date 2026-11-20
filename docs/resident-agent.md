@@ -84,7 +84,7 @@ it; the durable blocks replace it when the turn lands.
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
 | `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory file, in a scrolling view |
-| `/sim` | the SIM log: each harness change's prediction, what CI and the reviews showed, and the brain that wrote it (`caminus ember agent sim NAME --on/--off` switches it for a session; `--record` / `--observe` / `--export` from the CLI). The end-of-goal reflection that proposes a record is off unless the session asks: `caminus ember agent reflect NAME --on` (see `config.json` below) |
+| `/sim` | the SIM log: each harness change's prediction, what CI and the reviews showed, and the brain that wrote it (`caminus ember agent sim NAME --on/--off` switches it for a session; `--record` / `--observe` / `--export` from the CLI). The end-of-goal reflection that proposes a record is off unless the session asks: `caminus ember agent reflect NAME --on` (config `reflect`, default false) |
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
 | `/panel` | the Caminus panel (models, servers, the cards) full screen inside Ember; Esc, q or e comes back to the chat as it was |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
