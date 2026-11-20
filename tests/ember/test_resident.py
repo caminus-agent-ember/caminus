@@ -2811,9 +2811,11 @@ for line in sys.stdin:
                     'cd %s && xargs touch'%wt,'cd %s && echo x --out=/tmp/escape6'%wt):
             why=delegate.refused('terminal',dict(command=cmd),row)
             self.assertTrue(why and 'worktree' in why,(cmd,why))
-        # a bare `cd ..` reads nothing, so it stays read-only (a read-only command may read anywhere); only a
-        # command that changes something has to start and stay inside the worktree
-        self.assertIsNone(delegate.refused('terminal',dict(command='cd %s && cd .. && ls' % wt),row))
+        # a `cd ..` that then *reads* is refused like any other read outside (#384 review P1: a writing child's
+        # read-only command is checked too, so `cd W && cd .. && ls` would list the parent); only a command that
+        # changes something and stays inside is allowed to move around
+        why=delegate.refused('terminal',dict(command='cd %s && cd .. && ls' % wt),row)
+        self.assertTrue(why and 'reads only inside its worktree' in why,(why,))
         self.assertIsNone(delegate.refused('terminal',dict(
             command='cd %s && touch ok.txt && cat sub/../ok.txt 2>&1'%wt),row))
         self.assertTrue(delegate.refused('terminal',dict(command='ls',cwd=wt+'/..'),row),'a cwd that climbs out')
