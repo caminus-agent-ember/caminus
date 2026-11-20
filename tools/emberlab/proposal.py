@@ -160,8 +160,11 @@ def cmd_propose(a, run):
         raise SystemExit(f'no SIM record {a.record} in {home}')
     if rec.get('status') == 'observed':
         raise SystemExit(f'SIM record {a.record} is already observed: a closed record is not measured again')
-    prop = dict(rec, config=_json_arg(a.config, 'config'), env=_json_arg(a.env, 'env'),
-                base_config=_json_arg(a.base_config, 'base-config'), base_env=_json_arg(a.base_env, 'base-env'))
+    try:
+        prop = dict(rec, config=_json_arg(a.config, 'config'), env=_json_arg(a.env, 'env'),
+                    base_config=_json_arg(a.base_config, 'base-config'), base_env=_json_arg(a.base_env, 'base-env'))
+    except ValueError as e:
+        raise SystemExit(str(e))
     suite = runner.load_suite(a.suite)
     brains = [brains_mod.parse(s, a.parallel) for s in a.brain]
     try:
@@ -185,7 +188,8 @@ def cmd_propose(a, run):
                                      for x in arms}, indent=1))
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
     runs = type('Run', (), dict(suite=a.suite, brain=list(a.brain), arm=None, arms=str(arms_file), out=str(out),
-                                repeats=a.repeats, only=a.only, host=a.host, unsafe_local=a.unsafe_local,
+                                repeats=a.repeats, only=a.only, host=a.host,
+                                unsafe_local=a.unsafe_local or a.unsafe_free,
                                 jobs=a.jobs, parallel=a.parallel, timeout=None, rerun=False))()
     if run(runs):
         raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')
