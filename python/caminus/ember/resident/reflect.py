@@ -22,7 +22,9 @@ import json
 from . import sim
 
 MAX_TOKENS = 700              # well under model.SHORT_CALL: this call runs with thinking off
-TIMEOUT = 120                 # seconds: the goal is complete, so a hung endpoint must not hold the loop for 900 s
+TIMEOUT = 60                  # seconds per attempt: the goal is complete, so a hung endpoint must not hold the loop
+                              # for a turn's 900 s. The call runs on the loop thread, so this is the bound: one
+                              # attempt normally, a second only when the first reply could not be read (60-120 s).
 SYSTEM = '''REFLECT. You review one finished agent goal and propose at most one change to the harness (the system
 prompt, a tool, a gate, a cap) that would have made this goal faster or more reliable. You see the goal, its
 done check, how it ended, its tool calls and the failures along the way. Propose only a change the evidence
@@ -62,6 +64,11 @@ def maybe(rt, gid, summary='', open_work=''):
             return None
         if not callable(getattr(getattr(rt, 'model', None), 'complete', None)):
             return None           # a stubbed runtime (some tests drop a plain namespace in for the model)
+        if not _may_spend(rt, gid):
+            # the brain in force is the fallback and its daily allowance is spent (or it is unpriced): the turn
+            # after this one would not go there either, so the reflection does not spend past it (brains._allowed)
+            rt.store.event('reflection_skipped', dict(reason="the fallback's allowance is spent"), gid)
+            return None
         msgs = [dict(role='system', content=SYSTEM),
                 dict(role='user', content=brief(rt, gid, summary, open_work))]
         text = _ask(rt, gid, msgs)
@@ -79,7 +86,7 @@ def maybe(rt, gid, summary='', open_work=''):
         goal = rt.store.goal(gid) or {}
         rec.update(status='proposed',
                    eval_context='goal %s · %s steps · judge %s' % (
-                       gid[:8], goal.get('steps') or 0, _judge(rt, gid) or 'not run'))
+                       gid[:8], goal.get('steps') or 0, _judge(rt, gid, _episode_start(rt, gid)) or 'not run'))
         return sim.record(rt, gid, rec)
     except Exception as e:
         try:
@@ -90,8 +97,10 @@ def maybe(rt, gid, summary='', open_work=''):
 
 
 def _ask(rt, gid, msgs):
-    """One short call, priced into the goal's spend like any other turn (inside the brain's allowance), on its own
-    timeout: the goal is already complete, so a hung endpoint must not hold the loop for a turn's 900 s."""
+    """One short call, priced into the goal's spend like any other turn, on its own timeout: the goal is already
+    complete, so a hung endpoint must not hold the loop for a turn's 900 s. It runs on the loop thread (one call per
+    completed goal, and the loop is idle between goals), so the bound that matters is TIMEOUT per attempt: two at
+    most, when the first reply could not be read."""
     reply = rt.model.complete(msgs, tools=None, max_tokens=MAX_TOKENS, timeout=TIMEOUT)
     try:
         rt.brains.account(gid)
@@ -120,9 +129,31 @@ def parse(text):
                 change=change, rationale=str(d.get('rationale') or '').strip(), predicted=predicted)
 
 
-def _judge(rt, gid):
-    row = rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='judged' ORDER BY seq DESC LIMIT 1",
-                              (gid,)).fetchone()
+def _episode_start(rt, gid):
+    """The seq this episode began after: the goal's previous `finished` event (a reopened goal's earlier episode is
+    not this one's evidence), or 0 for a first finish."""
+    row = rt.store.db.execute(
+        "SELECT seq FROM events WHERE goal=? AND kind='finished' ORDER BY seq DESC LIMIT 1 OFFSET 1", (gid,)).fetchone()
+    return row['seq'] if row else 0
+
+
+def _may_spend(rt, gid):
+    """Whether the brain in force may take this call. The primary is the model the user chose, so it always may; the
+    fallback has a daily allowance (`budget_usd`, brain.py) that gates its work turns, and a reflection billed to a
+    fallback past its allowance would spend money the runtime just refused to spend on the goal's own turns."""
+    brains = getattr(rt, 'brains', None)
+    try:
+        if brains is None or not brains.cfg or getattr(rt, 'model', None) is not brains.fallback:
+            return True
+        return brains.spent_today() < float(brains.cfg['budget_usd'])
+    except Exception:
+        return True               # (a stub brain in a test: the call is not a spend the guard can price)
+
+
+def _judge(rt, gid, since=0):
+    row = rt.store.db.execute(
+        "SELECT data FROM events WHERE goal=? AND kind='judged' AND seq>? ORDER BY seq DESC LIMIT 1",
+        (gid, since)).fetchone()
     try:
         return json.loads(row['data']).get('verdict') if row else None
     except (ValueError, KeyError, TypeError):
@@ -132,6 +163,7 @@ def _judge(rt, gid):
 def brief(rt, gid, summary, open_work):
     """The evidence the call sees: the goal, the done check, its own plan, how it ended, and where it struggled."""
     g = rt.store.goal(gid) or {}
+    since = _episode_start(rt, gid)
     parts = ['GOAL:\n' + (g.get('prompt') or '')[:3000],
              'DONE CHECK:\n' + (g.get('done_check') or '(none)')]
     todo = rt.store.todo(gid)
@@ -146,27 +178,26 @@ def brief(rt, gid, summary, open_work):
         parts.append('LEFT OPEN (the agent says):\n' + open_work[:1000])
     parts.append('THE GOAL TOOK %s MODEL TURNS, the agent changed approach %s times, and %d steer(s) arrived.' % (
         g.get('steps') or 0, g.get('approach_changes') or 0, len(rt.store.steers(gid))))
-    verdict = _judge(rt, gid)
-    if verdict:
-        row = rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='judged' ORDER BY seq DESC LIMIT 1",
-                                  (gid,)).fetchone()
+    verd = _judge(rt, gid, since)
+    if verd:
+        row = rt.store.db.execute(
+            "SELECT data FROM events WHERE goal=? AND kind='judged' AND seq>? ORDER BY seq DESC LIMIT 1",
+            (gid, since)).fetchone()
         try:
             reason = str(json.loads(row['data']).get('reason') or '')[:600]
         except (ValueError, KeyError, TypeError):
             reason = ''
-        parts.append('THE FINISH JUDGE: %s — %s' % (verdict, reason))
-    row = rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='verified' ORDER BY seq DESC LIMIT 1",
-                              (gid,)).fetchone()
+        parts.append('THE FINISH JUDGE: %s — %s' % (verd, reason))
+    row = rt.store.db.execute(
+        "SELECT data FROM events WHERE goal=? AND kind='verified' AND seq>? ORDER BY seq DESC LIMIT 1",
+        (gid, since)).fetchone()
     if row:
         try:
             parts.append('WHAT THE AGENT VERIFIED:\n' + str(json.loads(row['data']).get('evidence') or '')[:1000])
         except (ValueError, KeyError, TypeError):
             pass
     # this episode only: after a reopened goal finishes again, the previous episode's calls are not this one's
-    # evidence (the judge and verification lookups above are newest-first for the same reason)
-    prior = rt.store.db.execute(
-        "SELECT seq FROM events WHERE goal=? AND kind='finished' ORDER BY seq DESC LIMIT 1 OFFSET 1", (gid,)).fetchone()
-    since = prior['seq'] if prior else 0
+    # evidence (the judge and verification lookups above are scoped the same way: newest-first within the episode)
     rows = rt.store.db.execute(
         "SELECT data FROM events WHERE goal=? AND kind='tool_result' AND seq>? ORDER BY seq DESC LIMIT 200",
         (gid, since)).fetchall()

@@ -8318,6 +8318,69 @@ for line in sys.stdin:
             self.assertEqual(rt.store.goal(gid)['state'],'working','the reflection touches no goal state')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_reflection_does_not_spend_past_the_brain_that_took_the_goal(self):
+        # #383 review P2: the call is priced into the goal's spend like a turn, and the fallback's daily budget gates
+        # its work turns (brains._allowed). A goal whose last turn the fallback served must not reflect past that
+        # budget: the runtime would spend through this call what it just refused to spend on the goal's own turns.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                return {'content':json.dumps(dict(problem_group='x',change='y',predicted='z'))}
+        class FakeBrains:
+            budget=0.5
+            def __init__(self,model):self.fallback=model;self.cfg=dict(budget_usd=self.budget)
+            def spent_today(self):return self.spent
+        rt=Runtime(self.home)
+        try:
+            model=Model();rt.model=model;rt.brains=FakeBrains(model)
+            rt.brains.spent=0.6
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,0,'past the allowance: no call')
+            events=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(events),1,'the skip is on the record with its reason')
+            self.assertIn('allowance is spent',events[0]['data']['reason'])
+            # under the allowance again the same goal reflects once
+            rt.brains.spent=0.1
+            self.assertIsNotNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1)
+            # the primary is the brain the user chose: its allowance is not this guard's (a fallback-only budget)
+            rt.model=object.__new__(type('P',(),{}))
+            rt.model.complete=Model().complete;rt.brains.fallback=object()
+            self.assertTrue(reflect._may_spend(rt,gid),'the fallback is not in force: no budget applies')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_reopened_goals_reflection_reads_only_this_episodes_judge(self):
+        # #383 review P2: the brief and the record's eval_context took the newest `judged` event for the goal. A
+        # reopened goal that finished again without a judge this episode would quote the earlier verdict, which
+        # describes a different episode. Both lookups are now scoped to the episode (after the previous `finished`).
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('judged',dict(verdict='unmet',reason='the old episode'),gid)
+            rt.store.event('finished',dict(summary='first episode'),gid)
+            # this episode's own finish: _finish writes it before it calls the reflection (runtime._finish)
+            rt.store.event('finished',dict(summary='second episode'),gid)
+            since=reflect._episode_start(rt,gid)
+            self.assertGreater(since,0,'the previous episode’s finish bounds this one')
+            self.assertIsNone(reflect._judge(rt,gid,since),'the earlier verdict is not this episode’s')
+            self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
+            rt.store.event('judged',dict(verdict='met',reason='this episode'),gid)
+            self.assertEqual(reflect._judge(rt,gid,reflect._episode_start(rt,gid)),'met','a verdict this episode is seen')
+            self.assertIn('THE FINISH JUDGE: met',reflect.brief(rt,gid,'Done.',''))
+        finally:rt.mail.close();rt.store.close()
+
+
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
     def __init__(self,*answers):self.answers=deque(answers);self.requests=[]
