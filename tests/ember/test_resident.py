@@ -2654,8 +2654,9 @@ for line in sys.stdin:
             # the child's own turns: a write is refused (it is read-only), then it reads and finishes
             call('write',dict(path=str(self.home/'child.txt'),content='x')),
             call('terminal',dict(command='grep -n marker f.txt')),
+            call('read',dict(path='f.txt')),
             call('define_done',dict(check='f.txt has a marker line')),
-            call('verify',dict(evidence='grep printed 2:marker line')),
+            call('verify',dict(evidence='read showed line 2 is "marker line"')),
             call('finish',dict(summary='f.txt line 2 is "marker line".')),
             # back in the parent: the delegate result was the child's report
             call('verify',dict(evidence='the child quoted line 2 of f.txt')),
@@ -2666,7 +2667,7 @@ for line in sys.stdin:
         events=[e for e in self.cmd('events') if e['kind']=='tool_result']
         reports=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
         self.assertTrue(reports and reports[-1].get('outcome')=='completed',reports)
-        self.assertEqual(reports[-1]['steps'],5,'the child ran five of its own turns')
+        self.assertEqual(reports[-1]['steps'],6,'the child ran six of its own turns')
         self.assertTrue(reports[-1]['verified'])
         self.assertGreaterEqual(reports[-1]['cap_usd'],0.0)
         self.assertIn('marker line',reports[-1]['summary'])
@@ -2735,14 +2736,15 @@ for line in sys.stdin:
         finally:rt.mail.close();rt.store.close()
 
     def test_a_child_cannot_type_into_or_signal_a_terminal(self):
-        # A read-only child could send `signal`/`stdin` to a session another goal opened, and machine() hands out
-        # session ids (#382 review): input and signals are refused for a child, before the tool runs.
+        # A child has no host terminal at all now (#382 review, fourth round): a filter cannot make a shell
+        # read-only, and the child's sandbox box is a directory in the workspace, so any file it writes there
+        # (a git hook, diff.textconv, a binutils @file naming --plugin) could be run by an allow-listed command.
         from caminus.ember.resident import delegate
         sid='a'*32
-        for args in (dict(signal='TERM'),dict(session=sid,stdin='echo pwned\n'),dict(session=sid,signal='KILL')):
+        for args in (dict(signal='TERM'),dict(session=sid,stdin='echo pwned\n'),dict(session=sid,signal='KILL'),
+                     dict(session=sid),dict(command='ls'),dict(command='grep -n marker f.txt'),dict(),):
             why=delegate.refused('terminal',args)
-            self.assertTrue(why and 'read-only' in why,args)
-        self.assertIsNone(delegate.refused('terminal',dict(session=sid)),'a poll of its own session is still reading')
+            self.assertTrue(why and 'read-only' in why and 'sandbox' in why,args)
 
     def test_a_terminal_session_belongs_to_the_goal_that_opened_it(self):
         # the other half of #382's P1: a job records the goal that opened it, and a delegate child may use only the
@@ -2767,24 +2769,25 @@ for line in sys.stdin:
             t.signal_running(signal.SIGTERM)
             self.wait(lambda:not t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'],10)
 
-    def test_a_child_gate_must_be_a_read_only_command(self):
-        # define_done's gate runs any shell command at finish (and after a change turn): a child called
+    def test_a_child_has_no_gate_at_all(self):
+        # define_done's gate runs a shell command at finish (and after a change turn): a child called
         # define_done(gate='touch gate_pwned && grep -q x f.txt'), finish ran it, and the report said completed
-        # (#382 review). A child's gate must read only, and a stored one is refused at finish too.
+        # (#382 review). Reading the command was not enough either: a child now has no host shell at all, so it
+        # has no gate - not even a "read-only" one - and a stored gate is refused at finish.
         from caminus.ember.resident import delegate, judge
-        why=delegate.refused('define_done',dict(check='x',gate='touch gate_pwned && grep -q x f.txt'))
-        self.assertTrue(why and 'read-only command' in why,why)
-        self.assertIsNone(delegate.refused('define_done',dict(check='x',gate='grep -q x f.txt')))
+        for gate in ('touch gate_pwned', 'grep -q x f.txt', 'ls'):
+            why=delegate.refused('define_done',dict(check='x',gate=gate))
+            self.assertTrue(why and 'read-only' in why and 'gate' in why,(gate,why))
         self.assertIsNone(delegate.refused('define_done',dict(check='x')),'no gate is fine')
         rt=Runtime(self.home)
         try:
             parent=rt.store.enqueue('p')
             child=rt.store._enqueue('c',kind='delegate')
             rt.store.delegate_add(child,parent,'','','worker',0.5)
-            rt.store.update(child,gate="touch gate_pwned")
+            rt.store.update(child,gate="ls")
             out=judge.review(rt,child,dict(summary='x'))
-            self.assertIn('read-only command',out['error'])
-            self.assertFalse((self.home/'gate_pwned').exists(),'the stored gate did not run')
+            self.assertIn('read-only',out['error'])
+            self.assertIn('gate',out['error'])
         finally:rt.mail.close();rt.store.close()
 
     def test_read_only_commands_cannot_run_programs(self):
@@ -2869,7 +2872,14 @@ for line in sys.stdin:
                     'uniq a b', 'xxd a b',
                     # git subcommands that write, and a bare git
                     'git', 'git add x', 'git commit -m x', 'git checkout -b y', 'git branch newname', 'git branch -D main',
-                    'git remote add x y', 'git remote set-url origin z', 'git stash', 'git reflog expire --all'):
+                    'git remote add x y', 'git remote set-url origin z', 'git stash', 'git reflog expire --all',
+                    # fourth round (#382 review): a binutils @file expands into options, so @opts is --plugin;
+                    # xxd stops its options at the first operand, so `xxd f -p` writes ./-p; and a flag that
+                    # takes no value (or an optional one) must not swallow the next flag
+                    'nm @opts a.out', 'objdump @opts -d a.out', 'readelf @opts a.out', 'strings @opts a.out',
+                    'xxd f -p', 'xxd f -u', 'xxd f -l 4',
+                    'git log --relative-date --ext-diff', 'git log --standard-notes --ext-diff',
+                    'git diff -C --ext-diff', 'git log -U --ext-diff', 'git show -C --textconv'):
             self.assertFalse(ro(cmd),cmd)
         # and the reads these programs really do, including clustered short flags, `--` before a dash operand, and
         # explicit no-<driver> options (which turn a driver off rather than run one)
@@ -2882,7 +2892,13 @@ for line in sys.stdin:
                     'git status --porcelain', 'git branch -a', 'git branch --list', 'git remote -v',
                     'git remote show origin', 'git rev-parse --short HEAD', 'git describe --tags --always',
                     'date -u', 'date +%F', 'date -d yesterday', 'date --iso-8601', 'ps aux', 'df -h', 'du -sh .',
-                    'free -h', 'readelf -h a.out', 'objdump -d a.out', 'nm a.out', 'strings -n 4 a.out'):
+                    'free -h', 'readelf -h a.out', 'objdump -d a.out', 'nm a.out', 'strings -n 4 a.out',
+                    # fourth round: reads these refusals must not break - an attached optional value, a value
+                    # that is a plain word, an @ operand for a program that does not expand one, and -p before
+                    # the file (xxd's own flag order)
+                    'xxd -p f', 'xxd -u -l 8 f', 'git log -U5', 'git log -U 5', 'git diff -C2', 'git diff -C 2',
+                    'git log --relative-date', 'git log --relative-date=short', 'git log --standard-notes',
+                    'git log --oneline --relative-date -5', 'grep @x f', 'ls @x', 'git blame -L 1,5 f'):
             self.assertTrue(ro(cmd),cmd)
 
     def test_cancelling_the_parent_stops_the_child(self):

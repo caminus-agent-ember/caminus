@@ -5,10 +5,10 @@ conversation, todo list, done check, gate, verify and spend row - with four limi
 from inside another goal:
 
 - read-only: write, edit, checkpoint, rollback, ask_user, ask_root, github_handoff, send_message, report,
-  remember, sim, schedule, lease, browser, propose_plan, a nested delegate and the advisor are refused, and
-  terminal runs only a read-only command (allow-listed per program). The sandbox stays available: the folder it
-  sees is a read-only bind at /work and /box dies with the box, so a child can reproduce or check inside one
-  without changing the human's files;
+  remember, sim, schedule, lease, browser, propose_plan, a nested delegate and the advisor are refused, and it
+  has no terminal and no gate on this machine: a filter cannot make a shell read-only (four review rounds each
+  found another spelling that made an allow-listed host command run the child's own file), so its commands run
+  only in the sandbox, where its folder is a read-only mount at /work and /box changes nothing outside itself;
 - depth 1: a child cannot delegate, so the tree is one level deep by construction;
 - caps: a step limit, a time limit and a dollar cap. The cap is config `delegate_usd` (0.50 by default) and a
   call's `cap_usd` may lower it, never raise it; reaching it pauses the child and the parent gets a partial
@@ -45,17 +45,13 @@ TASK
 WHAT DONE LOOKS LIKE (call define_done with this, then verify and finish)
 {done}
 
-Rules that differ from a top-level goal: you cannot write or edit a file, run a command that changes anything,
-ask your human, message a peer, or delegate further. You read, search, run read-only commands, use the sandbox,
-the web and machine, then define_done, verify and finish with what you found. Name files by path and line and
-quote the few lines that matter. Your parent reads only your structured report (summary, verified, skipped,
-spend), so the answer belongs in your finish summary: say plainly what you checked and what you could not.'''
-
-
-def read_only(cmd):
-    """runtime.read_only_command without the circular import (runtime imports this module)."""
-    from .runtime import read_only_command
-    return bool(cmd) and read_only_command(cmd)
+Rules that differ from a top-level goal: you cannot write or edit a file, ask your human, message a peer, or
+delegate further, and you have no terminal and no gate on this machine - a filter cannot make a shell read-only,
+so your commands run only in the sandbox, where your folder is a read-only mount at /work and /box changes
+nothing outside itself. Read, search, use the sandbox, the web and machine, then define_done (without a gate),
+verify and finish with what you found. Name files by path and line and quote the few lines that matter. Your
+parent reads only your structured report (summary, verified, skipped, spend), so the answer belongs in your
+finish summary: say plainly what you checked and what you could not.'''
 
 
 def refused(name, args):
@@ -63,18 +59,21 @@ def refused(name, args):
     if name in REFUSED:
         return ('a delegate child is read-only: %s is not available in it. Report what you found; your parent '
                 'makes the change.' % name)
-    if name == 'terminal' and (args.get('stdin') is not None or args.get('signal')):
-        return ('a delegate child is read-only: its terminal cannot take input or signal a session (that session '
-                'may belong to another goal). It runs a read-only command of its own, or reports what is missing')
-    if name == 'terminal' and args.get('command') and not read_only(args['command']):
-        return ('a delegate child is read-only: terminal runs only a read-only command here, and typing into a '
-                'running shell is not reading')
-    if name == 'define_done' and args.get('gate') and not read_only(args['gate']):
-        # a gate runs in a shell at finish (and after a change turn): `define_done(gate='touch x && ...')` created
-        # the file and still reported completed (#382 review). A read-only gate proves as much and cannot run one.
-        return ('a delegate child is read-only: its gate must be a read-only command, because it runs in a shell '
-                'when the goal finishes. Check with a command that only reads (grep, test -f, ls), or leave gate '
-                'empty and report what you verified')
+    if name == 'terminal':
+        # A child has no host terminal at all (#382 review, fourth round). Reading a command is not the same as
+        # running it safely: the child's box is a directory in the workspace (boxes/<gid>), so anything it writes
+        # there - a git hook, diff.textconv, a binutils @file naming --plugin - could be executed by an
+        # allow-listed host command, and four rounds of filter fixes each found another such spelling. The sandbox
+        # needs no classifier: its /work mount is read-only and /box dies with the box.
+        return ('a delegate child is read-only: it has no terminal on this machine, because a filter cannot make '
+                'a shell read-only. Use sandbox instead - its folder is a read-only mount at /work and /box '
+                'changes nothing outside itself - or report what you could not check')
+    if name == 'define_done' and args.get('gate'):
+        # a gate runs in a shell at finish (and after a change turn), on the host: `define_done(gate='touch x && ...')`
+        # created the file and still reported completed (#382 review). A child has no host shell at all now, so it
+        # has no gate either; it verifies inside the sandbox and says in its finish summary what it checked.
+        return ('a delegate child is read-only: it has no gate, because a gate runs in a shell on this machine. '
+                'Check what you can in sandbox, then report what you verified there and what you could not')
     if name.startswith('mcp__'):
         return 'a delegate child cannot call an MCP tool: it can change things this harness does not see'
     return None

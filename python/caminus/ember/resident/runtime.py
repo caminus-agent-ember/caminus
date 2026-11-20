@@ -56,6 +56,11 @@ GATE_TURN_TIMEOUT = 120  # a per-turn gate gets two minutes (the finish gate kee
 GATE_SLOW = 30           # a gate slower than this runs per turn at most every GATE_SLOW_EVERY seconds
 GATE_SLOW_EVERY = 600
 INTERRUPT_HOLD = 120     # after an Esc, how long a goal waits for the message that steers it
+# binutils programs that expand an @file operand into more options: `nm @opts` read --plugin out of a file, so the
+# plugin loaded although no option was spelled (#382 review). An @ operand is refused for these, whatever it names.
+AT_FILE = frozenset(('nm', 'objdump', 'readelf', 'strings', 'addr2line', 'c++filt', 'elfedit', 'gprof', 'size'))
+
+
 class _Allow:
     """The exact options one read-only program may be given (#382 review, fourth round).
 
@@ -67,13 +72,17 @@ class _Allow:
     hands it to the program. `tar` is gone: listing needs -z / -j / -J / -Z, each of which makes tar run a
     decompressor, and its option surface is the largest of all. `unzip -l` and `7z l` still list archives.
     """
-    __slots__ = ('short', 'short_value', 'long', 'long_value', 'long_opt', 'max_operands', 'first',
-                 'numbers', 'require', 'dash')
+    __slots__ = ('short', 'short_value', 'short_opt', 'long', 'long_value', 'long_opt', 'max_operands', 'first',
+                 'numbers', 'require', 'dash', 'stop_at_operand')
 
     def __init__(self, short='', short_value='', long=(), long_value=(), long_opt=(), max_operands=None,
-                 first=None, numbers=False, require=(), dash=False):
+                 first=None, numbers=False, require=(), dash=False, short_opt='', stop_at_operand=False):
         self.short = frozenset(short)
         self.short_value = frozenset(short_value)
+        # a letter whose value may only be attached (-U5, -C2): the next word is never skipped as its value, because
+        # the program reads a bare -U / -C as the flag and then treats that word as an option of its own (#382 review:
+        # `git diff -C --ext-diff` skipped --ext-diff as -C's value)
+        self.short_opt = frozenset(short_opt)
         self.long = frozenset(long)
         self.long_value = frozenset(long_value)
         self.long_opt = frozenset(long_opt)     # bare or =VALUE (--porcelain, --color, --date)
@@ -82,6 +91,9 @@ class _Allow:
         self.numbers = numbers                 # a bare -N count (head -5, git log -5)
         self.require = frozenset(require)      # at least one of these flags must appear (unzip lists with -l/-v/-Z)
         self.dash = dash                       # long names also take one dash (find -name, -type)
+        # getopt(3) with '+' in its optstring (xxd) stops at the first operand: every later word is an operand to the
+        # program, so `xxd f -p` names an output file called -p, not the -p flag (#382 review)
+        self.stop_at_operand = stop_at_operand
 
 
 _HELP = ('help', 'version')
@@ -200,7 +212,7 @@ ALLOWED = {
     'xxd': _Allow('abCdeEhipuv', 'clnosg', (
         'bits', 'cols', 'color', 'decimal', 'include', 'name', 'group', 'offset', 'seek', 'len', 'groupsize',
         'uppercase', 'help', 'version'), ('cols', 'len', 'offset', 'seek', 'groupsize', 'name', 'group'),
-                 ('color',), max_operands=1),          # -r / -R (rebuild a binary) are not listed
+                 ('color',), max_operands=1, stop_at_operand=True),   # -r / -R (rebuild a binary) not listed
     'od': _Allow('abc dDefhHiIlLoOsSvVxX'.replace(' ', ''), 'AjNStw', (
         'address-radix', 'skip-bytes', 'read-bytes', 'strings', 'format', 'output-duplicates', 'traditional',
         'endian', 'width', 'help', 'version'), ('address-radix', 'skip-bytes', 'read-bytes', 'strings', 'format',
@@ -296,7 +308,7 @@ GIT = {
                                    'ignore-submodules', 'column', 'no-column', 'ahead-behind', 'no-ahead-behind',
                                    'renames', 'no-renames', 'porcelain', 'show-stash', 'no-optional-locks', *_HELP),
                      (), ('porcelain', 'untracked-files', 'ignored', 'ignore-submodules', 'column'), max_operands=0),
-    'log': _Allow('pucmszg', 'nUSGL', (
+    'log': _Allow('pucmszg', 'nSGL', (
         'oneline', 'graph', 'decorate', 'no-decorate', 'stat', 'shortstat', 'numstat', 'name-only', 'name-status',
         'summary', 'patch', 'no-patch', 'raw', 'abbrev-commit', 'no-abbrev-commit', 'full-history', 'first-parent',
         'merges', 'no-merges', 'reverse', 'all', 'not', 'branches', 'tags', 'remotes', 'no-walk', 'walk-reflogs',
@@ -313,10 +325,9 @@ GIT = {
                      'committer', 'grep', 'encoding', 'show-linear-break', 'glob', 'exclude', 'exclude-hidden',
                      'decorate-refs', 'decorate-refs-exclude', 'diff-filter', 'format', 'pretty', 'date',
                      'unified', 'inter-hunk-context', 'word-diff-regex', 'src-prefix', 'dst-prefix', 'line-prefix',
-                     'notes', 'show-notes', 'standard-notes', 'relative-date'), ('color', 'decorate', 'notes',
-                                                                                  'pretty', 'date', 'expand-tabs'),
-                    numbers=True),
-    'diff': _Allow('pRwabsBdDs', 'UC', (
+                     ), ('color', 'decorate', 'notes', 'pretty', 'date', 'expand-tabs', 'show-notes',
+                           'standard-notes', 'relative-date'), short_opt='U', numbers=True),
+    'diff': _Allow('pRwabsBdDs', '', (
         'patch', 'no-patch', 'stat', 'numstat', 'shortstat', 'name-only', 'name-status', 'summary', 'raw',
         'full-index', 'binary', 'abbrev', 'find-renames', 'no-renames', 'find-copies', 'find-copies-harder',
         'diff-filter', 'diff-algorithm', 'minimal', 'patience', 'histogram', 'ignore-all-space',
@@ -331,7 +342,7 @@ GIT = {
                    'dst-prefix', 'line-prefix', 'relative', 'unified', 'inter-hunk-context', 'ignore-submodules',
                    'submodule', 'stat-width', 'stat-name-width', 'stat-count', 'abbrev'),
                   ('color', 'color-words', 'word-diff', 'function-context', 'find-renames', 'find-copies',
-                   'find-copies-harder', 'ita-visible-in-index')),
+                   'find-copies-harder', 'ita-visible-in-index'), short_opt='UC'),
     'show': _Allow('pucmszg', 'nUSGL', (
         'oneline', 'graph', 'decorate', 'no-decorate', 'stat', 'shortstat', 'numstat', 'name-only', 'name-status',
         'summary', 'patch', 'no-patch', 'raw', 'abbrev-commit', 'no-abbrev-commit', 'first-parent', 'reverse',
@@ -522,15 +533,25 @@ def _date_sets(args):
     return False
 
 
-def _allow_ok(spec, args):
+def _allow_ok(spec, args, prog=''):
     """Every word of args fits spec (_Allow): a listed short flag, a short cluster of listed letters, a listed long
     name, or an operand. An unlisted flag, an abbreviation of a long name (getopt would accept it, so this refuses
     every --out= that is not exactly --output=), a short cluster with one unlisted letter, or more operands than
-    the program reads all mean: not a read."""
+    the program reads all mean: not a read.
+
+    Three refusals come from the fourth review round (#382) and hold whether or not a flag looks harmless:
+    an operand starting with `@` for a binutils program (it expands a response file, so `nm @opts` is a
+    --plugin or --sbrk load: the file need not be spelled as an option at all); a word after the first operand
+    for a program whose getopt stops there (xxd, so `xxd f -p` writes ./-p instead of printing); and a bare
+    flag that only takes an attached value (-U / -C in git: `git diff -C --ext-diff` made the classifier skip
+    --ext-diff as -C's value, which git never did)."""
     used, i, operands = set(), 0, []
     while i < len(args):
         w = args[i]
         if w == '-' or not w.startswith('-'):
+            if spec.stop_at_operand:
+                operands.extend(args[i:])      # getopt with '+' stops here: every later word is an operand
+                break
             operands.append(w)
             i += 1
             continue
@@ -542,6 +563,12 @@ def _allow_ok(spec, args):
             if name in spec.long_opt:
                 i += 1
             elif name in spec.long_value:
+                if not eq:
+                    # fail closed: a word starting with '-' is never a flag's value. getopt would take it as one,
+                    # but git's own optional-value flags (-U, -C, --relative-date) read the next word as an
+                    # option, so skipping it let --ext-diff through (#382 review).
+                    if i + 1 >= len(args) or args[i + 1].startswith('-'):
+                        return False
                 i += 1 if eq else 2
             elif eq or name not in spec.long:
                 return False
@@ -564,6 +591,9 @@ def _allow_ok(spec, args):
             if ch in spec.short:
                 used.add(ch)
                 j += 1
+            elif ch in spec.short_opt:
+                used.add(ch)
+                break                          # the rest of this word is its value; a bare -C takes none
             elif ch in spec.short_value:
                 used.add(ch)
                 i += 0 if j + 1 < len(body) else 1    # the rest of the word, or the next one, is its value
@@ -574,6 +604,8 @@ def _allow_ok(spec, args):
         if not ok:
             return False
         i += 1
+    if prog in AT_FILE and any(o.startswith('@') for o in operands):
+        return False                          # `nm @f` reads -plugin/-sbrk from a file: not a read
     if spec.require and not (spec.require & used):
         return False                  # unzip without -l / -v / -Z / -t extracts
     if spec.first and operands and operands[0] not in spec.first:
@@ -604,14 +636,14 @@ def read_only_command(cmd):
                 return False
         elif prog == 'git':
             spec = GIT.get(args[0]) if args else None
-            if spec is None or not _allow_ok(spec, args[1:]):
+            if spec is None or not _allow_ok(spec, args[1:], prog):
                 return False              # (no --output, --ext-diff, --textconv, --filters, -O ...: #382 review)
         elif prog == 'date':
             if _date_sets(args):
                 return False              # date -s / a bare operand sets the clock
         else:
             spec = ALLOWED.get(prog)
-            if spec is None or not _allow_ok(spec, args):
+            if spec is None or not _allow_ok(spec, args, prog):
                 return False
     return True
 def weak_gate(gate):
@@ -692,7 +724,7 @@ TOOLS = [
          dict(command={'type':'string'}, folder={'type':'string'}, hosts={'type':'array','items':{'type':'string'}},
               timeout={'type':'integer'}, session={'type':'string'}, stdin={'type':'string'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, max_output={'type':'integer'})),
-    tool('delegate', 'Run a bounded, read-only child goal through this harness\'s own goal loop and get its short report back. Give the task and what done looks like for the child (it becomes the child\'s define_done); the child cannot write, edit, run a command that changes anything, ask your human, message a peer, or delegate further. Use it for research or a check you would otherwise do yourself, to run it on a cheaper or different-family brain (model/provider, from `models`), and with cap_usd to bound what it may spend (default delegate_usd, 0.50; a call may lower it, never raise it). The report has the outcome (completed / capped / failed / incomplete), summary, what it verified and skipped, the model, steps, spend and allowance. One child runs at a time: this call returns when its report is ready.',
+    tool('delegate', 'Run a bounded, read-only child goal through this harness\'s own goal loop and get its short report back. Give the task and what done looks like for the child (it becomes the child\'s define_done); the child cannot write, edit, ask your human, message a peer, or delegate further, and it has no terminal or gate on this machine - its commands run only in the sandbox (its folder is a read-only mount at /work). Use it for research or a check you would otherwise do yourself, to run it on a cheaper or different-family brain (model/provider, from `models`), and with cap_usd to bound what it may spend (default delegate_usd, 0.50; a call may lower it, never raise it). The report has the outcome (completed / capped / failed / incomplete), summary, what it verified and skipped, the model, steps, spend and allowance. One child runs at a time: this call returns when its report is ready.',
          dict(task={'type':'string'}, done_check={'type':'string'}, role={'type':'string','enum':list(delegate.ROLES)},
               model={'type':'string'}, provider={'type':'string'}, cap_usd={'type':'number'},
               max_steps={'type':'integer'}, max_seconds={'type':'integer'}), ('task','done_check')),
