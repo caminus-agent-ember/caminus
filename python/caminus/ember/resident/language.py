@@ -1,0 +1,230 @@
+"""The owner's language, named in the prompt and held with one nudge (issue #354).
+
+Seen 2026-11-19 on the CyberExpert session: mid-goal a DeepSeek reply switched to Chinese ("分支已推送。现在开
+PR (base ember-next)。") while the owner works in English. The chat is what the owner reads and the done judge
+grades, so a reply in the wrong language is not usable. Two halves, both cheap enough for every turn:
+
+- the owner's language is a session setting (`caminus ember agent language NAME LANGUAGE`, key `language` in
+  config.json). Without one it is derived from the owner's first goal: the script census of its prompt, else
+  English. `prompt.py` names it, so the brain is told which language to keep to in replies, notes, files,
+  commit messages and GitHub text.
+- after every stored assistant reply, `check` censuses the prose's letters by script. When a majority of the
+  reply's units is in a script other than the owner's, the drift is an event (kind `language_drift`, with the
+  brain that wrote it, so a drift rate per brain is visible in the event log) and, at most once every
+  DRIFT_EVERY assistant turns, one short nudge goes into the goal's inbox: the next turn reads
+  "[nudge #N, keeps your plan: ... Reply in English ...]".
+
+What a unit is: one letter in a script that does not space its words (Han, Kana) and one word otherwise.
+Counting Han characters is what catches a reply like the one above, where raw letters are mostly Latin
+identifiers ("PR", "base", "ember-next"); counting words keeps an English reply that quotes a few CJK
+characters far under the threshold. Fenced code and inline `code` spans are not prose and are left out, so a
+code block does not drown the narration around it.
+"""
+import bisect
+import json
+from pathlib import Path
+import re
+import sqlite3
+import urllib.parse
+
+from . import sim
+
+DEFAULT = 'English'
+MIN_UNITS = 6          # fewer letters than this cannot name a language: "ok", a path, a one-word reply
+DRIFT_EVERY = 3        # assistant turns between two nudges on one goal (the issue's "at most once every N turns")
+OTHER_SHARE = .5       # "most letters of a reply are in another script": a strict majority
+DERIVE_SHARE = .6      # a first goal names a language only when its dominant script is this clear
+
+# (first, last, script), sorted by first; Unicode blocks, letters only where a block mixes letters and digits
+_RANGES = sorted([
+    (0x0041, 0x005A, 'Latin'), (0x0061, 0x007A, 'Latin'), (0x00AA, 0x00AA, 'Latin'), (0x00BA, 0x00BA, 'Latin'),
+    (0x00C0, 0x00D6, 'Latin'), (0x00D8, 0x00F6, 'Latin'), (0x00F8, 0x02AF, 'Latin'),
+    (0x0370, 0x0373, 'Greek'), (0x0376, 0x0377, 'Greek'), (0x037B, 0x037D, 'Greek'), (0x037F, 0x037F, 'Greek'),
+    (0x0386, 0x0386, 'Greek'), (0x0388, 0x03FF, 'Greek'),
+    (0x0400, 0x052F, 'Cyrillic'), (0x1C80, 0x1C8F, 'Cyrillic'), (0x2DE0, 0x2DFF, 'Cyrillic'), (0xA640, 0xA69F, 'Cyrillic'),
+    (0x05D0, 0x05EA, 'Hebrew'), (0x05EF, 0x05F2, 'Hebrew'), (0xFB1D, 0xFB4F, 'Hebrew'),
+    (0x0620, 0x065F, 'Arabic'), (0x066E, 0x06D3, 'Arabic'), (0x06D5, 0x06D5, 'Arabic'), (0x06E5, 0x06E6, 'Arabic'),
+    (0x06EE, 0x06FF, 'Arabic'), (0x0750, 0x077F, 'Arabic'), (0x08A0, 0x08FF, 'Arabic'),
+    (0xFB50, 0xFDFF, 'Arabic'), (0xFE70, 0xFEFF, 'Arabic'),
+    (0x0904, 0x0939, 'Devanagari'), (0x093D, 0x093D, 'Devanagari'), (0x0950, 0x0950, 'Devanagari'),
+    (0x0958, 0x0961, 'Devanagari'), (0x0972, 0x097F, 'Devanagari'), (0xA8E0, 0xA8FF, 'Devanagari'),
+    (0x0E01, 0x0E3A, 'Thai'), (0x0E40, 0x0E5B, 'Thai'),
+    (0x1100, 0x11FF, 'Hangul'), (0x3130, 0x318F, 'Hangul'), (0xA960, 0xA97F, 'Hangul'),
+    (0xAC00, 0xD7AF, 'Hangul'), (0xD7B0, 0xD7FF, 'Hangul'),
+    (0x3041, 0x3096, 'Kana'), (0x309B, 0x309F, 'Kana'), (0x30A1, 0x30FA, 'Kana'), (0x30FD, 0x30FF, 'Kana'),
+    (0x31F0, 0x31FF, 'Kana'), (0xFF66, 0xFF9F, 'Kana'),
+    (0x3400, 0x4DBF, 'Han'), (0x4E00, 0x9FFF, 'Han'), (0xF900, 0xFAFF, 'Han'),
+    (0x20000, 0x2A6DF, 'Han'), (0x2A700, 0x2EBEF, 'Han'), (0x30000, 0x3134F, 'Han'),
+    (0x1D00, 0x1D7F, 'Latin'), (0x1E00, 0x1EFF, 'Latin'), (0x1F00, 0x1FFF, 'Greek'),
+    (0x2C60, 0x2C7F, 'Latin'), (0xA720, 0xA7FF, 'Latin'), (0xAB30, 0xAB6F, 'Latin'), (0xFB00, 0xFB06, 'Latin'),
+    (0xFF21, 0xFF3A, 'Latin'), (0xFF41, 0xFF5A, 'Latin'),
+])
+_STARTS = [r[0] for r in _RANGES]
+SPACELESS = ('Han', 'Kana')
+
+# A language name reads as its script, so `agent language NAME Chinese` knows what to census without a model.
+# Latin is the default and the widest family; an unusual language can still be named (the prompt follows it),
+# the census just cannot judge it.
+_SCRIPTS_FOR = {}
+for _script, _names in {
+        'Latin': 'english french german spanish portuguese italian dutch swedish norwegian danish finnish polish '
+                 'czech slovak hungarian turkish indonesian malay vietnamese romanian catalan basque irish welsh '
+                 'estonian latvian lithuanian slovenian croatian albanian azerbaijani uzbek tagalog filipino hausa '
+                 'yoruba igbo zulu xhosa afrikaans swahili',
+        'Cyrillic': 'russian ukrainian bulgarian serbian belarusian macedonian kazakh kyrgyz tajik tatar chechen mongolian',
+        'Greek': 'greek', 'Arabic': 'arabic persian farsi urdu pashto kurdish sindhi uyghur',
+        'Hebrew': 'hebrew yiddish', 'Devanagari': 'hindi marathi nepali sanskrit konkani bhojpuri',
+        'Thai': 'thai', 'Hangul': 'korean', 'Han': 'chinese mandarin cantonese', 'Kana': 'japanese'}.items():
+    _SCRIPTS_FOR[_script.lower()] = (_script,)
+    for _name in _names.split():
+        _SCRIPTS_FOR[_name] = (_script,)
+# Japanese writes in two scripts, and a Chinese owner reading kanji is still a Han script
+_SCRIPTS_FOR['japanese'] = ('Han', 'Kana')
+_SCRIPTS_FOR['日本語'] = ('Han', 'Kana')
+_SCRIPTS_FOR['中文'] = ('Han',)
+_SCRIPTS_FOR['汉语'] = ('Han',)
+_SCRIPTS_FOR['한국어'] = ('Hangul',)
+
+_LANG_OF = {'Latin': 'English', 'Cyrillic': 'Russian', 'Greek': 'Greek', 'Arabic': 'Arabic', 'Hebrew': 'Hebrew',
+            'Devanagari': 'Hindi', 'Thai': 'Thai', 'Hangul': 'Korean', 'Kana': 'Japanese', 'Han': 'Chinese'}
+
+_FENCE = re.compile(r'```.*?```', re.S)
+_TICK = re.compile(r'`[^`\n]*`')
+
+
+def script_of(ch):
+    """The script of one character, '' for anything that is not a letter in the table."""
+    o = ord(ch)
+    i = bisect.bisect_right(_STARTS, o) - 1
+    if i >= 0:
+        first, last, script = _RANGES[i]
+        if o <= last:
+            return script
+    return ''
+
+
+def prose(text):
+    """The text without fenced code and inline `code` spans: a code block is not a reply's language."""
+    return _TICK.sub(' ', _FENCE.sub(' ', text or ''))
+
+
+def units(text):
+    """Units per script (see the module docstring), and their total."""
+    per = {}
+    script, run = '', 0
+    for ch in prose(text):
+        s = script_of(ch)
+        if s == script:
+            run += 1
+            continue
+        if script:
+            per[script] = per.get(script, 0) + (run if script in SPACELESS else 1)
+        script, run = s, (1 if s else 0)
+    if script:
+        per[script] = per.get(script, 0) + (run if script in SPACELESS else 1)
+    return per, sum(per.values())
+
+
+def drift(text, scripts):
+    """(script, share) when a strict majority of the reply's units is in one script the owner does not write in."""
+    per, total = units(text)
+    if total < MIN_UNITS or not scripts:
+        return None
+    other = total - sum(per.get(s, 0) for s in scripts)
+    if not other or other / total <= OTHER_SHARE:
+        return None
+    script = max((s for s in per if s not in scripts), key=lambda s: per[s])
+    return script, other / total
+
+
+def named(name, source):
+    """The owner's language as the prompt and the check use it: its name, its scripts, where it came from."""
+    name = str(name or '').strip() or DEFAULT
+    return dict(name=name, scripts=_SCRIPTS_FOR.get(name.lower(), ()), source=source)
+
+
+def derive(prompts):
+    """The language of the owner's first goal that is clear enough to name, else None."""
+    for prompt in prompts:
+        per, total = units(prompt or '')
+        if total < MIN_UNITS:
+            continue
+        script = max(per, key=per.get)
+        if per[script] / total < DERIVE_SHARE:
+            continue
+        if script == 'Han' and per.get('Kana', 0) >= .15 * (per['Han'] + per.get('Kana', 0)):
+            script = 'Kana'                        # kanji and kana together: Japanese, not Chinese
+        if (language := _LANG_OF.get(script)):
+            return named(language, 'first goal')
+    return None
+
+
+_GOALS = 'SELECT prompt FROM goals ORDER BY COALESCE(position, created), created LIMIT 8'
+
+
+def owner(rt):
+    """The owner's language for this session: config `language`, else the first goal's script, else English."""
+    name = str((getattr(rt, 'config', None) or {}).get('language') or '').strip()
+    if name:
+        return named(name, 'config')
+    try:
+        prompts = [r['prompt'] for r in rt.store.db.execute(_GOALS)]
+    except sqlite3.Error:
+        prompts = []
+    return derive(prompts) or named(DEFAULT, 'default')
+
+
+def from_home(home):
+    """`owner` for a caller with no runtime (the CLI): read config.json and, if it exists, the store read-only.
+
+    It must not create either: `agent prompt --home NOT-INITIALIZED` prints a prompt before `init` and leaves
+    the directory absent.
+    """
+    home = Path(home)
+    config = {}
+    try:
+        config = json.loads((home / 'config.json').read_text())
+    except (OSError, ValueError):
+        pass
+    name = str(config.get('language') or '').strip() if isinstance(config, dict) else ''
+    if name:
+        return named(name, 'config')
+    prompts = []
+    store = home / 'agent.sqlite3'
+    if store.is_file():
+        try:
+            db = sqlite3.connect('file:%s?mode=ro' % urllib.parse.quote(str(store)), uri=True)
+            try:
+                prompts = [r[0] for r in db.execute(_GOALS)]
+            finally:
+                db.close()
+        except sqlite3.Error:
+            pass
+    return derive(prompts) or named(DEFAULT, 'default')
+
+
+def check(rt, gid, text, cfg=None):
+    """Record a drift in `text` and, when the goal is due for one, return the nudge for its next turn.
+
+    Every detection is an event (kind `language_drift`, the brain in its data, so a rate per brain is a count
+    of that event); the nudge comes at most once every DRIFT_EVERY assistant turns of the goal, counted from
+    the last turn that was nudged (not the last detection: a reply that keeps drifting is detected every turn,
+    and counting from the detection would push the next nudge back on every one of them).
+    """
+    who = owner(rt)
+    hit = drift(text, who['scripts'])
+    if not hit:
+        return ''
+    script, share = hit
+    recent = list(rt.store.db.execute("SELECT seq, data FROM events WHERE goal=? AND kind='language_drift' "
+                                      "ORDER BY seq DESC LIMIT 32", (gid,)))
+    last = next((r['seq'] for r in recent if json.loads(r['data']).get('nudged')), None)
+    since = rt.store.db.execute("SELECT COUNT(*) FROM events WHERE goal=? AND kind='assistant' AND seq>?",
+                                (gid, last or 0)).fetchone()[0]
+    nudge = last is None or since >= DRIFT_EVERY
+    rt.store.event('language_drift', dict(script=script, language=who['name'], share=round(share, 3),
+                                          brain=sim.brain(sim.serving(rt, cfg)), nudged=nudge), gid)
+    if not nudge:
+        return ''
+    return ("Reply in %s, the owner's language: your last reply came out mostly in another script (%s)."
+            % (who['name'], script))

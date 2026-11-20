@@ -299,7 +299,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore','sim'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore','sim','language'):
         p=sub.add_parser(op)
         p.add_argument('name',**(dict(nargs='?',help='the session to restore; none lists the closed ones') if op=='restore' else {}))
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -356,6 +356,11 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='language':
+            p.add_argument('--to',metavar='LANGUAGE',help='the language the owner works in, e.g. English, Chinese, '
+                           'Spanish: what the prompt asks and what the drift check holds a reply to')
+            p.add_argument('--auto',action='store_true',help='drop the setting: derive the language from the first goal '
+                           'again (English when that cannot tell)')
         if op=='sim':
             p.add_argument('--on',action='store_true',help='write sim true: this session records SIM predictions')
             p.add_argument('--off',action='store_true',help='write sim false: the agent says the log is off instead of recording')
@@ -698,7 +703,8 @@ def main(argv=None,stdin=None):
                 sim_on=bool(json.loads((home/'config.json').read_text()).get('sim',True))
             except (OSError,ValueError):
                 sim_on=True
-            value=render_prompt(home,sim=sim_on)
+            from . import language
+            value=render_prompt(home,sim=sim_on,language=language.from_home(home)['name'])
             emit(dict(prompt=value),True) if a.json else print(value)
             return 0
         if a.op=='init':
@@ -795,6 +801,22 @@ def main(argv=None,stdin=None):
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)
             return 0
         store=Store(home)
+        if a.op=='language':
+            # The owner's language (issue #354): the prompt names it, and the per-turn check holds a reply to it.
+            from types import SimpleNamespace
+            from . import language
+            cfg=json.loads((home/'config.json').read_text())
+            if a.to and a.auto:
+                raise ValueError('use --to NAME or --auto, not both')
+            if a.to:
+                cfg['language']=a.to.strip()
+                atomic_json(home/'config.json',cfg)
+            elif a.auto:
+                cfg.pop('language',None)
+                atomic_json(home/'config.json',cfg)
+            who=language.owner(SimpleNamespace(store=store,config=cfg))
+            emit(dict(language=who['name'],scripts=list(who['scripts']),source=who['source']),a.json)
+            return 0
         if a.op=='sim':
             # The SIM log (issue #341): predictions before a harness change and observations after CI and the
             # reviews. Listing and export read the event log; a record is one event, so a live daemon sees it at

@@ -34,6 +34,7 @@ from . import planning
 from . import sandbox
 from . import sim
 from . import browser
+from . import language
 
 TODO_STATES = ('pending', 'in_progress', 'done')
 # The todo shapes models are trained on (Qwen Code's todo_write: id, content, status; Claude Code's TodoWrite: content,
@@ -548,7 +549,8 @@ class Runtime:
         agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, and the measured
         budget - therefore rides after the history instead (see :meth:`context_message`). A memory write used
         to invalidate the cache at the first token and force a full re-read of the whole transcript."""
-        return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self)))
+        return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self),
+                                                         language=language.owner(self)['name']))
 
     def context_message(self,gid=None):
         """What the model knows about itself, delivered after the history so the cached prefix survives.
@@ -2199,8 +2201,8 @@ class Runtime:
                 if k == 'sim' and bool(fresh[k]) != bool(self.config.get('sim', True)):
                     self._tools = None        # an off session is not offered the sim tool, and an on one is
                 self.config[k] = fresh[k]
-        for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
-            if k in fresh:
+        for k in ('eyes', 'providers', 'language'):   # (`agent eyes` / `agent provider` take effect at the next image
+            if k in fresh:                            #  read, `agent language` at the next turn)
                 self.config[k] = fresh[k]
             else:
                 self.config.pop(k, None)
@@ -2353,6 +2355,12 @@ class Runtime:
             reasoning = reply.pop('reasoning_content','')
             if not self.store.model_reply(gid,reply,reasoning=reasoning,tokens=self._reply_tokens()):
                 return True
+            # A reply that slid into another language is an event every turn, and one nudge to the goal's next
+            # turn when it is due (issue #354); the prompt names the language, this is what holds a brain that
+            # drifts past it anyway.
+            if (note := language.check(self, gid, reply.get('content') or '')):
+                with self.store.transaction():
+                    self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
             self.progress[gid] = time.time()
             if not reply.get('tool_calls'):
                 # A goal ends only through the finish tool, which runs the done check. Plain text is not

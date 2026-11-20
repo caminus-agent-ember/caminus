@@ -2636,6 +2636,52 @@ for line in sys.stdin:
         self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],True,'--on stays on')
         self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
 
+    def test_a_reply_that_slides_into_chinese_is_nudged_in_english(self):
+        # issue #354, seen on a DeepSeek session: mid-goal a reply switched to Chinese while the owner works in
+        # English. The prompt names the language; a reply whose most units are in another script is an event
+        # carrying the brain that wrote it, and the goal's next turn reads one short nudge back to English.
+        chinese='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        slid=call('terminal',dict(command='printf ok'));slid['content']=chinese
+        self.replies(slid,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        drifts=[e['data'] for e in self.cmd('events') if e['kind']=='language_drift']
+        self.assertEqual(len(drifts),1)
+        self.assertEqual((drifts[0]['script'],drifts[0]['language'],drifts[0]['nudged']),('Han','English',True))
+        self.assertEqual(drifts[0]['brain']['model'],'fixture','the brain that wrote the drift is named')
+        # the nudge rides the goal's next turn, its plan kept, and the request's prompt names English
+        body=json.dumps(Endpoint.seen[-1][1])
+        self.assertIn('[nudge #',body)
+        self.assertIn('Reply in English, the owner\'s language',body)
+        self.assertIn('Your human works in English',json.dumps(Endpoint.seen[0][1]))
+        self.assertEqual([x['kind'] for x in self.steers(goal['id'])],['nudge'])
+
+    def test_an_english_reply_quoting_chinese_is_not_a_drift(self):
+        # a reply that quotes a log line, a path or a word in another script is English: the census counts words,
+        # so a few CJK characters inside an English sentence stay far under the majority, and no nudge is queued.
+        quoted=call('terminal',dict(command='printf ok'))
+        quoted['content']=('The build printed \u5206\u652f\u5df2\u63a8\u9001 once, which is the Chinese for '
+                           '"the branch was pushed"; the PR is open against ember-next.')
+        self.replies(quoted,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
+        self.assertEqual(self.steers(goal['id']),[])
+
+    def test_the_language_setting_names_the_prompt_and_auto_derives_it_again(self):
+        # the owner's language is a session setting (`agent language NAME --to LANGUAGE`), read by `agent prompt`
+        # before a turn, so the setting and the prompt cannot disagree; `--auto` drops it and the first goal's
+        # script names the language again.
+        self.assertEqual(self.cmd('language',[]),dict(language='English',scripts=['Latin'],source='default'))
+        self.assertIn('Your human works in English',self.cmd('prompt',[])['prompt'])
+        out=self.cmd('language',['--to','Chinese'])
+        self.assertEqual(out,dict(language='Chinese',scripts=['Han'],source='config'))
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
+        self.assertIn('Your human works in Chinese',self.cmd('prompt',[])['prompt'])
+        self.cmd('language',['--to','Chinese','--auto'],code=1)
+        self.assertEqual(self.cmd('language',['--auto']),dict(language='English',scripts=['Latin'],source='default'))
+        self.assertNotIn('language',json.loads((self.home/'config.json').read_text()))
+
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
         rt=Runtime(self.home)
