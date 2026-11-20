@@ -522,7 +522,8 @@ def resume_goal(store,gid,max_steps=None,max_seconds=None):
         g=store.goal(gid)
         if g['state'] in ('completed','cancelled'):
             raise ValueError('submit a new goal instead of replaying a finished one')
-        if store.delegate(gid):
+        from . import delegate
+        if delegate.is_child(store, gid):
             # A delegate child's brain and caps lived in the process that ran it; resumed later it would run on
             # the parent's brain with no cap (#382 review). Its report is already with its parent: delegate again.
             raise ValueError('that goal is a delegate child, and its report is already with its parent: a resumed '
@@ -1299,7 +1300,8 @@ def main(argv=None,stdin=None):
                     if state=='cancelled' or state=='completed' and not a.continue_goal:
                         raise ValueError('goal finished; submit a new goal instead of steering it')
                     if state=='completed':
-                        if store.delegate(a.goal_id):
+                        from . import delegate
+                        if delegate.is_child(store, a.goal_id):
                             # resume_goal refuses this for the same reason: a child's brain and caps die with the
                             # process that ran it, so a continued child would run uncapped on another brain, and
                             # its report is already with its parent (#382 review). Same write lock as the revive.

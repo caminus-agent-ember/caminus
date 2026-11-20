@@ -259,7 +259,8 @@ def review(rt, gid, result):
     g = rt.store.goal(gid)
     gate = g.get('gate')
     if gate:
-        if rt.store.delegate(gid):
+        from . import delegate
+        if delegate.is_child(rt.store, gid):
             # a child has no host shell at all (#382 review, fourth round): a gate runs in one, and even a
             # "read-only" gate cannot be told from a writing one by a filter. One stored before this refusal
             # must not run either.

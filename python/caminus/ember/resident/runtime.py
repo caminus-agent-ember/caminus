@@ -1611,7 +1611,7 @@ class Runtime:
                 continue
             name = d.get('name') or ''
             res = d.get('result') if isinstance(d.get('result'), dict) else {}
-            if self.store.delegate(gid) and delegate.refused(name, args):
+            if delegate.is_child(self.store, gid) and delegate.refused(name, args):
                 # a delegate child's policy refusal is not a change attempt: nothing ran and nothing changed, so
                 # it must not make the child read a path it never touched before it can finish (#342)
                 continue
@@ -1738,7 +1738,7 @@ class Runtime:
             gid_now = action['goal']
             refused = False
             # a delegate child's terminal may use only the sessions its own goal opened (#382 review)
-            child_goal = bool(self.store.delegate(gid_now))
+            child_goal = delegate.is_child(self.store, gid_now)
             signature = self._signature(name, args)
             if name == 'browser' and args.get('action') in browser.CHANGES and \
                     action['id'] in self.__dict__.get('_browser_skip', {}).get(gid_now, ()):
@@ -1763,7 +1763,7 @@ class Runtime:
             # github_handoff, a further delegate, a terminal command that changes anything and any terminal input
             # or signal are refused here, before the tool runs, whatever the model asks for (delegate.py holds
             # the list and the reason). A child's terminal also cannot use another goal's session (Terminal.call).
-            if (why := delegate.refused(name, args)) and self.store.delegate(gid_now):
+            if (why := delegate.refused(name, args)) and child_goal:
                 raise ValueError(why)
             # Step 8, the runtime half: a call that has already failed twice is not retried. The prompt
             # tells the model to change approach; this is the backstop for when it does not.

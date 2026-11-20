@@ -16,10 +16,13 @@ from inside another goal:
   read as no cap at all. Spend is usd + the OpenCode plan's allowance, because inside a Go allowance a turn costs
   $0 of money and real allowance;
 - a short structured report back: outcome (completed / capped / failed / incomplete), summary, what it
-  verified, what it skipped, steps, spend, allowance and its cap.
+  verified, what it skipped, steps, spend, allowance and its cap. `capped` covers all three limits: the dollar
+  cap, the step limit and the time limit each end a child the same way and say so in its error text;
 
-- the count is capped too: start() counts this parent's children in the store and refuses past
-  `delegate_max_children` (4 by default), so a parent cannot grow an unbounded tree;
+- the count is capped too: start() counts the children this parent still has **running** (`outcome=''`) and
+  refuses past `delegate_max_children` (4 by default), so a parent cannot grow an unbounded tree and a finished
+  child does free its slot, as the refusal says. A child's row is closed on every exit, a crash included, so a
+  run that died cannot wedge its parent at the limit;
 - the child's stop watches the parent: a cancelled, paused or failed parent ends the child's loop at its next
   check (the daemon's `_stop` alone did not, and a cancelled parent's child ran on - #382 review), and a child
   stopped that way reports `incomplete` rather than running on its own brain later;
@@ -52,6 +55,40 @@ nothing outside itself. Read, search, use the sandbox, the web and machine, then
 verify and finish with what you found. Name files by path and line and quote the few lines that matter. Your
 parent reads only your structured report (summary, verified, skipped, spend), so the answer belongs in your
 finish summary: say plainly what you checked and what you could not.'''
+
+
+def _limit(rt, key):
+    """A config limit: a missing or null key takes the default, as the dollar cap does; 0 or less is refused.
+
+    `delegate_max_steps: null` raised TypeError at every delegate call (#382 review), so a null now takes the
+    default. A configured 0 is *not* read as "the default" (the same silent-literal trap the delegates table's
+    `DEFAULT 0` was): no child may take zero steps, and a limit nobody can see is not a limit."""
+    value = rt.config.get(key)
+    default = DEFAULTS[key.replace('delegate_', '')]
+    if value is None:
+        return default
+    value = int(value)
+    if value < 1:
+        raise ValueError('%s is %s: a limit of 0 is not "no limit" and does not mean the default (%s). Set it to '
+                         'at least 1, or remove the key' % (key, value, default))
+    return value
+
+
+def is_child(store, gid):
+    """Whether this goal is a delegate child: its own `kind='delegate'` first, its delegates row second.
+
+    The policy (read-only refusals, no terminal, the resume fence, no gate) is keyed on the goal because the goal
+    carries it: `_enqueue(kind='delegate')` writes it in the same insert that creates the goal. The row is a fact
+    about one run - its brain, cap, spend and report - and is a second marker, so the answer is their union and
+    fails closed: a goal whose row was restored without (a hand edit, a partial backup) is still a child, and a
+    leftover row makes a goal read-only until it is removed (a false "child" costs a read-only goal; a false
+    "not a child" runs uncapped on the wrong brain). Only `start()` writes a row, and it writes it for a
+    `kind='delegate'` goal, so the two agree except where a person edited the store. One indexed read, not a
+    full goal."""
+    r = store.db.execute('SELECT kind FROM goals WHERE id=?', (gid,)).fetchone()
+    if r is not None and r['kind'] == 'delegate':
+        return True
+    return bool(store.delegate(gid))
 
 
 def refused(name, args):
@@ -97,13 +134,13 @@ def _caps(rt, args):
             raise ValueError('cap_usd must be more than 0: it is what the child may spend, and 0 used to mean '
                              '"uncapped". Omit it to use delegate_usd ($%s)' % cap)
         cap = min(cap, their)
-    steps = int(cfg.get('delegate_max_steps', DEFAULTS['max_steps']))
+    steps = int(_limit(rt, 'delegate_max_steps'))
     if args.get('max_steps') is not None:
         their = int(args['max_steps'])
         if their <= 0:
             raise ValueError('max_steps must be at least 1: a child that may take no step cannot do anything')
         steps = min(steps, their)
-    secs = int(cfg.get('delegate_max_seconds', DEFAULTS['max_seconds']))
+    secs = int(_limit(rt, 'delegate_max_seconds'))
     if args.get('max_seconds') is not None:
         their = int(args['max_seconds'])
         if their <= 0:
@@ -179,11 +216,12 @@ def start(rt, parent, args, prepared=None):
     its own, and a nested loop inside the write transaction would deadlock on BEGIN.) `prepared` is prepare()'s
     result, which the runtime resolves before BEGIN (#382 review)."""
     p = prepared or prepare(rt, args)
-    limit = int(rt.config.get('delegate_max_children', DEFAULTS['max_children']))
-    used = rt.store.db.execute('SELECT count(*) FROM delegates WHERE parent=?', (parent,)).fetchone()[0]
+    limit = int(_limit(rt, 'delegate_max_children'))
+    used = rt.store.db.execute("SELECT count(*) FROM delegates WHERE parent=? AND outcome=''",
+                               (parent,)).fetchone()[0]
     if used >= limit:
-        raise ValueError('this goal has used its %d delegate children (delegate_max_children): finish one, or '
-                         'do the rest yourself' % limit)
+        raise ValueError('this goal has %d delegate children still running (delegate_max_children): their '
+                         'reports arrive first; do the rest yourself, or delegate again once one finishes' % limit)
     child = rt.store._enqueue(CHILD_PROMPT.format(parent=parent[:8], task=p['task'], done=p['done']),
                               max_steps=p['max_steps'], max_seconds=p['max_seconds'], kind='delegate')
     who = p['who']
@@ -255,6 +293,17 @@ def run_child(rt, parent, job):
         rt._stop = daemon_stop
         rt.delegate_models.pop(child, None)
         rt.delegate_caps.pop(child, None)
+        # A run that died before it reported (an exception out of rt.run, a kill) must not leave a row `outcome=''`
+        # forever: the children limit counts running rows now, so an unclosed one would wedge the parent at the
+        # limit. The normal path closed the row already, so this is a no-op for it.
+        try:
+            row = rt.store.delegate(child)
+            if row and not row.get('outcome'):
+                rt.store.delegate_done(child, 'failed', dict(child=child, outcome='failed', state='error',
+                                                             summary='the run of this child ended without a report'))
+                rt.store.event('delegate_done', dict(child=child, outcome='failed'), parent)
+        except Exception:
+            pass                          # (a closing write must never mask the error that ended the run)
 
 
 def capped(rt, gid):

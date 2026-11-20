@@ -121,7 +121,9 @@ class Store:
           CREATE TABLE IF NOT EXISTS delegates(
             child TEXT PRIMARY KEY, parent TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
             provider TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'worker',
-            cap_usd REAL NOT NULL DEFAULT 0, spend_usd REAL NOT NULL DEFAULT 0,
+            -- no DEFAULT on cap_usd (#382 review): a stored 0 read as "no cap at all" once; a cap is always
+            -- written by delegate_add, which refuses 0 and less.
+            cap_usd REAL NOT NULL, spend_usd REAL NOT NULL DEFAULT 0,
             allowance_usd REAL NOT NULL DEFAULT 0, outcome TEXT NOT NULL DEFAULT '',
             report TEXT, started REAL NOT NULL, ended REAL);
           CREATE INDEX IF NOT EXISTS delegates_parent ON delegates(parent,started);
@@ -296,8 +298,11 @@ class Store:
     def delegate_add(self, child, parent, model, provider, role, cap_usd):
         """Register a delegate child: its brain, its role and its dollar cap (the metric the cap reads is this row's
         spend_usd + allowance_usd, kept by delegate_spend)."""
+        cap = float(cap_usd)
+        if cap <= 0:
+            raise ValueError('a delegate needs a positive dollar cap: %r read as no cap at all (#382 review)' % cap_usd)
         self.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) VALUES(?,?,?,?,?,?,?)',
-                        (child, parent, model or '', provider or '', role, float(cap_usd or 0.0), time.time()))
+                        (child, parent, model or '', provider or '', role, cap, time.time()))
 
     def delegate(self, child):
         r = self.db.execute('SELECT * FROM delegates WHERE child=?', (child,)).fetchone()

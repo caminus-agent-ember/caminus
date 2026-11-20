@@ -2726,7 +2726,15 @@ for line in sys.stdin:
         rt=Runtime(self.home)
         try:
             parent,child=rt.store.enqueue('p'),rt.store.enqueue('c')
-            rt.store.delegate_add(child,parent,'','','worker',0.0)
+            # a cap is written by delegate_add, which refuses 0 and less (#382 review); the column has no DEFAULT 0
+            cols={r[1]:r[4] for r in rt.store.db.execute('PRAGMA table_info(delegates)')}
+            self.assertIsNone(cols['cap_usd'],'no DEFAULT 0 for a reader to mistake for "no cap"')
+            with self.assertRaises(ValueError) as caught:
+                rt.store.delegate_add(child,parent,'','','worker',0.0)
+            self.assertIn('positive dollar cap',str(caught.exception))
+            # a row written before the fix (a raw insert, a store from an older version) still pauses at $0
+            rt.store.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) '
+                                'VALUES(?,?,?,?,?,?,?)',(child,parent,'','','worker',0.0,time.time()))
             self.assertTrue(delegate.capped(rt,child),'a stored $0 cap is a cap, not "unlimited"')
             self.assertEqual(rt.store.goal(child)['state'],'paused')
             self.assertIn('cap reached',rt.store.goal(child)['error'])
@@ -2952,6 +2960,97 @@ for line in sys.stdin:
             r=housemate.wait(rt,gid,'message',timeout=1800)
             self.assertLess(time.monotonic()-t0,6)
             self.assertEqual(r['happened'],'timeout')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_wait_with_less_than_a_second_left_reports_the_budget(self):
+        # `min(timeout, int(left) + 1)` rounded a fraction of a second up to a whole one and returned a stale
+        # "timeout" wait, so a child at its deadline spent a step on a wait that could not happen (#382 review).
+        from caminus.ember.resident import housemate
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Wait.',max_seconds=30)
+            rt.store.update(gid,deadline=time.time()+.5)
+            t0=time.monotonic()
+            r=housemate.wait(rt,gid,'message',timeout=1800)
+            self.assertLess(time.monotonic()-t0,.5,'no wait happens below a second')
+            self.assertEqual(r['waited_s'],0)
+            self.assertIn('time budget is used up',r['happened'])
+            self.assertIn('do not wait again',r['note'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_children_limit_counts_running_children_not_every_child_ever_made(self):
+        # count(*) counted every child the parent ever made, so after 4 finished children it could never delegate
+        # again, while the refusal said finishing one frees a slot (#382 review). Running rows count; a child's
+        # row is closed on every exit, a crashed run included, so nothing can wedge the parent at the limit.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate_max_children']=2
+            parent=rt.store.enqueue('p')
+            def prep():return dict(task='t',done='d',role='worker',cap_usd=.5,max_steps=4,max_seconds=60,
+                                   model=rt.model,who={})
+            kids=[delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['child']
+                  for _ in range(2)]
+            with self.assertRaises(ValueError) as caught:
+                delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+            self.assertIn('2 delegate children still running',str(caught.exception))
+            # a finished child frees its slot, as the message says
+            rt.store.delegate_done(kids[0],'completed',dict(outcome='completed'))
+            third=delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['child']
+            # a run that died before it reported does not wedge the parent: run_child closes the row on the way out
+            with unittest.mock.patch.object(rt,'run',side_effect=RuntimeError('boom')):
+                with self.assertRaises(RuntimeError):
+                    delegate.run_child(rt,parent,dict(child=third,role='worker'))
+            self.assertEqual(rt.store.delegate(third)['outcome'],'failed')
+            delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_null_delegate_limit_takes_the_default_and_a_zero_is_refused(self):
+        # `delegate_max_steps: null` raised TypeError at every delegate call (#382 review), as a null dollar cap
+        # used to. Zero is not read as "the default" either: the same silent literal the table's DEFAULT 0 was.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for key in ('delegate_max_steps','delegate_max_seconds','delegate_max_children'):rt.config[key]=None
+            cap,steps,secs=delegate._caps(rt,dict())
+            self.assertEqual((steps,secs),(delegate.DEFAULTS['max_steps'],delegate.DEFAULTS['max_seconds']))
+            self.assertEqual(delegate._limit(rt,'delegate_max_children'),delegate.DEFAULTS['max_children'])
+            self.assertEqual(cap,delegate.DEFAULTS['cap_usd'])
+            for key in ('delegate_max_steps','delegate_max_seconds','delegate_max_children'):
+                rt.config[key]=0
+                with self.assertRaises(ValueError) as caught:
+                    delegate._limit(rt,key)
+                self.assertIn('at least 1',str(caught.exception))
+                rt.config[key]=None                  # (back to the default: _caps reads all three)
+            rt.config['delegate_max_steps']=5
+            self.assertEqual(delegate._caps(rt,dict())[1],5,'a configured limit still applies')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_whose_delegates_row_is_gone_is_still_a_child(self):
+        # the policy (refusals, the resume fence, no gate) was keyed on the delegates row, so a goal whose row was
+        # restored without - a hand edit, a partial backup, a sweep - was not a child any more and could write,
+        # run a terminal command or be resumed uncapped (#382 review). The goal's own kind is the answer, and a
+        # leftover row still makes a goal read-only: a false "child" costs a read-only goal, the other error does not.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            rt.store.db.execute('DELETE FROM delegates WHERE child=?',(child,))
+            self.assertIsNone(rt.store.delegate(child),'the row is really gone')
+            self.assertTrue(delegate.is_child(rt.store,child),'the goal still says what it is')
+            for name,args in (('write',dict(path='x',content='y')),('ask_user',dict(question='q')),
+                              ('terminal',dict(command='ls')),('delegate',dict(task='t',done_check='d'))):
+                self.assertTrue(delegate.refused(name,args),name)
+            with self.assertRaises(ValueError) as caught:
+                resume_goal(rt.store,child)
+            self.assertIn('delegate child',str(caught.exception))
+            other=rt.store.enqueue('o')
+            rt.store.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) '
+                                'VALUES(?,?,?,?,?,?,?)',(other,parent,'','','worker',.5,time.time()))
+            self.assertTrue(delegate.is_child(rt.store,other),'a leftover row fails closed')
         finally:rt.mail.close();rt.store.close()
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):

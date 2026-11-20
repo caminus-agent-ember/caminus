@@ -89,7 +89,12 @@ def wait(rt, gid, until, target='', timeout=300):
         if left <= 0:
             return dict(happened='the goal\'s time budget is used up', waited_s=0,
                         note='the goal pauses at its next step; do not wait again')
-        timeout = max(1, min(timeout, int(left) + 1))
+        # Round down, not up (#382 review): `min(timeout, int(left) + 1)` could wait a second past the deadline
+        # and hand back a stale wait. Below a second there is no wait to make.
+        if left < 1:
+            return dict(happened="the goal's time budget is used up", waited_s=0,
+                        note='the goal pauses at its next step; do not wait again')
+        timeout = min(timeout, int(left))
     seen_inbox = _inbox_count(rt, gid)
     queued = _queued(rt, gid)
     while True:
