@@ -216,6 +216,14 @@ def opencode_rates(m):
     return opencode_row(m) if opencode_offered(m) else None
 
 
+def _cannot_price(what, model, wait, tail='the relay tries again in %ds'):
+    """The one refusal a price this relay cannot know YET gets: (status, kind, message, retry_after, local), a 503
+    the agent waits out. `what` names the cause and never carries the owner's path (this text reaches the agent).
+    local marks it X-Relay-Refusal on the wire, so a resident never reads it as the provider being down (a 503 from
+    an outage is what moves a goal to its fallback brain; brain.Brains.on_failure)."""
+    return (503, 'api_error', '%s, so %r cannot be priced yet; %s' % (what, model, tail % wait), wait, True)
+
+
 class ListPrices:
     """Per-model prices from the provider's own model list (DeepInfra's, OpenCode's), refreshed hourly; a model it
     publishes no price for, or one rates() leaves out, is refused. fetch: () -> the list; rates: a row -> its rates
@@ -282,14 +290,13 @@ class ListPrices:
             return self.table.get(model)
 
     def refusal(self, model):
-        """(status, kind, message, retry_after) while the list has never loaded, or None once it has: a model a good
-        list does not price is a fact about the model, a list that never loaded is not."""
+        """(status, kind, message, retry_after, local) while the list has never loaded, or None once it has: a model
+        a good list does not price is a fact about the model, a list that never loaded is not."""
         with self.lock:
             if self.at or not self.error:
                 return None
             wait = max(0, math.ceil(self.next - time.time()))
-            return (503, 'api_error', 'the price list has not loaded yet (%s), so %r cannot be priced yet; the relay '
-                    'tries again in %ds' % (self.error, model, wait), wait)
+            return _cannot_price('the price list has not loaded yet (%s)' % self.error, model, wait)
 
     def prime(self):
         """Load once now, off the request path: a relay that starts before the network does logs the failure and
@@ -391,27 +398,30 @@ class OwnerPrices:
             return None
 
     def refusal(self, model):
-        """(status, kind, message, retry_after) for a model this relay cannot price, or None when it has no better
-        account than 'no price for MODEL'. Two causes are not about the model: a price file that cannot be read (the
-        message names the file, never its path: this text reaches the agent) and a model list that has not loaded,
-        which may be what prices the alias the call used. Both are a 503 the agent waits on, never the 403 that
-        stops its goal: a file missing at boot (the owner writes it later) and a file caught mid-rewrite are as
+        """(status, kind, message, retry_after, local) for a model this relay cannot price, or None when it has no
+        better account than 'no price for MODEL'. Two causes are not about the model: a price file that cannot be
+        read (the message names the file, never its path: this text reaches the agent) and a model list that has not
+        loaded, which may be what prices the alias the call used. Both are a 503 the agent waits on, never the 403
+        that stops its goal: a file missing at boot (the owner writes it later) and a file caught mid-rewrite are as
         transient as a list that has not loaded. Only a model that is not priced is asked at all (do_POST asks this
-        after get() answered None), and the file is re-read on the next request, so the wait named is the agent's."""
+        after get() answered None), and the file is re-read on the next request, so the wait named is the agent's.
+
+        A name the provider's list knows it does not carry is a typo whatever the file is doing, so it is refused at
+        once even when the last refresh failed (a list that loaded once keeps its names). With the list never loaded
+        there is nothing to compare against: the name waits with the file (the PR body states this trade-off)."""
         with self.lock:
-            if self.names and not self.names_error and model not in self.names:
+            if self.names and model not in self.names:
                 # the file's absence says nothing about a NAME, the provider's own list does: a name that list does
                 # not know is a typo, and waiting an hour on a 503 for it hides that. Refused at once (the caller's
                 # 403 "no price for"), whatever the file is doing. A name it does know still waits below.
                 return None
             if self.error:
-                return (503, 'api_error', 'the relay cannot read its price file (%s), so %r cannot be priced yet; '
-                        'the owner re-reads it on change, no restart, so retry in %ds'
-                        % (self.error, model, PRICE_FILE_RETRY), PRICE_FILE_RETRY)
+                return _cannot_price('the relay cannot read its price file (%s)' % self.error, model,
+                                     PRICE_FILE_RETRY, 'the owner re-reads it on change, no restart, so retry in %ds')
             if self.fetch and self.names_error and model not in self.names:
                 wait = max(0, math.ceil(60 - (time.time() - self.names_at)))
-                return (503, 'api_error', 'the price list has not loaded yet (%s), so the name %r cannot be resolved to '
-                        'a priced model; the relay tries again in %ds' % (self.names_error, model, wait), wait)
+                return _cannot_price('the price list has not loaded yet (%s), so the name cannot be resolved to a '
+                                     'priced model' % self.names_error, model, wait)
             return None
 
 
@@ -430,7 +440,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
         def log_message(self, *a):
             pass
 
-        def refuse(self, status, kind, message, retry_after=None):
+        def refuse(self, status, kind, message, retry_after=None, local=False):
             err = dict(type='error', error=dict(type=kind, message='relay: ' + message)) \
                 if messages_wire(self.path.split('?')[0]) else dict(error=dict(message='relay: ' + message, type=kind, code=status))
             raw = json.dumps(err).encode()
@@ -439,6 +449,10 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             self.send_header('Content-Length', str(len(raw)))
             if retry_after is not None:
                 self.send_header('Retry-After', str(retry_after))
+            if local:
+                # a 503 this relay made itself (a price it cannot know yet), never the provider being down: the
+                # resident's fallback logic reads a bare 503 as an outage (brain.Brains.on_failure)
+                self.send_header('X-Relay-Refusal', '1')
             self.end_headers()
             self.wfile.write(raw)
             log('refused %d %s' % (status, message))

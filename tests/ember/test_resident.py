@@ -1168,6 +1168,10 @@ class Resident(unittest.TestCase):
         self.assertEqual(off._to_anthropic([dict(role='user',content='hi')],None,None)['thinking'],dict(type='disabled'))
 
     def test_a_providers_capacity_errors_are_waited_out_not_counted(self):
+        """429 / 503 / 529 are waited out on their own budget (an hour, five minutes apart), never the 8 tries, and a
+        relay's 503 while its price list has not loaded (#351) is waited out like those: for any remote model but an
+        OpenCode plan's, whose retries always count (its traffic is watched for abuse). A relay that never loads
+        therefore ends a plan goal with an error rather than hanging it."""
         from caminus.ember.resident import runtime as R
         from caminus.ember.resident.model import ModelError
         rt=Runtime(self.home)
@@ -1186,29 +1190,11 @@ class Resident(unittest.TestCase):
             broken=ModelError('HTTP Error 500: boom');broken.status=500
             for i in range(8):rt._schedule_retry(gid2,broken)
             self.assertIsNone(rt._schedule_retry(gid2,broken),'other failures keep the 8-attempt limit')
-        finally:rt.mail.close();rt.store.close()
-
-    def test_a_relays_503_is_a_bounded_retry_not_an_endless_wait(self):
-        """#351 answers 503 + Retry-After while its price list has not loaded. That cannot wait forever: the bound
-        lives where the retries are, so an OpenCode plan model spends the ordinary retry budget (covered above) and
-        any other remote model waits out BUSY_WAIT_S and then stops with the reason. A relay that never loads
-        therefore ends the goal with an error, it does not hang it."""
-        from caminus.ember.resident import runtime as R
-        from caminus.ember.resident.model import ModelError
-        rt=Runtime(self.home)
-        try:
-            gid=rt.store.enqueue('Make x.')
-            rt.model.remote=True;rt.model.opencode=True
+            gid3=rt.store.enqueue('Make z.');rt.model.opencode=True
             loading=ModelError('HTTP Error 503: relay: the price list has not loaded yet');loading.status=503
             loading.retry_after=60
-            self.assertIsNotNone(rt._schedule_retry(gid,loading),'a plan model retries the 503 like any error')
-            self.assertEqual(rt.retry[gid][1],1,'the retry is counted, not a free busy wait')
-            gid2=rt.store.enqueue('Make y.');rt.model.opencode=False;rt.retry.pop(gid2,None)
-            self.assertIsNotNone(rt._schedule_retry(gid2,loading),'a non-plan relay is waited out')
-            self.assertLessEqual(rt.retry[gid2][0]-time.time(),301)
-            rt.busy_since[gid2]=time.time()-R.BUSY_WAIT_S-1
-            self.assertIsNone(rt._schedule_retry(gid2,loading),'after an hour of it the goal stops')
-            self.assertEqual(rt.store.goal(gid2)['state'],'error')
+            self.assertIsNotNone(rt._schedule_retry(gid3,loading),'a plan model retries the relay 503 like any error')
+            self.assertEqual(rt.retry[gid3][1],1,'the retry is counted, not a free busy wait')
         finally:rt.mail.close();rt.store.close()
 
     def test_the_runtime_block_leaves_out_the_shell_agents_robots_md(self):
@@ -4797,8 +4783,8 @@ for line in sys.stdin:
         self.assertIsNone(prices.get('zai-org/GLM-5.2'))
         self.assertEqual(len(tries), 1)
         self.assertTrue(any('price list unavailable (1 in a row)' in l and 'BadStatusLine' in l for l in lines), lines)
-        status, kind, message, wait = prices.refusal('zai-org/GLM-5.2')
-        self.assertEqual((status, kind), (503, 'api_error'))
+        status, kind, message, wait, local = prices.refusal('zai-org/GLM-5.2')
+        self.assertEqual((status, kind, local), (503, 'api_error', True), 'the refusal is the relay\'s own, marked local')
         self.assertIn('has not loaded', message)
         self.assertGreater(wait, 0, 'the refusal says when the next try is')
         time.sleep(0.4)                                # (the retry window the refusal named)
@@ -4870,6 +4856,8 @@ for line in sys.stdin:
             self.assertEqual(caught.exception.code, 503)
             self.assertIn(b'has not loaded', caught.exception.read())
             self.assertIn('Retry-After', caught.exception.headers)
+            self.assertEqual(caught.exception.headers.get('X-Relay-Refusal'), '1',
+                             "the resident must not read the relay's own 503 as the provider being down")
             self.assertEqual(calls, [], 'a price list that has not loaded forwards nothing')
             time.sleep(0.4)
             code, body = self._post(base + '/v1/openai/chat/completions', dict(model='zai-org/GLM-5.2', messages=[]))
@@ -4954,11 +4942,16 @@ for line in sys.stdin:
         op = relay.OwnerPrices(str(pf), lines.append, fetch=lambda: listed)
         self.assertIsNone(op.get('mistral-large-latest'))
         self.assertTrue(any('price file unreadable: FileNotFoundError' in l for l in lines), lines)
-        status, kind, message, wait = op.refusal('mistral-large-latest')
-        self.assertEqual((status, kind), (503, 'api_error'), 'a known name waits for the file to come back')
+        status, kind, message, wait, local = op.refusal('mistral-large-latest')
+        self.assertEqual((status, kind, local), (503, 'api_error', True), 'a known name waits for the file to come back')
         self.assertIn('cannot read its price file', message)
         self.assertGreater(wait, 0)
         self.assertIsNone(op.refusal('mistral-larg'), 'a name the list does not know is refused at once, never waited out')
+        # a refresh that FAILED keeps the names it loaded: a typo is still a typo while the list is down (the old
+        # test asked names_error too, so one failed refresh sent every typo back to the hour-long 503 wait)
+        op.names_error, op.names_at = 'OSError: network is down', time.time() - 120
+        self.assertIsNone(op.refusal('mistral-larg'), 'a failed refresh does not turn a typo back into a wait')
+        self.assertEqual(op.refusal('mistral-large-latest')[4], True, 'a known name still waits with the file')
 
     def test_an_alias_whose_model_list_never_loaded_is_a_503_waited_out_not_a_403(self):
         """Mistral's aliases come from the provider's own model list. While that list has never loaded, a name the
@@ -4978,8 +4971,8 @@ for line in sys.stdin:
             return listed
         op = relay.OwnerPrices(str(pf), lines.append, fetch=fetch)
         self.assertIsNone(op.get('mistral-large-latest'))
-        status, kind, message, wait = op.refusal('mistral-large-latest')
-        self.assertEqual((status, kind), (503, 'api_error'))
+        status, kind, message, wait, local = op.refusal('mistral-large-latest')
+        self.assertEqual((status, kind, local), (503, 'api_error', True))
         self.assertIn('has not loaded', message)
         self.assertGreater(wait, 0, 'the refusal says when the next try is')
         for _ in range(3):
@@ -6929,6 +6922,36 @@ for line in sys.stdin:
             self.assertEqual(brain_events,['fallback','primary'])
         finally:rt.mail.close();rt.store.close()
         self.assertIsNone(self.cmd('fallback',['--off'])['fallback'])
+
+    def test_a_relays_price_refusal_does_not_switch_the_goal_to_the_fallback(self):
+        """#351: the relay answers 503 while its price list has not loaded. A bare 503 is what Brains.on_failure reads
+        as the primary being unreachable: it marks it down for down_seconds and the turn is retried at once on the
+        fallback, a paid brain, against the PR's whole design. The refusal carries X-Relay-Refusal, model.http_error
+        keeps it on the error, and on_failure leaves the primary alone so the agent waits the relay out on its own
+        retry budget. A real upstream 503 (the relay's own 'upstream unreachable' carries no marker) still switches."""
+        import io
+        import urllib.error
+        from caminus.ember.resident.model import ModelError, http_error
+        self.cmd('fallback',['--model','claude-haiku-5-5','--endpoint','http://127.0.0.1:8765/v1','--api','anthropic','--context','100000','--budget-usd','0.5'])
+        Fake=self.brains()
+        rt=Runtime(self.home,model=Fake('k3-coder',[],up=True))
+        try:
+            gid=rt.store.enqueue('Say hi.')
+            outage=ModelError('HTTP Error 503: upstream unreachable');outage.status=503
+            self.assertTrue(rt.brains.on_failure(gid,outage),'a bare 503 is still an outage: the fallback takes the turn')
+            self.assertGreater(rt.brains.down_until,time.time())
+            rt.brains.down_until=0.0
+            loading=ModelError('HTTP Error 503: relay: the price list has not loaded yet');loading.status=503
+            loading.relay_refusal=True
+            self.assertFalse(rt.brains.on_failure(gid,loading),"the relay's own 503 is not the provider being down")
+            self.assertEqual(rt.brains.down_until,0.0,'the primary is not marked down and the turn is not re-aimed')
+            marked=http_error(urllib.error.HTTPError('http://relay',503,'Service Unavailable',
+                                                     {'X-Relay-Refusal':'1'},io.BytesIO(b'relay: waiting')))
+            self.assertTrue(marked.relay_refusal,'the wire marker reaches the error the resident sees')
+            plain=http_error(urllib.error.HTTPError('http://relay',503,'Service Unavailable',{},
+                                                    io.BytesIO(b'upstream unreachable')))
+            self.assertFalse(plain.relay_refusal,'an outage the relay forwards keeps no marker')
+        finally:rt.mail.close();rt.store.close()
 
     def test_a_model_outage_is_one_event_and_its_return_another(self):
         # a local server down for GPU work wrote 367 identical model_unavailable events over five hours
