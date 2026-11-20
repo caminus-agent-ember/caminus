@@ -4907,7 +4907,7 @@ for line in sys.stdin:
             self.assertIn('Retry-After', caught.exception.headers)
             body = caught.exception.read()
             self.assertIn(b'cannot read its price file', body)
-            self.assertIn(b'tries again in', body, 'the refusal says when to retry')
+            self.assertIn(b'retry in', body, 'the refusal says when to retry')
             self.assertNotIn(str(self.home).encode(), body, "the owner's path is not the agent's business")
             self.assertEqual(calls, [])
             self.assertTrue(any('price file unreadable: FileNotFoundError' in l for l in log), log)

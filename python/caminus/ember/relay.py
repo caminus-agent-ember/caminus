@@ -378,11 +378,12 @@ class OwnerPrices:
         message names the file, never its path: this text reaches the agent) and a model list that has not loaded,
         which may be what prices the alias the call used. Both are a 503 the agent waits on, never the 403 that
         stops its goal: a file missing at boot (the owner writes it later) and a file caught mid-rewrite are as
-        transient as a list that has not loaded, and the file is re-read on the next request either way."""
+        transient as a list that has not loaded. Only a model that is not priced is asked at all (do_POST asks this
+        after get() answered None), and the file is re-read on the next request, so the wait named is the agent's."""
         with self.lock:
             if self.error:
                 return (503, 'api_error', 'the relay cannot read its price file (%s), so %r cannot be priced yet; '
-                        'the owner re-reads it on change, no restart, and the relay tries again in %ds'
+                        'the owner re-reads it on change, no restart, so retry in %ds'
                         % (self.error, model, PRICE_FILE_RETRY), PRICE_FILE_RETRY)
             if self.fetch and self.names_error and model not in self.names:
                 wait = max(0, math.ceil(60 - (time.time() - self.names_at)))
