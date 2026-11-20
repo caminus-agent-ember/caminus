@@ -44,6 +44,7 @@ import (
 // a content line; elsewhere (screen) it is a row of the drawn frame.
 type chatSelection struct {
 	dragging, moved, shown bool   // moved: the pointer went 2 or more cells from the press (less is a shaky click)
+	cleared                bool   // this press cleared a copy the screen still showed: the click after it only clears
 	edges                  []int  // over the screen: the columns where the area's boxes draw their sides
 	screen                 bool   // over the frame's rows, not the transcript's content
 	x0, x1, y0, y1         int    // the area the drag began in: cells [x0, x1); for the screen, rows [y0, y1)
@@ -325,8 +326,10 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 		if ev.Button != tea.MouseLeft {
 			return m, nil, false
 		}
-		m.syncChat() // the areas as the screen draws them now (opening the session picker shortens the transcript)
+		was := m.chat.sel.shown // a shown copy: the click that clears it must not also toggle what it covers
+		m.syncChat()            // the areas as the screen draws them now (opening the session picker shortens the transcript)
 		m.chat.sel = m.selectionAt(ev.X, ev.Y)
+		m.chat.sel.cleared = was
 		return m, nil, true
 	case tea.MouseMotionMsg:
 		s := m.chat.sel
@@ -376,8 +379,9 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 func (m emberModel) clickAt(s chatSelection) (emberModel, tea.Cmd) {
 	x, y := s.at[0], s.at[1]
 	// a click on the header opens the whole goal under the title, or closes it again (#316); it is the header's
-	// own rows only, so a click in the transcript is untouched
-	if m.transcriptShown() && y < lipgloss.Height(m.chatHead(max(20, m.width))) {
+	// own rows only, so a click in the transcript is untouched. The click that clears a copy the screen still shows
+	// only clears: the drag that made it ended where the goal's header is, and opening it there would be a surprise.
+	if m.transcriptShown() && !s.cleared && y < lipgloss.Height(m.chatHead(max(20, m.width))) {
 		next, _ := m.toggleHead()
 		return next.(emberModel), nil
 	}

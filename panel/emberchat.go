@@ -40,6 +40,7 @@ type residentChat struct {
 	mdSource                                bool                  // Ctrl+Y: open cards show Markdown as its source, not rendered
 	mdCache                                 map[mdKey]string      // each card text's drawing by cardMarkdown ("": as it is)
 	headOpen                                bool                  // Alt+G: the whole goal under the title, as Markdown
+	headFor                                 string                // the goal it was opened on: a switch to another goal hides it
 	headTop                                 int                   // the expanded goal's first row (PgUp/PgDn scroll it)
 	headMD                                  map[headKey]string    // the expanded goal's drawing, by width and source
 	calls                                   map[string]callInfo   // each tool call's arguments by id: its result's card names what it acted on
@@ -648,14 +649,13 @@ func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
 func (m emberModel) chatHead(w int) string {
 	state, steps, goalText := m.headParts()
 	agent := residentText(m.agentName)
-	if m.chat.headOpen && goalText != "" {
+	if m.headShown() {
 		return m.headExpanded(agent, state, steps, w)
 	}
-	head := shellHeader(agent, state, goalText, steps, w)
-	if first := strings.SplitN(head, "\n", 2)[0]; !strings.Contains(ansi.Strip(first), "…") || goalText == "" {
-		return head
+	if !m.headCut(w) { // (one test, shared with Alt+G and the click: see headCut)
+		return shellHeader(agent, state, goalText, steps, w)
 	}
-	head = shellHeader(agent, state, "", steps, w)
+	head := shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
 	// Wrap breaks a long path too (Wordwrap left it to be cut at the edge with no marker)
 	wrapped := headWrappedLines(goalText, w)
@@ -735,8 +735,9 @@ func headWrappedLines(goal string, w int) []string {
 	return strings.Split(ansi.Wrap(goal, max(10, w-4), " "), "\n")
 }
 
-// headCut: the goal does not fit the header (beside the agent and its state, or in its three lines), so Alt+G and a
-// click on the header have something to expand. It mirrors chatHead's own test, so the hint and the key agree.
+// headCut: the goal does not fit on the header's title line, beside the agent and its state, so chatHead draws it
+// under the title in up to headLines wrapped lines instead. It is the layout test only: a goal cut off the title line
+// may still wrap into those three lines with nothing left over (headHidden).
 func (m emberModel) headCut(w int) bool {
 	state, steps, goalText := m.headParts()
 	if goalText == "" {
@@ -747,6 +748,26 @@ func (m emberModel) headCut(w int) bool {
 		return true
 	}
 	return len(headWrappedLines(goalText, w)) > headLines
+}
+
+// headHidden: some of the goal is not on the screen, so the hint, Alt+G and a click on the header all say the same
+// thing. A goal cut off the title line that wraps into headLines or fewer is drawn whole under the title: there the
+// hint stays away and the key does nothing, rather than opening an expansion that would repeat what is shown.
+func (m emberModel) headHidden(w int) bool {
+	_, _, goalText := m.headParts()
+	return goalText != "" && len(headWrappedLines(goalText, w)) > headLines
+}
+
+// headShown: the whole goal is under the title now. Alt+G opened it on one goal, and it stays open only while the chat
+// still shows that goal: Ctrl+N or a switch to another goal hides the text, so the expansion is hidden with it rather
+// than eating the next Esc for a goal that is not on the screen. The goal's id, not its text: a message that re-aims
+// it (the "↪ " prefix) is the same goal still on the screen.
+func (m emberModel) headShown() bool {
+	if !m.chat.headOpen || m.headGoalText() == "" {
+		return false
+	}
+	sel := m.selectedResidentGoal()
+	return sel != nil && sel.ID == m.chat.headFor
 }
 
 // headRows is how many rows of the expanded goal the header shows at once: half the screen less the title and the
@@ -772,8 +793,10 @@ func (m emberModel) headExpanded(agent, state string, steps, w int) string {
 	}
 	out := title + "\n" + strings.Join(shown, "\n")
 	if top > 0 || more > 0 {
-		out += "\n" + emberDim.Render(fmt.Sprintf("  … lines %d–%d of %d · PgUp/PgDn scrolls · Alt+G or Esc collapses",
-			top+1, top+len(shown), len(lines)))
+		// cut to the width as renderChat's clip does: the hint is ~66 columns, and at 40 or 60 the terminal wrapped it,
+		// leaving the frame one row taller than the screen (the title scrolled off the top)
+		out += "\n" + emberDim.Render(ansi.Truncate(fmt.Sprintf("  … lines %d–%d of %d · PgUp/PgDn scrolls · Alt+G or Esc collapses",
+			top+1, top+len(shown), len(lines)), max(10, w-4), ""))
 	}
 	return out + "\n" + rule
 }
@@ -816,15 +839,26 @@ func (m emberModel) headExpandedBody(w int) string {
 
 // toggleHead expands the goal under the title, or collapses it back to its three lines.
 func (m emberModel) toggleHead() (tea.Model, tea.Cmd) {
-	if m.chat.headOpen {
-		m.chat.headOpen, m.chat.headTop = false, 0
+	if m.headShown() {
+		m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0
 		return m, nil
 	}
-	if !m.headCut(max(20, m.width)) {
+	if !m.headHidden(max(20, m.width)) {
 		return m, nil
 	}
-	m.chat.headOpen, m.chat.headTop = true, 0
+	m.chat.headOpen, m.chat.headFor, m.chat.headTop = true, m.headGoalID(), 0
 	return m, nil
+}
+
+// headGoalID is the selected goal's id, or "" when the chat shows no goal (the same cases headGoalText blanks).
+func (m emberModel) headGoalID() string {
+	if m.headGoalText() == "" {
+		return ""
+	}
+	if sel := m.selectedResidentGoal(); sel != nil {
+		return sel.ID
+	}
+	return ""
 }
 
 // windowTitle is the terminal tab's title: the agent's state glyph, its name and what it is doing now, so a glance
@@ -2841,7 +2875,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil // the chat is the only screen: Tab completes and does nothing else
 	case "pgup":
 		// an expanded goal taller than its half of the screen scrolls first; one that fits does not take the key
-		if m.chat.headOpen && m.scrollHead(-m.headRows()) {
+		if m.headShown() && m.scrollHead(-m.headRows()) {
 			return m, nil
 		}
 		if m.liveBoxShown() {
@@ -2851,7 +2885,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
-		if m.chat.headOpen && m.scrollHead(m.headRows()) {
+		if m.headShown() && m.scrollHead(m.headRows()) {
 			return m, nil
 		}
 		if m.liveBoxShown() {
@@ -2902,8 +2936,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "alt+g":
 		return m.toggleHead()
 	case "esc":
-		if m.chat.headOpen { // the goal opened under the title closes first: it was the last thing opened
-			m.chat.headOpen, m.chat.headTop = false, 0
+		if m.headShown() { // the goal opened under the title closes first: it was the last thing opened
+			m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0
 			return m, nil
 		}
 		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode
