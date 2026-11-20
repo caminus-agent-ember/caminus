@@ -3010,6 +3010,29 @@ for line in sys.stdin:
             delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
         finally:rt.mail.close();rt.store.close()
 
+    def test_sweep_closes_a_child_whose_goal_row_is_gone(self):
+        # sweep() ran bare in the runtime loop and read store.goal(), which raises on an unknown id: one delegates
+        # row whose goal row was gone (a partial restore - the case is_child's docstring names) ended the daemon
+        # on every pass and left the row open for good (#382 review, this push). It now reads the state directly
+        # and closes a row without its goal as orphaned.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            gone=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(gone,parent,'','','worker',.5)
+            rt.store.db.execute('DELETE FROM goals WHERE id=?',(gone,))
+            delegate.sweep(rt)                     # used to raise ValueError('unknown goal ...')
+            self.assertEqual(rt.store.delegate(gone)['outcome'],'orphaned')
+            self.assertIn('goal row is gone',json.loads(rt.store.delegate(gone)['report'])['summary'])
+            # the ordinary case still pauses a child left runnable by a run that ended
+            live=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(live,parent,'','','worker',.5)
+            delegate.sweep(rt)
+            self.assertEqual(rt.store.goal(live)['state'],'paused')
+            self.assertEqual(rt.store.delegate(live)['outcome'],'orphaned')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_null_delegate_limit_takes_the_default_and_a_zero_is_refused(self):
         # `delegate_max_steps: null` raised TypeError at every delegate call (#382 review), as a null dollar cap
         # used to. Zero is not read as "the default" either: the same silent literal the table's DEFAULT 0 was.

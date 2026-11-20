@@ -349,8 +349,15 @@ def sweep(rt):
     """At a runtime start, a child left runnable belongs to a run that ended (the store has one writer, and the
     runtime lock proved no other process holds it): pause it so it cannot run later on the wrong brain."""
     for r in rt.store.db.execute("SELECT child FROM delegates WHERE outcome=''").fetchall():
-        g = rt.store.goal(r['child'])
-        if g['state'] in ('queued', 'working', 'waiting_model'):
+        # a direct read, not store.goal(): that raises on an unknown id, and this runs bare in the runtime loop,
+        # so one row whose goal is gone (a partial restore) would end the daemon on every pass and leave the row
+        # open for good (#382 review). A row without its goal is closed as orphaned - it can never report.
+        row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (r['child'],)).fetchone()
+        if row is None:
+            rt.store.delegate_done(r['child'], 'orphaned', dict(outcome='orphaned', child=r['child'],
+                                                                summary='this child\'s goal row is gone'))
+            continue
+        if row['state'] in ('queued', 'working', 'waiting_model'):
             with rt.store.transaction():
-                rt.store.update(g['id'], state='paused', error='its runtime ended mid-delegation')
-            rt.store.delegate_done(g['id'], 'orphaned', dict(outcome='orphaned'))
+                rt.store.update(r['child'], state='paused', error='its runtime ended mid-delegation')
+            rt.store.delegate_done(r['child'], 'orphaned', dict(outcome='orphaned'))
