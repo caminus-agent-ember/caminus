@@ -2711,8 +2711,8 @@ for line in sys.stdin:
                          'English','a pasted CJK log line does not outvote the owner')
         self.assertEqual(language.derive(['\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
                                           '\u7136\u540e\u5f00 PR\u3002'])['name'],'Chinese','a Chinese goal still names it')
-        self.assertEqual(language.derive(['Fix it. ```\u5206\u652f\u5df2\u63a8\u9001\u3002```'])['name'],'English',
-                         'a fenced block is not the owner\'s prose')
+        self.assertEqual(language.derive(['Fix the failing push step. ```\u5206\u652f\u5df2\u63a8\u9001\u3002```'])['name'],
+                         'English', 'a fenced block is not the owner\'s prose')
         self.assertEqual(language.derive(['ok']),None,'too few letters cannot name a language')
 
     def test_an_unlisted_language_says_the_drift_check_is_off(self):
