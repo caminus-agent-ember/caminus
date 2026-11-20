@@ -3002,6 +3002,9 @@ for line in sys.stdin:
                 with self.assertRaises(RuntimeError):
                     delegate.run_child(rt,parent,dict(child=third,role='worker'))
             self.assertEqual(rt.store.delegate(third)['outcome'],'failed')
+            # ...and the goal must not stay runnable: closing the row takes it out of sweep()'s reach
+            # (`outcome=''`), so the next run would pick it up on whatever brain that process has, uncapped
+            self.assertEqual(rt.store.goal(third)['state'],'paused')
             delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
         finally:rt.mail.close();rt.store.close()
 

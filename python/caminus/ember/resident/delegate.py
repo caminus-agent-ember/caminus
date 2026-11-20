@@ -299,6 +299,15 @@ def run_child(rt, parent, job):
         try:
             row = rt.store.delegate(child)
             if row and not row.get('outcome'):
+                g = rt.store.goal(child) or {}
+                if g.get('state') in ('queued', 'working', 'waiting_model'):
+                    # and the goal must not stay runnable: closing the row here takes it out of sweep()'s reach
+                    # (sweep() looks for `outcome=''`), and a runnable child left behind would be picked up by
+                    # the next run on whatever brain that process has, with no cap ledger (#382 review, this
+                    # push). sweep() pauses exactly this for the process-died case; this is the in-process one.
+                    with rt.store.transaction():
+                        rt.store.update(child, state='paused', error='its run ended without a report '
+                                                                    '(a delegate child run by another goal)')
                 rt.store.delegate_done(child, 'failed', dict(child=child, outcome='failed', state='error',
                                                              summary='the run of this child ended without a report'))
                 rt.store.event('delegate_done', dict(child=child, outcome='failed'), parent)
