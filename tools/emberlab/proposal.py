@@ -88,15 +88,21 @@ def arms_from_proposal(prop, base_checkout=None, arm_checkout=None):
     return [base, arm]
 
 
+def host_kind(a, brains):
+    """The host `cmd_run` will pick, computed the same way: an explicit --host, else `agent` for a real brain."""
+    return a.host or ('agent' if any(getattr(b, 'real', False) for b in brains) else 'local')
+
+
 def approval_missing(a, brains):
     """What the owner still has to allow before this run starts: the plan alone never starts one."""
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
-    real = [b.label() for b in brains if getattr(b, 'real', False) and not getattr(b, 'paid', False)]
+    real = [b.label() for b in brains if getattr(b, 'real', False)]
     missing = []
     if paid and not a.approve_paid:
         missing.append("--approve-paid (billed through the owner's relay: " + ', '.join(paid) + ')')
-    if real and not (a.unsafe_local or a.unsafe_free) and (a.host or 'agent') == 'local':
-        missing.append('--unsafe-local (a real model runs as you: ' + ', '.join(real) + ')')
+    # the same rule as cmd_run, paid brains included: on the local host a real model gets a shell as you
+    if real and host_kind(a, brains) == 'local' and not (a.unsafe_local or a.unsafe_free):
+        missing.append('--unsafe-local (a real model runs as you on the local host: ' + ', '.join(real) + ')')
     return missing
 
 

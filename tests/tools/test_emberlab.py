@@ -227,6 +227,11 @@ p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'anth
 check(p.returncode != 0 and '--approve-paid' in (p.stderr + p.stdout) and not po.exists(),
       f'propose: a brain billed through the relay does not run without --approve-paid ({p.returncode}; '
       f'{(p.stderr + p.stdout)[-300:]})')
+p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'anthropic:8091#claude-haiku-5-5',
+        '--host', 'local', '--approve-paid', '--config', '{"sim": false}', '--out', str(po))
+check(p.returncode != 0 and '--unsafe-local' in (p.stderr + p.stdout) and not po.exists(),
+      f'propose: a paid real brain on the local host needs --unsafe-local too, like lab.py run ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve', '--out', str(po))
 check(p.returncode != 0 and 'measure nothing' in (p.stderr + p.stdout),
       'propose: two identical arms are refused (the proposal names no change)')
