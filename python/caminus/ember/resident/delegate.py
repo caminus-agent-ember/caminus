@@ -108,26 +108,28 @@ NESTED = frozenset('sh bash dash zsh ksh csh tcsh fish eval exec source xargs en
 # with `git config`, so refusing these costs it nothing (#384 review: the reviewer reproduced `git -c` twice).
 GIT_INJECT = frozenset(('-c', '--config-env', '--exec-path'))
 
+# git's global options that take a value as the next word, so the walk over the option prefix must step over both
+# (`git -C . config ...`). `-c`, `--config-env` and `--exec-path` are here AND in GIT_INJECT.
+_GIT_VALUE_OPTS = frozenset(('-C', '--git-dir', '--work-tree', '-c', '--config-env', '--exec-path'))
 
-def _git_sub(rest):
-    """git's subcommand from the words after `git`: the first word that is not an option or an option's value.
 
-    `git -C . config ...` names a directory before the subcommand and `-c` takes a value, so "the first word that
-    does not start with `-`" is not the subcommand. Only what this needs is skipped: `-C` with its value, and any
-    `--opt=value` form. A command separator ends the git command."""
+def _git_words(rest):
+    """(git's global options, the words from its subcommand on) from the words after `git`.
+
+    `-c`, `--config-env` and `--exec-path` are options only BEFORE the subcommand: `git switch -c x` and
+    `git commit -c HEAD` use `-c` for something else entirely (create a branch, re-edit a message), and a scan
+    over every word refused them (#384: my own guard, caught by probing it). A command separator ends the git
+    command, and an `--opt=value` word is one word."""
     i = 0
     while i < len(rest):
         w = rest[i]
-        if w in ';&|()<>`':
-            return ''
-        if w in ('-C', '--git-dir', '--work-tree'):
-            i += 2
-            continue
+        if w and all(c in ';&|()<>`' for c in w):
+            break
         if w.startswith('-'):
-            i += 1
+            i += 2 if w in _GIT_VALUE_OPTS else 1
             continue
-        return w
-    return ''
+        break
+    return rest[:i], rest[i:]
 
 
 def _escaping(cmd, wt):
@@ -153,19 +155,35 @@ def _escaping(cmd, wt):
         return 'it cannot be parsed'
     if len(words) < 3 or words[0] != 'cd' or words[1] != wt or words[2] != '&&':
         return 'it must start with `cd %s && `' % wt
+    at_cmd = True                                  # the next word starts a command (after `&&`, `;`, `|`, `(`)
     for i, w in enumerate(words[3:]):
+        if w and all(c in ';&|()<>`' for c in w):
+            at_cmd = True
+            continue
+        if at_cmd and '=' in w and w.split('=', 1)[0].startswith('GIT_'):
+            # `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0='<cmd>' git status` is
+            # `git -c` by another spelling: reproduced, it ran <cmd> from a worktree (#384, my own probe). The
+            # rule is the GIT_ namespace, not a list of names - GIT_EXEC_PATH, GIT_PAGER, GIT_SSH_COMMAND and
+            # GIT_CONFIG_GLOBAL reach outside the worktree the same way.
+            return ('%s sets a git environment variable, and git reads or runs what it names: the worktree shares '
+                    'its repository with the parent' % w)
+        if at_cmd and '=' in w:
+            continue                               # another plain env assignment: still before the command word
+        at_cmd = False
         prog = w.rsplit('/', 1)[-1]
         if prog == 'git':
             # git's own config is the parent repository's: a worktree's .git is a FILE naming
             # <parent>/.git/worktrees/<name>, so `git config core.fsmonitor '<cmd>'` here writes the parent's config
             # and every later `git status` in the parent runs <cmd> (reproduced). `-c`, `--config-env` and
             # `--exec-path` do the same per command (`git -c alias.x='!cmd' x`). All are refused; a child that
-            # needs a setting uses a file in its worktree.
+            # needs a setting uses a file in its worktree. Only the options BEFORE the subcommand count:
+            # `git switch -c x` and `git commit -c HEAD` mean something else by `-c` (#384, my own probe).
             rest = words[4 + i:]
-            for v in rest:
+            opts, after = _git_words(rest)
+            for v in opts:
                 if v in GIT_INJECT or v.split('=', 1)[0] in GIT_INJECT:
                     return ('%s lets git read or run something the worktree shares with the parent repository' % v)
-            if _git_sub(rest) == 'config':
+            if after and after[0] == 'config':
                 return ('git config writes a config the worktree shares with the parent repository, so a later '
                         'git command there would run what it names')
         if prog in NESTED or prog.lstrip('-') in NESTED:

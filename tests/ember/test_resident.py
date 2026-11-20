@@ -2839,16 +2839,27 @@ for line in sys.stdin:
                     "cd %s && git -c core.pager='sh -c ls' log"%wt,
                     'cd %s && git --exec-path=/tmp log'%wt,
                     'cd %s && git --config-env=core.pager=E log'%wt,
+                    # `git -c` by another spelling: the GIT_CONFIG_* environment, reproduced running <cmd> from a
+                    # worktree (#384, my own probe). The rule is the GIT_ namespace, not a list of names.
+                    "cd %s && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "
+                    "GIT_CONFIG_VALUE_0='touch /tmp/pwn' git status"%wt,
+                    'cd %s && GIT_EXEC_PATH=/tmp git status'%wt,
+                    'cd %s && git status && GIT_CONFIG_GLOBAL=/tmp/gc git log'%wt,
                     'cd %s && echo x > .git'%wt, 'cd %s && rm .git'%wt,
                     'cd %s && echo hi > .git/config'%wt):
             why=delegate.refused('terminal',dict(command=cmd),row)
             self.assertTrue(why and 'worktree' in why,(cmd,why))
-        # the work a writing child exists for still runs: build, test, commit, log
+        # the work a writing child exists for still runs: build, test, commit, log - and `-c` AFTER the
+        # subcommand means something else (`git switch -c x` creates a branch, `git commit -c HEAD` re-edits a
+        # message), so it is not refused (#384: my guard refused both until I probed it)
         for cmd in ('cd %s && make test'%wt,'cd %s && python3 -m pytest -q'%wt,
                     'cd %s && git status --short'%wt,'cd %s && git add -A && git commit -m x'%wt,
                     'cd %s && git log --oneline -5'%wt,'cd %s && touch ok.txt'%wt,
                     'cd %s && cat .git'%wt,'cd %s && touch gitignore'%wt,
-                    'cd %s && cat .github/workflows/x.yml'%wt):
+                    'cd %s && cat .github/workflows/x.yml'%wt,
+                    'cd %s && git switch -c x'%wt,'cd %s && git commit -c HEAD'%wt,
+                    'cd %s && git commit -C HEAD'%wt,'cd %s && git checkout -b y'%wt,
+                    'cd %s && git log -c'%wt,'cd %s && FOO=1 make test'%wt):
             self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
         # the .git pointer is not a file a writing child may rewrite, by either file tool; `.github` and
         # `gitignore` are ordinary files and stay writable
