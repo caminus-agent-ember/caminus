@@ -2821,6 +2821,55 @@ for line in sys.stdin:
         self.assertTrue(delegate.refused('checkpoint',dict(paths=['../x']),row))
         self.assertIsNone(delegate.refused('checkpoint',dict(paths=['ok.txt','sub/../ok.txt']),row))
 
+    def test_a_writing_childs_read_only_command_is_path_checked_too(self):
+        # #384 review, P1: `refused()` ran the worktree check only when `not read_only(cmd)`, so a writing child's
+        # `cd W && cat ../parent_secret.txt` - or `grep -r a /abs/parent/tree` - read the parent's tree with the
+        # check skipped, while the `read` tool refuses the same path. Every command is path-checked now, and only
+        # the checks against a *change* through git's shared metadata depend on the command changing something.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.runtime import read_only_command as ro
+        wt=str(self.home/'worktrees'/'abcd1234')
+        (self.home/'parent_secret.txt').write_text('secret\n')
+        row=dict(permissions='write',worktree=wt)
+        for cmd in ('cd %s && cat ../parent_secret.txt'%wt,'cd %s && cat %s/parent_secret.txt'%(wt,self.home),
+                    'cd %s && grep -r a %s'%(wt,self.home),'cd %s && head -1 ../parent_secret.txt 2>/dev/null'%wt):
+            self.assertTrue(ro(cmd),'the probe command is read-only: %s'%cmd)
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'reads only inside its worktree' in why,(cmd,why))
+        # ...and the reads that stay inside still work; a `cwd` inside the worktree needs no `cd W && ` prefix
+        self.assertIsNone(delegate.refused('terminal',dict(command='cd %s && cat sub/../ok.txt'%wt),row))
+        self.assertIsNone(delegate.refused('terminal',dict(command='cat ../ok.txt',cwd=wt+'/sub'),row))
+        self.assertTrue(delegate.refused('terminal',dict(command='cat ../../x',cwd=wt+'/sub'),row))
+        # a read-only command may read git's metadata (it changes nothing); a writing one may not use it to run
+        self.assertIsNone(delegate.refused('terminal',dict(command='cd %s && cat .git'%wt),row),
+                          'a read-only command naming .git reads the pointer and changes nothing')
+        self.assertTrue(delegate.refused('terminal',dict(command='cd %s && echo x > .git'%wt),row))
+        self.assertTrue(delegate.refused('terminal',dict(command='cd %s && git config core.pager x'%wt),row))
+        # a redirect to a stream is not a path outside the worktree (#384 review, P2: `ls 2>/dev/null` was refused)
+        for cmd in ('cd %s && ls 2>/dev/null'%wt,'cd %s && ls 2>/dev/stdout'%wt,'cd %s && ls 2>/dev/stderr'%wt):
+            self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
+        self.assertTrue(delegate.refused('terminal',dict(command='cd %s && cat ../x 2>/dev/null'%wt),row),
+                        'the stream exception does not excuse a real path outside')
+
+    def test_the_children_limit_counts_running_children_not_every_child_ever_made(self):
+        # #384 review, P2: count(*) counted every child the parent ever made, so after 4 finished children it could
+        # never delegate again, while the refusal said finishing one frees a slot (the same P2 #382 fixed).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate_max_children']=2
+            parent=rt.store.enqueue('p')
+            def prep():return dict(task='t',done='d',role='worker',permissions='read',cap_usd=.5,max_steps=4,
+                                   max_seconds=60,model=rt.model,who={},wait=True)
+            kids=[delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['child']
+                  for _ in range(2)]
+            with self.assertRaises(ValueError) as caught:
+                delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+            self.assertIn('2 delegate children still running',str(caught.exception))
+            rt.store.delegate_done(kids[0],'completed',dict(outcome='completed'))
+            delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_writing_child_cannot_reach_the_parent_repository_through_git_metadata(self):
         # #384 review: `NESTED` names shell-like programs, so `git -c alias.x='!cmd' x`, `git -c core.pager=...`
         # and `awk 'BEGIN{system(...)}'` ran a command with `_escaping` returning '' - and so did

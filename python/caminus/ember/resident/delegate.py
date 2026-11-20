@@ -67,7 +67,8 @@ READ_TEXT = '''You cannot write or edit a file or run a command that changes any
 commands, use the sandbox, the web and machine, then define_done, verify and finish with what you found.'''
 WRITE_TEXT = '''You may write and edit files and run commands, but only inside the worktree this delegate created for you
 (call checkpoint before your first change to it, and name files relative to it): everything outside that worktree is
-your parent's to change. A terminal command that changes something must start with `cd <your worktree> && `.
+your parent's to change, and a read of it is refused the same way. A terminal command starts with
+`cd <your worktree> && ` or passes `cwd` inside it, and every path it names must stay inside.
 The worktree keeps your changes apart from your parent's tree; it is not a jail, so treat it as your own checkout and
 do not try to reach past it. Two things are off limits because your worktree shares them with the parent's
 repository: `git config`, `git -c`, `--config-env`, `--exec-path`, and any path naming `.git` - they are refused.'''
@@ -101,6 +102,10 @@ def _inside(wt, path):
 NESTED = frozenset('sh bash dash zsh ksh csh tcsh fish eval exec source xargs env sudo doas su chroot '
                    'unshare nsenter script'.split())
 
+# Redirect targets that are streams, not files: a command may write its errors to one of these and change nothing
+# outside the worktree, so they are not "climbs out of the worktree" (#384 review: `ls 2>/dev/null` was refused).
+DEVICES = frozenset(('/dev/null', '/dev/stdout', '/dev/stderr'))
+
 # git options that make a git command run or read something of the caller's choosing, with no shell in sight:
 # `-c alias.x='!cmd' x` runs cmd through git's own alias expansion, `-c core.pager='sh -c ...' log` runs it as a
 # pager, `-c diff.external`, `core.fsmonitor` and `remote.uploadpack` alike; `--config-env` reads a value from the
@@ -132,20 +137,26 @@ def _git_words(rest):
     return rest[:i], rest[i:]
 
 
-def _escaping(cmd, wt):
-    """Why a writing child's command could change something outside its worktree, or ''.
+def _escaping(cmd, wt, writing=True, base=''):
+    """Why a writing child's command could reach outside its worktree, or ''.
+
+    Checked for every command of a writing child, read-only or not (#384 review): `cd W && cat ../parent_secret`
+    reads what the parent did not hand the child, which is exactly the path the `read` tool refuses. `writing`
+    says the command changes something: only then do the checks that guard against a *change* through git's
+    shared metadata apply (`git config` / `git -c` / `--config-env` / `--exec-path`, a `GIT_` variable, a word
+    naming `.git`); a read-only command may read that metadata and changes nothing.
 
     A best-effort tripwire on the command text, not a boundary (see the module docstring): a program that computes
     a path at run time (`python3 -c "open(...)"`, `awk 'BEGIN{system(...)}'`, a `make` recipe) can still write
-    anywhere, and no text check can see it. What holds exactly is the file tools' path check (`_inside`). What
-    this adds, beyond the obvious spellings, is the two ways an ordinary-looking command reaches the parent's
-    repository through the worktree's shared metadata: `git config` / `git -c` / `--config-env` / `--exec-path`
-    (a later `git status` in the parent runs what it named) and any word naming `.git` (the pointer file itself).
+    anywhere, and no text check can see it. What holds exactly is the file tools' path check (`_inside`).
 
-    The command must start with `cd <worktree> &&`; no word may name a program that runs another command
-    (`sh -c`, `eval`, `xargs`), an absolute path outside the worktree, a `..` component, a `$` expansion or a
-    `~` home; and the value of `--opt=path` is checked as a path too. Words are split with punctuation, so a
-    redirect glued to its target (`echo x >../out`) yields `../out` as a word.
+    The command must start with `cd <worktree> &&` unless `base` names a directory inside the worktree the command
+    already starts in (a read-only command with a `cwd`); every path word is then resolved against that directory,
+    and a later `cd` moves it. No word may name a program that runs another command (`sh -c`, `eval`, `xargs`), an
+    absolute path outside the worktree, a `..` component, a `$` expansion or a `~` home; the value of
+    `--opt=path` is checked as a path too. Words are split with punctuation, so a redirect glued to its target
+    (`echo x >../out`) yields `../out` as a word. A redirect to /dev/null (or /dev/stdout, /dev/stderr) changes
+    nothing and is allowed.
     """
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=';&|()<>`')
@@ -153,14 +164,25 @@ def _escaping(cmd, wt):
         words = list(lex)
     except ValueError:
         return 'it cannot be parsed'
-    if len(words) < 3 or words[0] != 'cd' or words[1] != wt or words[2] != '&&':
-        return 'it must start with `cd %s && `' % wt
+    if base:
+        if not _inside(wt, base):
+            return '%s climbs out of the worktree' % base
+        start = 0
+    else:
+        if len(words) < 3 or words[0] != 'cd' or words[1] != wt or words[2] != '&&':
+            return 'it must start with `cd %s && `' % wt
+        base = os.path.realpath(wt)
+        start = 3
     at_cmd = True                                  # the next word starts a command (after `&&`, `;`, `|`, `(`)
-    for i, w in enumerate(words[3:]):
+    cwd = os.path.realpath(base or wt)             # where a relative path word resolves
+    j = start
+    while j < len(words):
+        w = words[j]
         if w and all(c in ';&|()<>`' for c in w):
             at_cmd = True
+            j += 1
             continue
-        if '=' in w and w.split('=', 1)[0].startswith('GIT_'):
+        if writing and '=' in w and w.split('=', 1)[0].startswith('GIT_'):
             # `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0='<cmd>' git status` is
             # `git -c` by another spelling: it runs <cmd> from a worktree. The rule is the GIT_ namespace, not a
             # list of names - GIT_EXEC_PATH, GIT_PAGER, GIT_SSH_COMMAND and GIT_CONFIG_GLOBAL reach outside the
@@ -171,18 +193,35 @@ def _escaping(cmd, wt):
             return ('%s sets a git environment variable, and git reads or runs what it names: the worktree shares '
                     'its repository with the parent' % w)
         if at_cmd and '=' in w:
+            j += 1
             continue                               # another plain env assignment: still before the command word
         at_cmd = False
         prog = w.rsplit('/', 1)[-1]
-        if prog == 'git':
+        if prog == 'cd':
+            # `cd` moves where the next relative path resolves. Its directory word is checked like any other path
+            # and then skipped, so `cd sub && cat ../ok.txt` reads a file in the worktree while `cd ..` leaves it.
+            k = j + 1
+            while k < len(words) and words[k].startswith('-'):
+                k += 1                             # cd -P / -L / -e: an option, then the directory
+            if k >= len(words) or not words[k] or all(c in ';&|()<>`' for c in words[k]) or words[k] == '-':
+                return 'cd without a directory goes to your home, outside the worktree'
+            d = words[k]
+            if d.startswith('~') or '$' in d:
+                return '%s could resolve outside the worktree' % d
+            target = d if os.path.isabs(d) else os.path.join(cwd, d)
+            if not _inside(wt, target):
+                return '%s climbs out of the worktree' % d
+            cwd = os.path.realpath(target)
+            j = k + 1
+            continue
+        if writing and prog == 'git':
             # git's own config is the parent repository's: a worktree's .git is a FILE naming
             # <parent>/.git/worktrees/<name>, so `git config core.fsmonitor '<cmd>'` here writes the parent's config
             # and every later `git status` in the parent runs <cmd> (reproduced). `-c`, `--config-env` and
             # `--exec-path` do the same per command (`git -c alias.x='!cmd' x`). All are refused; a child that
             # needs a setting uses a file in its worktree. Only the options BEFORE the subcommand count:
             # `git switch -c x` and `git commit -c HEAD` mean something else by `-c`.
-            rest = words[4 + i:]
-            opts, after = _git_words(rest)
+            opts, after = _git_words(words[j + 1:])
             for v in opts:
                 if v in GIT_INJECT or v.split('=', 1)[0] in GIT_INJECT:
                     return ('%s lets git read or run something the worktree shares with the parent repository' % v)
@@ -193,14 +232,18 @@ def _escaping(cmd, wt):
             return '%s runs another command, which this check cannot see' % w
         if w.startswith('~') or '$' in w:
             return '%s could resolve outside the worktree' % w
+        if w in DEVICES:
+            j += 1
+            continue                               # a redirect to a stream writes nothing: `ls 2>/dev/null`
         for p in ([w, w.split('=', 1)[1]] if '=' in w else [w]):
-            if '.git' in p.split('/'):
+            if writing and '.git' in p.split('/'):
                 # the worktree's .git is a FILE naming <parent>/.git/worktrees/<name>: rewriting it points every
                 # later git command in the worktree at another repository (the parent's own tree, or a bare repo
                 # whose hooks then run), which is a change outside the worktree by another name
                 return ('%s names the worktree\'s .git, which is a pointer into the parent repository' % w)
-            if not _inside(wt, p):
+            if not _inside(wt, p if os.path.isabs(p) else os.path.join(cwd, p)):
                 return '%s climbs out of the worktree' % w
+        j += 1
     return ''
 
 
@@ -232,18 +275,24 @@ def refused(name, args, row=None):
                     'of its own, or report what is missing'
                     % (' (a read-only child reads, it does not interact)' if not write else ''))
         cmd = str(args.get('command') or '')
-        if not write and cmd and not read_only(cmd):
-            return ('a read-only delegate child runs only a read-only command here. Report what you found; your '
-                    'parent makes the change')
-        if write and wt and cmd and not read_only(cmd):
-            why = _escaping(cmd, wt)
-            if why:
-                return ('a writing child changes files only inside its worktree (%s): %s. Start the command with '
-                        '`cd %s && ` and keep every path inside it' % (wt, why, wt))
         cwd = str(args.get('cwd') or '')
         if write and wt and cwd and not (os.path.isabs(cwd) and _inside(wt, cwd)):
             return ('a writing child starts a terminal command inside its worktree (%s), not %s'
                     % (wt, cwd))
+        ro = read_only(cmd)
+        if not write and cmd and not ro:
+            return ('a read-only delegate child runs only a read-only command here. Report what you found; your '
+                    'parent makes the change')
+        if write and wt and cmd:
+            # every command, read-only or not (#384 review): `cd W && cat ../parent_secret.txt` reads what the
+            # `read` tool refuses, so a read-only command is path-checked as well. `writing` adds only the checks
+            # against a change through git's shared metadata; the path rule is the same. A command that already
+            # starts inside the worktree (its `cwd`) needs no `cd W && ` prefix.
+            why = _escaping(cmd, wt, writing=not ro, base=cwd)
+            if why:
+                return ('a writing child %s only inside its worktree (%s): %s. Start the command with `cd %s && ` '
+                        '(or set cwd inside it) and keep every path inside it'
+                        % ('reads' if ro else 'changes files', wt, why, wt))
     if write and wt and name in ('write', 'edit'):
         path = str(in_worktree(row, name, args).get('path') or '')
         if path.startswith('/') and not _inside(wt, path):
@@ -472,10 +521,11 @@ def start(rt, parent, args, prepared=None):
                          'permissions (a child never gets more than its parent has). Explore with a read-only '
                          'child, or finish the plan first')
     limit = int(rt.config.get('delegate_max_children', DEFAULTS['max_children']))
-    used = rt.store.db.execute('SELECT count(*) FROM delegates WHERE parent=?', (parent,)).fetchone()[0]
+    used = rt.store.db.execute("SELECT count(*) FROM delegates WHERE parent=? AND outcome=''",
+                               (parent,)).fetchone()[0]
     if used >= limit:
-        raise ValueError('this goal has used its %d delegate children (delegate_max_children): finish one, or '
-                         'do the rest yourself' % limit)
+        raise ValueError('this goal has %d delegate children still running (delegate_max_children): their '
+                         'reports arrive first; do the rest yourself, or delegate again once one finishes' % limit)
     child = rt.store._enqueue('', max_steps=p['max_steps'], max_seconds=p['max_seconds'], kind='delegate')
     top = base = worktree = branch = ''
     try:
