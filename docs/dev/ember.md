@@ -192,8 +192,14 @@ python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
   printed before anything starts. A paid brain needs `--approve-paid`, a real model on the local host needs
   `--unsafe-local`, and `--dry-run` stops after the plan.
 - **The record carries the numbers.** `sim.observe` appends the verdict and each brain's pass rate, false
-  completions and median steps; the observer is `emberlab`, and the predictor's brain stays named.
-- **A closed record stays closed.** An `observed` record is not measured again; a `proposed` one is the input.
+  completions and median steps, plus the suite and the tasks that ran; the observer is `emberlab`, and the
+  predictor's brain stays named.
+- **A closed record stays closed.** An `observed` record is not measured again; a `proposed` one is the input
+  (`recorded` is refused: its change is already in the tree, so the A/B would measure nothing). A verdict of
+  `incomplete` (a brain with no run of one arm) leaves the record open.
+- **One folder, one experiment.** `--out` records the arms (checkout, commit, tree state, config, env) and the plan
+  (suite, brains, `--only`, repeats), and a rerun that differs in any of them is refused: run ids carry no record id,
+  so a shared folder would reuse the other experiment's rows.
 
 **Work with the agent.** A lab session is a resident with its daemon running, in its own home:
 

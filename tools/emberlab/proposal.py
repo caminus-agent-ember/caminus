@@ -89,26 +89,50 @@ def arms_from_proposal(prop, base_checkout=None, arm_checkout=None):
     return [base, arm]
 
 
-def arms_spec(arms):
-    """What `arms.json` records for a folder: each arm's checkout, commit, tree state, config and env.
+ARM_KEYS = ('checkout', 'commit', 'dirty', 'config', 'env')
+PLAN_KEYS = ('suite', 'brains', 'only', 'repeats')
+
+
+def arms_spec(arms, plan=None):
+    """What a folder records as its identity: each arm as `Arm.describe` writes it, and the plan that reads the rows.
 
     The commit and the dirty flag belong to the identity, not just the path: a run id is task.brain.arm.rN and
     carries no record id, and `lab.py run` skips every id already in results.jsonl, so a checkout that moved (a
     commit, a rebase) would close a new record with the previous rows (#385 review: reproduced by committing
     between two runs into one folder).
+
+    The suite, brains, `--only` and repeats belong to it for the same reason: one folder holds one experiment. A
+    first run that errored partway leaves its rows, and a rerun with another `--brain` (or another suite or task
+    set) would pass the arms check and close its record with numbers this command never chose (#385 review P1).
     """
-    return {x.name: dict(checkout=str(x.checkout), commit=x.commit, dirty=x.dirty, config=x.config, env=x.env)
-            for x in arms}
+    return dict(arms={x.name: x.describe() for x in arms},
+                plan=None if plan is None else {k: plan.get(k) for k in PLAN_KEYS})
+
+
+def _arms_of(spec):
+    """The arms map of a folder spec: `{"arms": ..., "plan": ...}` from `arms_spec`, or a bare map (an older one)."""
+    if isinstance(spec, dict) and isinstance(spec.get('arms'), dict):
+        return spec['arms']
+    return spec if isinstance(spec, dict) else {}
 
 
 def arms_mismatch(prior, spec):
     """Why the runs already in a folder are not this experiment's, or '' when they are."""
-    for name in sorted(set(prior) | set(spec)):
-        if not isinstance(prior.get(name), dict) or name not in spec:
-            return f'arm {name}: the folder holds {prior.get(name)!r}'
-        for k in ('checkout', 'commit', 'dirty', 'config', 'env'):
-            if prior[name].get(k) != spec[name].get(k):
-                return f'arm {name}: {k} was {prior[name].get(k)!r}, this run is {spec[name].get(k)!r}'
+    pa, sa = _arms_of(prior), _arms_of(spec)
+    for name in sorted(set(pa) | set(sa)):
+        if not isinstance(pa.get(name), dict) or name not in sa:
+            return f'arm {name}: the folder holds {pa.get(name)!r}'
+        for k in ARM_KEYS:
+            if pa[name].get(k) != sa[name].get(k):
+                return f'arm {name}: {k} was {pa[name].get(k)!r}, this run is {sa[name].get(k)!r}'
+    sp = spec.get('plan') if isinstance(spec, dict) else None
+    if sp is not None:
+        pp = prior.get('plan') if isinstance(prior, dict) else None
+        if not isinstance(pp, dict):
+            return 'the folder does not record the plan it runs (an older arms.json)'
+        for k in PLAN_KEYS:
+            if pp.get(k) != sp.get(k):
+                return f'plan: {k} was {pp.get(k)!r}, this run is {sp.get(k)!r}'
     return ''
 
 
@@ -179,6 +203,11 @@ def cmd_propose(a, run):
         raise SystemExit(f'no SIM record {a.record} in {home}')
     if rec.get('status') == 'observed':
         raise SystemExit(f'SIM record {a.record} is already observed: a closed record is not measured again')
+    if rec.get('status') != 'proposed':
+        # `recorded` is a prediction whose change is already in the tree: measuring it compares the tree with itself.
+        raise SystemExit(f"SIM record {a.record} is {rec.get('status') or 'unstated'}, not proposed: only a "
+                         "`proposed` record (a change nobody has made yet) is measured; a `recorded` one's change is "
+                         'already in the tree, so an A/B of it measures nothing')
     try:
         prop = dict(rec, config=_json_arg(a.config, 'config'), env=_json_arg(a.env, 'env'),
                     base_config=_json_arg(a.base_config, 'base-config'), base_env=_json_arg(a.base_env, 'base-env'))
@@ -203,7 +232,9 @@ def cmd_propose(a, run):
         return 0
     out.mkdir(parents=True, exist_ok=True)
     arms_file = out / 'arms.json'
-    spec = arms_spec(arms)
+    # the folder holds one experiment: the arms AND the plan that reads their rows (suite, brains, tasks, repeats)
+    spec = arms_spec(arms, dict(suite=suite['name'], brains=sorted(b.label() for b in brains), only=sorted(only),
+                                repeats=a.repeats))
     if arms_file.exists():
         # a run id is task.brain.arm.rN: two experiments sharing a folder would reuse each other's rows by id
         try:
@@ -212,7 +243,7 @@ def cmd_propose(a, run):
             raise SystemExit(f'{arms_file} is not JSON: use a fresh --out')
         why = arms_mismatch(prior, spec)
         if why:
-            raise SystemExit(f'{out} holds runs for different arms ({why}): use a fresh --out (a shared folder '
+            raise SystemExit(f'{out} holds a different experiment ({why}): use a fresh --out (a shared folder '
                              "would reuse the other experiment's rows by id)")
     arms_file.write_text(json.dumps(spec, indent=1))
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
@@ -225,7 +256,13 @@ def cmd_propose(a, run):
     verdict = report_mod.compare(report_mod.load(out), 'base', 'arm')
     print(report_mod.compare_md(verdict), flush=True)
     measured = (f"tools/emberlab propose: suite {suite['name']}, brains "
-                f"{', '.join(b.label() for b in brains)}, repeats {a.repeats}, {out}")
+                f"{', '.join(b.label() for b in brains)}, tasks {len(tasks)}/{len(suite['tasks'])}"
+                + (f" ({', '.join(t['key'] for t in tasks)})" if only else '')
+                + f", repeats {a.repeats}, {out}")
+    if verdict['verdict'].startswith('incomplete'):
+        # a brain with no run of one arm cannot judge the proposal, and `observe` is permanent: leave it open
+        raise SystemExit(f"the runs do not judge the proposal ({verdict['verdict']}): the record stays open "
+                         f'(rerun the same command into the same folder; {measured})')
     # sim.observe overwrites eval_context, so the proposing turn's own context is carried forward, then the run's
     prior_ctx = (rec.get('eval_context') or '').strip()
     write_observation(home, a.record, observed_text(verdict),

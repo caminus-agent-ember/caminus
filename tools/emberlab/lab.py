@@ -123,7 +123,7 @@ def main(argv=None):
     p.add_argument('--suite', required=True, help='a suite name under benchmarks/ember/suites, or a folder')
     p.add_argument('--brain', action='append', required=True)
     p.add_argument('--arm', action='append', help='NAME[=CHECKOUT] (default: base = this checkout)')
-    p.add_argument('--arms', help='JSON {NAME: {checkout, config, env}}')
+    p.add_argument('--arms', help='JSON {NAME: {checkout, config, env}}, or the arms.json `propose` writes')
     p.add_argument('--out', required=True)
     p.add_argument('--repeats', type=int, default=1)
     p.add_argument('--only', help='comma-separated task keys')

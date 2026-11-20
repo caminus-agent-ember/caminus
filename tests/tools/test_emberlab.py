@@ -210,7 +210,8 @@ def sim_record(home, **fields):
     sim, store, rt = proposal._open(home)
     try:
         return sim.record(rt, 'g-propose', dict(dict(problem_group='propose test', change='turn sim off in the arm',
-                                                     predicted='no difference on one task'), **fields),
+                                                     predicted='no difference on one task', status='proposed'),
+                                                **fields),
                           cfg=dict(model='m', provider='p'))
     finally:
         store.close()
@@ -235,6 +236,16 @@ check(p.returncode != 0 and '--unsafe-local' in (p.stderr + p.stdout) and not po
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve', '--out', str(po))
 check(p.returncode != 0 and 'measure nothing' in (p.stderr + p.stdout),
       'propose: two identical arms are refused (the proposal names no change)')
+# only a `proposed` record is the input: a `recorded` one's change is already in the base tree, so its A/B would
+# compare that change with itself (and with the override), not judge the prediction (#385 review P2)
+r0 = sim_record(ph, status='recorded')
+p = lab('propose', '--sim-home', str(ph), '--record', r0['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(S / 'propose-recorded'))
+check(p.returncode != 0 and 'not proposed' in (p.stderr + p.stdout)
+      and not (S / 'propose-recorded' / 'results.jsonl').exists()
+      and proposal.load_record(ph, r0['id'])['status'] == 'recorded',
+      f'propose: a recorded (not proposed) record is refused before anything runs ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve',
         '--config', '{"sim": false}', '--only', 'read', '--out', str(po))
 closed = proposal.load_record(ph, r1['id'])
@@ -246,6 +257,17 @@ check(p.returncode == 0 and closed['status'] == 'observed' and 'no difference' i
       and 'scripted:solve 3/3 -> 3/3' in closed['observed'],
       f'propose: the runs close the record with the per-brain numbers ({p.returncode}; '
       f'{closed["observed"][:200]}; {p.stderr[-200:]})')
+# `--only` narrows the task set, and the observation must say which tasks ran: an `eval_context` that says only
+# "suite basic" is a verdict over an unknown part of the suite (#385 review P2)
+check('tasks 1/5 (read)' in (closed.get('eval_context') or ''),
+      f'propose: the observation names the tasks that ran ({closed.get("eval_context", "")[-300:]})')
+# one shape for the arms: `arms.json` and the run's `plan.json` are both `Arm.describe()` (#385 review P2, Growth)
+spec = json.loads((po / 'arms.json').read_text())
+plan_j = json.loads((po / 'plan.json').read_text())
+check(spec['arms'] == {x['name']: x for x in plan_j['arms']} and spec['plan']['suite'] == 'basic'
+      and spec['plan']['brains'] == ['scripted:solve'] and spec['plan']['only'] == ['read'],
+      f'propose: arms.json is plan.json\'s arms and the plan that reads them ({sorted(spec.get("arms", {}))}, '
+      f'{spec.get("plan")})')
 check(closed['observed_by']['model'] == 'emberlab' and closed['brain']['model'] == 'm',
       'propose: the observation names emberlab, the predictor keeps the brain that made the prediction')
 check(arm_home and base_home and all(c.get('sim') is False for c in arm_home) and all('sim' not in c for c in base_home),
@@ -279,10 +301,44 @@ check(p.returncode == 0 and '0 to do' in p.stdout
       and proposal.load_record(ph, r4['id'])['status'] == 'observed',
       f'propose: the same arms resume the folder and close the record ({p.returncode}; '
       f'{(p.stdout + p.stderr)[-300:]})')
+# the same arms with another --brain (or suite, --only, repeats) is a different experiment: without this the record
+# would be closed with rows this command never chose (#385 review P1)
+r7 = sim_record(ph, status='proposed')
+p = lab('propose', '--sim-home', str(ph), '--record', r7['id'], '--brain', 'scripted:claim',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(shared))
+check(p.returncode != 0 and 'fresh --out' in (p.stderr + p.stdout) and 'brains' in (p.stderr + p.stdout)
+      and proposal.load_record(ph, r7['id'])['status'] != 'observed',
+      f'propose: a shared --out with another brain is refused and the record stays open ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
+# a verdict of `incomplete` (a brain with no run of one arm) says nothing about the proposal, and observe is
+# permanent: the record stays open (#385 review P2)
+inc = S / 'propose-incomplete'
+r8 = sim_record(ph, status='proposed')
+ns = argparse.Namespace(sim_home=str(ph), record=r8['id'], suite='basic', brain=['scripted:solve'], repeats=1,
+                        only='read', host=None, jobs=1, parallel=None, out=str(inc),
+                        config='{"sim": false}', env=None, base_config=None, base_env=None,
+                        arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
+                        unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+
+
+def half_run(runs):
+    """`lab.py run` with only the base arm done: the arm rows are missing, so the verdict is incomplete."""
+    (inc / 'results.jsonl').write_text(json.dumps(dict(id='read.scripted-solve.base.r1', brain='scripted:solve',
+                                                       arm='base', task='read', repeat=1, check=True)) + '\n')
+    return 0
+
+
+try:
+    proposal.cmd_propose(ns, half_run)
+    err = ''
+except SystemExit as e:
+    err = str(e)
+check('incomplete' in err and proposal.load_record(ph, r8['id'])['status'] == 'proposed',
+      f'propose: an incomplete verdict leaves the record open ({err[:200]})')
 # a checkout that MOVED (a commit, a rebase) is a different arm even at the same path: `lab.py run` skips every id
 # already in results.jsonl, so without this a new record would be closed with the previous rows (#385 review P1)
 moved = json.loads((shared / 'arms.json').read_text())
-moved['arm']['commit'] = 'deadbeef0000'
+moved['arms']['arm']['commit'] = 'deadbeef0000'
 (shared / 'arms.json').write_text(json.dumps(moved))
 r5 = sim_record(ph, status='proposed')
 p = lab('propose', '--sim-home', str(ph), '--record', r5['id'], '--brain', 'scripted:solve',
