@@ -2788,6 +2788,35 @@ for line in sys.stdin:
         errs=[r['data']['result'].get('error','') for r in events if r['data'].get('name')=='terminal']
         self.assertTrue(any('worktree' in e for e in errs),errs)
 
+    def test_a_writing_child_cannot_climb_out_with_a_dotdot_path(self):
+        # #384 review: the worktree check was `path.startswith(wt + '/')`, which accepted `<wt>/../x`, so a
+        # relative `../x` path - and a redirect glued to it (`echo x>../x`) - left the worktree. The path, the
+        # cwd, a checkpoint and every command word are normalised now, so `..`, `.` and doubled slashes cannot
+        # climb out, while a path that resolves back inside (`sub/../ok.txt`) still works.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'abcd1234')
+        row=dict(permissions='write',worktree=wt)
+        for path in ('../escape.txt','../../../../tmp/escape.txt','sub/../../escape.txt','..','./../x'):
+            args=delegate.in_worktree(row,'write',dict(path=path))
+            why=delegate.refused('write',args,row)
+            self.assertTrue(why and 'worktree' in why,(path,args,why))
+        for path in ('ok.txt','sub/../ok.txt',wt+'/deep/../ok.txt'):
+            self.assertIsNone(delegate.refused('write',delegate.in_worktree(row,'write',dict(path=path)),row),path)
+        for cmd in ('cd %s && echo x > ../escape.txt'%wt,'cd %s && echo x>../escape.txt'%wt,
+                    'cd %s && cat<../passwd'%wt,'cd %s && echo hi 2>../err'%wt,
+                    'cd %s && echo x > /tmp/escape.txt'%wt,'cd %s && cd .. && touch escape.txt'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'worktree' in why,(cmd,why))
+        # a bare `cd ..` reads nothing, so it stays read-only (a read-only command may read anywhere); only a
+        # command that changes something has to start and stay inside the worktree
+        self.assertIsNone(delegate.refused('terminal',dict(command='cd %s && cd .. && ls' % wt),row))
+        self.assertIsNone(delegate.refused('terminal',dict(
+            command='cd %s && touch ok.txt && cat sub/../ok.txt 2>&1'%wt),row))
+        self.assertTrue(delegate.refused('terminal',dict(command='ls',cwd=wt+'/..'),row),'a cwd that climbs out')
+        self.assertIsNone(delegate.refused('terminal',dict(command='ls',cwd=wt+'/sub'),row))
+        self.assertTrue(delegate.refused('checkpoint',dict(paths=['../x']),row))
+        self.assertIsNone(delegate.refused('checkpoint',dict(paths=['ok.txt','sub/../ok.txt']),row))
+
     def test_a_child_delegate_cannot_delegate_again_or_ask_the_human(self):
         # depth 1 and no human: both refusals are the runtime's, whatever the model asks for
         self.gates_on()

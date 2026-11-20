@@ -72,28 +72,41 @@ def read_only(cmd):
     return bool(cmd) and read_only_command(cmd)
 
 
+def _inside(wt, path):
+    """True when `path` stays inside `wt` once the OS resolves it.
+
+    A plain `path.startswith(wt + '/')` accepted `<wt>/../x`, which the OS then resolves outside the worktree:
+    a writing child's `write(path='../x')` and `cd <wt> && echo x > ../x` both left it (#384 review).
+    realpath() normalises `..`, `.`, doubled slashes and symlinks on both sides, so neither a `..` path nor a
+    link inside the worktree can name a file outside it.
+    """
+    wt = os.path.realpath(wt)
+    p = path if os.path.isabs(path) else os.path.join(wt, path)
+    p = os.path.realpath(p)
+    return p == wt or p.startswith(wt + os.sep)
+
+
 def _escaping(cmd, wt):
     """Why a writing child's command could change something outside its worktree, or ''.
 
     Best effort on the command text, not a sandbox (see the module docstring): the command must start with
     `cd <worktree> &&`, and no word may name an absolute path outside it, a `..` path component, a `$` expansion or
-    a `~` home. A word that reads `<worktree>/...` is fine.
+    a `~` home. A word that reads `<worktree>/...` is fine. Words are split with punctuation, so a redirect glued
+    to its target (`echo x >../out`) still yields `../out` as its own word.
     """
     try:
-        words = shlex.split(cmd, posix=True)
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=';&|()<>`')
+        lex.whitespace_split = True
+        words = list(lex)
     except ValueError:
         return 'it cannot be parsed'
     if len(words) < 3 or words[0] != 'cd' or words[1] != wt or words[2] != '&&':
         return 'it must start with `cd %s && `' % wt
     for w in words[3:]:
-        if w.startswith(wt + '/') or w == wt:
-            continue
-        if w.startswith('/'):
-            return '%s is outside the worktree' % w
-        if '..' in w.split('/'):
-            return '%s climbs out of the worktree' % w
         if w.startswith('~') or '$' in w:
             return '%s could resolve outside the worktree' % w
+        if not _inside(wt, w):
+            return '%s climbs out of the worktree' % w
     return ''
 
 
@@ -134,18 +147,17 @@ def refused(name, args, row=None):
                 return ('a writing child changes files only inside its worktree (%s): %s. Start the command with '
                         '`cd %s && ` and keep every path inside it' % (wt, why, wt))
         cwd = str(args.get('cwd') or '')
-        if write and wt and cwd and not (os.path.isabs(cwd) and
-                                         (cwd.rstrip('/') == wt or cwd.startswith(wt + '/'))):
+        if write and wt and cwd and not (os.path.isabs(cwd) and _inside(wt, cwd)):
             return ('a writing child starts a terminal command inside its worktree (%s), not %s'
                     % (wt, cwd))
     if write and wt and name in ('write', 'edit'):
         path = str(in_worktree(row, name, args).get('path') or '')
-        if path.startswith('/') and not (path.rstrip('/') == wt or path.startswith(wt + '/')):
+        if path.startswith('/') and not _inside(wt, path):
             return ('a writing child changes files inside its worktree (%s): name the file relative to it; the '
                     'files outside are your parent\'s to change' % wt)
     if write and wt and name == 'checkpoint':
         outside = [str(p) for p in (in_worktree(row, name, args).get('paths') or [])
-                   if str(p).startswith('/') and not (str(p).rstrip('/') == wt or str(p).startswith(wt + '/'))]
+                   if str(p).startswith('/') and not _inside(wt, str(p))]
         if outside:
             return ('a writing child checkpoints paths inside its worktree (%s): %s is outside it'
                     % (wt, ', '.join(outside[:3])))
