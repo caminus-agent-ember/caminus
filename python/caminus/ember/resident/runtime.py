@@ -2203,6 +2203,9 @@ class Runtime:
                 if k == 'sim' and bool(fresh[k]) != bool(self.config.get('sim', True)):
                     self._tools = None        # an off session is not offered the sim tool, and an on one is
                 self.config[k] = fresh[k]
+        for k in ('reflect',):                    # `agent reflect`: the next finished goal reflects, or does not
+            if k in fresh:
+                self.config[k] = fresh[k]
         for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
             if k in fresh:
                 self.config[k] = fresh[k]

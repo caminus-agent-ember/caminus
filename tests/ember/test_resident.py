@@ -218,6 +218,10 @@ class Resident(unittest.TestCase):
     def replies(self,*messages):Endpoint.queues[self.key]=deque(messages)
     def verdicts(self,*values):Endpoint.judges[self.key]=deque(values)
     def reflect(self,*values):Endpoint.reflects[self.key]=deque(values)
+    def reflect_on(self):
+        """Write reflect true: the end-of-goal reflection is off unless a session opts in (#383)."""
+        conf=json.loads((self.home/'config.json').read_text());conf['reflect']=True
+        (self.home/'config.json').write_text(json.dumps(conf))
     def steers(self,gid):
         import sqlite3
         db=sqlite3.connect(self.home/'agent.sqlite3');db.row_factory=sqlite3.Row
@@ -8167,7 +8171,9 @@ for line in sys.stdin:
     def test_a_finished_goal_leaves_one_proposed_record_from_a_cheap_call(self):
         # #341: at the end of a graded goal, one short call asks what harness change would have made it faster or
         # more reliable, and writes the answer as a 'proposed' SIM record: a queue a person reads, never a change.
+        # The reflection is off by default (#383): the session opts in, so this test turns it on like a user would.
         self.gates_on()
+        self.reflect_on()
         self.replies(call('define_done',dict(check='the file exists')),
                      call('verify',dict(evidence='ls showed the file')),
                      call('finish',dict(summary='Done.')))
@@ -8196,6 +8202,7 @@ for line in sys.stdin:
         # a reply that is not the JSON asked for is asked once more, with the shape spelled out; a second unreadable
         # reply is an event on a completed goal, never a failed goal.
         self.gates_on()
+        self.reflect_on()
         self.replies(call('define_done',dict(check='the file exists')),
                      call('verify',dict(evidence='ls showed the file')),
                      call('finish',dict(summary='Done.')))
@@ -8210,14 +8217,55 @@ for line in sys.stdin:
         self.assertIn('could not be read',events[0]['data']['reason'])
         self.assertEqual(self.cmd('sim',[])['records'],[])
 
-    def test_an_off_sim_log_or_a_free_stretch_asks_for_no_reflection(self):
-        # the reflection writes into the SIM log, so an off arm records nothing (an A/B's off arm must not learn
-        # here); free time is not graded work and is not reflected on; config reflect false turns it off.
+    def test_the_reflection_is_off_until_the_session_turns_it_on(self):
+        # #383: a reflection is a paid model call per graded goal whose only product is a proposal, so it is off by
+        # default for every session; `agent reflect --on` is the documented switch (and the running resident takes
+        # it at its next turn, as it takes `sim`).
         self.gates_on()
+        cfg=json.loads((self.home/'config.json').read_text())
+        self.assertNotIn('reflect',cfg,'a fresh session leaves the default alone instead of writing it')
+        # a fresh session: a graded goal completes with no reflection call, even with an answer waiting
         self.replies(call('define_done',dict(check='the file exists')),
                      call('verify',dict(evidence='ls showed the file')),
                      call('finish',dict(summary='Done.')))
-        cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
+        self.reflect(dict(problem_group='x',change='y',predicted='z'))
+        self.assertEqual(self.cmd('once',['--goal','Create the file.'])['state'],'completed')
+        self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'default: no reflection call')
+        self.assertEqual(self.cmd('sim',[])['records'],[],'default: no proposed record')
+        # the switch: --on writes config reflect true and the next graded goal reflects once
+        self.assertEqual(self.cmd('reflect',['--on'])['reflect'],True)
+        self.assertTrue(json.loads((self.home/'config.json').read_text())['reflect'])
+        self.assertEqual(self.cmd('reflect',[])['reflect'],True,'no flag: report the setting, change nothing')
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.assertEqual(self.cmd('once',['--goal','Create the file.'])['state'],'completed')
+        self.assertEqual(len([b for k,b in Endpoint.reflect_seen if k==self.key]),1,'reflect on: one call')
+        self.assertEqual(len(self.cmd('sim',['--status','proposed'])['records']),1)
+        # a running resident follows the key at its next turn (runtime._follow_config), like it follows sim
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            rt.model=Endpoint
+            self.assertTrue(rt.config.get('reflect'))
+            self.cmd('reflect',['--off'])
+            rt._follow_config()
+            self.assertFalse(rt.config.get('reflect'),'a daemon sees --off without a restart')
+            gid=rt.store.enqueue('x');rt.store.update(gid,done_check='test -f x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+        finally:rt.mail.close();rt.store.close()
+        self.assertFalse(json.loads((self.home/'config.json').read_text())['reflect'])
+        self.assertEqual(self.cmd('reflect',['--on','--off'],code=1)['error'],'use --on or --off, not both')
+
+    def test_an_off_sim_log_or_a_free_stretch_asks_for_no_reflection(self):
+        # the reflection writes into the SIM log, so an off arm records nothing (an A/B's off arm must not learn
+        # here) even when the session turned reflection on; free time is not graded work and is not reflected on.
+        self.gates_on()
+        self.reflect_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False;cfg['reflect']=True
         (self.home/'config.json').write_text(json.dumps(cfg))
         self.assertEqual(self.cmd('once',['--goal','Create the file.'])['state'],'completed')
         self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'sim off: no reflection call')
@@ -8228,8 +8276,8 @@ for line in sys.stdin:
         (self.home/'config.json').write_text(json.dumps(cfg))
         self.assertEqual(self.cmd('once',['--goal','Create the file again.'])['state'],'completed')
         self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'reflect false: no reflection call')
-        # free time is not graded work: the log is on again, and a stretch still asks for no reflection
-        cfg.pop('reflect',None);(self.home/'config.json').write_text(json.dumps(cfg))
+        # free time is not graded work: the log and the reflection are on, and a stretch still asks for none
+        cfg['reflect']=True;(self.home/'config.json').write_text(json.dumps(cfg))
         from caminus.ember.resident import reflect
         rt=Runtime(self.home)
         try:
@@ -8248,6 +8296,7 @@ for line in sys.stdin:
         # a model outage at goal end must not turn a completed goal into an error: the goal stays completed and
         # the failure is on the record.
         self.gates_on()
+        self.reflect_on()
         self.replies(call('define_done',dict(check='the file exists')),
                      call('verify',dict(evidence='ls showed the file')),
                      call('finish',dict(summary='Done.')))

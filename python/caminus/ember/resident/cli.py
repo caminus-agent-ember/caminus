@@ -299,7 +299,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore','sim'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore','sim','reflect'):
         p=sub.add_parser(op)
         p.add_argument('name',**(dict(nargs='?',help='the session to restore; none lists the closed ones') if op=='restore' else {}))
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -376,6 +376,9 @@ def parser():
             p.add_argument('--export',action='store_true',help='write the records as JSONL')
             p.add_argument('--out',help='with --export: the file (default: sim.jsonl in the agent home)')
             p.add_argument('--limit',type=int,default=20,help='list at most this many records')
+        if op=='reflect':
+            p.add_argument('--on',action='store_true',help='write reflect true: a graded goal ends with one reflection call')
+            p.add_argument('--off',action='store_true',help='write reflect false (the default): a finished goal asks for none')
         if op=='studio':
             p.add_argument('--read',help='one file from the journal, the studio or the shelf, as text')
             p.add_argument('--raw',action='store_true',help='with --read: the bytes, base64 (images, documents; 24 MB at most)')
@@ -846,6 +849,19 @@ def main(argv=None,stdin=None):
                 store.close()
             if a.json:emit(dict(name=a.name,lines=out['lines'],records=out['records']),True)
             else:print('\n'.join(out['lines']),flush=True)
+            return 0
+        if a.op=='reflect':
+            # The end-of-goal reflection switch (issue #341): a paid model call per graded goal, whose only product
+            # is a proposed SIM record a person reads, so it is off unless the session asks for it. The daemon
+            # follows this key at the next turn boundary (runtime._follow_config), as it follows 'sim'.
+            cfg=json.loads((home/'config.json').read_text())
+            if a.on and a.off:
+                raise ValueError('use --on or --off, not both')
+            if a.on or a.off:
+                cfg['reflect']=bool(a.on)
+                atomic_json(home/'config.json',cfg)
+            store.close()
+            emit(dict(name=a.name,reflect=bool(cfg.get('reflect',False))),a.json)
             return 0
         if a.op=='fallback':
             from .brain import DEFAULTS as FB

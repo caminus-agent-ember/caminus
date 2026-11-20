@@ -8,9 +8,11 @@ judge's verdict, the verification, the failed calls), so anyone can check it aga
 
 The call runs after the goal's completion transaction, outside it (a model call inside BEGIN would block every
 other writer), and never raises: a reflection that failed is an event on a completed goal, not a failed goal.
-It is skipped when the SIM log is off (an A/B arm records nothing), when config 'reflect' is false, in free
-time (not graded work), and when the runtime was asked to stop. A goal re-finished after its human reopened it
-reflects again: that is a new episode with new evidence.
+It is OFF unless a session turns it on: config 'reflect' defaults to false, because it is a paid call per graded
+goal and its only product is a proposal a person reads, so it must be a spend the user chose. The switch is
+`caminus ember agent reflect --on` (and `--off`), which writes the same key. It is also skipped when the SIM log
+is off (an A/B arm records nothing), in free time (not graded work), and when the runtime was asked to stop. A
+goal re-finished after its human reopened it reflects again: that is a new episode with new evidence.
 
 The system message begins with REFLECT so a log reader (and the test fixture) can name the call, as the
 judge's begins with JUDGE.
@@ -52,7 +54,9 @@ def maybe(rt, gid, summary='', open_work=''):
             # so a proposal from it would restate the goal rather than name a harness problem. (It also keeps a
             # plain two-turn conversation two model calls, as the session tests count them.)
             return None
-        if not sim.enabled(rt) or not rt.config.get('reflect', True):
+        if not sim.enabled(rt) or not rt.config.get('reflect', False):
+            # off unless the session asked for it (`agent reflect --on`): a paid call per graded goal is the user's
+            # decision, and this one's only product is a proposal a person reads
             return None
         if rt.stopping():
             return None
