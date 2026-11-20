@@ -2839,12 +2839,21 @@ for line in sys.stdin:
                     "cd %s && git -c core.pager='sh -c ls' log"%wt,
                     'cd %s && git --exec-path=/tmp log'%wt,
                     'cd %s && git --config-env=core.pager=E log'%wt,
-                    # `git -c` by another spelling: the GIT_CONFIG_* environment, reproduced running <cmd> from a
-                    # worktree (#384, my own probe). The rule is the GIT_ namespace, not a list of names.
+                    # `git -c` by another spelling: the GIT_CONFIG_* environment, which ran <cmd> from a worktree.
+                    # The rule is the GIT_ namespace, not a list of names, and it holds wherever the word stands:
+                    # `export GIT_CONFIG_COUNT=1 ...; git status` sets the same variable one word before the
+                    # command, in the one shell the whole command string runs in.
                     "cd %s && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "
                     "GIT_CONFIG_VALUE_0='touch /tmp/pwn' git status"%wt,
                     'cd %s && GIT_EXEC_PATH=/tmp git status'%wt,
                     'cd %s && git status && GIT_CONFIG_GLOBAL=/tmp/gc git log'%wt,
+                    "cd %s && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager "
+                    "GIT_CONFIG_VALUE_0='sh -c ls'; git status"%wt,
+                    'cd %s && export GIT_EXEC_PATH=/tmp && git status'%wt,
+                    'cd %s && declare -x GIT_CONFIG_GLOBAL=/tmp/gc && git log'%wt,
+                    'cd %s && typeset GIT_PAGER=x && git log'%wt,
+                    'cd %s && local GIT_SSH_COMMAND=x && git fetch'%wt,
+                    'cd %s && set -a; GIT_CONFIG_COUNT=1; git status'%wt,
                     'cd %s && echo x > .git'%wt, 'cd %s && rm .git'%wt,
                     'cd %s && echo hi > .git/config'%wt):
             why=delegate.refused('terminal',dict(command=cmd),row)
@@ -2859,7 +2868,9 @@ for line in sys.stdin:
                     'cd %s && cat .github/workflows/x.yml'%wt,
                     'cd %s && git switch -c x'%wt,'cd %s && git commit -c HEAD'%wt,
                     'cd %s && git commit -C HEAD'%wt,'cd %s && git checkout -b y'%wt,
-                    'cd %s && git log -c'%wt,'cd %s && FOO=1 make test'%wt):
+                    'cd %s && git log -c'%wt,'cd %s && FOO=1 make test'%wt,
+                    # a word that merely contains `GIT_`, without `=`, is not an assignment
+                    'cd %s && grep GIT_ notes.txt'%wt,'cd %s && grep -r GIT_ .'%wt):
             self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
         # the .git pointer is not a file a writing child may rewrite, by either file tool; `.github` and
         # `gitignore` are ordinary files and stay writable

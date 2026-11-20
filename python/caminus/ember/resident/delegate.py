@@ -83,7 +83,7 @@ def _inside(wt, path):
     """True when `path` stays inside `wt` once the OS resolves it.
 
     A plain `path.startswith(wt + '/')` accepted `<wt>/../x`, which the OS then resolves outside the worktree:
-    a writing child's `write(path='../x')` and `cd <wt> && echo x > ../x` both left it (#384 review).
+    a writing child's `write(path='../x')` and `cd <wt> && echo x > ../x` both left it.
     realpath() normalises `..`, `.`, doubled slashes and symlinks on both sides, so neither a `..` path nor a
     link inside the worktree can name a file outside it.
     """
@@ -95,7 +95,7 @@ def _inside(wt, path):
 
 # Programs that run another command from a string, or start a shell of their own: a text check cannot see what
 # their argument does (a nested `sh -c "echo x > /tmp/evil"` hides its path inside one word), so a writing child
-# may not call them (#384 review). This is a name deny-list and it cannot hold on its own: `awk
+# may not call them. This is a name deny-list and it cannot hold on its own: `awk
 # 'BEGIN{system(...)}'`, `make`, `python3 -c` and `git -c alias.x='!cmd' x` all run a command without naming one
 # of these, and the module docstring says so. It narrows the obvious spellings; the worktree is not a jail.
 NESTED = frozenset('sh bash dash zsh ksh csh tcsh fish eval exec source xargs env sudo doas su chroot '
@@ -105,12 +105,12 @@ NESTED = frozenset('sh bash dash zsh ksh csh tcsh fish eval exec source xargs en
 # `-c alias.x='!cmd' x` runs cmd through git's own alias expansion, `-c core.pager='sh -c ...' log` runs it as a
 # pager, `-c diff.external`, `core.fsmonitor` and `remote.uploadpack` alike; `--config-env` reads a value from the
 # environment; `--exec-path` moves the programs git runs. A child can set a setting it needs in its own worktree
-# with `git config`, so refusing these costs it nothing (#384 review: the reviewer reproduced `git -c` twice).
+# with `git config`, so refusing these costs it nothing.
 GIT_INJECT = frozenset(('-c', '--config-env', '--exec-path'))
 
 # git's global options that take a value as the next word, so the walk over the option prefix must step over both
-# (`git -C . config ...`). `-c`, `--config-env` and `--exec-path` are here AND in GIT_INJECT.
-_GIT_VALUE_OPTS = frozenset(('-C', '--git-dir', '--work-tree', '-c', '--config-env', '--exec-path'))
+# (`git -C . config ...`). The injecting ones are here AND in GIT_INJECT (one fact, one place).
+_GIT_VALUE_OPTS = GIT_INJECT | frozenset(('-C', '--git-dir', '--work-tree'))
 
 
 def _git_words(rest):
@@ -118,8 +118,8 @@ def _git_words(rest):
 
     `-c`, `--config-env` and `--exec-path` are options only BEFORE the subcommand: `git switch -c x` and
     `git commit -c HEAD` use `-c` for something else entirely (create a branch, re-edit a message), and a scan
-    over every word refused them (#384: my own guard, caught by probing it). A command separator ends the git
-    command, and an `--opt=value` word is one word."""
+    over every word refused them. A command separator ends the git command, and an `--opt=value` word is one
+    word."""
     i = 0
     while i < len(rest):
         w = rest[i]
@@ -160,11 +160,14 @@ def _escaping(cmd, wt):
         if w and all(c in ';&|()<>`' for c in w):
             at_cmd = True
             continue
-        if at_cmd and '=' in w and w.split('=', 1)[0].startswith('GIT_'):
+        if '=' in w and w.split('=', 1)[0].startswith('GIT_'):
             # `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0='<cmd>' git status` is
-            # `git -c` by another spelling: reproduced, it ran <cmd> from a worktree (#384, my own probe). The
-            # rule is the GIT_ namespace, not a list of names - GIT_EXEC_PATH, GIT_PAGER, GIT_SSH_COMMAND and
-            # GIT_CONFIG_GLOBAL reach outside the worktree the same way.
+            # `git -c` by another spelling: it runs <cmd> from a worktree. The rule is the GIT_ namespace, not a
+            # list of names - GIT_EXEC_PATH, GIT_PAGER, GIT_SSH_COMMAND and GIT_CONFIG_GLOBAL reach outside the
+            # worktree the same way. Refused wherever the word stands, not only in command position: `export
+            # GIT_CONFIG_COUNT=1 ...; git status` and `declare -x GIT_EXEC_PATH=...` set the same variable one
+            # word earlier, and a command string runs in one shell, so the export lives as long as the bypass.
+            # A bare `GIT_` name without `=` is not refused, so `grep GIT_ f` still reads a file.
             return ('%s sets a git environment variable, and git reads or runs what it names: the worktree shares '
                     'its repository with the parent' % w)
         if at_cmd and '=' in w:
@@ -177,7 +180,7 @@ def _escaping(cmd, wt):
             # and every later `git status` in the parent runs <cmd> (reproduced). `-c`, `--config-env` and
             # `--exec-path` do the same per command (`git -c alias.x='!cmd' x`). All are refused; a child that
             # needs a setting uses a file in its worktree. Only the options BEFORE the subcommand count:
-            # `git switch -c x` and `git commit -c HEAD` mean something else by `-c` (#384, my own probe).
+            # `git switch -c x` and `git commit -c HEAD` mean something else by `-c`.
             rest = words[4 + i:]
             opts, after = _git_words(rest)
             for v in opts:
@@ -249,12 +252,12 @@ def refused(name, args, row=None):
         if '.git' in path.split(os.sep):
             # the worktree's .git is a FILE naming <parent>/.git/worktrees/<name>: rewriting it points the next
             # git command in the worktree at another repository (or a bare repo whose hooks then run), so it is a
-            # change outside the worktree by another name (#384 review, same class as `git config`)
+            # change outside the worktree by another name, the same class as `git config`
             return ('a writing child cannot rewrite .git (%s): in a worktree it is a pointer into the parent '
                     'repository, not a file of yours. Change your files and let git update its own metadata' % path)
     if write and wt and name in ('read', 'search'):
         # a writing child's world is its worktree: reading the parent's tree (or a home) from it leaks what the
-        # parent did not hand it, and the PR body says such a read is refused (#384 review)
+        # parent did not hand it, and the module docstring says such a read is refused
         path = str(in_worktree(row, name, args).get('path') or '')
         if path.startswith('/') and not _inside(wt, path):
             return ('a writing child reads inside its worktree (%s): name the file relative to it' % wt)
