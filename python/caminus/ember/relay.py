@@ -86,6 +86,9 @@ PRICE_REFRESH = 3600
 # starts before the network does (a systemd unit 12 s after boot) is refused by nothing while it waits, and does not
 # hammer a provider that is down. The last delay is not PRICE_REFRESH: an hour is the window this bug cost.
 LOAD_BACKOFF = (10, 30, 60, 300)
+# The wait a refusal names while the owner's price file cannot be read: the file is re-read on every request, so
+# this only tells the agent how long to wait before the retry that may find the file written.
+PRICE_FILE_RETRY = 60
 # A decode-rate ceiling for output a stream does not show (Meta bills its models' reasoning but sends it empty), used
 # only to bound a reply cut before its usage came. Meta publishes no speed: an assumed ceiling (unverified), above the
 # decode rates hosted APIs usually report, so a hang-up errs high rather than booking one token.
@@ -233,11 +236,18 @@ class ListPrices:
     def _load(self, now):
         try:
             table, rows = {}, {}
-            for m in self.fetch().get('data') or []:
+            data = self.fetch().get('data') or []
+            if not isinstance(data, list):
+                # a 200 whose data is a number or a bool: iterating it raised a TypeError out of get(), which
+                # dropped the client's connection and left next/tries unadvanced (the per-request hammering the
+                # backoff exists to stop). A list is the only shape a model list has.
+                raise ValueError('the model list is not a list: %s' % type(data).__name__)
+            for m in data:
                 # an entry with a null price or no id is skipped, never the whole table (a TypeError there
-                # dropped the client's connection and left every model unpriced)
+                # dropped the client's connection and left every model unpriced). The id must be a string: a row
+                # whose id is a list or a dict went into table[...] as an unhashable key, a TypeError out of get().
                 try:
-                    r = self.rates(m) if m.get('id') else None
+                    r = self.rates(m) if isinstance(m.get('id'), str) and m['id'] else None
                 except (TypeError, ValueError, AttributeError):
                     continue
                 if r is not None:
@@ -334,10 +344,12 @@ class OwnerPrices:
                 # logged on the first failure too: a price file missing at start (a relay that starts before the owner
                 # wrote it) refused every model with no line in the log, and the log is all the owner has. The message
                 # keeps no path (FileNotFoundError's text carries it): this text reaches the agent, the log does not.
+                # The last good table stays: a file caught mid-rewrite (truncate, then write) must not un-price the
+                # models it priced a moment ago; mtime None re-reads it on the next request either way.
                 why = '%s: %s' % (type(e).__name__, e.strerror if isinstance(e, OSError) else str(e)[:200])
                 if why != self.error:
                     self.log('price file unreadable: %s (%s)' % (why, self.path))
-                self.error, self.table, self.mtime = why, {}, None
+                self.error, self.mtime = why, None
             if model in self.table or not self.fetch:
                 return self.table.get(model)
             if time.time() - self.names_at > PRICE_REFRESH or (model not in self.names and time.time() - self.names_at > 60):
@@ -364,11 +376,14 @@ class OwnerPrices:
         """(status, kind, message, retry_after) for a model this relay cannot price, or None when it has no better
         account than 'no price for MODEL'. Two causes are not about the model: a price file that cannot be read (the
         message names the file, never its path: this text reaches the agent) and a model list that has not loaded,
-        which may be what prices the alias the call used (503, so the agent waits instead of stopping its goal)."""
+        which may be what prices the alias the call used. Both are a 503 the agent waits on, never the 403 that
+        stops its goal: a file missing at boot (the owner writes it later) and a file caught mid-rewrite are as
+        transient as a list that has not loaded, and the file is re-read on the next request either way."""
         with self.lock:
-            if self.error and not self.table:
-                return (403, 'permission_error', 'the relay cannot read its price file (%s), so %r cannot be priced: '
-                        'the owner re-reads it on change, no restart' % (self.error, model), None)
+            if self.error:
+                return (503, 'api_error', 'the relay cannot read its price file (%s), so %r cannot be priced yet; '
+                        'the owner re-reads it on change, no restart, and the relay tries again in %ds'
+                        % (self.error, model, PRICE_FILE_RETRY), PRICE_FILE_RETRY)
             if self.fetch and self.names_error and model not in self.names:
                 wait = max(0, math.ceil(60 - (time.time() - self.names_at)))
                 return (503, 'api_error', 'the price list has not loaded yet (%s), so the name %r cannot be resolved to '

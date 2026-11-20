@@ -1188,6 +1188,31 @@ class Resident(unittest.TestCase):
             self.assertIsNone(rt._schedule_retry(gid2,broken),'other failures keep the 8-attempt limit')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_relays_503_is_a_bounded_retry_not_an_endless_wait(self):
+        """#351 answers 503 + Retry-After while its price list has not loaded, and the review asked whether that
+        could wait forever. It cannot, because the bound lives where the retries are: an OpenCode plan model spends
+        the ordinary retry budget (8), and any other remote model waits out BUSY_WAIT_S and then stops with the
+        reason. A relay that never loads therefore ends the goal with an error, it does not hang it."""
+        from caminus.ember.resident import runtime as R
+        from caminus.ember.resident.model import ModelError
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            rt.model.remote=True;rt.model.opencode=True
+            loading=ModelError('HTTP Error 503: relay: the price list has not loaded yet');loading.status=503
+            loading.retry_after=60
+            for i in range(8):
+                self.assertIsNotNone(rt._schedule_retry(gid,loading),'a plan model retries the 503 like any error')
+            self.assertIsNone(rt._schedule_retry(gid,loading),'the ninth stops it: the wait is bounded')
+            self.assertEqual(rt.store.goal(gid)['state'],'error')
+            gid2=rt.store.enqueue('Make y.');rt.model.opencode=False;rt.retry.pop(gid2,None)
+            self.assertIsNotNone(rt._schedule_retry(gid2,loading),'a non-plan relay is waited out')
+            self.assertLessEqual(rt.retry[gid2][0]-time.time(),301)
+            rt.busy_since[gid2]=time.time()-R.BUSY_WAIT_S-1
+            self.assertIsNone(rt._schedule_retry(gid2,loading),'after an hour of it the goal stops')
+            self.assertEqual(rt.store.goal(gid2)['state'],'error')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_runtime_block_leaves_out_the_shell_agents_robots_md(self):
         with self.hermetic_home():
             (Path(os.environ['HOME'])/'ROBOTS.md').write_text('# ROBOTS.md\nask with ~/bin/env-ask; root with ~/bin/ask-root\n')
@@ -4788,6 +4813,17 @@ for line in sys.stdin:
         empty = relay.ListPrices(lines.append, lambda: dict(data=[]), backoff=(0.3,))
         self.assertIsNone(empty.get('zai-org/GLM-5.2'))
         self.assertEqual(empty.refusal('zai-org/GLM-5.2')[0], 503)
+        # a 200 whose shape is wrong is a failed load too. `for m in fetch().get('data') or []` raised a TypeError
+        # out of get() when data was a number or a bool (the client's connection dropped, tries/next never advanced,
+        # so every later request fetched again); an entry whose id was a list or a dict put an unhashable key in the
+        # table, the same TypeError by another route. Both are logged and refused like any other failed load.
+        for shape in (5, True, {'nope': 1}, [{'id': ['a'], 'metadata': dict(pricing=dict(input_tokens=1, output_tokens=2))}],
+                      [{'id': {'a': 1}}, 'not-a-row']):
+            bad = relay.ListPrices(lines.append, lambda s=shape: dict(data=s), backoff=(0.3,))
+            self.assertIsNone(bad.get('zai-org/GLM-5.2'))          # (no exception out of get())
+            self.assertEqual(bad.tries, 1, 'a malformed list is a failed load, retried on the schedule')
+            self.assertEqual(bad.refusal('zai-org/GLM-5.2')[0], 503)
+            self.assertIn('price list unavailable (1 in a row)', lines[-1], lines[-1])
 
     def test_a_failed_hourly_refresh_waits_out_its_backoff_instead_of_fetching_every_request(self):
         """A refresh that fails is a failed load too. _due() used to test only 'the hour is up' once the table had
@@ -4849,7 +4885,9 @@ for line in sys.stdin:
         """Mistral's prices are the owner's file. A relay that started before it existed refused every model with
         'no price for MODEL (add it to the relay's --prices file)', which reads as a wrong model name, and logged
         nothing at all. Now the first failure is logged, the refusal says the file cannot be read (never its path:
-        the text reaches the agent), and the owner's file appearing is read on the next request."""
+        the text reaches the agent) and is a 503 the agent waits on, never the 403 that stops its goal (a file
+        missing at boot is a boot-order accident, the same one #351 is about), and the owner's file appearing is
+        read on the next request."""
         import urllib.error, urllib.request
         from caminus.ember import relay
         ok = json.dumps(dict(choices=[dict(message=dict(content='hi'),finish_reason='stop')],
@@ -4865,9 +4903,11 @@ for line in sys.stdin:
                                          {'Content-Type': 'application/json'})
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.urlopen(req, timeout=10)
-            self.assertEqual(caught.exception.code, 403)
+            self.assertEqual(caught.exception.code, 503, 'a missing file is a wait, not a rejected model')
+            self.assertIn('Retry-After', caught.exception.headers)
             body = caught.exception.read()
             self.assertIn(b'cannot read its price file', body)
+            self.assertIn(b'tries again in', body, 'the refusal says when to retry')
             self.assertNotIn(str(self.home).encode(), body, "the owner's path is not the agent's business")
             self.assertEqual(calls, [])
             self.assertTrue(any('price file unreadable: FileNotFoundError' in l for l in log), log)
@@ -4876,7 +4916,16 @@ for line in sys.stdin:
             code, body = self._post(base + '/v1/chat/completions', dict(model='open-mistral-4', messages=[]))
             self.assertEqual(code, 200, body)
             self.assertAlmostEqual(ledger.spent(), 0.4 + 2.0, places=6)
+            # the file caught mid-rewrite: a truncate-then-write re-read fails after a good one. The last good
+            # table keeps pricing the model (a 503 here would tell the agent to wait for a price it already has).
+            pf.write_text('{"open-mistral-4": [0.4,')        # (a half-written file: ValueError)
+            code, body = self._post(base + '/v1/chat/completions', dict(model='open-mistral-4', messages=[]))
+            self.assertEqual(code, 200, body)
+            self.assertAlmostEqual(ledger.spent(), 2 * (0.4 + 2.0), places=6, msg='priced from the last good table')
+            self.assertTrue(any('price file unreadable: JSONDecodeError' in l for l in log), log)
+            self.assertEqual(prices.refusal('open-mistral-4')[0], 503, 'another model is still a wait, not a 403')
             # a readable file that does not price the model is the model's fact again: the file's advice, not "unreadable"
+            pf.write_text(json.dumps({'open-mistral-4': [0.4, 2.0]}))
             code, body = self._post(base + '/v1/chat/completions', dict(model='open-mistral-9', messages=[]))
             self.assertEqual(code, 403)
             self.assertIn(b'no price for', body)
