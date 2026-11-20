@@ -2821,6 +2821,46 @@ for line in sys.stdin:
         self.assertTrue(delegate.refused('checkpoint',dict(paths=['../x']),row))
         self.assertIsNone(delegate.refused('checkpoint',dict(paths=['ok.txt','sub/../ok.txt']),row))
 
+    def test_a_writing_child_cannot_reach_the_parent_repository_through_git_metadata(self):
+        # #384 review: `NESTED` names shell-like programs, so `git -c alias.x='!cmd' x`, `git -c core.pager=...`
+        # and `awk 'BEGIN{system(...)}'` ran a command with `_escaping` returning '' - and so did
+        # `git config core.fsmonitor '<cmd>'`, which is worse: a worktree's .git is a FILE naming
+        # <parent>/.git/worktrees/<name>, so that writes the PARENT repo's config and every later `git status`
+        # there runs <cmd> (reproduced). The worktree is not a jail (awk, make and python3 -c still write
+        # anywhere), but the two exact ways an ordinary command reaches the parent's repository are refused now,
+        # and so is rewriting the .git pointer itself.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'abcd1234')
+        row=dict(permissions='write',worktree=wt)
+        for cmd in ("cd %s && git config core.fsmonitor 'touch /tmp/pwn'"%wt,
+                    'cd %s && git config core.pager "sh -c ls"'%wt,
+                    'cd %s && git -C . config core.fsmonitor x'%wt,
+                    "cd %s && git -c alias.x='!touch /tmp/pwn' x"%wt,
+                    "cd %s && git -c core.pager='sh -c ls' log"%wt,
+                    'cd %s && git --exec-path=/tmp log'%wt,
+                    'cd %s && git --config-env=core.pager=E log'%wt,
+                    'cd %s && echo x > .git'%wt, 'cd %s && rm .git'%wt,
+                    'cd %s && echo hi > .git/config'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'worktree' in why,(cmd,why))
+        # the work a writing child exists for still runs: build, test, commit, log
+        for cmd in ('cd %s && make test'%wt,'cd %s && python3 -m pytest -q'%wt,
+                    'cd %s && git status --short'%wt,'cd %s && git add -A && git commit -m x'%wt,
+                    'cd %s && git log --oneline -5'%wt,'cd %s && touch ok.txt'%wt,
+                    'cd %s && cat .git'%wt,'cd %s && touch gitignore'%wt,
+                    'cd %s && cat .github/workflows/x.yml'%wt):
+            self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
+        # the .git pointer is not a file a writing child may rewrite, by either file tool; `.github` and
+        # `gitignore` are ordinary files and stay writable
+        for path in ('.git','sub/.git','.git/config','sub/../.git'):
+            self.assertTrue(delegate.refused('write',delegate.in_worktree(row,'write',dict(path=path)),row),path)
+            self.assertTrue(delegate.refused('edit',delegate.in_worktree(row,'edit',dict(path=path)),row),path)
+        for path in ('.github/x.yml','ok.txt','sub/notes.txt','gitignore'):
+            self.assertIsNone(delegate.refused('write',delegate.in_worktree(row,'write',dict(path=path)),row),path)
+        # and the guard says what it is: a tripwire that names awk by way of what it cannot see, not a jail
+        self.assertIsNone(delegate.refused('terminal',dict(command="cd %s && awk 'BEGIN{system(\"ls\")}'"%wt),row),
+                          'a run-time program is not claimed to be caught (the docstring says best effort)')
+
     def test_a_child_delegate_cannot_delegate_again_or_ask_the_human(self):
         # depth 1 and no human: both refusals are the runtime's, whatever the model asks for
         self.gates_on()
