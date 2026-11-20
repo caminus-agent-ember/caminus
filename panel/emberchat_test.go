@@ -3234,10 +3234,34 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "block breaking") {
 		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
 	}
+	// A steer redirects the plan inside the goal it was sent to; it never becomes what the goal works toward, even
+	// when a new done check follows it. A denial redirect (the human says "no, do this instead" to a root request)
+	// is written kind='steer', via='denial' by the runtime and is a steer too: the header keeps the goal.
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{
+		{Seq: 20, Goal: "original", Kind: "user_message",
+			Data: map[string]any{"text": "Two process changes from the maintainer, one of them urgent.", "kind": "steer"}},
+		{Seq: 21, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "the urgent change is in"}},
+		{Seq: 22, Goal: "original", Kind: "user_message",
+			Data: map[string]any{"text": "use the static binary instead", "kind": "steer", "via": "denial"}},
+		{Seq: 23, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "no apt package is added"}},
+	}})
+	if aim, re := m.goalAim(&g); !re || aim != "review caminus and embers design" {
+		t.Fatalf("a steer or a denial redirect redirects the plan, not the goal: %q %v", aim, re)
+	}
+	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "static binary") {
+		t.Fatalf("the header keeps the goal, and no steer replaces it: %s", h)
+	}
+	// the steer itself is not lost: it shows once, in the transcript, marked as the human's steer
+	m.render() // (the transcript is built as it is drawn)
+	body := ansi.Strip(m.chat.content)
+	if !strings.Contains(body, "you · steer") || strings.Count(body, "Two process changes") != 1 {
+		t.Fatalf("the steer shows once in the transcript:\n%s", body)
+	}
 }
 
-// An Ember session names itself EMBER wherever it does: the header and its notifications. The Caminus panel and the
-// top screen keep CAMINUS, which is the engine's name, not the harness's (issue #340).
+// An Ember session names itself EMBER wherever it draws it: the header and the drawn frame. The Caminus panel and
+// the top screen keep CAMINUS, which is the engine's name, not the harness's (issue #340). A notification's title
+// is checked once, in TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere.
 func TestAnEmberSessionNamesItselfEmber(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 140, 30
@@ -3254,45 +3278,6 @@ func TestAnEmberSessionNamesItselfEmber(t *testing.T) {
 	// the engine's own screens keep their name (the top screen draws CAMINUS · top)
 	if top := ansi.Strip(screenHeader("CAMINUS", "top", "idle", lipgloss.NewStyle(), "", "", 80)); !strings.HasPrefix(top, "CAMINUS · top idle") {
 		t.Fatalf("the Caminus top screen is still CAMINUS:\n%s", top)
-	}
-	var got []string
-	old := notifyRun
-	notifyRun = func(u, title, body string) { got = append(got, title) }
-	defer func() { notifyRun = old }()
-	m.notifyRequests() // first pass: silent
-	m.reqs = append(m.reqs, emberReq{ID: "r1", Cmd: "apt-get install jq"})
-	m.notifyRequests()
-	if len(got) != 1 || !strings.HasPrefix(got[0], "Ember:") {
-		t.Fatalf("a notification from an Ember session names Ember: %v", got)
-	}
-}
-
-// A steer redirects the plan inside its goal; it does not become the goal. The header keeps the goal and the steer's
-// words stay where they belong: one line in the transcript (issue #340).
-func TestASteerKeepsTheGoalLine(t *testing.T) {
-	m := chatFixture(t)
-	m.width, m.height = 140, 30
-	g := residentGoal{ID: "original", State: "working", Prompt: "split the sweep into two processes"}
-	m.resident.Goals = []residentGoal{g}
-	// through receiveResident, so the events also reach the drawn transcript (a direct slice write does not)
-	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{
-		{Seq: 2, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "both processes run"}},
-		{Seq: 3, Goal: "original", Kind: "user_message",
-			Data: map[string]any{"text": "Two process changes from the maintainer, one of them urgent.", "kind": "steer"}},
-		{Seq: 4, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "the urgent change is in"}},
-	}})
-	if aim, re := m.goalAim(&g); re || aim != g.Prompt {
-		t.Fatalf("a steer redirects the plan, not the goal: %q %v", aim, re)
-	}
-	head := ansi.Strip(m.chatHead(140))
-	if !strings.Contains(head, "split the sweep") || strings.Contains(head, "Two process changes") {
-		t.Fatalf("the goal stays in the header, and the steer does not replace it:\n%s", head)
-	}
-	// the steer itself is not lost: it shows once, in the transcript, marked as the human's steer
-	m.render() // (the transcript is built as it is drawn)
-	body := ansi.Strip(m.chat.content)
-	if !strings.Contains(body, "you · steer") || !strings.Contains(body, "Two process changes") {
-		t.Fatalf("the steer shows in the transcript:\n%s", body)
 	}
 }
 
