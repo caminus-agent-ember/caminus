@@ -3005,6 +3005,8 @@ for line in sys.stdin:
             # ...and the goal must not stay runnable: closing the row takes it out of sweep()'s reach
             # (`outcome=''`), so the next run would pick it up on whatever brain that process has, uncapped
             self.assertEqual(rt.store.goal(third)['state'],'paused')
+            self.assertEqual(json.loads(rt.store.delegate(third)['report'])['state'],'paused',
+                             'the report says the state the goal is in, not a made-up "error"')
             delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
         finally:rt.mail.close();rt.store.close()
 

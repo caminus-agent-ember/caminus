@@ -299,8 +299,11 @@ def run_child(rt, parent, job):
         try:
             row = rt.store.delegate(child)
             if row and not row.get('outcome'):
-                g = rt.store.goal(child) or {}
-                if g.get('state') in ('queued', 'working', 'waiting_model'):
+                # a direct read, not store.goal(): that raises on an unknown id, and the write closing the row must
+                # not be skipped because the goal row went missing
+                r = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (child,)).fetchone()
+                state = (r['state'] if r else '') or ''
+                if state in ('queued', 'working', 'waiting_model'):
                     # and the goal must not stay runnable: closing the row here takes it out of sweep()'s reach
                     # (sweep() looks for `outcome=''`), and a runnable child left behind would be picked up by
                     # the next run on whatever brain that process has, with no cap ledger (#382 review, this
@@ -308,7 +311,9 @@ def run_child(rt, parent, job):
                     with rt.store.transaction():
                         rt.store.update(child, state='paused', error='its run ended without a report '
                                                                     '(a delegate child run by another goal)')
-                rt.store.delegate_done(child, 'failed', dict(child=child, outcome='failed', state='error',
+                    state = 'paused'
+                # the report's state is the goal's, so it says `paused` where the goal was just paused
+                rt.store.delegate_done(child, 'failed', dict(child=child, outcome='failed', state=state or 'error',
                                                              summary='the run of this child ended without a report'))
                 rt.store.event('delegate_done', dict(child=child, outcome='failed'), parent)
         except Exception:
