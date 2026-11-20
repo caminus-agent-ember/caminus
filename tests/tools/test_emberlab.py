@@ -197,6 +197,63 @@ for pid in (real.get('worker'), real.get('pid')):
     except OSError:
         pass
 
+# ---- propose
+ph = S / 'simhome'
+ph.mkdir(parents=True, exist_ok=True)
+sys.path.insert(0, str(ROOT / 'python'))
+sys.path.insert(0, str(ROOT / 'tools/emberlab'))
+import proposal  # noqa: E402
+
+
+def sim_record(home, **fields):
+    """A `proposed` record in a scratch home: the reflection's output before anyone has measured it."""
+    sim, store, rt = proposal._open(home)
+    try:
+        return sim.record(rt, 'g-propose', dict(dict(problem_group='propose test', change='turn sim off in the arm',
+                                                     predicted='no difference on one task'), **fields),
+                          cfg=dict(model='m', provider='p'))
+    finally:
+        store.close()
+
+
+r1 = sim_record(ph)
+po = S / 'propose'
+p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(po), '--dry-run')
+check(p.returncode == 0 and f"proposal {r1['id']}" in p.stdout and 'runs: 2' in p.stdout and not po.exists(),
+      f'propose: --dry-run prints the plan and creates nothing ({p.returncode}; {p.stdout[-300:]})')
+p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'anthropic:8091#claude-haiku-5-5',
+        '--config', '{"sim": false}', '--out', str(po))
+check(p.returncode != 0 and '--approve-paid' in (p.stderr + p.stdout) and not po.exists(),
+      f'propose: a brain billed through the relay does not run without --approve-paid ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
+p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve', '--out', str(po))
+check(p.returncode != 0 and 'measure nothing' in (p.stderr + p.stdout),
+      'propose: two identical arms are refused (the proposal names no change)')
+p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(po))
+closed = proposal.load_record(ph, r1['id'])
+arm_home = [json.loads((po / 'runs' / r['id'] / 'home' / 'config.json').read_text())
+            for r in report.load(po) if r['arm'] == 'arm']
+base_home = [json.loads((po / 'runs' / r['id'] / 'home' / 'config.json').read_text())
+             for r in report.load(po) if r['arm'] == 'base']
+check(p.returncode == 0 and closed['status'] == 'observed' and 'no difference' in closed['observed']
+      and 'scripted:solve 1/1 -> 1/1' in closed['observed'],
+      f'propose: the runs close the record with the per-brain numbers ({p.returncode}; '
+      f'{closed["observed"][:200]}; {p.stderr[-200:]})')
+check(closed['observed_by']['model'] == 'emberlab' and closed['brain']['model'] == 'm',
+      'propose: the observation names emberlab, the predictor keeps the brain that made the prediction')
+check(arm_home and base_home and all(c.get('sim') is False for c in arm_home) and all('sim' not in c for c in base_home),
+      'propose: the arm run home has sim=false and the base run home does not (the proposal is the only difference)')
+p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(po))
+check(p.returncode != 0 and 'already observed' in (p.stderr + p.stdout),
+      'propose: a closed record is not measured again')
+p = lab('propose', '--sim-home', str(ph), '--record', 'nostore', '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--out', str(po))
+check(p.returncode != 0 and 'no SIM record' in (p.stderr + p.stdout),
+      'propose: a record the log does not hold is refused before anything runs')
+
 # ---- tui
 if shutil.which('tmux'):
     to = S / 'tui'

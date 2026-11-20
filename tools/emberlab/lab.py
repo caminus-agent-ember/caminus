@@ -8,6 +8,10 @@ Batch (measure):
              [--host local|agent] [--only KEY,...] [--jobs N] [--timeout S]
   lab.py report DIR [--md FILE]                one table per brain x arm, and per task
   lab.py compare DIR --base A --arm B          the A/B verdict: better only if better across the board
+  lab.py propose --sim-home HOME --record ID --brain BRAIN [--config JSON | --arm-checkout DIR] ...
+                                               a `proposed` SIM record becomes two arms; the runs close it (Haiku
+                                               through the owner's relay is the tool A/B brain; billed runs need
+                                               --approve-paid; see proposal.py)
 
 Sessions (design with the agent):
   lab.py open NAME --brain BRAIN --out DIR [--host agent] [--fixture SUITE]   a lab agent, its daemon up
@@ -37,6 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import brains as brains_mod    # noqa: E402
 import hosts as hosts_mod      # noqa: E402
+import proposal as proposal_mod  # noqa: E402
 import report as report_mod    # noqa: E402
 import runner                  # noqa: E402
 import sessions                # noqa: E402
@@ -137,6 +142,32 @@ def main(argv=None):
     p.add_argument('--arm', required=True)
     p.add_argument('--json', action='store_true')
 
+    p = sub.add_parser('propose')
+    p.add_argument('--sim-home', required=True, help="the resident's home whose SIM log holds the record")
+    p.add_argument('--record', required=True, help='the id of a `proposed` SIM record')
+    p.add_argument('--suite', default='basic')
+    p.add_argument('--brain', action='append', required=True)
+    p.add_argument('--repeats', type=int, default=1)
+    p.add_argument('--only', help='comma-separated task keys')
+    p.add_argument('--host', choices=('local', 'agent'))
+    p.add_argument('--jobs', type=int, default=4)
+    p.add_argument('--parallel', type=int)
+    p.add_argument('--out', help='default: SIM-HOME/emberlab/sim-ab/RECORD')
+    p.add_argument('--config', help="the proposal as config.json keys for arm, JSON")
+    p.add_argument('--env', help="the proposal as environment variables for arm, JSON")
+    p.add_argument('--base-config', help='config.json keys for base (rarely: base runs as it runs now)')
+    p.add_argument('--base-env')
+    p.add_argument('--arm-checkout', help='the checkout with the proposed code (default: this checkout)')
+    p.add_argument('--base-checkout')
+    p.add_argument('--dry-run', action='store_true', help='print the plan and create nothing')
+    p.add_argument('--approve-paid', action='store_true',
+                   help="run a brain billed through the owner's relay (the plan names it first)")
+    p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
+    p.add_argument('--unsafe-free', action='store_true', help='the same, named for an unattended run')
+    p.add_argument('--prediction-error', help='where the prediction was wrong (filled after the fact is too late; '
+                                             'leave it for the review)')
+    p.add_argument('--goal', help="the goal id the observation lives in (default: the record's)")
+
     p = sub.add_parser('open')
     p.add_argument('name')
     p.add_argument('--brain', required=True, help='driven, driven:judge, driven:caminus, openai:URL[#MODEL], anthropic:PORT#MODEL, ...')
@@ -179,7 +210,9 @@ def main(argv=None):
     if a.cmd == 'serve-driven':
         brains_mod.serve_driven(a.ctl, a.judge, a.ttl, a.caminus)
         return 0
-    return dict(run=cmd_run, report=cmd_report, compare=cmd_compare, open=sessions.open_session, say=sessions.say,
+    return dict(run=cmd_run, report=cmd_report, compare=cmd_compare,
+                propose=lambda a: proposal_mod.cmd_propose(a, cmd_run),
+                open=sessions.open_session, say=sessions.say,
                 turn=sessions.turn, reply=sessions.reply, events=sessions.events, status=sessions.status,
                 close=sessions.close)[a.cmd](a)
 
