@@ -504,8 +504,9 @@ class Model:
             # server's own timings replace it: _speed)
             body['stream_options'] = dict(include_usage=True)
             return self._stream(body, on_delta, session, timeout)
-        result = self.request(self.base + '/chat/completions', body, timeout=timeout,
-                              **({'session': session} if session else {}))
+        result = self.request(self.base + '/chat/completions', body,
+                              **({'session': session} if session else {}),
+                              **({'timeout': timeout} if timeout else {}))
         self.last_usage = result.get('usage') or {}
         # no decode window without streamed pieces: only a server's own timings give a speed here
         self.last_speed = self._speed(result.get('timings'))
