@@ -359,8 +359,8 @@ def parser():
         if op=='language':
             p.add_argument('--to',metavar='LANGUAGE',help='the language the owner works in, e.g. English, Chinese, '
                            'Spanish: what the prompt asks and what the drift check holds a reply to')
-            p.add_argument('--auto',action='store_true',help='drop the setting: derive the language from the first goal '
-                           'again (English when that cannot tell)')
+            p.add_argument('--auto',action='store_true',help='drop the setting: derive the language from your goals '
+                           'again (English when they cannot tell)')
         if op=='sim':
             p.add_argument('--on',action='store_true',help='write sim true: this session records SIM predictions')
             p.add_argument('--off',action='store_true',help='write sim false: the agent says the log is off instead of recording')
@@ -815,7 +815,13 @@ def main(argv=None,stdin=None):
                 cfg.pop('language',None)
                 atomic_json(home/'config.json',cfg)
             who=language.owner(SimpleNamespace(store=store,config=cfg))
-            emit(dict(language=who['name'],scripts=list(who['scripts']),source=who['source']),a.json)
+            # A name with no script table (`--to Esperanto`) leaves the drift check switched off: say so here
+            # rather than print `scripts: []` and let the owner believe a drifting reply would be held.
+            out=dict(language=who['name'],scripts=list(who['scripts']),source=who['source'],check=bool(who['scripts']))
+            if not who['scripts']:
+                out['note']=('no script table for %s: the prompt asks for it, but a reply that drifts into another '
+                             'script is not detected' % who['name'])
+            emit(out,a.json)
             return 0
         if a.op=='sim':
             # The SIM log (issue #341): predictions before a harness change and observations after CI and the

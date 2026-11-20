@@ -2687,18 +2687,42 @@ for line in sys.stdin:
         self.assertTrue(any(d['nudged'] for d in drifts[language.DRIFT_EVERY:]),'the interval brings the nudge back')
 
     def test_the_language_setting_names_the_prompt_and_auto_derives_it_again(self):
-        # the owner's language is a session setting (`agent language NAME --to LANGUAGE`), read by `agent prompt`
-        # before a turn, so the setting and the prompt cannot disagree; `--auto` drops it and the first goal's
-        # script names the language again.
-        self.assertEqual(self.cmd('language',[]),dict(language='English',scripts=['Latin'],source='default'))
+        # the owner's language is a session setting (`agent language --to LANGUAGE`), read by `agent prompt`
+        # before a turn, so the setting and the prompt cannot disagree; `--auto` drops it and the owner's own
+        # goals name the language again.
+        self.assertEqual(self.cmd('language',[]),dict(language='English',scripts=['Latin'],source='default',check=True))
         self.assertIn('Your human works in English',self.cmd('prompt',[])['prompt'])
         out=self.cmd('language',['--to','Chinese'])
-        self.assertEqual(out,dict(language='Chinese',scripts=['Han'],source='config'))
+        self.assertEqual(out,dict(language='Chinese',scripts=['Han'],source='config',check=True))
         self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
         self.assertIn('Your human works in Chinese',self.cmd('prompt',[])['prompt'])
         self.cmd('language',['--to','Chinese','--auto'],code=1)
-        self.assertEqual(self.cmd('language',['--auto']),dict(language='English',scripts=['Latin'],source='default'))
+        self.assertEqual(self.cmd('language',['--auto']),dict(language='English',scripts=['Latin'],source='default',
+                                                                check=True))
         self.assertNotIn('language',json.loads((self.home/'config.json').read_text()))
+
+    def test_a_goal_that_pastes_another_script_does_not_name_the_session(self):
+        # the autopilot review of #390: `derive` counted units over the first goal, so an English goal with a
+        # pasted Chinese log line named the session Chinese, and every English reply then drifted. Letters over
+        # prose across all the owner's prompts keep it English, and a goal that is really Chinese still names it.
+        from caminus.ember.resident import language
+        self.assertEqual(language.derive(['Fix the failing push step. Log: \u6d4b\u8bd5\u5931\u8d25\u4e86\uff0c'
+                                          '\u5206\u652f\u5df2\u63a8\u9001\uff0c\u8bf7\u68c0\u67e5\u3002'])['name'],
+                         'English','a pasted CJK log line does not outvote the owner')
+        self.assertEqual(language.derive(['\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                                          '\u7136\u540e\u5f00 PR\u3002'])['name'],'Chinese','a Chinese goal still names it')
+        self.assertEqual(language.derive(['Fix it. ```\u5206\u652f\u5df2\u63a8\u9001\u3002```'])['name'],'English',
+                         'a fenced block is not the owner\'s prose')
+        self.assertEqual(language.derive(['ok']),None,'too few letters cannot name a language')
+
+    def test_an_unlisted_language_says_the_drift_check_is_off(self):
+        # `--to Esperanto` has no script table: the prompt still asks for it, but nothing can judge a drift.
+        # `check` says so instead of printing `scripts: []` and letting the owner believe a reply is held.
+        out=self.cmd('language',['--to','Esperanto'])
+        self.assertEqual((out['language'],out['scripts'],out['check']),('Esperanto',[],False))
+        self.assertIn('not detected',out['note'])
+        self.assertEqual(self.cmd('language',[]),dict(language='Esperanto',scripts=[],source='config',check=False,
+                                                      note=out['note']))
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')

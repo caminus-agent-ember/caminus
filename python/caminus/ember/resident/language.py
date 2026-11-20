@@ -4,10 +4,11 @@ Seen 2026-11-19 on the CyberExpert session: mid-goal a DeepSeek reply switched t
 PR (base ember-next)。") while the owner works in English. The chat is what the owner reads and the done judge
 grades, so a reply in the wrong language is not usable. Two halves, both cheap enough for every turn:
 
-- the owner's language is a session setting (`caminus ember agent language NAME LANGUAGE`, key `language` in
-  config.json). Without one it is derived from the owner's first goal: the script census of its prompt, else
-  English. `prompt.py` names it, so the brain is told which language to keep to in replies, notes, files,
-  commit messages and GitHub text.
+- the owner's language is a session setting (`caminus ember agent language --to LANGUAGE`, key `language` in
+  config.json). Without one it is derived from the owner's own prompts (the first eight goals, prose only, a
+  letter census): when one script holds DERIVE_SHARE of their letters it names the language, else English.
+  `prompt.py` names it, so the brain is told which language to keep to in replies, notes, files, commit
+  messages and GitHub text.
 - after every stored assistant reply, `check` censuses the prose's letters by script. When a majority of the
   reply's units is in a script other than the owner's, the drift is an event (kind `language_drift`, with the
   brain that wrote it, so a drift rate per brain is visible in the event log) and, at most once every
@@ -33,7 +34,7 @@ DEFAULT = 'English'
 MIN_UNITS = 6          # fewer letters than this cannot name a language: "ok", a path, a one-word reply
 DRIFT_EVERY = 3        # assistant turns between two nudges on one goal (the issue's "at most once every N turns")
 OTHER_SHARE = .5       # "most letters of a reply are in another script": a strict majority
-DERIVE_SHARE = .6      # a first goal names a language only when its dominant script is this clear
+DERIVE_SHARE = .6      # your goals name a language only when one script holds this share of their letters
 
 # (first, last, script), sorted by first; Unicode blocks, letters only where a block mixes letters and digits
 _RANGES = sorted([
@@ -143,19 +144,41 @@ def named(name, source):
     return dict(name=name, scripts=_SCRIPTS_FOR.get(name.lower(), ()), source=source)
 
 
+def letters(text):
+    """Units per script counting every letter of a spaceless script separately from every letter elsewhere.
+
+    The drift check counts a Han run as its characters (a Chinese sentence has few spaces, so one word would
+    hide it), but that same count over a *goal* lets a pasted log line outvote the owner: "Fix the failing
+    push step. Log: 测试失败了，分支已推送，请检查。" is 13 Han units against 6 English words. A letter
+    census sees 26 Latin letters against 13 Han and keeps English, which is what the owner wrote.
+    """
+    per = {}
+    for ch in prose(text):
+        s = script_of(ch)
+        if s:
+            per[s] = per.get(s, 0) + 1
+    return per, sum(per.values())
+
+
 def derive(prompts):
-    """The language of the owner's first goal that is clear enough to name, else None."""
-    for prompt in prompts:
-        per, total = units(prompt or '')
-        if total < MIN_UNITS:
-            continue
-        script = max(per, key=per.get)
-        if per[script] / total < DERIVE_SHARE:
-            continue
-        if script == 'Han' and per.get('Kana', 0) >= .15 * (per['Han'] + per.get('Kana', 0)):
-            script = 'Kana'                        # kanji and kana together: Japanese, not Chinese
-        if (language := _LANG_OF.get(script)):
-            return named(language, 'first goal')
+    """The owner's language from their own prompts, when one script is clear enough to name, else None.
+
+    Read as letters over prose, across all the prompts: an owner who writes English around a pasted line in
+    another script is English, and one excerpt cannot name the session (a wrong name changes the prompt and
+    nudges every reply of it). Fenced code is not the owner's prose either. Japanese is kanji and kana
+    together, so Kana shares the count with Han instead of splitting it.
+    """
+    joined = '\n'.join(p or '' for p in prompts)
+    per, total = letters(joined)
+    if total < MIN_UNITS:
+        return None
+    script = max(per, key=per.get)
+    if per[script] / total < DERIVE_SHARE:
+        return None
+    if script == 'Han' and per.get('Kana', 0) >= .15 * (per['Han'] + per.get('Kana', 0)):
+        script = 'Kana'                            # kanji and kana together: Japanese, not Chinese
+    if (language := _LANG_OF.get(script)):
+        return named(language, 'your goals')
     return None
 
 
@@ -163,15 +186,29 @@ _GOALS = 'SELECT prompt FROM goals ORDER BY COALESCE(position, created), created
 
 
 def owner(rt):
-    """The owner's language for this session: config `language`, else the first goal's script, else English."""
+    """The owner's language for this session: config `language`, else the letters of their goals, else English.
+
+    Cached on the runtime: the answer cannot change between goals, and a turn that is plainly English should not
+    pay for a query and a census per reply (an autopilot review of #390 asked for this).
+    """
     name = str((getattr(rt, 'config', None) or {}).get('language') or '').strip()
     if name:
         return named(name, 'config')
     try:
+        count = rt.store.db.execute('SELECT COUNT(*) FROM goals').fetchone()[0]
+    except sqlite3.Error:
+        count = None
+    cache = getattr(rt, '_language_owner', None)
+    if cache and count is not None and cache[0] == count:
+        return cache[1]
+    try:
         prompts = [r['prompt'] for r in rt.store.db.execute(_GOALS)]
     except sqlite3.Error:
         prompts = []
-    return derive(prompts) or named(DEFAULT, 'default')
+    who = derive(prompts) or named(DEFAULT, 'default')
+    if count is not None:
+        rt._language_owner = (count, who)
+    return who
 
 
 def from_home(home):
