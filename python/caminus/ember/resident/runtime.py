@@ -1210,7 +1210,7 @@ class Runtime:
                 last[path] = None             # (a failed read counts too: "not found" or "not text" is what is there)
         return [v for v in last.values() if v]
 
-    def _finish(self, gid, summary, open_work=''):
+    def _finish(self, gid, summary, open_work='', open_left=None, verdict=''):
         # Serialize completion with send --goal-id. Steering accepted while the
         # model was in flight must be observed before the goal can finish.
         with self.store.transaction():
@@ -1220,6 +1220,13 @@ class Runtime:
                 self.store.event('completion_deferred',dict(reason='human steering is waiting'),gid)
                 return
             self.store.update(gid,state='completed',summary=summary)
+            if open_left:
+                # A finish that left todo items open, on the record: a successful finish ends the goal, so the model
+                # never reads it back, but the event is what makes a 5-of-6-open finish auditable after the fact. It
+                # sits after state='completed' and not where finish was called: the goal can still be deferred
+                # (completion_deferred, when human steering waits) or found cancelled, and recorded there the event
+                # claimed a finish with items open that never happened while the goal carried on working.
+                self.store.event('finish_open_todo', dict(left=open_left, verdict=verdict), gid)
             self.store.end_grants(gid)      # grants end with the goal
             if goal.get('kind','work') in FREE_KINDS:
                 self.free.ended(gid, summary)
@@ -1556,21 +1563,16 @@ class Runtime:
             # a linked agent's token never comes back in a result (an `env` or a verbose gh would print it)
             from . import github
             result = json.loads(github.redact(json.dumps(result, ensure_ascii=False), self.config))
-        if open_left is not None and 'error' not in result:
-            # A finish that left todo items open, on the record: a successful finish ends the goal, so the model
-            # never reads it back, but the event is what makes a 5-of-6-open finish auditable after the fact. It
-            # carries the verdict, and it is written here rather than in the finish branch because the judge can
-            # still refuse the finish: recorded there, an event claimed a finish with open items that never
-            # happened (the goal carried on working, and its audit trail said it had finished).
-            self.store.event('finish_open_todo', dict(left=open_left, verdict=str(result.get('judge', ''))[:500]),
-                             action['goal'])
         self.store.action_result(action, result, panel)
         if looped:
             self._collapse_loop(action['goal'], signature, looped)
         if 'error' not in result:
             self.progress[action['goal']] = time.time()
         if action['name'] == 'finish' and 'error' not in result:
-            self._finish(action['goal'],result['summary'],result.get('open',''))
+            # open_left goes with the summary: _finish writes the event once the goal is completed, so a finish the
+            # judge refused, a completion deferred by waiting steering, or a cancelled goal leaves it unrecorded.
+            self._finish(action['goal'],result['summary'],result.get('open',''),
+                         open_left, str(result.get('judge', ''))[:500])
         elif action['name'] == 'propose_plan' and 'error' not in result:
             # The plan is in: park until the human approves (plan approve) or sends a revision.
             with self.store.transaction():

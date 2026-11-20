@@ -559,6 +559,30 @@ class Resident(unittest.TestCase):
         self.assertEqual(events[0]['data']['left'],['check it'])
         self.assertTrue(events[0]['data']['verdict'].startswith('met'),events[0]['data'])
 
+    def test_a_finish_deferred_by_a_waiting_message_leaves_no_open_todo_event(self):
+        # A second way a finish does not happen: _finish defers the completion while human steering waits in the
+        # inbox (completion_deferred). The event was written where finish was called, so a deferred finish was on
+        # the record with items open while the goal carried on working. It belongs in _finish, after state='completed':
+        # one event for the finish that happened, none for the one that did not.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Write the file.')
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'Check the edge case too.','steer'))
+            rt._finish(gid,'Wrote the file.','check it: left for the human',['check it'],'met: it is checked')
+            events=rt.store.events()
+            self.assertNotEqual(rt.store.goal(gid)['state'],'completed','a waiting steer defers the completion')
+            self.assertTrue(any(e['kind']=='completion_deferred' for e in events))
+            self.assertFalse([e for e in events if e['kind']=='finish_open_todo'],
+                             'a deferred finish is not on the record with items open')
+            rt.store.db.execute("UPDATE inbox SET consumed=1 WHERE goal=?",(gid,))
+            rt._finish(gid,'Wrote the file.','check it: left for the human',['check it'],'met: it is checked')
+            self.assertEqual(rt.store.goal(gid)['state'],'completed')
+            events=[e for e in rt.store.events() if e['kind']=='finish_open_todo']
+            self.assertEqual(len(events),1,'the finish that completed is on the record once')
+            self.assertEqual(events[0]['data']['left'],['check it'])
+            self.assertTrue(events[0]['data']['verdict'].startswith('met'))
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_todo_nudge_fires_after_a_verify_or_a_compaction_with_items_open(self):
         # The stale nudge waits TODO_STALE steps, so a short goal can verify and finish with every item still open
         # and never be prompted; a compaction loses the list the same way. This is the nudge at those two moments.
