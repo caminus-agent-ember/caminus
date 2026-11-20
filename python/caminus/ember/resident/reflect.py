@@ -20,6 +20,7 @@ import json
 from . import sim
 
 MAX_TOKENS = 700              # well under model.SHORT_CALL: this call runs with thinking off
+TIMEOUT = 120                 # seconds: the goal is complete, so a hung endpoint must not hold the loop for 900 s
 SYSTEM = '''REFLECT. You review one finished agent goal and propose at most one change to the harness (the system
 prompt, a tool, a gate, a cap) that would have made this goal faster or more reliable. You see the goal, its
 done check, how it ended, its tool calls and the failures along the way. Propose only a change the evidence
@@ -41,6 +42,10 @@ def maybe(rt, gid, summary='', open_work=''):
         from .freetime import KINDS as FREE_KINDS
         g = rt.store.goal(gid)
         if not g or g.get('kind', 'work') in FREE_KINDS:
+            return None
+        if g.get('kind') == 'delegate':
+            # a delegate child is capped and reports to its parent (#382), and its parent reflects on the goal it
+            # was doing: a second call inside the child's cap would bill the parent twice for one lesson
             return None
         if not g.get('done_check'):
             # graded work only: a goal with no done check has no judge and no standard it was measured against,
@@ -81,8 +86,9 @@ def maybe(rt, gid, summary='', open_work=''):
 
 
 def _ask(rt, gid, msgs):
-    """One short call, priced into the goal's spend like any other turn (inside the brain's allowance)."""
-    reply = rt.model.complete(msgs, tools=None, max_tokens=MAX_TOKENS)
+    """One short call, priced into the goal's spend like any other turn (inside the brain's allowance), on its own
+    timeout: the goal is already complete, so a hung endpoint must not hold the loop for a turn's 900 s."""
+    reply = rt.model.complete(msgs, tools=None, max_tokens=MAX_TOKENS, timeout=TIMEOUT)
     try:
         rt.brains.account(gid)
     except Exception:
@@ -95,17 +101,11 @@ def _ask(rt, gid, msgs):
 
 
 def parse(text):
-    """The JSON object in a reply, or None. A fenced block or a sentence around it is tolerated; a record needs
-    a change and a prediction (sim.record refuses one without them), and {"skip": true} proposes nothing."""
-    import re
-    m = re.search(r'\{.*\}', text or '', re.S)
-    if not m:
-        return None
-    try:
-        d = json.loads(m.group(0))
-    except ValueError:
-        return None
-    if not isinstance(d, dict):
+    """The JSON object in a reply, or None. A record needs a change and a prediction (sim.record refuses one
+    without them), and {"skip": true} proposes nothing."""
+    from .judge import object_in
+    d = object_in(text)
+    if d is None:
         return None
     if d.get('skip'):
         return dict(skip=True, reason=str(d.get('reason') or 'no reason given')[:500])
@@ -158,8 +158,14 @@ def brief(rt, gid, summary, open_work):
             parts.append('WHAT THE AGENT VERIFIED:\n' + str(json.loads(row['data']).get('evidence') or '')[:1000])
         except (ValueError, KeyError, TypeError):
             pass
+    # this episode only: after a reopened goal finishes again, the previous episode's calls are not this one's
+    # evidence (the judge and verification lookups above are newest-first for the same reason)
+    prior = rt.store.db.execute(
+        "SELECT seq FROM events WHERE goal=? AND kind='finished' ORDER BY seq DESC LIMIT 1 OFFSET 1", (gid,)).fetchone()
+    since = prior['seq'] if prior else 0
     rows = rt.store.db.execute(
-        "SELECT data FROM events WHERE goal=? AND kind='tool_result' ORDER BY seq DESC LIMIT 200", (gid,)).fetchall()
+        "SELECT data FROM events WHERE goal=? AND kind='tool_result' AND seq>? ORDER BY seq DESC LIMIT 200",
+        (gid, since)).fetchall()
     names, failed, errors = {}, 0, []
     for r in rows:
         try:
