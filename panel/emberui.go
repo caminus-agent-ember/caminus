@@ -175,12 +175,19 @@ type sshOutMsg struct {
 	err  error
 }
 
-// emberSetting is one setting from its flag, else from the environment: `caminus ember ui` execs this panel with no
-// flags at all, so that a terminal showing the foreground command line shows `caminus ember`, never the ssh key and
-// bridge paths (issue #317). An explicit flag still wins, so every old caller and the demo keep working.
-func emberSetting(flagValue, env string) string {
+// emberSetting is one setting with the one precedence this command has: an explicit flag, else the value -demo
+// gives it, else the environment. `caminus ember ui` execs this panel with no flags at all, so that a terminal
+// showing the foreground command line shows `caminus ember`, never the ssh key and bridge paths (issue #317).
+// -demo is deliberately above the environment, not below it: docs/ember.md tells a real setup to export
+// CAMINUS_ENV_USER, and a demo started from that shell must not be pointed at the real agent account (the demo
+// opens the `demo` agent and never SSHes, so an inherited name would only mislabel its card). A flag still beats
+// both, which is what every old caller passes.
+func emberSetting(flagValue, demoValue, env string) string {
 	if flagValue != "" {
 		return flagValue
+	}
+	if demoValue != "" {
+		return demoValue
 	}
 	return os.Getenv(env)
 }
@@ -196,22 +203,18 @@ func emberMain(args []string) {
 	draft := fs.String("draft", "", "text the composer starts with (a new goal, sent on Enter)")
 	demo := fs.Bool("demo", false, "the demo (tools/ember_demo.py): no SSH, and an approved root command is recorded, never run")
 	fs.Parse(args)
+	demoMode = *demo
+	// The environment fills only what neither a flag nor -demo gave, and -demo's own value sits above the
+	// environment for the two settings it has an opinion about (user, key): see emberSetting.
+	demoUser, demoKey := "", ""
 	if *demo {
-		demoMode = true
-		if *user == "" {
-			*user = "demo"
-		}
-		if *key == "" {
-			*key = "none"
-		}
+		demoUser, demoKey = "demo", "none"
 	}
-	// The environment fills only what neither a flag nor -demo gave: a flag wins, so the demo and every old caller are
-	// unchanged, and `caminus ember ui` (no flags at all) still gets all five.
-	*user = emberSetting(*user, "CAMINUS_ENV_USER")
-	*bridge = emberSetting(*bridge, "CAMINUS_ENV_BRIDGE")
-	*audit = emberSetting(*audit, "CAMINUS_ENV_AUDIT")
-	*key = emberSetting(*key, "CAMINUS_ENV_KEY")
-	*cli = emberSetting(*cli, "CAMINUS_EMBER_CLI")
+	*user = emberSetting(*user, demoUser, "CAMINUS_ENV_USER")
+	*bridge = emberSetting(*bridge, "", "CAMINUS_ENV_BRIDGE")
+	*audit = emberSetting(*audit, "", "CAMINUS_ENV_AUDIT")
+	*key = emberSetting(*key, demoKey, "CAMINUS_ENV_KEY")
+	*cli = emberSetting(*cli, "", "CAMINUS_EMBER_CLI")
 	if *user == "" || *bridge == "" || *audit == "" || *key == "" {
 		fmt.Fprintln(os.Stderr, "caminus-panel ember: --user --bridge --audit --key are all required")
 		os.Exit(2)

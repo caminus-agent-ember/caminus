@@ -27,24 +27,33 @@ func writeReq(t *testing.T, bridge, id, cmd string, ts float64) {
 	}
 }
 
-// emberSetting is the order `caminus ember ui` relies on: it execs this panel with no flags, so the settings must come
-// from the environment; an explicit flag (the demo, an old caller, a person) still wins.
+// emberSetting is the precedence `caminus ember ui` relies on: an explicit flag, else the value -demo gives the
+// setting, else the environment. It execs this panel with no flags, so the environment must fill all five; and a
+// demo started from a shell that exports CAMINUS_ENV_USER (docs/ember.md tells a real setup to) must still be the
+// demo, not the real agent account.
 func TestEmberSettingsComeFromTheFlagsElseTheEnvironment(t *testing.T) {
 	t.Setenv("CAMINUS_ENV_USER", "env-agent")
 	t.Setenv("CAMINUS_ENV_BRIDGE", "/env/bridge")
 	t.Setenv("CAMINUS_EMBER_CLI", `["env-cli"]`)
-	if got := emberSetting("", "CAMINUS_ENV_USER"); got != "env-agent" {
+	if got := emberSetting("", "", "CAMINUS_ENV_USER"); got != "env-agent" {
 		t.Fatalf("an empty flag reads the environment: %q", got)
 	}
-	if got := emberSetting("/flag/bridge", "CAMINUS_ENV_BRIDGE"); got != "/flag/bridge" {
+	if got := emberSetting("/flag/bridge", "", "CAMINUS_ENV_BRIDGE"); got != "/flag/bridge" {
 		t.Fatalf("an explicit flag wins over the environment: %q", got)
 	}
-	if got := emberSetting("", "CAMINUS_ENV_AUDIT_UNSET_HERE"); got != "" {
+	if got := emberSetting("", "", "CAMINUS_ENV_AUDIT_UNSET_HERE"); got != "" {
 		t.Fatalf("neither a flag nor the environment stays empty (the required check reports it): %q", got)
 	}
-	// the panel's five settings, in the demo's hands too: -demo fills only what is still empty
-	if got := emberSetting("/flag/key", "CAMINUS_ENV_KEY"); got != "/flag/key" {
+	// the key follows the same order, and -demo's own value sits between the flag and the environment
+	if got := emberSetting("/flag/key", "none", "CAMINUS_ENV_KEY"); got != "/flag/key" {
 		t.Fatalf("the key follows the same order: %q", got)
+	}
+	t.Setenv("CAMINUS_ENV_KEY", "/env/key")
+	if got := emberSetting("", "none", "CAMINUS_ENV_KEY"); got != "none" {
+		t.Fatalf("-demo keeps its own key even when the environment exports one: %q", got)
+	}
+	if got := emberSetting("", "demo", "CAMINUS_ENV_USER"); got != "demo" {
+		t.Fatalf("-demo keeps its own user even when the environment exports one: %q", got)
 	}
 }
 
