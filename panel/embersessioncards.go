@@ -55,7 +55,7 @@ func workersRow(ws []residentWorker) string {
 	if running > 0 {
 		return fmt.Sprintf("%s · $%.4f of $%.2f", plural(running, "child", "children"), spent, cap)
 	}
-	// The status sorts running children first and then newest first, so the first finished one is the last child.
+	// Running children sort first, then newest first: the first non-running entry is the newest finished child.
 	w := ws[0]
 	for _, c := range ws {
 		if !c.Running {

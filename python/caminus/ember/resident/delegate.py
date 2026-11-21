@@ -794,7 +794,10 @@ def settle(rt):
                 continue
             rt.store.update(parent, state='working')
             rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (parent, text, 'nudge'))
-        rt.store.event('delegate_reports', dict(children=ids), parent)
+            # The event is what marks these reports shown, so it commits with the wake it belongs to: written
+            # after the transaction, a death in between left the parent awake with an empty `shown` ledger, and
+            # the next settle printed the same reports again (#384 review).
+            rt.store.event('delegate_reports', dict(children=ids), parent)
         moved = True
     return moved
 
