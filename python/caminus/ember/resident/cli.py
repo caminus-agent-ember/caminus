@@ -818,13 +818,16 @@ def main(argv=None,stdin=None):
             if not isinstance(cfg,dict):
                 # Valid JSON of the wrong shape (a list, a string) used to traceback at cfg['language'] below.
                 raise ValueError('config.json is not a JSON object: fix or remove %s' % (home/'config.json'))
+            if a.to is not None and a.auto:
+                # Asked first: `--to '' --auto` is a contradiction about what the command is for, and answering it
+                # with the blank-name error named the less likely mistake (review P2). Whatever the name is, both
+                # flags together is the thing to say.
+                raise ValueError('use --to NAME or --auto, not both')
             if a.to is not None:
                 if not a.to.strip():
                     # `--to ''` is falsy, so it used to skip both writes and print a derived answer while an old
                     # `language` key stayed in config.json, disagreeing with the display (review P2): say so.
                     raise ValueError('--to needs a language name; use --auto to drop the setting')
-            if a.to is not None and a.auto:
-                raise ValueError('use --to NAME or --auto, not both')
             if a.to is not None:
                 cfg['language']=a.to.strip()
                 atomic_json(home/'config.json',cfg)

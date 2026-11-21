@@ -3062,6 +3062,40 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_the_tick_takes_the_drift_nudge_from_the_plain_dispatch_not_from_its_own_copy(self):
+        # review P2 (r12): `_tick` decided `due` itself and `_plain_reply` decided again in prose of its own; a
+        # branch added to one would leave the other saying a turn comes when none does, and the nudge queued for
+        # that turn defers the `_finish` on the same tick. `_tick` now reads `turn` from `_plain_dispatch`, the
+        # predicate `_plain_reply` dispatches on: this moves that predicate under `_tick` and asserts the nudge
+        # follows it, not a re-derivation.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            rt.loop_gates=True
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            rt._plain_dispatch=lambda g: ('asked', False, 0)     # (a branch whose reply leaves no turn)
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(gid))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1,'the drift is an event whatever the branch')
+            self.assertFalse(drifts[0]['nudged'],'no turn follows the reply the dispatch named')
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[],
+                'no nudge is left for a turn that never comes')
+            g2=rt.store.enqueue('A second goal, whose reply leaves a turn.')
+            rt._plain_dispatch=lambda g: ('', True, 1)           # (a branch that does leave one)
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(g2))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(g2,))]
+            self.assertEqual(len(drifts),1)
+            self.assertTrue(drifts[0]['nudged'],'the turn the dispatch named is the one nudged')
+            rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(g2,))]
+            self.assertTrue(any('Reply in English' in t for t in rows),rows)
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_an_empty_language_setting_is_refused_instead_of_silently_ignored(self):
         # review P2: `--to ''` is falsy, so it skipped both writes and printed a derived answer while an old
         # `language` key stayed in config.json, disagreeing with the display.
@@ -3071,6 +3105,11 @@ for line in sys.stdin:
             self.assertIn('--auto',out['error'],'the refusal names how to drop the setting')
             self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting is unchanged')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
+        # review P2 (r12): `--to '' --auto` is a contradiction about what the command is for, and it used to be
+        # answered with the blank-name error. Both flags together is the thing to say, whatever the name is.
+        out=self.cmd('language',['--to','','--auto'],code=1)
+        self.assertIn('not both',out['error'],'the two flags together are named, not the empty name')
+        self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting is unchanged')
 
     def test_a_corrupt_config_is_an_error_the_owner_can_act_on_not_a_traceback(self):
         # review P2: the `language` op read config.json unguarded. It writes the setting, so unlike `prompt` it
