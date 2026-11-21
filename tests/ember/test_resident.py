@@ -4810,7 +4810,7 @@ for line in sys.stdin:
             self.assertIn('price list unavailable (1 in a row)', lines[-1], lines[-1])
 
     def test_a_first_price_load_in_flight_answers_at_once_instead_of_blocking_the_request(self):
-        """#389 review P2: the lock was held across the fetch, and prime() starts the first load exactly when the
+        """The lock was held across the fetch, and prime() starts the first load exactly when the
         relay's port starts answering, so a provider that accepted and stalled kept the first POST blocked for the
         whole fetch instead of getting the prompt 503 it waits out. The fetch now runs outside the lock: a request
         mid-fetch is answered from the table as it is, one loader runs at a time, and the loaded table lands."""
@@ -4874,7 +4874,7 @@ for line in sys.stdin:
         """A failed refresh says nothing about a name the last good table does not price: the provider may have added
         it after that table was fetched, and the retried refresh may price it. refusal() answered None for any name
         once `at` was set, so that name took the caller's 403 (a goal stopped or rerouted) where a 503 would have
-        waited out the backoff (#389 review P2). A loaded table with no failed load behind it still answers None:
+        waited out the backoff. A loaded table with no failed load behind it still answers None:
         a good list not pricing a name is a fact about the model."""
         from caminus.ember import relay
         good = dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2)))])
@@ -4901,7 +4901,7 @@ for line in sys.stdin:
         """The backoff exists so a provider that is down is not hammered. _load stamped `next` from the `now` it read
         BEFORE the fetch (the lock is released across it), so a provider that stalled for longer than the delay left
         `next` in the past and the very next request fetched again: the guard lapsed exactly when the provider was
-        slow (#389 review P2). The clock is kept under the final lock, from a fresh time.time()."""
+        slow. The clock is kept under the final lock, from a fresh time.time()."""
         from caminus.ember import relay
         calls, lines = [], []
         def fetch():
@@ -4923,7 +4923,7 @@ for line in sys.stdin:
     def test_a_model_that_is_not_a_string_is_refused_not_raised_out_of_the_handler(self):
         """`model` comes from a JSON body, so it can be a list or an object. do_POST guarded the table lookup
         (isinstance(model, str)) but not refusal(), whose `model not in self.names` raises TypeError for an
-        unhashable value: the client's connection dropped and no refusal was logged (#389 review P2). Both price
+        unhashable value: the client's connection dropped and no refusal was logged. Both price
         classes answer None for a non-string (the caller's own 403 names it), and the relay answers a body naming
         a list with a 403, not a dropped connection."""
         import urllib.request
@@ -4957,10 +4957,10 @@ for line in sys.stdin:
             stop()
 
     def test_a_name_that_cannot_be_resolved_because_the_list_never_loaded_waits_with_the_file(self):
-        """The PR body's one stated trade-off, asserted directly: with no names loaded (the provider's list never
+        """The one stated trade-off, asserted directly: with no names loaded (the provider's list never
         came back) there is nothing to say a name is a typo, so a name the file does not price yet waits on the
         503 rather than taking the 403 that stops a goal. The alias test reached this only through its pre-load
-        state (#389 review, follow-up)."""
+        state."""
         from caminus.ember import relay
         pf = self.home/('prices-never-listed-'+uuid.uuid4().hex+'.json')
         def fetch():
@@ -5096,7 +5096,7 @@ for line in sys.stdin:
         self.assertIsNone(op.refusal('mistral-larg'), 'a name the list does not know is refused at once, never waited out')
         # a refresh that FAILED leaves the names stale: the owner may have added an alias upstream since the last good
         # load, so a name they do not carry is NOT called a typo (the 403 ends the goal); it takes the 503 wait the
-        # 60 s retry refetches (#389 review P2-1: a new alias during a network drop was refused as a typo)
+        # 60 s retry refetches (a new alias during a network drop was refused as a typo)
         op.names_error, op.names_at = 'OSError: network is down', time.time() - 120
         status, kind, message, wait, local = op.refusal('mistral-larg')
         self.assertEqual((status, kind, local), (503, 'api_error', True), 'a stale list never calls a name a typo')
@@ -5136,7 +5136,7 @@ for line in sys.stdin:
 
     def test_a_refusal_never_names_a_zero_wait_after_the_clock_steps_back(self):
         """A clock step backwards (NTP) leaves a due time in the past: `max(0, ceil(next-now))` was 0, so the 503
-        said Retry-After: 0 and the client retried at once rather than when the next load is due (#389 review P2)."""
+        said Retry-After: 0 and the client retried at once rather than when the next load is due."""
         from caminus.ember import relay
         def boom():
             raise OSError('network is down')
@@ -5153,7 +5153,7 @@ for line in sys.stdin:
     def test_a_header_is_found_whatever_case_the_caller_asks_in(self):
         """`header()` is the case-insensitive lookup a refusal leans on (a plain dict is not, an HTTPMessage is): its
         fallback compared the stored key to the NAME as passed, so a caller passing 'Retry-After' found nothing while
-        'retry-after' worked — a latent trap for the next caller, not a live bug (#389 review P2)."""
+        'retry-after' worked — a latent trap for the next caller, not a live bug."""
         from caminus.ember.resident import model
         self.assertEqual(model.header({'Retry-After': '9'}, 'retry-after'), '9')
         self.assertEqual(model.header({'Retry-After': '9'}, 'Retry-After'), '9')
@@ -5165,7 +5165,7 @@ for line in sys.stdin:
         """The 503 for an unreadable file is the same code either way, so its text carries what the agent (and the
         owner reading the log) cannot otherwise tell: whether the last good table still prices what it priced, that
         the grace dropped it, or that no table was ever read. Saying "dropped" when nothing was ever read, or nothing
-        at all while the table still serves, reads as a file that was just caught mid-rewrite (#389 review P2)."""
+        at all while the table still serves, reads as a file that was just caught mid-rewrite."""
         from caminus.ember import relay
         pf, lines = self.home/('prices-'+uuid.uuid4().hex+'.json'), []
         pf.write_text(json.dumps({'mistral-large-2512': [0.7, 2.1]}))
@@ -5232,7 +5232,7 @@ for line in sys.stdin:
     def test_a_slow_model_list_does_not_block_a_price_the_file_already_has(self):
         """The alias list is a provider HTTPS GET, and get() ran it inside `with self.lock`, the one lock every
         request thread shares: while a provider accepted and stalled, every model the owner's file prices waited for
-        that GET, and so did every request behind it (#389 review P2). It now runs outside the lock, as
+        that GET, and so did every request behind it. It now runs outside the lock, as
         ListPrices._load does: a priced model answers from the table at once, a name the in-flight fetch may yet
         resolve gets the 503 wait rather than the 403 that stops a goal, and a second request for it starts no
         second fetch."""

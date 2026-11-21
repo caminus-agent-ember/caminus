@@ -91,7 +91,7 @@ LOAD_BACKOFF = (10, 30, 60, 300)
 PRICE_FILE_RETRY = 60
 # The shortest wait a refusal names. A clock step backwards (NTP) leaves a due time in the past, and the wait then
 # rounded to 0, so the 503 said `Retry-After: 0` and the client retried at once instead of when the next load is
-# due. A few seconds costs nothing and is still shorter than every real backoff (#389 review P2).
+# due. A few seconds costs nothing and is still shorter than every real backoff.
 PRICE_WAIT_FLOOR = 5
 # Seconds a last good price table outlives the price file becoming unreadable. A file caught mid-rewrite (truncate,
 # then write) must keep pricing the models it priced a moment ago, so the table is not dropped on the first failed
@@ -281,7 +281,7 @@ class ListPrices:
 
         The clock is read here, after the fetch, and never taken from the caller: the backoff and `at` both start
         when the fetch ENDS (a stalled provider's delay must not be already spent). A `now` parameter read before
-        the fetch would say the opposite (#389 review P2). The lock used to be held across the fetch, and `prime()`
+        the fetch would say the opposite. The lock used to be held across the fetch, and `prime()`
         starts the first load exactly when the relay's port starts answering, so a provider that accepted and
         stalled kept the first request blocked for the whole fetch instead of getting the prompt 503 it waits out.
         One loader at a time: a request that arrives mid-fetch is answered from the table as it is, and refusal()
@@ -302,7 +302,7 @@ class ListPrices:
             with self.lock:
                 # the clock starts when the fetch ENDS, not when it began: a provider that accepted and stalled for
                 # longer than the delay left `next` (and `at`) in the past, so the very next request fetched again and
-                # the backoff this change exists for lapsed exactly when the provider was slow (#389 review P2)
+                # the backoff this change exists for lapsed exactly when the provider was slow
                 now = time.time()
                 if err is None:
                     self.table, self.rows, self.at = table, rows, now
@@ -333,7 +333,7 @@ class ListPrices:
         flight is neither: it is a 503 with the short wait, not the 403 that stops the agent's goal.
 
         A refresh that failed is not a fact about the model either: a name the last good table does not price may be
-        one the retried refresh will price, so within its backoff it gets the same 503 and wait (#389 review P2).
+        one the retried refresh will price, so within its backoff it gets the same 503 and wait.
         Only a loaded table with no failed load behind it answers None for an unpriced name (the caller's 403)."""
         with self.lock:
             if not isinstance(model, str):
@@ -408,7 +408,7 @@ class OwnerPrices:
         """One alias-list fetch: the provider's HTTPS GET outside the lock, the swap and the clock under it.
 
         The fetch used to run inside get()'s `with self.lock`, and this class is shared by every request thread, so a
-        provider that accepted and stalled made every price lookup wait for it (#389 review P2). As in
+        provider that accepted and stalled made every price lookup wait for it. As in
         ListPrices._load, one loader runs at a time and a request that arrives mid-fetch answers from the names as
         they are; refusal() says the list is still loading. The clock is read after the fetch, so a stalled
         provider's delay is not already spent when the retry rule is asked again.
@@ -483,7 +483,7 @@ class OwnerPrices:
             if model in self.table or not self.fetch:
                 return self.table.get(model)     # (this returns None only with `error` set when the table never read:
                                                  #  refusal()'s file branch relies on that, it is what makes the
-                                                 #  unreadable file a 503 rather than a plain 403 — #389 review P2-2)
+                                                 #  unreadable file a 503 rather than a plain 403)
             due = self._names_due(model, time.time())
         if due:
             self._load_names()               # (a fetch already in flight returns at once)
@@ -509,19 +509,19 @@ class OwnerPrices:
 
         A non-string model (a JSON list or object, a number) is not a model name and is refused as one: `model in
         self.names` raised TypeError for an unhashable one, out of the handler, and the client's connection dropped
-        with no logged refusal (#389 review P2).
+        with no logged refusal.
 
         A name a CURRENT list (its last refresh succeeded) knows it does not carry is a typo whatever the file is
         doing, so it is refused at once. When the last refresh failed the names it kept may be stale (the owner can
         add an alias upstream), so a name they do not carry waits on the 503 the 60 s retry refetches, never the 403
-        that ends a goal. With the list never loaded there is nothing to compare against: the name waits with the
-        file (the PR body states this trade-off).
+        that ends a goal. With the list never loaded there is nothing to compare against, so the name waits with the
+        file: an alias of a priced model is the likelier reading, and a wait spends nothing.
 
         A name the list DOES carry, whose whole alias group the last good table prices nothing for, is the other way
         round: that read already proved the file does not price it, so a file that has since become unreadable
         changes nothing about this model and the answer is the same 403 a readable file gives. The 503 wait is for a
-        price the file coming back could supply; this one it never had (#389 review P1: an unpriced model was waited
-        on for up to an hour and then ended the goal). An empty table (dropped after the grace), a list that never
+        price the file coming back could supply; this one it never had, and waiting on it ended the caller's goal.
+        An empty table (dropped after the grace), a list that never
         loaded or a list whose last refresh failed still waits: there the price, or the model's place in the list,
         plausibly returns."""
         with self.lock:
@@ -545,28 +545,28 @@ class OwnerPrices:
                 tail = 'the owner re-reads it on change, no restart, so retry in %ds'
                 if self.table and self.error_at:
                     # the last good table still serves (the grace is not over): say so, or the 503 reads as if
-                    # nothing were priced and the agent cannot tell how long what it has still holds (#389 review P2)
+                    # nothing were priced and the agent cannot tell how long what it has still holds
                     left = math.ceil(PRICE_FILE_GRACE - (time.time() - self.error_at))
                     if left > 0:
                         what += ('; the last good table still prices what it priced, for %ds more unreadable'
                                  % left)
                 elif self.dropped:
                     # the grace has passed: the last good table is gone. Say so, or the 503 reads as a file that
-                    # was just caught mid-rewrite however long the relay has been refusing (#389 review P2).
+                    # was just caught mid-rewrite however long the relay has been refusing.
                     what += ('; the last good table was dropped after %d s unreadable'
                              % PRICE_FILE_GRACE)
                     tail = 'nothing is priced until the file is back; retry in %ds'
                 elif not self.table and self.error_at:
                     # nothing is priced and nothing was dropped: the file has never read (missing since the relay
                     # started) or it read as an empty table. Name that rather than the grace, which had nothing to
-                    # drop, so the 503 says where it stands (#389 review P2: the wording)
+                    # drop, so the 503 says where it stands
                     what += '; no price table is loaded'
                     tail = 'nothing is priced until the file is readable; retry in %ds'
                 return _cannot_price(what, model, PRICE_FILE_RETRY, tail)
             if self.fetch and self.names_loading and not self.names and not self.names_error:
                 # the first fetch is still in flight (it runs outside the lock, so get() answered None from the names
                 # as they are): the name may be an alias of a priced model. A 503 with the short wait, as
-                # ListPrices.refusal does, never the 403 that stops a goal (#389 review P2).
+                # ListPrices.refusal does, never the 403 that stops a goal.
                 return _cannot_price('the price list is still loading', model, LOAD_BACKOFF[0])
             if self.fetch and self.names_error and model not in self.names:
                 wait = max(PRICE_WAIT_FLOOR, math.ceil(60 - (time.time() - self.names_at)))
