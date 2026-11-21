@@ -2810,6 +2810,35 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_a_store_error_during_the_drift_check_loses_the_event_not_the_turn(self):
+        # review P2: check() ran three event queries and the insert with no guard, after the reply was already
+        # recorded and before the inbox write, so a locked db or a schema drift raised out of runtime._tick and the
+        # turn died mid-tool-call. owner() already treats sqlite3.Error as tolerable; check() now does too: the
+        # event is lost for that turn and the next one detects the drift again, which beats a dead turn.
+        import sqlite3
+        import types
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        real=rt.store
+        def boom(*a,**k):
+            raise sqlite3.Error('database is locked')
+        try:
+            gid=real.enqueue('Open the pull request against ember-next.')
+            rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=boom)
+            self.assertEqual(language.check(rt,gid,zh),'','a locked store is no nudge, not an exception')
+            rt.store=types.SimpleNamespace(db=real.db,event=boom)   # (the queries read, the insert is refused)
+            self.assertEqual(language.check(rt,gid,zh),'','a refused insert is no nudge either')
+            rt.store=real
+            self.assertEqual([r[0] for r in real.db.execute(
+                "SELECT COUNT(*) FROM events WHERE goal=? AND kind='language_drift'",(gid,))],[0],
+                'neither failed call wrote an event')
+            self.assertIn('Reply in English',language.check(rt,gid,zh),
+                          'the next turn with a working store detects the drift again')
+        finally:
+            rt.store=real
+            rt.mail.close();rt.store.close()
+
     def test_an_empty_language_setting_is_refused_instead_of_silently_ignored(self):
         # review P2: `--to ''` is falsy, so it skipped both writes and printed a derived answer while an old
         # `language` key stayed in config.json, disagreeing with the display.

@@ -313,13 +313,20 @@ def check(rt, gid, text, cfg=None, due=True):
     # as a goal drifted 32 more times, and the cadence then fired again early (review P2). Ask SQLite for the
     # maximum seq with json_extract, which is how other event data is read here; a runtime attribute would be
     # lost on the daemon's restart, and the log is already the record.
-    last = rt.store.db.execute("SELECT MAX(seq) FROM events WHERE goal=? AND kind='language_drift' AND "
-                               "json_extract(data,'$.nudged')=1", (gid,)).fetchone()[0]
-    since = rt.store.db.execute("SELECT COUNT(*) FROM events WHERE goal=? AND kind='assistant' AND seq>?",
-                                (gid, last or 0)).fetchone()[0]
-    nudge = due and (last is None or since >= DRIFT_EVERY)
-    rt.store.event('language_drift', dict(script=script, language=who['name'], share=round(share, 3),
-                                          brain=sim.brain(sim.serving(rt, cfg)), nudged=nudge), gid)
+    try:
+        last = rt.store.db.execute("SELECT MAX(seq) FROM events WHERE goal=? AND kind='language_drift' AND "
+                                   "json_extract(data,'$.nudged')=1", (gid,)).fetchone()[0]
+        since = rt.store.db.execute("SELECT COUNT(*) FROM events WHERE goal=? AND kind='assistant' AND seq>?",
+                                    (gid, last or 0)).fetchone()[0]
+        nudge = due and (last is None or since >= DRIFT_EVERY)
+        rt.store.event('language_drift', dict(script=script, language=who['name'], share=round(share, 3),
+                                              brain=sim.brain(sim.serving(rt, cfg)), nudged=nudge), gid)
+    except sqlite3.Error:
+        # a locked db or a schema drift here raises inside runtime._tick right after the reply was recorded and
+        # before the inbox write, so the turn dies mid-tool-call; owner() above already treats an unreadable store
+        # as tolerable, and a drift event lost this turn is re-detected on the next one, not worth a dead turn
+        # (review P2)
+        return ''
     if not nudge:
         return ''
     return ("Reply in %s, the owner's language: your last reply came out mostly in another script (%s)."
