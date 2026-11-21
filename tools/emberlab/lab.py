@@ -173,8 +173,11 @@ def main(argv=None):
                    help="run a brain billed through the owner's relay (the plan names it first)")
     p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
     p.add_argument('--unsafe-free', action='store_true', help='the same, named for an unattended run')
-    p.add_argument('--prediction-error', help='where the prediction was wrong (filled after the fact is too late; '
-                                             'leave it for the review)')
+    p.add_argument('--prediction-error', help='where the prediction was wrong, filled in after the run; a review '
+                                             'says whether the miss is understood, so leave it empty unless it is - '
+                                             "sim.observe treats a non-empty value as the record's final answer on "
+                                             'why the prediction missed and the log is append-only, so a typo is '
+                                             'permanent')
     p.add_argument('--goal', help="the goal id the observation lives in (default: the record's)")
 
     p = sub.add_parser('open')

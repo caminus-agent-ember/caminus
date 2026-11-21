@@ -199,7 +199,9 @@ python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
   `incomplete` (a brain with no run of one arm) leaves the record open.
 - **One folder, one experiment.** `--out` records the arms (checkout, commit, tree state, config, env) and the plan
   (suite, brains, `--only`, repeats), and a rerun that differs in any of them is refused: run ids carry no record id,
-  so a shared folder would reuse the other experiment's rows.
+  so a shared folder would reuse the other experiment's rows. The checkouts are recorded as given, so an
+  `--arm-checkout` under your home leaves that absolute path in `arms.json`: keep an `--out` folder private unless
+  the paths in it are ones you would publish.
 - **The exit code.** `propose` exits 0 when the verdict is `better across the board` or `no difference`, and 1 when
   it is `worse for ...` or another verdict (a script can gate on it); a run that errored, a refusal and a usage
   error exit non-zero and leave the record open.
