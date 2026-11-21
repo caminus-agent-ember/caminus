@@ -2770,6 +2770,64 @@ for line in sys.stdin:
         self.assertIsNone(language.drift('```\n\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002\n```',('Latin',)),
                           'a fenced block is still not prose')
 
+    def test_the_floor_decision_reads_the_owners_own_units_not_the_total(self):
+        # review P2: the mixed-shape floor tested the reply's total, so a mostly-Chinese reply whose only
+        # owner-script units were ONE borrowed token ("文件在 ok": three Han and one `ok`) passed both floors and
+        # was never held. The decision is on the owner's own units: 0 or 1 -> the whole-reply floor, 2+ -> the
+        # mixed floor. The table pins the verdict for each shape so a later edit cannot regroup the rule.
+        from caminus.ember.resident import language
+        cases = [
+            # (reply, owner scripts, expected, why)
+            ('\u6587\u4ef6', ('Latin',), None, 'two units, a fragment, under the whole floor'),
+            ('\u597d', ('Latin',), None, 'one unit cannot name a language'),
+            ('\u6587\u4ef6\u5728', ('Latin',), ('Han', 1.0), 'three units, none the owner\'s: whole floor met'),
+            ('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002', ('Latin',), ('Han', 1.0), 'five units, none the owner\'s'),
+            ('\u6587\u4ef6\u5728 ok', ('Latin',), ('Han', .75), 'one borrowed owner unit does not buy the mixed floor'),
+            ('ok \u6587\u4ef6', ('Latin',), None, 'two owner units are content: the mixed floor holds it'),
+            ('\u6587\u4ef6 missing', ('Latin',), None, 'two owner units, four units total: held'),
+            ('Is \u5df2\u5b8c\u6210 right?', ('Latin',), None, 'two owner units, five total: held'),
+            ('\u6587\u4ef6\u5728 is here now', ('Latin',), None, 'share is exactly .5: not a strict majority'),
+            ('ok \u597d\u7684', ('Latin',), None, 'share is exactly .5 even with one owner unit'),
+        ]
+        for text, scripts, expected, why in cases:
+            self.assertEqual(language.drift(text, scripts), expected, '%s: %r' % (why, text))
+        # the two shapes the earlier rounds fixed must survive this table
+        self.assertEqual(language.drift('\u597d\u7684\u3002\u8bf7\u68c0\u67e5 branch: pr-390-fix.', ('Latin',)),
+                         ('Han', .625), 'a short mixed reply with a borrowed clause is still a drift')
+        self.assertIsNone(language.drift('I pushed the branch and opened the pull request, please review it.',
+                                         ('Han',)), 'the reverse direction is held by the same floor')
+
+    def test_a_deleted_goal_does_not_leave_a_stale_language_cached(self):
+        # review P2: `owner` cached on COUNT(*) FROM goals, so deleting one goal and adding another kept the
+        # count while the first-8 window changed, and the cached language outlived the goals that produced it
+        # (`agent language` reads the window uncached and disagreed). The key is the window's own ids.
+        from caminus.ember.resident import language
+        rt = Runtime(self.home)
+        try:
+            en = 'Fix the failing push step and open the pull request against ember-next.'
+            for _ in range(7):
+                rt.store.enqueue(en)
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'], 'English',
+                             'seven Latin goals and one Chinese: the prefix names no language')
+            key = rt._language_owner[0]
+            self.assertEqual(len(key), 8, 'the cache key is the whole window, not its size')
+            ids = [r['id'] for r in rt.store.db.execute(
+                'SELECT id FROM goals ORDER BY created, id LIMIT 8')]
+            for gid in ids[:7]:                         # (replace seven, keep the count at eight)
+                rt.store.db.execute('DELETE FROM goals WHERE id=?', (gid,))
+            for _ in range(7):
+                rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                                 '\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(rt.store.db.execute('SELECT COUNT(*) FROM goals').fetchone()[0], 8,
+                             'the goal count is unchanged: a count key cannot see this')
+            self.assertEqual(language.owner(rt)['name'], 'Chinese',
+                             'the window changed under the same count: re-derive, do not serve the cache')
+            self.assertEqual(language.from_home(self.home)['name'], 'Chinese',
+                             'the CLI agrees with the turn after the window changed')
+        finally:
+            rt.mail.close(); rt.store.close()
+
     def test_a_nudge_is_not_forgotten_by_a_long_run_of_drifting_replies(self):
         # review P2: the last nudged drift was found in a LIMIT 32 window of the newest drifts, so a goal that
         # drifted 32 more times since its nudge lost it; `last` became None and `since` counted every assistant
@@ -3002,7 +3060,7 @@ for line in sys.stdin:
             again=language.owner(rt)
             self.assertEqual((first['name'],first['source']),('Chinese','your goals'),'the goal names Chinese')
             self.assertEqual(again,first,'a restart re-derives the same name, scripts and source')
-            self.assertEqual(getattr(rt,'_language_owner',(None,None))[1],first,'the answer is cached by goal count')
+            self.assertEqual(getattr(rt,'_language_owner',(None,None))[1],first,'the answer is cached by window')
             self.assertEqual(language.from_home(self.home),first,'the CLI reads the same name as the turn')
         finally:
             rt.mail.close();rt.store.close()

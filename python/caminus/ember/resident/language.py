@@ -139,12 +139,15 @@ def drift(text, scripts):
     them would nudge a correct Chinese reply back to Chinese. A clause that is entirely in another script is
     still the reply switching, so a real drift is caught.
 
-    The floor depends on which shape the reply is: a reply that also has units in the owner's script is held to
-    MIN_UNITS, because a word or a path in another script is not a language ("ok", `文件 missing`); a reply
-    with none of the owner's units at all is another language from WHOLE_MIN_UNITS on ("好的。完成了。" is 5, and
-    a bare two-character path like `文件` is a fragment, not a reply: review P2).
-    One floor for both let an English owner's short Chinese confirmations pass unheld forever, however many
-    arrived (review P2).
+    The floor depends on how many of the owner's own units the reply has, not on the reply's total size: one
+    unit of the owner's script in an otherwise-foreign reply is a borrowed term (`ok`, a `git push`), so the
+    whole-reply floor WHOLE_MIN_UNITS applies and two of them do not buy the larger one; two or more are
+    content, so a word or a path in another script is not a language ("ok", `文件 missing`) and MIN_UNITS holds
+    it. A reply with none of the owner's units at all is another language from WHOLE_MIN_UNITS on
+    ("好的。完成了。" is 5, and a bare two-character path like `文件` is a fragment, not a reply: review P2).
+    One floor for both shapes let an English owner's short Chinese confirmations pass unheld forever, however
+    many arrived (review P2); keying the mixed floor on the total let a reply like "文件在 ok" (three Han units
+    and one borrowed `ok`) pass both (review P2).
     """
     if any(s in SPACELESS for s in (scripts or ())):
         text = _without_borrowed(text, scripts)
@@ -152,9 +155,8 @@ def drift(text, scripts):
     if not scripts:
         return None
     other = total - sum(per.get(s, 0) for s in scripts)
-    # (parenthesised: `and` binds tighter than `or`, and the three conditions encode the review-fix history - a
-    # later edit must not regroup them by accident, #390 review)
-    if not other or (other == total and other < WHOLE_MIN_UNITS) or (other < total and total < MIN_UNITS):
+    own = total - other
+    if not other or other < WHOLE_MIN_UNITS or (own >= 2 and total < MIN_UNITS):
         return None
     if other / total <= OTHER_SHARE:
         return None
@@ -248,7 +250,7 @@ def derive(prompts):
 
 # Created order, never `position`: a queue reorder rewrites `position` (store.queue_move), and the corpus
 # a session derives its language from must not change under the owner, the CLI or a restart for that reason.
-_GOALS = 'SELECT prompt FROM goals ORDER BY created, id LIMIT 8'
+_GOALS = 'SELECT id, prompt FROM goals ORDER BY created, id LIMIT 8'
 
 
 def owner(rt):
@@ -256,7 +258,9 @@ def owner(rt):
 
     `derive` is a pure function of the goal window and the window is created order, so this answer cannot drift
     between a turn, the CLI (`from_home`) and a restart; the cache below is an optimisation, not a second
-    opinion, and is keyed by the goal count so a short first goal does not pin the session before one names it.
+    opinion, and is keyed by the window's own goal ids, not its size, so a short first goal does not pin the
+    session before one names it and a goal deleted and another added keeps the cache honest (review P2: a count
+    key served a language derived from a window that no longer exists).
     Neither cache lives in config: the setting is `--to`, and a derived name that were written there would be
     a pin `--auto` could not drop.
     """
@@ -264,19 +268,15 @@ def owner(rt):
     if name:
         return named(name, 'config')
     try:
-        count = rt.store.db.execute('SELECT COUNT(*) FROM goals').fetchone()[0]
+        rows = list(rt.store.db.execute(_GOALS))
+        key = tuple(r['id'] for r in rows)
     except sqlite3.Error:
-        count = None
+        return named(DEFAULT, 'default')            # a store error is not an answer to cache
     cache = getattr(rt, '_language_owner', None)
-    if cache and count is not None and cache[0] == count:
+    if cache and cache[0] == key:
         return cache[1]
-    try:
-        prompts = [r['prompt'] for r in rt.store.db.execute(_GOALS)]
-    except sqlite3.Error:
-        prompts = []
-    who = derive(prompts) or named(DEFAULT, 'default')
-    if count is not None:
-        rt._language_owner = (count, who)
+    who = derive([r['prompt'] for r in rows]) or named(DEFAULT, 'default')
+    rt._language_owner = (key, who)
     return who
 
 
@@ -301,7 +301,8 @@ def from_home(home):
         try:
             db = sqlite3.connect('file:%s?mode=ro' % urllib.parse.quote(str(store)), uri=True)
             try:
-                prompts = [r[0] for r in db.execute(_GOALS)]
+                db.row_factory = sqlite3.Row
+                prompts = [r['prompt'] for r in db.execute(_GOALS)]
             finally:
                 db.close()
         except sqlite3.Error:
