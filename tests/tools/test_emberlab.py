@@ -347,6 +347,68 @@ check(p.returncode != 0 and 'fresh --out' in (p.stderr + p.stdout) and 'commit' 
       and proposal.load_record(ph, r5['id'])['status'] != 'observed',
       f'propose: a folder whose checkout moved is refused and the record stays open ({p.returncode}; '
       f'{(p.stderr + p.stdout)[-300:]})')
+# a record closed while the arms ran is not observed a second time: the resident's own `_record` refuses it inside
+# the same transaction as the append (verified: with the unfixed code the refusal surfaced as a ValueError
+# traceback), so the command reports it as a refusal and keeps the runs (#385 review P2)
+r9 = sim_record(ph, status='proposed')
+sim, store, rt = proposal._open(ph)
+try:
+    sim.observe(rt, 'g-propose', r9['id'], 'closed by the resident while the arms ran')
+finally:
+    store.close()
+try:
+    proposal.write_observation(ph, r9['id'], 'the lab measured it')
+    err9 = ''
+except (SystemExit, ValueError) as e:
+    err9 = str(e)
+newest = proposal.load_record(ph, r9['id'])
+check('not closed' in err9 and 'already observed' in err9 and newest['status'] == 'observed'
+      and newest['observed'] == 'closed by the resident while the arms ran',
+      f'propose: a record closed during the runs is not observed twice, and says so ({err9[:200]}; '
+      f'{newest.get("observed")!r})')
+# the folder's identity is created once, exclusively: a concurrent command that finds arms.json compares instead of
+# rewriting it, so the last writer cannot win over the first (#385 review P2)
+cf = S / 'claim'
+cf.mkdir(parents=True, exist_ok=True)
+spec_a = dict(arms={'base': dict(checkout='a', commit='1', dirty=False, config={}, env={}),
+                    'arm': dict(checkout='b', commit='2', dirty=False, config={}, env={})},
+              plan=dict(suite='basic', brains=['scripted:solve'], only=[], repeats=1))
+spec_b = json.loads(json.dumps(spec_a))
+spec_b['arms']['arm']['commit'] = '3'
+why = proposal.claim_folder(cf / 'arms.json', spec_a)
+(cf / 'arms.json').write_text(json.dumps(spec_a, indent=2))     # as another writer would have left it
+first = (cf / 'arms.json').read_text()
+why2 = proposal.claim_folder(cf / 'arms.json', spec_b)
+why3 = proposal.claim_folder(cf / 'arms.json', spec_a)
+check(why == '' and why2 and 'commit' in why2 and why3 == '' and (cf / 'arms.json').read_text() == first,
+      f'propose: the first command to create arms.json owns it, the second compares instead of rewriting '
+      f'({why!r}, {why2!r}, {why3!r})')
+# the documented exit code: 1 on a `worse` verdict, and the record is still observed (docs/dev/ember.md)
+worse = S / 'propose-worse'
+r10 = sim_record(ph, status='proposed')
+ns2 = argparse.Namespace(sim_home=str(ph), record=r10['id'], suite='basic', brain=['scripted:solve'], repeats=1,
+                         only='read', host=None, jobs=1, parallel=None, out=str(worse),
+                         config='{"sim": false}', env=None, base_config=None, base_env=None,
+                         arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
+                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+
+
+def worse_run(runs):
+    """`lab.py run` with an arm that passes less than base: report.compare's verdict is `worse`."""
+    rows = [dict(id='read.scripted-solve.base.r1', brain='scripted:solve', arm='base', task='read', repeat=1,
+                 check=True),
+            dict(id='read.scripted-solve.arm.r1', brain='scripted:solve', arm='arm', task='read', repeat=1,
+                 check=False)]
+    (worse / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    return 0
+
+
+try:
+    code = proposal.cmd_propose(ns2, worse_run)
+except SystemExit as e:
+    code = str(e)
+check(code == 1 and proposal.load_record(ph, r10['id'])['status'] == 'observed',
+      f'propose: a `worse` verdict exits 1 and still closes the record ({code!r})')
 
 # ---- tui
 if shutil.which('tmux'):

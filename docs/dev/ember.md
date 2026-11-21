@@ -200,6 +200,9 @@ python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
 - **One folder, one experiment.** `--out` records the arms (checkout, commit, tree state, config, env) and the plan
   (suite, brains, `--only`, repeats), and a rerun that differs in any of them is refused: run ids carry no record id,
   so a shared folder would reuse the other experiment's rows.
+- **The exit code.** `propose` exits 0 when the verdict is `better across the board` or `no difference`, and 1 when
+  it is `worse for ...` or another verdict (a script can gate on it); a run that errored, a refusal and a usage
+  error exit non-zero and leave the record open.
 
 **Work with the agent.** A lab session is a resident with its daemon running, in its own home:
 

@@ -28,6 +28,7 @@ tree plus the change, and the diff between the two arms is then only that change
 """
 from pathlib import Path
 import json
+import os
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -65,11 +66,21 @@ def load_record(home, rid):
 
 
 def write_observation(home, rid, observed, eval_context='', prediction_error='', goal=None):
-    """Append the outcome to the record the arms measured: one new version, status 'observed'."""
+    """Append the outcome to the record the arms measured: one new version, status 'observed'.
+
+    The "a closed record stays closed" rule is the resident's own, and it already holds across the race: `observe`
+    reads the newest version and appends in one `_atomic` transaction (`BEGIN IMMEDIATE`), and `_record` refuses a
+    version of an already-observed record. So a resident that closes the record while the arms run is not raced
+    over; what the command owes is to report that refusal as one, not as a traceback (#385 review P2).
+    """
     sim, store, rt = _open(home)
     try:
-        return sim.observe(rt, goal, rid, observed, eval_context, prediction_error,
-                           cfg=dict(model='emberlab', provider='', effort=''))
+        try:
+            return sim.observe(rt, goal, rid, observed, eval_context, prediction_error,
+                               cfg=dict(model='emberlab', provider='', effort=''))
+        except ValueError as e:
+            # the record was closed (or removed) between the plan and the runs: say which, and leave it as it is
+            raise SystemExit(f'the runs are kept but the record is not closed: {e}')
     finally:
         store.close()
 
@@ -133,6 +144,28 @@ def arms_mismatch(prior, spec):
         for k in PLAN_KEYS:
             if pp.get(k) != sp.get(k):
                 return f'plan: {k} was {pp.get(k)!r}, this run is {sp.get(k)!r}'
+    return ''
+
+
+def claim_folder(arms_file, spec):
+    """Make `arms_file` this experiment's, or say why the folder already holds another.
+
+    The create is exclusive (`O_CREAT|O_EXCL`): two `propose` commands starting at once into one `--out` would both
+    read the same absent file and both write it, last writer wins, and the shared `results.jsonl` would then hold
+    both experiments' rows by id — the reuse bug the plan check closes for the sequential case (#385 review P2).
+    An existing file is only read, never rewritten: the folder's identity is written once.
+    """
+    data = json.dumps(spec, indent=1)
+    try:
+        fd = os.open(str(arms_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        try:
+            prior = json.loads(arms_file.read_text())
+        except ValueError:
+            return f'{arms_file} is not JSON: use a fresh --out'
+        return arms_mismatch(prior, spec)
+    with os.fdopen(fd, 'w') as f:
+        f.write(data)
     return ''
 
 
@@ -232,20 +265,15 @@ def cmd_propose(a, run):
         return 0
     out.mkdir(parents=True, exist_ok=True)
     arms_file = out / 'arms.json'
-    # the folder holds one experiment: the arms AND the plan that reads their rows (suite, brains, tasks, repeats)
+    # the folder holds one experiment: the arms AND the plan that reads their rows (suite, brains, tasks, repeats),
+    # and the first of two concurrent commands to create arms.json owns it (a run id is task.brain.arm.rN, so a
+    # shared folder would reuse the other experiment's rows by id)
     spec = arms_spec(arms, dict(suite=suite['name'], brains=sorted(b.label() for b in brains), only=sorted(only),
                                 repeats=a.repeats))
-    if arms_file.exists():
-        # a run id is task.brain.arm.rN: two experiments sharing a folder would reuse each other's rows by id
-        try:
-            prior = json.loads(arms_file.read_text())
-        except ValueError:
-            raise SystemExit(f'{arms_file} is not JSON: use a fresh --out')
-        why = arms_mismatch(prior, spec)
-        if why:
-            raise SystemExit(f'{out} holds a different experiment ({why}): use a fresh --out (a shared folder '
-                             "would reuse the other experiment's rows by id)")
-    arms_file.write_text(json.dumps(spec, indent=1))
+    why = claim_folder(arms_file, spec)
+    if why:
+        raise SystemExit(f'{out} holds a different experiment ({why}): use a fresh --out (a shared folder '
+                         "would reuse the other experiment's rows by id)")
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
     runs = type('Run', (), dict(suite=a.suite, brain=list(a.brain), arm=None, arms=str(arms_file), out=str(out),
                                 repeats=a.repeats, only=a.only, host=a.host,
