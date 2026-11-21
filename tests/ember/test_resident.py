@@ -5077,6 +5077,31 @@ for line in sys.stdin:
         finally:
             stop()
 
+    def test_a_flap_re_reads_the_table_so_the_grace_counts_from_the_last_good_read(self):
+        """A file that is unreadable, readable once, then unreadable again must not leave the OLD table serving for
+        two graces. The flap's request re-reads the file (a failure leaves mtime None, so any stat differs and the
+        table is replaced), and that good read clears error_at: the next failed read starts a new streak, and the
+        table it can drop is the one the flap just read. So what serves while the file is unreadable was real when
+        it was read, and it is dropped one grace after that read, never two."""
+        from caminus.ember import relay
+        pf, lines = self.home/('prices-'+uuid.uuid4().hex+'.json'), []
+        pf.write_text(json.dumps({'open-mistral-4': [0.4, 2.0]}))
+        op = relay.OwnerPrices(str(pf), lines.append)
+        self.assertEqual(op.get('open-mistral-4'), (0.4, 2.0, 0.4))
+        pf.unlink()                                          # (unreadable: the first streak begins)
+        self.assertEqual(op.get('open-mistral-4'), (0.4, 2.0, 0.4), 'the last good table still serves')
+        first = op.error_at
+        self.assertTrue(first)
+        op.error_at -= relay.PRICE_FILE_GRACE + 1            # (this streak alone would be past the grace)
+        pf.write_text(json.dumps({'open-mistral-4': [0.9, 3.0]}))   # (readable once: the flap)
+        self.assertEqual(op.get('open-mistral-4'), (0.9, 3.0, 0.9), 'the flap re-reads the file, not the old table')
+        self.assertEqual(op.error_at, 0.0, 'a good read ends the streak')
+        pf.unlink()                                          # (unreadable again: a NEW streak)
+        self.assertEqual(op.get('open-mistral-4'), (0.9, 3.0, 0.9), 'one grace from the flap read, not the old table')
+        self.assertGreater(op.error_at, first, 'the grace counts from the last good read, not the first failure')
+        op.error_at -= relay.PRICE_FILE_GRACE + 1
+        self.assertIsNone(op.get('open-mistral-4'), 'past the grace from the last good read the table is dropped')
+
     def test_a_name_the_model_list_does_not_know_fails_at_once_even_with_the_price_file_missing(self):
         """The wait a missing price file asks for is about the FILE; a name the provider's own list does not carry is
         about the MODEL. Waiting up to an hour on a 503 (busy, retry) for a typo hides it, so the list's answer is
