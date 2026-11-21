@@ -293,6 +293,10 @@ class ListPrices:
                 # escaping here dropped the client's connection (the price list was simply never loaded)
                 err = e
             with self.lock:
+                # the clock starts when the fetch ENDS, not when it began: a provider that accepted and stalled for
+                # longer than the delay left `next` (and `at`) in the past, so the very next request fetched again and
+                # the backoff this change exists for lapsed exactly when the provider was slow (#389 review P2)
+                now = time.time()
                 if err is None:
                     self.table, self.rows, self.at = table, rows, now
                     self.tries, self.next, self.error = 0, 0.0, ''
@@ -322,6 +326,8 @@ class ListPrices:
         a good list does not price is a fact about the model, a list that never loaded is not. A first load still in
         flight is neither: it is a 503 with the short wait, not the 403 that stops the agent's goal."""
         with self.lock:
+            if not isinstance(model, str):
+                return None                  # (not a model name: the caller refuses it; `model in self.table` needs a key)
             if self.at:
                 return None
             if self.loading and not self.error:
@@ -439,10 +445,16 @@ class OwnerPrices:
         transient as a list that has not loaded. Only a model that is not priced is asked at all (do_POST asks this
         after get() answered None), and the file is re-read on the next request, so the wait named is the agent's.
 
+        A non-string model (a JSON list or object, a number) is not a model name and is refused as one: `model in
+        self.names` raised TypeError for an unhashable one, out of the handler, and the client's connection dropped
+        with no logged refusal (#389 review P2).
+
         A name the provider's list knows it does not carry is a typo whatever the file is doing, so it is refused at
         once even when the last refresh failed (a list that loaded once keeps its names). With the list never loaded
         there is nothing to compare against: the name waits with the file (the PR body states this trade-off)."""
         with self.lock:
+            if not isinstance(model, str):
+                return None                  # (the caller's own 403 names the model; do_POST guards every table lookup)
             if self.names and model not in self.names:
                 # the file's absence says nothing about a NAME, the provider's own list does: a name that list does
                 # not know is a typo, and waiting an hour on a 503 for it hides that. Refused at once (the caller's
@@ -597,12 +609,14 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         model, ', '.join(sorted(models)), hint))
                 row = None
             else:
+                # (both the table lookup and refusal() read the model as a key: a JSON list or object in `model` is
+                # a TypeError out of the handler, and the client's connection dropped with no refusal logged)
                 rates = prices.get(model) if isinstance(model, str) else None
                 if rates is None:
                     # a price table that could not be read, or a list that has not loaded, is not a fact about the
                     # model: it says so, and whether to wait, instead of the 'no price' that stops the agent's goal
                     why = getattr(prices, 'refusal', None)
-                    better = why(model) if why else None
+                    better = why(model) if why and isinstance(model, str) else None
                     if better:
                         return self.refuse(*better)
                     return self.refuse(403, 'permission_error', 'no price for %r: it cannot be metered%s' % (

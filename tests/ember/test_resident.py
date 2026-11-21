@@ -4870,6 +4870,84 @@ for line in sys.stdin:
         self.assertEqual(len(calls), 2, 'a refresh that failed is not retried on every request')
         self.assertTrue(any('price list unavailable (1 in a row)' in l for l in lines), lines)
 
+    def test_a_stalled_price_fetch_stamps_its_backoff_when_it_ends_not_when_it_began(self):
+        """The backoff exists so a provider that is down is not hammered. _load stamped `next` from the `now` it read
+        BEFORE the fetch (the lock is released across it), so a provider that stalled for longer than the delay left
+        `next` in the past and the very next request fetched again: the guard lapsed exactly when the provider was
+        slow (#389 review P2). The clock is kept under the final lock, from a fresh time.time()."""
+        from caminus.ember import relay
+        calls, lines = [], []
+        def fetch():
+            calls.append(1)
+            time.sleep(0.6)                                  # (a provider that accepts and stalls)
+            raise OSError('stalled out')
+        prices = relay.ListPrices(lines.append, fetch, backoff=(0.3,))
+        self.assertIsNone(prices.get('zai-org/GLM-5.2'))     # (the failed load is the whole call)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(prices.get('zai-org/GLM-5.2'), 'inside the backoff: no second fetch')
+        self.assertEqual(len(calls), 1, 'a fetch slower than the delay does not erode its own backoff')
+        status, kind, why, wait, local = prices.refusal('zai-org/GLM-5.2')
+        self.assertEqual((status, kind, local), (503, 'api_error', True))
+        self.assertGreater(wait, 0, 'the 503 names the wait it just earned, not 0')
+        time.sleep(0.4)
+        self.assertIsNone(prices.get('zai-org/GLM-5.2'))
+        self.assertEqual(len(calls), 2, 'once the delay is over the load runs again')
+
+    def test_a_model_that_is_not_a_string_is_refused_not_raised_out_of_the_handler(self):
+        """`model` comes from a JSON body, so it can be a list or an object. do_POST guarded the table lookup
+        (isinstance(model, str)) but not refusal(), whose `model not in self.names` raises TypeError for an
+        unhashable value: the client's connection dropped and no refusal was logged (#389 review P2). Both price
+        classes answer None for a non-string (the caller's own 403 names it), and the relay answers a body naming
+        a list with a 403, not a dropped connection."""
+        import urllib.request
+        from caminus.ember import relay
+        listed = dict(data=[dict(id='mistral-large-2512', aliases=['mistral-large-latest'])])
+        op = relay.OwnerPrices(str(self.home/'no-such-prices.json'), lambda m: None, fetch=lambda: listed)
+        op.get('mistral-large-latest')                       # (the file failed and the names loaded: the exact path)
+        self.assertTrue(op.names and op.error)
+        for m in (['x'], {'a': 1}, 5, True, None):
+            self.assertIsNone(op.refusal(m), m)
+        self.assertEqual(op.refusal('mistral-large-latest')[0], 503, 'a name still waits with the file')
+        lp = relay.ListPrices(lambda m: None, lambda: dict(data=[]), backoff=(300,))
+        self.assertIsNone(lp.get('m'))
+        self.assertTrue(lp.error)
+        for m in (['x'], {'a': 1}):
+            self.assertIsNone(lp.refusal(m), m)
+        self.assertEqual(lp.refusal('m')[0], 503)
+        ok = json.dumps(dict(choices=[dict(message=dict(content='hi'), finish_reason='stop')],
+                             usage=dict(prompt_tokens=1, completion_tokens=1))).encode()
+        base, calls, ledger, log, stop = self._relay('deepinfra', lambda c: (200, ok, 'application/json'), cap=5.0)
+        try:
+            req = urllib.request.Request(base + '/v1/openai/chat/completions',
+                                         json.dumps(dict(model=['x'], messages=[])).encode(),
+                                         {'Content-Type': 'application/json'})
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(caught.exception.code, 403, 'a non-string model is a refused request, not a dropped one')
+            self.assertIn(b'no price for', caught.exception.read())
+            self.assertEqual(calls, [], 'nothing forwarded')
+        finally:
+            stop()
+
+    def test_a_name_that_cannot_be_resolved_because_the_list_never_loaded_waits_with_the_file(self):
+        """The PR body's one stated trade-off, asserted directly: with no names loaded (the provider's list never
+        came back) there is nothing to say a name is a typo, so a name the file does not price yet waits on the
+        503 rather than taking the 403 that stops a goal. The alias test reached this only through its pre-load
+        state (#389 review, follow-up)."""
+        from caminus.ember import relay
+        pf = self.home/('prices-never-listed-'+uuid.uuid4().hex+'.json')
+        def fetch():
+            raise OSError('the model list is down')
+        op = relay.OwnerPrices(str(pf), lambda m: None, fetch=fetch)
+        self.assertIsNone(op.get('mistral-large-latest'))
+        self.assertEqual(op.names, {}, 'no list ever loaded: nothing to compare the name against')
+        self.assertTrue(op.names_error and op.error, 'both the file and the list are unreadable')
+        status, kind, why, wait, local = op.refusal('mistral-large-latest')
+        self.assertEqual((status, kind, local), (503, 'api_error', True))
+        self.assertIn('cannot read its price file', why, 'the file is what the name waits with')
+        self.assertEqual(op.refusal('mistral-larg')[0], 503,
+                         'a typo cannot be told from an alias here, so it waits too (the trade-off, stated)')
+
     def test_the_relay_serves_a_priced_request_once_a_later_price_load_succeeds(self):
         """The issue's test, through the relay: the first POST meets a list that has not loaded (503, Retry-After,
         nothing forwarded); the next, after the retry window, is priced and metered, with no restart."""
