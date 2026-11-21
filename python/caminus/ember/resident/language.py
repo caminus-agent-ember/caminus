@@ -36,7 +36,7 @@ from . import sim
 
 DEFAULT = 'English'
 MIN_UNITS = 6          # fewer units than this cannot name a language: "ok", a path, a one-word reply
-WHOLE_MIN_UNITS = 2    # a reply with none of the owner's units at all is another language from the first word pair
+WHOLE_MIN_UNITS = 3    # a reply with none of the owner's units at all is another language from a word, not a pair
 DRIFT_EVERY = 3        # assistant turns between two nudges on one goal (the issue's "at most once every N turns")
 OTHER_SHARE = .5       # "most letters of a reply are in another script": a strict majority
 DERIVE_SHARE = .6      # your goals name a language only when one script holds this share of their letters
@@ -141,7 +141,8 @@ def drift(text, scripts):
 
     The floor depends on which shape the reply is: a reply that also has units in the owner's script is held to
     MIN_UNITS, because a word or a path in another script is not a language ("ok", `文件 missing`); a reply
-    with none of the owner's units at all is another language from WHOLE_MIN_UNITS on ("好的。完成了。" is 5).
+    with none of the owner's units at all is another language from WHOLE_MIN_UNITS on ("好的。完成了。" is 5, and
+    a bare two-character path like `文件` is a fragment, not a reply: review P2).
     One floor for both let an English owner's short Chinese confirmations pass unheld forever, however many
     arrived (review P2).
     """

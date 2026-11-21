@@ -2760,7 +2760,10 @@ for line in sys.stdin:
         self.assertEqual(language.units('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002')[1],5,'five Han units')
         self.assertEqual(language.drift('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002',('Latin',)),('Han',1.0),
                          'a short reply entirely in another script is a drift')
-        self.assertEqual(language.drift('\u597d\u4e86\u3002',('Latin',)),('Han',1.0),'two units are enough when none are the owner\'s')
+        self.assertIsNone(language.drift('\u6587\u4ef6',('Latin',)),
+                          'a bare two-character path is a fragment, not a reply (review P2)')
+        self.assertEqual(language.drift('\u6587\u4ef6\u5728',('Latin',)),('Han',1.0),
+                         'a reply of three units and none of the owner\'s is a drift')
         self.assertIsNone(language.drift('\u597d',('Latin',)),'one unit cannot name a language')
         self.assertIsNone(language.drift('ok \u6587\u4ef6',('Latin',)),
                           'a short reply that also has the owner\'s units keeps the 6-unit floor')
