@@ -398,9 +398,24 @@ def note_spend(rt, gid, usd, allowance):
     rt.store.delegate_spend(gid, usd or 0.0, allowance or 0.0)
 
 
+def _sweep_close(rt, r, outcome, state, summary):
+    """Close a child's row at sweep in the same shape run_child reports.
+
+    The close is the last thing written about this child, and a report without its spend reads as a free run
+    (#382 review), so the row's model, provider, spend and cap always ride along."""
+    rt.store.delegate_done(r['child'], outcome, dict(
+        child=r['child'], role=r['role'], model=r['model'], provider=r['provider'], outcome=outcome, state=state,
+        spend_usd=round(r['spend_usd'] or 0.0, 6), allowance_usd=round(r['allowance_usd'] or 0.0, 6),
+        cap_usd=r['cap_usd'] or 0.0, summary=summary))
+
+
 def sweep(rt):
     """At a runtime start, a child left runnable belongs to a run that ended (the store has one writer, and the
-    runtime lock proved no other process holds it): pause it so it cannot run later on the wrong brain."""
+    runtime lock proved no other process holds it): pause it so it cannot run later on the wrong brain.
+
+    A child left open whose goal has already ended is closed too: a process killed between the child's final
+    state write and its report leaves that row open forever, and start()'s child limit counts it against the
+    parent on every later start (#382 review)."""
     for r in rt.store.db.execute("SELECT child,role,model,provider,cap_usd,spend_usd,allowance_usd,started "
                                  "FROM delegates WHERE outcome=''").fetchall():
         # a direct read, not store.goal(): that raises on an unknown id, and this runs bare in the runtime loop,
@@ -408,16 +423,14 @@ def sweep(rt):
         # open for good (#382 review). A row without its goal is closed as orphaned - it can never report.
         row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (r['child'],)).fetchone()
         if row is None:
-            # the same shape run_child reports, so the spend it already made is not lost from the record: the
-            # close is the last thing written about this child, and a report without its spend reads as a free
-            # run (#382 review).
-            rt.store.delegate_done(r['child'], 'orphaned', dict(
-                child=r['child'], role=r['role'], model=r['model'], provider=r['provider'], outcome='orphaned',
-                state='error', spend_usd=round(r['spend_usd'] or 0.0, 6),
-                allowance_usd=round(r['allowance_usd'] or 0.0, 6), cap_usd=r['cap_usd'] or 0.0,
-                summary='this child\'s goal row is gone'))
+            _sweep_close(rt, r, 'orphaned', 'error', 'this child\'s goal row is gone')
             continue
         if row['state'] in ('queued', 'working', 'waiting_model'):
             with rt.store.transaction():
                 rt.store.update(r['child'], state='paused', error='its runtime ended mid-delegation')
-            rt.store.delegate_done(r['child'], 'orphaned', dict(outcome='orphaned'))
+            _sweep_close(rt, r, 'orphaned', 'paused', 'its runtime ended mid-delegation')
+            continue
+        # The goal already ended (completed / cancelled / error): the crash window run_child's fall-back close
+        # cannot reach, because that process is gone. The goal's own state names the outcome.
+        outcome = dict(completed='completed', cancelled='incomplete').get(row['state'], 'failed')
+        _sweep_close(rt, r, outcome, row['state'], 'this child\'s goal ended without a report')

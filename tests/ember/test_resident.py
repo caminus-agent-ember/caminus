@@ -3050,6 +3050,47 @@ for line in sys.stdin:
             self.assertEqual(rt.store.delegate(live)['outcome'],'orphaned')
         finally:rt.mail.close();rt.store.close()
 
+    def test_sweep_closes_a_child_left_open_by_a_crash_window_with_its_spend(self):
+        # review P2s (this push): a process killed between the child's final state write and its report leaves a
+        # row `outcome=''` whose goal already ended; sweep() closed only a missing goal or a still-runnable one,
+        # so that row fell through and start()'s child limit counted it forever, wedging the parent. And the
+        # pause-branch close wrote `dict(outcome='orphaned')` alone, dropping the row's spend/cap, so the
+        # parent's report read $0.0000 for real ledger money.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            # the crash window: the goal ended (completed), the row is still open, and money was spent
+            done=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(done,parent,'','','worker',.5)
+            rt.store.delegate_spend(done,.25,.0)
+            rt.store.db.execute("UPDATE goals SET state='completed' WHERE id=?",(done,))
+            # and a cancelled one, which is incomplete rather than failed
+            gone=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(gone,parent,'','','worker',.5)
+            rt.store.delegate_spend(gone,.10,.0)
+            rt.store.db.execute("UPDATE goals SET state='cancelled' WHERE id=?",(gone,))
+            # and a child left runnable, whose pause-branch close used to lose its spend too
+            live=rt.store._enqueue('c3',kind='delegate')
+            rt.store.delegate_add(live,parent,'','','worker',.5)
+            rt.store.delegate_spend(live,.05,.0)
+            delegate.sweep(rt)
+            self.assertEqual(rt.store.delegate(done)['outcome'],'completed','an ended goal closes its row')
+            report=json.loads(rt.store.delegate(done)['report'])
+            self.assertEqual(report['spend_usd'],.25,'the close carries the spend it made')
+            self.assertEqual(report['cap_usd'],.5)
+            self.assertEqual(rt.store.delegate(gone)['outcome'],'incomplete','a cancelled child did not finish')
+            self.assertEqual(json.loads(rt.store.delegate(gone)['report'])['spend_usd'],.10)
+            self.assertEqual(rt.store.delegate(live)['outcome'],'orphaned')
+            self.assertEqual(rt.store.goal(live)['state'],'paused')
+            self.assertEqual(json.loads(rt.store.delegate(live)['report'])['spend_usd'],.05,
+                             'the pause-branch close carries its spend too')
+            # and the parent's child budget is free again: no open row is left for it
+            open_rows=rt.store.db.execute("SELECT COUNT(*) FROM delegates WHERE parent=? AND outcome=''",
+                                          (parent,)).fetchone()[0]
+            self.assertEqual(open_rows,0,'no crash-window row is left open')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_parent_whose_goal_row_is_gone_does_not_raise_in_the_child(self):
         # parent_gone() read the parent with store.goal(), which raises on an unknown id: a hand-restored store
         # missing the parent row turned the child's run and its stop check into a raw ValueError instead of a
