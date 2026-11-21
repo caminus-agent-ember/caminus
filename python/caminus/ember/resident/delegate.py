@@ -475,18 +475,21 @@ def _commit(row):
     """A writing child's changes belong on its branch: commit them in its worktree before the parent reads the
     report, so `git merge <branch>` merges them and the diffstat names the files. A child that only writes leaves
     them untracked, and merging a branch with no commit merges nothing (a test of the full version caught it).
-    Best effort: a missing worktree or a failed commit still leaves the files and the commands in the report."""
+    Best effort: a missing worktree still leaves the files and the commands in the report, and a failed commit
+    returns why, which _survey puts in the report - the parent must not read a merge command whose branch lacks
+    the changes as if it were the child's work (#384 review)."""
     wt = row.get('worktree') or ''
     if not wt or not os.path.isdir(wt):
-        return
+        return 'the worktree %s is gone, so nothing was committed' % wt if wt else ''
     try:
         if not _git(['-C', wt, 'status', '--porcelain']).strip():
-            return                    # nothing changed: the branch already points at the base commit
+            return ''                 # nothing changed: the branch already points at the base commit
         _git(['-C', wt, 'add', '-A'])
         _git(['-C', wt, '-c', 'user.name=Caminus delegate', '-c', 'user.email=delegate@caminus.invalid',
               'commit', '-q', '-m', 'delegate %s: what its report describes' % (row.get('child') or '')[:8]])
-    except ValueError:
-        pass                          # never a reason to lose the child's outcome: the report still lists both
+    except ValueError as e:
+        return str(e)[:400]
+    return ''
 
 
 def _survey(row):
@@ -494,7 +497,10 @@ def _survey(row):
     commands the parent runs to keep or drop it. Best effort: a worktree already removed says so."""
     wt, repo, branch = row.get('worktree') or '', row.get('repo') or '.', row.get('branch') or ''
     out = dict(worktree=wt, branch=branch, base=row.get('base') or '')
-    _commit(row)
+    if failed := _commit(row):
+        # The branch may be the base commit while the files sit uncommitted: say so next to the merge command, so
+        # the parent does not read the merge as the child's work (#384 review).
+        out['commit_failed'] = failed
     base = row.get('base') or 'HEAD'
     try:
         # the commit's files and whatever is still uncommitted; a rename is its new name
@@ -697,8 +703,19 @@ def settle(rt):
         if rt.store.delegates(parent=parent, open_only=True):
             continue
         rows = rt.store.delegates(parent=parent)
+        # Every report this parent has not been named yet: the delegate_reports events are the record of what each
+        # earlier wake delivered. A fixed window of the last eight rows dropped a generation's earliest reports,
+        # which no later nudge ever named again (#384 review); a parent with more children than the window now
+        # hears about all of them. An empty set (a parked parent with no new child) keeps the old window, so the
+        # wake still carries something.
+        shown = set()
+        for e in rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='delegate_reports'", (parent,)):
+            try:
+                shown.update(json.loads(e['data']).get('children') or [])
+            except (ValueError, TypeError, AttributeError):
+                pass
         lines, ids = [], []
-        for r in rows[-8:]:
+        for r in [r for r in rows if r['child'] not in shown] or rows[-8:]:
             try:
                 rep = json.loads(r.get('report') or '{}')
             except ValueError:
@@ -713,7 +730,7 @@ def settle(rt):
                 continue
             rt.store.update(parent, state='working')
             rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (parent, text, 'nudge'))
-        rt.store.event('delegate_reports', dict(children=ids[-8:]), parent)
+        rt.store.event('delegate_reports', dict(children=ids), parent)
         moved = True
     return moved
 

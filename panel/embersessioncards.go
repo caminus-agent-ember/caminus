@@ -38,13 +38,16 @@ func workersRow(ws []residentWorker) string {
 	if len(ws) == 0 {
 		return ""
 	}
+	// Every child the card lists, not only the running ones: a finished child's spend vanished from the row the
+	// moment it stopped, so the total the card showed moved backwards while the children below it still read
+	// theirs (#384 review). The label counts the running ones; the money is all of them.
 	running, spent, cap := 0, 0.0, 0.0
 	for _, w := range ws {
 		if w.Running {
 			running++
-			spent += w.SpendUSD + w.AllowanceUSD
-			cap += w.CapUSD
 		}
+		spent += w.SpendUSD + w.AllowanceUSD
+		cap += w.CapUSD
 	}
 	if running > 0 {
 		return fmt.Sprintf("%s · $%.4f of $%.2f", plural(running, "child", "children"), spent, cap)

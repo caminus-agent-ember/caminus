@@ -2872,6 +2872,64 @@ for line in sys.stdin:
             delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_wake_nudge_names_every_report_the_parent_has_not_seen(self):
+        # #384 review: the nudge took the last eight delegates rows, so with more reports than that in one parked
+        # generation the earliest were never named - not in that wake, and not in a later one (the window only
+        # moves forward as rows arrive). The wake now carries every child the parent has not been shown yet: the
+        # delegate_reports events are the record of what each earlier wake delivered.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            kids=[]
+            for i in range(10):
+                child=rt.store._enqueue('c%d'%i,kind='delegate')
+                rt.store.delegate_add(child,parent,'','','worker',0.5)
+                rt.store.delegate_done(child,'completed',dict(outcome='completed',summary='report %d'%i,steps=i))
+                kids.append(child)
+            with rt.store.transaction():rt.store.update(parent,state='waiting_children')
+            # an earlier wake named the first four; the old window would have named children 2..9 here
+            rt.store.event('delegate_reports',dict(children=kids[:4]),parent)
+            self.assertTrue(delegate.settle(rt))
+            nudge=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(parent,))]
+            self.assertEqual(len(nudge),1,nudge)
+            for child in kids[4:]:self.assertIn(child[:8],nudge[0],'the report of %s is named'%child[:8])
+            for child in kids[:4]:self.assertNotIn(child[:8],nudge[0],'a report already delivered is not repeated')
+            self.assertEqual(rt.store.goal(parent)['state'],'working')
+            woke=[json.loads(r['data']) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='delegate_reports' ORDER BY seq",(parent,))]
+            self.assertEqual(woke[-1]['children'],kids[4:],'the event names exactly what this wake delivered')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_failed_commit_is_in_the_report_next_to_the_merge_command(self):
+        # #384 review: _commit swallowed every failure while _survey printed a merge command anyway - the branch
+        # could still be the base commit with the child's files uncommitted, so the parent's merge merged nothing
+        # and the report did not say so. The failure now reaches the report as commit_failed, and a commit that
+        # works leaves the field out.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo3';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        wt=self.home/'worktrees'/'feed1234'
+        subprocess.run(['git','-C',str(repo),'worktree','add','-q','-b','delegate/feed1234',str(wt),'HEAD'],check=True)
+        (wt/'NOTES.md').write_text('one line\n')
+        hook=repo/'.git'/'hooks'/'pre-commit'
+        hook.write_text('#!/bin/sh\necho the hook says no >&2\nexit 1\n');hook.chmod(0o755)
+        base=subprocess.run(['git','-C',str(repo),'rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()
+        row=dict(child='feed1234',worktree=str(wt),repo=str(repo),branch='delegate/feed1234',base=base)
+        rep=delegate._survey(row)
+        self.assertIn('commit_failed',rep,rep)
+        self.assertIn('the hook says no',rep['commit_failed'])
+        self.assertIn('NOTES.md',rep['files'])
+        self.assertIn('git -C',rep['merge'])
+        hook.unlink()
+        rep=delegate._survey(row)
+        self.assertNotIn('commit_failed',rep,rep)
+        shown=subprocess.run(['git','-C',str(wt),'show','--stat','--name-only','HEAD'],
+                             capture_output=True,text=True).stdout
+        self.assertIn('NOTES.md',shown,'the second survey committed the file onto the branch the merge names')
+
     def test_a_writing_child_cannot_reach_the_parent_repository_through_git_metadata(self):
         # #384 review: `NESTED` names shell-like programs, so `git -c alias.x='!cmd' x`, `git -c core.pager=...`
         # and `awk 'BEGIN{system(...)}'` ran a command with `_escaping` returning '' - and so did

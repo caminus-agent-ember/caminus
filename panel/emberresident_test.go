@@ -32,6 +32,16 @@ func TestWorkersRowNamesTheNewestFinishedChildAndCountsAllowance(t *testing.T) {
 	if got, want := workersRow(ws), "2 children · $0.0500 of $0.75"; got != want {
 		t.Fatalf("running row: %q, want %q", got, want)
 	}
+	// #384 review: with one child still running, a finished child's spend vanished from the row (the loop
+	// added only the running ones), so the total the card showed fell while the finished card below it still
+	// read its own spend. The label counts the running children; the money is every child the card lists.
+	ws = []residentWorker{
+		{Child: "r1", SpendUSD: 0.01, CapUSD: 0.5, Running: true},
+		{Child: "f1", SpendUSD: 0.02, CapUSD: 0.25, Outcome: "completed"},
+	}
+	if got, want := workersRow(ws), "1 child · $0.0300 of $0.75"; got != want {
+		t.Fatalf("mixed row: %q, want %q", got, want)
+	}
 }
 
 func TestResidentGoalCommandUsesStdin(t *testing.T) {
