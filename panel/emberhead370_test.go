@@ -183,6 +183,28 @@ func TestTheScrollRowFollowsTheGoalOnTheScreen(t *testing.T) {
 	}
 }
 
+// TestTheExpandedGoalKeepsThreeRowsOnATinyScreen: headRows() had a max(3, …) around max(12, height)/2-3 that could
+// never be reached, because the 12-row floor already keeps the result at three or more. The floor is the thing that
+// matters at a small height, so it is written down here rather than left implicit in an unreachable bound (#370
+// review).
+func TestTheExpandedGoalKeepsThreeRowsOnATinyScreen(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 100
+	for _, h := range []int{6, 12, 23, 24, 30, 60, 120} {
+		m.height = h
+		rows := m.headRows()
+		if rows < 3 {
+			t.Errorf("height %d: headRows %d gives the goal fewer than three rows", h, rows)
+		}
+		if rows > max(12, h)/2 || (h > 24 && rows > h/2) {
+			t.Errorf("height %d: headRows %d is more than half the screen", h, rows)
+		}
+		if h >= 30 && rows != h/2-3 {
+			t.Errorf("height %d: headRows %d is not half less the title and rule (%d)", h, rows, h/2-3)
+		}
+	}
+}
+
 // TestTheGoalDrawingsStayBounded: headMD is keyed by width and goal text and syncChat clears it only on a resize, so
 // a long run that shows many goals would keep every drawing. Past the bound the cache starts over and the goal on
 // the screen is drawn again.

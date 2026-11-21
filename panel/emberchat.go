@@ -652,8 +652,12 @@ func (m emberModel) chatHead(w int) string {
 	if m.headShown() {
 		return m.headExpanded(agent, state, steps, w)
 	}
-	if !m.headCut(w) { // (one test, shared with Alt+G and the click: see headCut)
-		return shellHeader(agent, state, goalText, steps, w)
+	// The header with the goal on its title line, built once: headCut reads the cut from this string and the uncut
+	// header is exactly this string, which chatHead used to build a second time on every frame (and bodyHeight on
+	// every poll) (#370 review).
+	withGoal := shellHeader(agent, state, goalText, steps, w)
+	if !m.headCutParts(goalText, withGoal, w) { // (one test, shared with Alt+G and the click: see headCut)
+		return withGoal
 	}
 	head := shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
@@ -740,11 +744,16 @@ func headWrappedLines(goal string, w int) []string {
 // may still wrap into those three lines with nothing left over (headHidden).
 func (m emberModel) headCut(w int) bool {
 	state, steps, goalText := m.headParts()
+	return m.headCutParts(goalText, shellHeader(residentText(m.agentName), state, goalText, steps, w), w)
+}
+
+// headCutParts is headCut over a header the caller has already built (chatHead draws that same string), so the layout
+// test costs no second build on a frame.
+func (m emberModel) headCutParts(goalText, head string, w int) bool {
 	if goalText == "" {
 		return false
 	}
-	head := shellHeader(residentText(m.agentName), state, goalText, steps, w)
-	if first := strings.SplitN(head, "\n", 2)[0]; strings.Contains(ansi.Strip(first), "…") {
+	if first, _, _ := strings.Cut(head, "\n"); strings.Contains(ansi.Strip(first), "…") {
 		return true
 	}
 	return len(headWrappedLines(goalText, w)) > headLines
@@ -772,7 +781,10 @@ func (m emberModel) headShown() bool {
 
 // headRows is how many rows of the expanded goal the header shows at once: half the screen less the title and the
 // rule, so the transcript keeps some room under it.
-func (m emberModel) headRows() int { return max(3, max(12, m.height)/2-3) }
+// The 12-row floor is what keeps this at three rows on a tiny terminal (below 24 rows, h/2-3 is under 9 and would
+// reach 0 at 6): with it, h/2-3 is never below 3, so the outer max(3, …) that used to wrap it could not be reached
+// (#370 review).
+func (m emberModel) headRows() int { return max(12, m.height)/2 - 3 }
 
 // headExpanded is the header with the whole goal under the title, drawn as Markdown like a reply, capped at half
 // the screen and scrolled by headTop (PgUp/PgDn; Alt+G or Esc collapses it).
