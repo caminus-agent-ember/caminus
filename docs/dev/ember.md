@@ -203,6 +203,10 @@ python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
   so a shared folder would reuse the other experiment's rows. The checkouts are recorded as given, so an
   `--arm-checkout` under your home leaves that absolute path in `arms.json`: keep an `--out` folder private unless
   the paths in it are ones you would publish.
+- **One race the plan does not close.** The record's status is re-read after `claim_folder`, which narrows but does
+  not close the window: a resident can observe the record between that re-read and the last run. `write_observation`
+  then catches `sim.observe`'s refusal of an observed version and exits with a plain message leaving the record as-is,
+  so the cost is compute already spent, not a record the runs contradicted.
 - **The exit code.** `propose` exits 0 when the verdict is `better across the board` or `no difference`, and 1 when
   it is `worse for ...` or another verdict (a script can gate on it); a run that errored, a refusal and a usage
   error exit non-zero and leave the record open.

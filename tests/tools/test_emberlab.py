@@ -235,6 +235,11 @@ p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'anth
 check(p.returncode != 0 and '--unsafe-local' in (p.stderr + p.stdout) and not po.exists(),
       f'propose: a paid real brain on the local host needs --unsafe-local too, like lab.py run ({p.returncode}; '
       f'{(p.stderr + p.stdout)[-300:]})')
+# the refusal names both names the rule honours: `--unsafe-free` is the same permission, and a message that names
+# only the other one sends an owner adding a flag the docs do not pair with unattended runs (#385 review P2)
+check('--unsafe-free' in (p.stderr + p.stdout),
+      f'propose: the local-host refusal names --unsafe-free as well, since hosts.local_refusal accepts it '
+      f'({(p.stderr + p.stdout)[-300:]})')
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve', '--out', str(po))
 check(p.returncode != 0 and 'measure nothing' in (p.stderr + p.stdout),
       'propose: two identical arms are refused (the proposal names no change)')

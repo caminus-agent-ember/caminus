@@ -148,7 +148,8 @@ def local_refusal(explicit, brains, unsafe_local=False, unsafe_free=False):
     """
     if (any(getattr(b, 'real', False) for b in brains) and kind(explicit, brains) == 'local'
             and not (unsafe_local or unsafe_free)):
-        return 'a real model on the local host gets a shell as you: use --host agent (or --unsafe-local)'
+        return ('a real model on the local host gets a shell as you: use --host agent (or --unsafe-local / '
+                '--unsafe-free)')
     return ''
 
 

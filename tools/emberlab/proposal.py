@@ -235,7 +235,10 @@ def approval_missing(a, brains):
                                   unsafe_free=getattr(a, 'unsafe_free', False))
     if why:
         real = [b.label() for b in brains if getattr(b, 'real', False)]
-        missing.append('--unsafe-local (a real model runs as you on the local host: ' + ', '.join(real) + ')')
+        # both names, as plan_md's `unlocked` joins them: the rule honours either, and a refusal that names one
+        # sends an owner adding a flag the docs do not pair with unattended runs (#385 review P2)
+        missing.append('--unsafe-local or --unsafe-free (a real model runs as you on the local host: '
+                       + ', '.join(real) + ')')
     return missing
 
 
