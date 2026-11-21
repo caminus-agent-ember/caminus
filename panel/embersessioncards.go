@@ -44,6 +44,8 @@ func workersRow(ws []residentWorker) string {
 	// The cap is the running children's: a finished child's cap is not a limit anything is still under, and the
 	// store returns at most 20 rows, so summing every row's cap drifted upward over a session with no children
 	// running and named a "$Y" the parent could never spend (#384 review).
+	// The spend is the listed children's, not the session's lifetime: store.workers() keeps the newest 20 rows, so a
+	// session with more children shows its newest 20 and their sum (#384 review follow-up).
 	running, spent, cap := 0, 0.0, 0.0
 	for _, w := range ws {
 		spent += w.SpendUSD + w.AllowanceUSD

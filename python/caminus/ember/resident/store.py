@@ -342,7 +342,9 @@ class Store:
     def workers(self):
         """What a UI shows of delegation: the running children and the newest finished ones, with the spend the cap
         reads (money and plan allowance, kept apart so a $0 Go turn still shows its allowance), what each may do and
-        the goal it is working on."""
+        the goal it is working on. Running children first, then the newest finished ones, 20 rows at most: a session
+        with more children than that shows its newest 20, so a card's money total is the listed children's spend,
+        not the session's lifetime spend (#384 review)."""
         rows = [dict(r) for r in self.db.execute(
             'SELECT d.child,d.parent,d.model,d.provider,d.role,d.cap_usd,d.spend_usd,d.allowance_usd,d.permissions,'
             'd.worktree,d.branch,d.outcome,d.started,d.ended,g.prompt,g.steps FROM delegates d '

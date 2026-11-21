@@ -2901,6 +2901,33 @@ for line in sys.stdin:
             self.assertEqual(woke[-1]['children'],kids[4:],'the event names exactly what this wake delivered')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_wake_with_more_reports_than_the_cap_counts_the_rest_and_collect_reads_them(self):
+        # #384 review: the wake text grew ~300 chars per child with no cap, so a parent with many children got a
+        # turn-sized message. The text now names WAKE_LINES children, counts the rest and points at collect; every
+        # id still goes in the delegate_reports event, so nothing is lost and a later wake's shown-set stays right.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            kids=[]
+            for i in range(delegate.WAKE_LINES+2):
+                child=rt.store._enqueue('c%d'%i,kind='delegate')
+                rt.store.delegate_add(child,parent,'','','worker',0.5)
+                rt.store.delegate_done(child,'completed',
+                                       dict(outcome='completed',summary='report %d of the run'%i,steps=i))
+                kids.append(child)
+            with rt.store.transaction():rt.store.update(parent,state='waiting_children')
+            self.assertTrue(delegate.settle(rt))
+            text=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(parent,))][0]
+            self.assertEqual(sum(1 for k in kids if k[:8] in text),delegate.WAKE_LINES,text)
+            self.assertIn('- and 2 more reports: collect reads them',text)
+            self.assertLess(len(text),delegate.WAKE_LINES*350+400,'the text stays bounded')
+            woke=[json.loads(r['data']) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='delegate_reports' ORDER BY seq",(parent,))]
+            self.assertEqual(woke[-1]['children'],kids,'every id is in the event, named or counted')
+            self.assertEqual(len(delegate.collect(rt,parent)['children']),len(kids),'collect reads them all')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_failed_commit_is_in_the_report_next_to_the_merge_command(self):
         # #384 review: _commit swallowed every failure while _survey printed a merge command anyway - the branch
         # could still be the base commit with the child's files uncommitted, so the parent's merge merged nothing

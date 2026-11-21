@@ -44,6 +44,9 @@ import time
 ROLES = ('worker', 'reviewer')
 PERMISSIONS = ('read', 'write')
 DEFAULTS = dict(cap_usd=0.50, max_steps=12, max_seconds=600, max_children=4)
+# A wake names at most this many children in its text; the rest are a count plus the `collect` pointer (#384
+# review: the text was unbounded, ~300 chars per child). Every id still goes in the event, so nothing is dropped.
+WAKE_LINES = 12
 # Every child, whatever its permissions: the outward and human-facing tools, and a nested delegate (depth 1).
 ALWAYS_REFUSED = ('ask_user', 'ask_root', 'github_handoff', 'send_message', 'report', 'remember', 'sim',
                   'schedule', 'lease', 'browser', 'propose_plan', 'delegate', 'advisor')
@@ -71,7 +74,10 @@ your parent's to change, and a read of it is refused the same way. A terminal co
 `cd <your worktree> && ` or passes `cwd` inside it, and every path it names must stay inside.
 The worktree keeps your changes apart from your parent's tree; it is not a jail, so treat it as your own checkout and
 do not try to reach past it. Two things are off limits because your worktree shares them with the parent's
-repository: `git config`, `git -c`, `--config-env`, `--exec-path`, and any path naming `.git` - they are refused.'''
+repository: `git config`, `git -c`, `--config-env`, `--exec-path`, and any path naming `.git` - they are refused.
+The checks above read the command text, so a program that computes a path at run time (`python3 -c`, `awk`, a `make`
+recipe) is not seen: your parent reviews the worktree's diff, and a write outside it is a change your parent would
+not review. Keep every write where you were told to.'''
 
 
 def read_only(cmd):
@@ -784,9 +790,16 @@ def settle(rt):
                 rep = json.loads(r.get('report') or '{}')
             except ValueError:
                 rep = {}
+            # Every id is named in the event, so a truncated wake's reports are still shown=next time; the text
+            # stops at WAKE_LINES lines (a turn's conversation is not a fair place to paste 30 reports) and says
+            # where the rest are (#384 review).
             ids.append(r['child'])
-            lines.append('- %s %s · %s steps · %s' % (r['child'][:8], r['outcome'] or '?', rep.get('steps', '?'),
-                                                      ' '.join(str(rep.get('summary') or '').split())[:300]))
+            if len(lines) < WAKE_LINES:
+                lines.append('- %s %s · %s steps · %s' % (r['child'][:8], r['outcome'] or '?', rep.get('steps', '?'),
+                                                         ' '.join(str(rep.get('summary') or '').split())[:300]))
+        more = len(ids) - len(lines)
+        if more > 0:
+            lines.append('- and %d more report%s: collect reads them' % (more, '' if more == 1 else 's'))
         text = ('[delegate] your children finished. Their reports are below; collect reads the structured ones. '
                 'Verify what you act on.\n' + '\n'.join(lines))
         with rt.store.transaction():
