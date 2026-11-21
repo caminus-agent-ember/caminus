@@ -5219,6 +5219,75 @@ for line in sys.stdin:
         self.assertEqual(op.get('open-mistral-4'), (0.4, 2.0, 0.4))
         self.assertFalse(op.dropped, 'a readable file is no longer a dropped table')
 
+    def test_a_request_that_queued_behind_a_failed_price_load_does_not_fetch_again(self):
+        """#389 review P2: get() asked _due() and then called _load(), which only asked whether a fetch was in
+        flight. A request thread that computed `due=True` and reached _load() only after another loader had finished
+        (and failed) found `loading` False and fetched again, so a burst of requests during an outage made one fetch
+        each, every one waiting out the 60 s connect timeout, before any of them re-read the backoff. `_load` now
+        re-checks _due() under the lock: the fetch a queued caller needs is the one that just ran."""
+        import threading
+        from caminus.ember import relay
+        calls, lines = [], []
+        def fetch():
+            calls.append(1)
+            raise OSError('network is down')
+        prices = relay.ListPrices(lines.append, fetch, backoff=(300,))
+        queued_in, landed = threading.Event(), threading.Event()
+        real_load = prices._load
+        def slow_load(model=None):
+            # the queued caller: `get()` computed due=True, and the load it queued behind ran and failed meanwhile
+            if not queued_in.is_set():
+                queued_in.set()
+                landed.wait(10)
+            return real_load(model)
+        prices._load = slow_load
+        queued = threading.Thread(target=prices.get, args=('zai-org/GLM-5.2',), daemon=True)
+        queued.start()
+        try:
+            self.assertTrue(queued_in.wait(10), 'the first request is past its _due() check')
+            self.assertIsNone(prices.get('zai-org/GLM-5.2'))    # (the load fails: next = now + 300)
+            self.assertEqual(len(calls), 1)
+        finally:
+            landed.set()
+            queued.join(10)
+        self.assertFalse(queued.is_alive())
+        self.assertEqual(len(calls), 1, 'the queued request did not fetch the list that had just failed')
+        self.assertEqual(prices.tries, 1)
+        status, kind, message, wait, local = prices.refusal('zai-org/GLM-5.2')
+        self.assertEqual((status, kind, local), (503, 'api_error', True))
+        self.assertIn('has not loaded', message)
+        self.assertGreater(wait, 0, 'the refusal says when the next try is')
+        # the retry the backoff promises still runs, once, when its time comes
+        prices.next = time.time() - 1
+        self.assertIsNone(prices.get('zai-org/GLM-5.2'))
+        self.assertEqual(len(calls), 2, 'the retry the backoff names runs')
+
+    def test_a_price_file_error_that_quotes_its_path_does_not_reach_the_agent(self):
+        """#389 review P2: OwnerPrices.refusal's file branch puts self.error into the agent-visible 503. The OSError
+        case was careful (e.strerror, never str(e)) but a JSON or row error was kept as str(e)[:200], and one of those
+        can quote the text it choked on, a price file's own path among it. The text is now sanitised where it is
+        built, so every reader of `error` is path-free; the log line still names the file, for the owner."""
+        import pathlib
+        from unittest import mock
+        from caminus.ember import relay
+        pf, lines = self.home/('prices-'+uuid.uuid4().hex+'.json'), []
+        pf.write_text(json.dumps({'mistral-large-2512': [0.7, 2.1]}))
+        op = relay.OwnerPrices(str(pf), lines.append)
+        self.assertEqual(op.get('mistral-large-2512'), (0.7, 2.1, 0.7))
+        def boom(*a, **k):
+            raise ValueError("Expecting value: line 1 column 1 (char 0) in /home/owner/secret/prices.json")
+        with mock.patch.object(pathlib.Path, 'read_text', boom):
+            op.mtime = None                                     # (the file looks changed: it is re-read)
+            self.assertIsNone(op.get('some-other-model'))       # (the failed read: the last good table stays)
+        status, kind, why, wait, local = op.refusal('some-other-model')
+        self.assertEqual((status, kind, local), (503, 'api_error', True))
+        self.assertIn('ValueError', why, 'the failure still names its kind')
+        self.assertNotIn('secret', why, 'the path never reaches the agent')
+        self.assertNotIn('prices.json', why)
+        self.assertIn(pf.name, lines[-1], 'the log still names the file, for the owner')
+        self.assertNotIn('/', relay._no_path('/a/b /c/d'), 'text that is nothing but paths is not passed through')
+        self.assertTrue(relay._no_path('x ' * 300).endswith('...'), 'the text is still bounded')
+
     def test_an_alias_whose_model_list_never_loaded_is_a_503_waited_out_not_a_403(self):
         """Mistral's aliases come from the provider's own model list. While that list has never loaded, a name the
         owner's file does not price may simply be an alias of one it does, so it is not a fact about the model: the

@@ -220,6 +220,17 @@ def opencode_rates(m):
     return opencode_row(m) if opencode_offered(m) else None
 
 
+def _no_path(text, limit=200):
+    """TEXT for the agent-visible refusals, with any path-looking token removed and its length bounded.
+
+    The OSError branch already keeps only `e.strerror`; the other exceptions (a JSON decode error, a row of the wrong
+    type) can quote the text they choked on, and one of those texts is a price file's own path. This text reaches the
+    agent, so the rule is applied to every branch at the point the message is built (#389 review P2)."""
+    words = [w for w in str(text).split() if '/' not in w and '\\' not in w]
+    out = ' '.join(words) or type(text).__name__
+    return out[:limit] + ('...' if len(out) > limit else '')
+
+
 def _cannot_price(what, model, wait, tail='the relay tries again in %ds'):
     """The one refusal a price this relay cannot know YET gets: (status, kind, message, retry_after, local), a 503
     the agent waits out. `what` names the cause and never carries the owner's path (this text reaches the agent).
@@ -276,8 +287,13 @@ class ListPrices:
             raise ValueError('no priced model in the list')
         return table, rows
 
-    def _load(self):
+    def _load(self, model=None):
         """One load: the fetch outside the lock, the swap and the backoff under it.
+
+        `model` is re-checked under the lock, not only by the caller: a request thread that computed `due=True` and
+        then queued behind a loader that has since finished would fetch again with `loading` False and no `_due`
+        question asked, so during an outage a burst of requests made one fetch each — the backoff's one-per-delay
+        cap held per caller, not per loader (#389 review P2).
 
         The clock is read here, after the fetch, and never taken from the caller: the backoff and `at` both start
         when the fetch ENDS (a stalled provider's delay must not be already spent). A `now` parameter read before
@@ -290,6 +306,8 @@ class ListPrices:
         with self.lock:
             if self.loading:
                 return
+            if not self._due(model, time.time()):
+                return                       # (another loader finished while this one queued: the fetch it needs is done)
             self.loading = True
         try:
             try:
@@ -323,7 +341,7 @@ class ListPrices:
         with self.lock:
             due = self._due(model, time.time())
         if due:
-            self._load()                     # (a fetch already in flight returns at once)
+            self._load(model)                # (a fetch already in flight, or one just finished, returns at once)
         with self.lock:
             return self.table.get(model)
 
@@ -464,7 +482,7 @@ class OwnerPrices:
                 # keeps no path (FileNotFoundError's text carries it): this text reaches the agent, the log does not.
                 # The last good table stays: a file caught mid-rewrite (truncate, then write) must not un-price the
                 # models it priced a moment ago; mtime None re-reads it on the next request either way.
-                why = '%s: %s' % (type(e).__name__, e.strerror if isinstance(e, OSError) else str(e)[:200])
+                why = '%s: %s' % (type(e).__name__, _no_path(e.strerror if isinstance(e, OSError) else str(e)))
                 if why != self.error:
                     self.log('price file unreadable: %s (%s)' % (why, self.path))
                 now = time.time()
