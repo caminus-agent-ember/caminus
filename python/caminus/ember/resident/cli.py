@@ -29,6 +29,32 @@ SPEED_FRESH_S = 120   # seconds a measured decode speed stays on the status line
 LIVE_POLL_S = 1.0     # the longest a status call waits on a Caminus server's /caminus/status for the live speed
 
 
+def _read_config(home, missing_ok):
+    """`config.json` as a dict, refused the same way by every op that reads it (#390 review P2).
+
+    `missing_ok` is for the read-only ops that work before `init`: `agent prompt` prints the defaults for a home
+    that has no config yet, so its absence is not an error there. An op that writes (`agent language`) passes
+    False and keeps "run agent init first". A corrupt file or valid JSON of the wrong shape is an error for both:
+    before, `prompt` silently fell back to the defaults while `language` refused, so the two ops could print
+    different languages for the same home.
+    """
+    try:
+        cfg = json.loads((home / 'config.json').read_text())
+    except FileNotFoundError:
+        if missing_ok:
+            return {}
+        raise ValueError('cannot read config.json in %s: run agent init first' % home)
+    except OSError:
+        if missing_ok:
+            return {}
+        raise ValueError('cannot read config.json in %s: run agent init first' % home)
+    except ValueError:
+        raise ValueError('config.json is not valid JSON: fix or remove %s' % (home / 'config.json'))
+    if not isinstance(cfg, dict):
+        raise ValueError('config.json is not a JSON object: fix or remove %s' % (home / 'config.json'))
+    return cfg
+
+
 def _engine_live(home, daemon_alive, opener=None):
     """The engine's write speed while this session's reply streams from a Caminus server: 1000 / its /caminus/status
     decode.ms_per_token (the engine's mean ms per emitted token over its last passes, across requests, so the figure
@@ -699,11 +725,12 @@ def main(argv=None,stdin=None):
             emit(discover(home,a.topic,a.query),True)
             return 0
         if a.op=='prompt':
-            try:
-                sim_on=bool(json.loads((home/'config.json').read_text()).get('sim',True))
-            except (OSError,ValueError):
-                sim_on=True
+            # The same read `agent language` makes, so the two ops cannot disagree about the language for the
+            # same home: a corrupt config is refused by both (before, this op fell back to the defaults and
+            # printed English while `language` reported the error — #390 review P2). A home with no config yet
+            # still prints the defaults, which is what `prompt` is for before `init`.
             from . import language
+            sim_on=bool(_read_config(home,missing_ok=True).get('sim',True))
             value=render_prompt(home,sim=sim_on,language=language.from_home(home)['name'])
             emit(dict(prompt=value),True) if a.json else print(value)
             return 0
@@ -806,18 +833,10 @@ def main(argv=None,stdin=None):
             # like `agent prompt`: before, it opened the Store first and an initialized home whose store had been
             # moved was handed an empty agent.sqlite3 back as a side effect of reading a setting (review P2).
             from . import language
-            try:
-                cfg=json.loads((home/'config.json').read_text())
-            except OSError:
-                raise ValueError('cannot read config.json in %s: run agent init first' % home)
-            except ValueError:
-                # A corrupt config must read as an error, not a traceback: `prompt` survives one by falling back to
-                # the defaults, but this op writes `language`, and a silent fallback would overwrite the file and
-                # lose whatever else it held (#390 review).
-                raise ValueError('config.json is not valid JSON: fix or remove %s' % (home/'config.json'))
-            if not isinstance(cfg,dict):
-                # Valid JSON of the wrong shape (a list, a string) used to traceback at cfg['language'] below.
-                raise ValueError('config.json is not a JSON object: fix or remove %s' % (home/'config.json'))
+            # This op writes `language`, so a config it cannot read is an error rather than a fallback that
+            # would overwrite whatever the file held; `_read_config` gives `agent prompt` the same refusal for
+            # the same corruption, so the two ops agree about one home (#390 review P2).
+            cfg=_read_config(home,missing_ok=False)
             if a.to is not None and a.auto:
                 # Asked first: `--to '' --auto` is a contradiction about what the command is for, and answering it
                 # with the blank-name error named the less likely mistake (review P2). Whatever the name is, both

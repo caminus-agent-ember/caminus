@@ -232,11 +232,16 @@ an empty prediction_error is a claim the prediction held exactly. Proposals are
 not changes: record them with status proposed and make no change.'''
 
 
-def render(home, sim=True, language='English'):
+def render(home, sim=True, *, language):
     """The prompt for a session whose owner works in `language` (issue #354; `resident/language.py` names it).
 
     It is part of the cached prefix, so it changes only when the session's setting does: the per-turn check
     (`language.check`) is what holds a brain that drifts anyway.
+
+    `language` is required, with no `'English'` default: a default let any caller that forgot it render a prompt
+    that disagrees with the session's setting (a later `run`/`pages` entry point, say), and the prompt is cached
+    from the first token, so the disagreement would outlive the turn that made it (#390 review P2). The two
+    callers (`Runtime.system`, `agent prompt`) both resolve it (`language.owner`, `language.from_home`).
     """
     from .browser import available
     try:

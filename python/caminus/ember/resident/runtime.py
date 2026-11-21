@@ -2403,9 +2403,14 @@ class Runtime:
             # `_finish` defers whenever an unconsumed inbox row waits. A tool-call reply generally does leave a
             # turn, so `follows` starts True, but this one must not queue the nudge that would defer its own
             # completion (review P1). The drift is still an event; only the nudge is withheld.
-            follows, dispatch = not _calls_finish(reply.get('tool_calls')), None
+            # Free time (`free`, `dream`) is not graded and has no next graded turn: `check`'s docstring says a
+            # drift there is recorded and never nudged, and only the plain branch below honoured it — a tool-call
+            # reply on a free goal was nudged anyway (review P2). `kind` is read for every reply now, not just a
+            # plain one, so the tool-call branch can honour the same rule.
+            kind = self.store.goal(gid).get('kind', 'work')
+            follows = not _calls_finish(reply.get('tool_calls')) and kind not in FREE_KINDS
+            dispatch = None
             if plain:
-                kind = self.store.goal(gid).get('kind', 'work')
                 # A plain reply leaves a turn only on the branches `_plain_reply` takes, and every branch that
                 # does not take one finishes or pauses the goal. Default False: a loop-gated reply sets it from
                 # the dispatch, and a reply that finishes (`loop_gates` off, a FREE kind) must not queue a nudge

@@ -1520,7 +1520,7 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
         rt=Runtime(self.home)
         try:
             self.assertNotIn('browser',[t['function']['name'] for t in rt.tools])
-            self.assertNotIn('use browser',prompt.render(self.home))
+            self.assertNotIn('use browser',prompt.render(self.home,language='English'))
             with self.assertRaises(ValueError) as cm:browser.call(rt,'g',uuid.uuid4().hex,dict(action='open',url='http://x.org/'))
             self.assertIn('no Chrome',str(cm.exception))
         finally:rt.mail.close();rt.store.close()
@@ -2602,8 +2602,8 @@ for line in sys.stdin:
             cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
             atomic_json(self.home/'config.json',cfg);rt._follow_config()
             self.assertNotIn('sim',[t['function']['name'] for t in rt.tools])
-            self.assertNotIn('SIM: predict',render(self.home,sim=False))
-            self.assertIn('SIM: predict',render(self.home))
+            self.assertNotIn('SIM: predict',render(self.home,sim=False,language='English'))
+            self.assertIn('SIM: predict',render(self.home,language='English'))
             self.assertEqual([h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')],[])
             cfg['sim']=True;atomic_json(self.home/'config.json',cfg);rt._follow_config()
             self.assertIn('sim',[t['function']['name'] for t in rt.tools])
@@ -3181,6 +3181,25 @@ for line in sys.stdin:
             self.assertEqual((self.home/'config.json').read_text(),text,'the op did not rewrite the corrupt file')
         (self.home/'config.json').write_text('{"name": "test"}')
         self.assertEqual(self.cmd('language',[])['language'],'English','a repaired config works again')
+
+    def test_prompt_and_language_refuse_one_corrupt_config_the_same_way(self):
+        # review P2 (r14): `agent prompt` read config.json in its own try/except and fell back to the defaults on a
+        # corrupt file, while `agent language` refused it. Two ops, one home, two answers about the language. Both
+        # go through `cli._read_config` now: a corrupt or wrong-shape file is refused by both with the same message,
+        # and only the no-config-yet case differs (prompt prints the defaults before `init`; language says to run it).
+        for text,why in (('not json{','not valid JSON'),('[]','not a JSON object')):
+            (self.home/'config.json').write_text(text)
+            for op,extra in (('prompt',[]),('language',[]),('language',['--to','Chinese'])):
+                out=self.cmd(op,extra,code=1)
+                self.assertIn(why,out['error'],'%s %s: %s' % (op,extra,out['error']))
+                self.assertIn('config.json',out['error'],'the error says which file to fix')
+            self.assertEqual((self.home/'config.json').read_text(),text,'neither op rewrote the corrupt file')
+        # a home with no config at all still prints a prompt: that is what `prompt` is for before `init`
+        (self.home/'config.json').unlink()
+        out=self.cmd('prompt',[])
+        self.assertIn('human',out['prompt'],'a home with no config yet still renders the defaults')
+        self.assertIn('run agent init first',self.cmd('language',[],code=1)['error'],
+                      'the writing op still says how to make one')
 
     def test_a_restart_derives_the_same_language_from_the_same_goals(self):
         # review P2: a derived name must not live only on the running runtime. `derive` is a pure function of
@@ -4165,6 +4184,38 @@ for line in sys.stdin:
                 rt.tick(gid)
             self.assertEqual(rt.store.goal(gid)['state'],'completed',[(e['kind'],str(e['data'])[:200]) for e in rt.store.events() if e['goal']==gid])
         finally:rt.mail.close();rt.store.close()
+
+    def test_a_free_goals_tool_call_reply_is_not_nudged_about_its_language(self):
+        # review P2 (r14): `check`'s docstring says a drift on a free-time goal is recorded and never nudged (the
+        # goal is not graded and has no next graded turn), but `kind` was read inside `if plain:`, so `follows`
+        # stayed True for a tool-call reply on a free goal and a nudge was queued anyway. `kind` is read for every
+        # reply now. A work goal's tool-call reply is still nudged, which the next assertion pins.
+        class Drift:
+            def __init__(self,*replies):self.replies=list(replies)
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return self.replies.pop(0)
+        chinese='\u5206\u652f\u5df2\u63a8\u9001\uff0c\u73b0\u5728\u5f00 PR\u3002'
+        slid=call('terminal',dict(command='printf ok'));slid['content']=chinese
+        rt=self.free_runtime(model=Drift(slid,dict(role='assistant',content='Resting now.')))
+        try:
+            gid=rt.free.pulse()
+            for _ in range(6):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            drifts=[e['data'] for e in rt.store.events() if e['kind']=='language_drift' and e['goal']==gid]
+            self.assertEqual(len(drifts),1,'the drift is still an event: it is the rate this feature is measured by')
+            self.assertFalse(drifts[0]['nudged'],'a free goal has no next graded turn to nudge')
+            self.assertEqual([x['kind'] for x in self.steers(gid)],[],'no nudge rides a free goal')
+        finally:rt.mail.close();rt.store.close()
+        # the work branch is unchanged: the same reply on a work goal queues the nudge (existing test pins the text,
+        # this one pins that the free/ work split did not switch the nudge off for everyone). The legacy fixture is
+        # left as setup made it: loop gates off, so `finish` completes without a done check to answer first.
+        self.replies(slid,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        drifts=[e['data'] for e in self.cmd('events')
+                if e['kind']=='language_drift' and e['goal']==goal['id']]
+        self.assertTrue(drifts and drifts[0]['nudged'],'a work goal is still nudged')
 
     def test_free_time_budget_on_a_priced_remote_model(self):
         import types
