@@ -1827,6 +1827,22 @@ class Runtime:
             if k=='assistant':break
         return ''
 
+    def _plain_continues(self, gid):
+        """Whether a plain reply leaves a turn behind: `_plain_reply`'s dispatch, without its writes.
+
+        Read before the language check so a drift on this reply is nudged exactly when a turn will read the
+        nudge. A nudge for a turn that never comes is worse than a late one: the unconsumed inbox row defers the
+        completion `_finish` makes on the same tick. Mirrors `_plain_reply` branch for branch - the reopened
+        goal's first plain reply is prompted on (a turn), the second finishes (no turn); an answer to the
+        human's question is told to carry on; otherwise the third plain reply in a row pauses the goal.
+        """
+        how = self._answering(gid)
+        if how == 'reopened':
+            return gid not in self.__dict__.get('_reopen_prompted', set())
+        if how == 'asked':
+            return True
+        return self.plain_replies.get(gid, 0) + 1 < PLAIN_TEXT_LIMIT
+
     def _plain_reply(self, gid):
         """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal. A reply to the
         human is not that: on a finished goal they reopened with a message, the answer ends the turn and the goal is
@@ -2357,16 +2373,24 @@ class Runtime:
                 return True
             # A reply that slid into another language is an event every turn, and one nudge to the goal's next
             # turn when it is due (issue #354); the prompt names the language, this is what holds a brain that
-            # drifts past it anyway. A plain reply ends the goal on this tick, so it gets the event and no nudge
-            # for a turn that never comes (review P2).
-            if (note := language.check(self, gid, reply.get('content') or '', due=bool(reply.get('tool_calls')))):
+            # drifts past it anyway. `due` is whether a turn follows this reply. Tool calls do; a plain reply
+            # ends the goal only on the paths below that finish or pause it, and a loop-gated one leaves the
+            # plain-text nudge behind, so its drift is nudged rather than recorded one turn late (review P2).
+            # A nudge for a turn that never comes is worse than late: the unconsumed inbox row would defer the
+            # completion `_finish` makes on this very tick.
+            plain = not reply.get('tool_calls')
+            follows = True
+            if plain:
+                kind = self.store.goal(gid).get('kind', 'work')
+                follows = kind not in FREE_KINDS and self.loop_gates and self._plain_continues(gid)
+            if (note := language.check(self, gid, reply.get('content') or '', due=follows)):
                 with self.store.transaction():
                     self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
             self.progress[gid] = time.time()
-            if not reply.get('tool_calls'):
+            if plain:
                 # A goal ends only through the finish tool, which runs the done check. Plain text is not
                 # completion: nudge the agent back to the work, and pause the goal after three in a row.
-                if self.store.goal(gid).get('kind','work') in FREE_KINDS:
+                if kind in FREE_KINDS:
                     # Free time is not graded: a plain reply is the resident choosing to rest.
                     self._finish(gid,reply['content'])
                 elif self.loop_gates:

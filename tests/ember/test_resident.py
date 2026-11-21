@@ -2810,6 +2810,40 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_a_loop_gated_plain_reply_is_nudged_because_a_turn_follows_it(self):
+        # review P2: `due=bool(reply.get('tool_calls'))` assumed a plain reply ends the goal. A goal whose loop
+        # gates are on keeps running after one (`_plain_reply` nudges it back to work), so a drifting plain reply
+        # left `nudged=False`: the nudge came one turn late and the cadence counted from the wrong turn. `due` now
+        # follows `_plain_reply`'s own dispatch, and only a reply that really ends the goal is left unnudged.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            rt.loop_gates=True
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(gid))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1)
+            self.assertTrue(drifts[0]['nudged'],'a plain reply that leaves a turn is nudged')
+            rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))]
+            self.assertTrue(any('Reply in English' in t for t in rows),'the nudge is queued for that turn')
+            self.assertNotIn(rt.store.goal(gid)['state'],('completed','paused'),'the goal kept running')
+            self.assertTrue(rt._plain_continues(gid),'the first plain reply leaves a turn behind')
+            # the shapes `_plain_reply` branches on decide `due`; a separate goal so its events do not overlap
+            g2=rt.store.enqueue('Second goal.')
+            rt.plain_replies[g2]=2
+            self.assertFalse(rt._plain_continues(g2),'the third plain reply in a row pauses the goal: no turn follows')
+            rt.plain_replies.pop(g2)
+            rt.store.event('finished',{},g2)
+            rt.store.event('goal_continued',{},g2)
+            rt.store.event('assistant',dict(content='ok'),g2)
+            self.assertTrue(rt._plain_continues(g2),'a reopened goal is prompted for one more turn')
+            rt.__dict__.setdefault('_reopen_prompted',set()).add(g2)
+            self.assertFalse(rt._plain_continues(g2),'its second plain reply completes the goal: no turn')
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_a_store_error_during_the_drift_check_loses_the_event_not_the_turn(self):
         # review P2: check() ran three event queries and the insert with no guard, after the reply was already
         # recorded and before the inbox write, so a locked db or a schema drift raised out of runtime._tick and the
@@ -2909,6 +2943,26 @@ for line in sys.stdin:
         self.assertIn('not detected',out['note'])
         self.assertEqual(self.cmd('language',[]),dict(language='Esperanto',scripts=[],source='config',check=False,
                                                       note=out['note']))
+
+    def test_reading_the_language_creates_no_store_and_no_home(self):
+        # review P2: `language` sat under `store=Store(home)`, so a typo'd `--home` was handed a directory and an
+        # agent.sqlite3 as the side effect of reading a setting, and an initialized home whose store had been
+        # moved got an empty one back. It reads through `language.from_home` (config, then the store mode=ro) like
+        # `agent prompt`, so neither a read nor the write creates either file.
+        fresh=S/(self.key+'-fresh')
+        p=subprocess.run([sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','language',
+                          'test','--home',str(fresh),'--json'],capture_output=True,text=True)
+        self.assertEqual(p.returncode,1,p.stdout+p.stderr)
+        self.assertIn('not initialized',p.stdout)
+        self.assertFalse(fresh.exists(),'a read created no home')
+        for name in ('agent.sqlite3','agent.sqlite3-wal','agent.sqlite3-shm'):
+            path=self.home/name
+            if path.exists():path.unlink()
+        out=self.cmd('language',['--to','Chinese'])
+        self.assertEqual((out['language'],out['source']),('Chinese','config'))
+        self.assertFalse((self.home/'agent.sqlite3').exists(),'setting the language created no store')
+        self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting reads back')
+        self.assertFalse((self.home/'agent.sqlite3').exists(),'reading it created no store')
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')

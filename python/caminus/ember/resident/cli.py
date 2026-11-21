@@ -800,14 +800,11 @@ def main(argv=None,stdin=None):
                 subprocess.run(['systemctl','--user','stop',unit],env=env,check=True)
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)
             return 0
-        store=Store(home)
         if a.op=='language':
             # The owner's language (issue #354): the prompt names it, and the per-turn check holds a reply to it.
-            # Unlike `agent prompt` (which reads config through language.from_home, mode=ro, and creates nothing),
-            # this op opens the Store first, so `agent language --home NEW` creates the home and agent.sqlite3 as
-            # a side effect of setting a setting. Intended for a settings op - but do not copy it into a read-only
-            # op (#390 review).
-            from types import SimpleNamespace
+            # Reads go through language.from_home (config, then the store mode=ro), so this op creates nothing,
+            # like `agent prompt`: before, it opened the Store first and an initialized home whose store had been
+            # moved was handed an empty agent.sqlite3 back as a side effect of reading a setting (review P2).
             from . import language
             try:
                 cfg=json.loads((home/'config.json').read_text())
@@ -834,7 +831,7 @@ def main(argv=None,stdin=None):
             elif a.auto:
                 cfg.pop('language',None)
                 atomic_json(home/'config.json',cfg)
-            who=language.owner(SimpleNamespace(store=store,config=cfg))
+            who=language.from_home(home)
             # A name with no script table (`--to Esperanto`) leaves the drift check switched off: say so here
             # rather than print `scripts: []` and let the owner believe a drifting reply would be held.
             out=dict(language=who['name'],scripts=list(who['scripts']),source=who['source'],check=bool(who['scripts']))
@@ -848,6 +845,7 @@ def main(argv=None,stdin=None):
                              'French and German alike, so `--to LANGUAGE` names the language you work in')
             emit(out,a.json)
             return 0
+        store=Store(home)
         if a.op=='sim':
             # The SIM log (issue #341): predictions before a harness change and observations after CI and the
             # reviews. Listing and export read the event log; a record is one event, so a live daemon sees it at
