@@ -3032,10 +3032,16 @@ for line in sys.stdin:
             parent=rt.store.enqueue('p')
             gone=rt.store._enqueue('c',kind='delegate')
             rt.store.delegate_add(gone,parent,'','','worker',.5)
+            rt.store.delegate_spend(gone,.25,.0)
             rt.store.db.execute('DELETE FROM goals WHERE id=?',(gone,))
             delegate.sweep(rt)                     # used to raise ValueError('unknown goal ...')
             self.assertEqual(rt.store.delegate(gone)['outcome'],'orphaned')
-            self.assertIn('goal row is gone',json.loads(rt.store.delegate(gone)['report'])['summary'])
+            report=json.loads(rt.store.delegate(gone)['report'])
+            self.assertIn('goal row is gone',report['summary'])
+            # the close is the last thing written about this child, so it must carry the spend it already made:
+            # a report without it reads as a free run (#382 review)
+            self.assertEqual(report['spend_usd'],.25)
+            self.assertEqual(report['cap_usd'],.5)
             # the ordinary case still pauses a child left runnable by a run that ended
             live=rt.store._enqueue('c2',kind='delegate')
             rt.store.delegate_add(live,parent,'','','worker',.5)
@@ -3092,8 +3098,10 @@ for line in sys.stdin:
     def test_a_pause_is_capped_by_a_fact_and_never_by_its_words(self):
         # run_child called a paused child `capped` when its error contained 'delegate' or 'budget', so a pause for
         # any other reason whose message happened to carry either word read to the parent as a spent limit (#382
-        # review, second round). The report reads the facts the caps leave: the delegate_capped event (written in
-        # the pause's own transaction), steps >= step_limit, or a deadline that has passed.
+        # review, second round). It then guessed from the row - steps >= step_limit, or a deadline that has
+        # passed - which reads a watchdog pause past a passed deadline as the deadline ending it (#382 review,
+        # third round). The one fact all three caps leave is the delegate_capped event, written in the pause's
+        # own transaction: capped() for the dollar cap, the runtime for the step limit and the deadline.
         from caminus.ember.resident import delegate
         rt=Runtime(self.home)
         try:
@@ -3107,22 +3115,28 @@ for line in sys.stdin:
             other=child()
             with rt.store.transaction():
                 rt.store.update(other,state='paused',error='another delegate asked the same question')  # the old false positive
-            self.assertFalse(delegate._capped(rt,other,rt.store.goal(other)))
+            self.assertFalse(delegate._capped(rt,other))
             stopped=child(steps=3)
             with rt.store.transaction():
                 rt.store.update(stopped,state='paused',steps=3,error='any words at all')
-            self.assertTrue(delegate._capped(rt,stopped,rt.store.goal(stopped)),'the step limit is a fact of its row')
+            self.assertFalse(delegate._capped(rt,stopped),'steps at the limit alone is not the pause the limit made')
+            with rt.store.transaction():     # the runtime's own step-limit pause writes the event
+                rt.store.event('delegate_capped',dict(kind='step_limit',steps=3,step_limit=3),stopped)
+            self.assertTrue(delegate._capped(rt,stopped),'the step limit is its event')
             late=child(deadline=time.time()-5)
             with rt.store.transaction():
-                rt.store.update(late,state='paused',error='any words at all')
-            self.assertTrue(delegate._capped(rt,late,rt.store.goal(late)),'a passed deadline is a fact of its row')
+                rt.store.update(late,state='paused',error='the watchdog stopped it')
+            self.assertFalse(delegate._capped(rt,late),'a pause past a passed deadline is not the deadline ending it')
+            with rt.store.transaction():     # the runtime's own deadline pause writes the event
+                rt.store.event('delegate_capped',dict(kind='deadline',deadline=rt.store.goal(late)['deadline']),late)
+            self.assertTrue(delegate._capped(rt,late),'the deadline is its event')
             dollars=child()
             rt.store.delegate_spend(dollars,.75,0.0)
             self.assertTrue(delegate.capped(rt,dollars))
-            self.assertTrue(delegate._capped(rt,dollars,rt.store.goal(dollars)),'the dollar cap is its event')
+            self.assertTrue(delegate._capped(rt,dollars),'the dollar cap is its event')
             with rt.store.transaction():
                 rt.store.update(other,state='completed')
-            self.assertFalse(delegate._capped(rt,other,rt.store.goal(other)),'a completed child is never capped')
+            self.assertFalse(delegate._capped(rt,other),'a completed child is never capped')
 
             # and the report itself: a pause that names a delegate is `incomplete`, not `capped`
             def fake_run(target=None,stop=None,**kw):
@@ -3130,6 +3144,68 @@ for line in sys.stdin:
             with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
                 report=delegate.run_child(rt,parent,dict(child=other,role='worker'))
             self.assertEqual(report['outcome'],'failed','a pause with no cap behind it is not a cap')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_closing_write_that_fails_leaves_a_trace_and_keeps_the_run_error(self):
+        # the fall-back close in run_child was `except Exception: pass`: a store that was transiently unwritable
+        # left the row `outcome=''`, which keeps its child slot until a restart (sweep() runs only at a start) and
+        # said nothing at all (#382 review). It retries once, then writes a line on the parent's events - and the
+        # error that ended the run is still the one raised.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            gid=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(gid,parent,'','','worker',.5)
+            import sqlite3
+            boom=RuntimeError('the run died')
+            calls=[]
+            def flaky(child,outcome,report=None):
+                calls.append(outcome)
+                raise sqlite3.OperationalError('database is locked')
+            with unittest.mock.patch.object(rt,'run',side_effect=boom), \
+                 unittest.mock.patch.object(rt.store,'delegate_done',side_effect=flaky):
+                with self.assertRaises(RuntimeError) as caught:
+                    delegate.run_child(rt,parent,dict(child=gid,role='worker'))
+            self.assertIs(caught.exception,boom,'the run error is not masked by the failed close')
+            self.assertEqual(len(calls),2,'the close is tried twice before giving up')
+            fails=[e for e in rt.store.events() if e['kind']=='delegate_close_failed']
+            self.assertEqual(len(fails),1)
+            self.assertEqual(fails[0]['goal'],parent,'the line is on the parent, which is the one refused next')
+            self.assertEqual(fails[0]['data']['child'],gid)
+            self.assertIn('locked',fails[0]['data']['error'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_runtime_writes_the_cap_event_its_own_pauses_leave(self):
+        # _capped() reads only the delegate_capped event, so the pauses the runtime makes itself must write it:
+        # the step limit and the deadline used to leave only `steps`/`deadline` on the row, which is how a watchdog
+        # pause past a passed deadline read as the deadline ending the child (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child(**cols):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                rt.delegate_caps[gid]=.5        # as start() leaves it: only a child has a cap to report
+                with rt.store.transaction():rt.store.update(gid,**cols)
+                return gid
+            stopped=child(step_limit=0)
+            self.assertTrue(rt._tick(stopped))
+            self.assertEqual(rt.store.goal(stopped)['state'],'paused')
+            self.assertIn('step budget',rt.store.goal(stopped)['error'])
+            self.assertTrue(delegate._capped(rt,stopped),'the step-limit pause leaves the cap event')
+            self.assertIn('step_limit',[e['data'].get('kind') for e in rt.store.events() if e['goal']==stopped])
+            late=child(deadline=time.time()-5)
+            self.assertTrue(rt._tick(late))
+            self.assertIn('time budget',rt.store.goal(late)['error'])
+            self.assertTrue(delegate._capped(rt,late),'the deadline pause leaves the cap event')
+            # and a plain goal gets no delegate line: it has no cap to report
+            plain=rt.store.enqueue('g',max_steps=1)
+            rt.store.update(plain,steps=1)
+            self.assertTrue(rt._tick(plain))
+            self.assertEqual(rt.store.goal(plain)['state'],'paused')
+            self.assertFalse([e for e in rt.store.events() if e['goal']==plain and e['kind']=='delegate_capped'])
         finally:rt.mail.close();rt.store.close()
 
     def test_a_null_delegate_limit_takes_the_default_and_a_zero_is_refused(self):

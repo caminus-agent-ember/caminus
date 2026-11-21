@@ -17,10 +17,11 @@ from inside another goal:
   $0 of money and real allowance;
 - a short structured report back: outcome (completed / capped / failed / incomplete), summary, what it
   verified, what it skipped, steps, spend, allowance and its cap. `capped` covers all three limits: the dollar
-  cap, the step limit and the time limit each end a child the same way, and the report recognises one from the
-  fact it leaves (the `delegate_capped` event in the pause's own transaction, `steps >= step_limit`, or a dead
-  deadline), never from its error text — an unrelated pause whose message named a delegate used to read as
-  capped (#382 review);
+  cap, the step limit and the time limit each end a child the same way, and each writes one `delegate_capped`
+  event in the pause's own transaction — `capped()` for the dollar cap, the runtime for the step limit and the
+  deadline — so the report reads that event and nothing else: never the error text (an unrelated pause whose
+  message named a delegate read as capped), and never the clock (a goal the watchdog paused past its deadline
+  read as the deadline ending it) (#382 review);
 
 - the count is capped too: start() counts the children this parent still has **running** (`outcome=''`) and
   refuses past `delegate_max_children` (4 by default), so a parent cannot grow an unbounded tree and a finished
@@ -249,23 +250,16 @@ def _state(rt, gid):
     return (r['state'] if r else '') or ''
 
 
-def _capped(rt, child, g):
-    """True when one of the child's own three caps ended its run. Explicit facts only, never its error text.
+def _capped(rt, child):
+    """True when one of the child's own three caps ended its run: the `delegate_capped` event, and nothing else.
 
-    The report used to call a paused child `capped` when its error contained 'delegate' or 'budget', so any pause
-    whose message happened to carry either word (a watchdog line naming the goal, a future timer mentioning a
-    delegate) told the parent its child had been stopped by a limit (#382 review, second round). Each cap leaves
-    a fact of its own: the dollar cap writes `delegate_capped` in the same transaction as the pause (capped()),
-    the step limit and the deadline are columns on the child's own row, and a run that reached one has
-    steps >= step_limit or is past its deadline."""
-    if rt.store.db.execute("SELECT 1 FROM events WHERE goal=? AND kind='delegate_capped' LIMIT 1",
-                           (child,)).fetchone():
-        return True
-    limit = g.get('step_limit')
-    if limit is not None and int(g.get('steps') or 0) >= int(limit):
-        return True
-    deadline = g.get('deadline')
-    return bool(deadline) and time.time() >= float(deadline)
+    One fact for all three caps, written in the transaction that pauses the goal: `capped()` for the dollar cap,
+    the runtime for the step limit and the deadline. The report used to guess from the error text (any pause
+    whose message carried 'delegate' or 'budget' read as capped), then from the clock (`time.time() >= deadline`
+    read as the deadline, so a watchdog pause past a passed deadline read as a spent limit). Neither says *why*
+    the goal paused; the event does (#382 review)."""
+    return bool(rt.store.db.execute("SELECT 1 FROM events WHERE goal=? AND kind='delegate_capped' LIMIT 1",
+                                    (child,)).fetchone())
 
 
 def run_child(rt, parent, job):
@@ -292,7 +286,7 @@ def run_child(rt, parent, job):
             g, state = rt.store.goal(child), 'cancelled'
         if state == 'completed':
             outcome = 'completed'
-        elif state == 'paused' and _capped(rt, child, g):
+        elif state == 'paused' and _capped(rt, child):
             outcome = 'capped'       # the dollar cap, the step limit or the deadline ended it
         elif state == 'cancelled':
             outcome = 'incomplete'   # its parent was cancelled: it did not finish its own work
@@ -327,28 +321,43 @@ def run_child(rt, parent, job):
         # A run that died before it reported (an exception out of rt.run, a kill) must not leave a row `outcome=''`
         # forever: the children limit counts running rows now, so an unclosed one would wedge the parent at the
         # limit. The normal path closed the row already, so this is a no-op for it.
-        try:
+        def close():
+            """The fall-back close, from the top, so a transient store failure can be tried again."""
             row = rt.store.delegate(child)
-            if row and not row.get('outcome'):
-                # a direct read, not store.goal(): that raises on an unknown id, and the write closing the row must
-                # not be skipped because the goal row went missing
-                r = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (child,)).fetchone()
-                state = (r['state'] if r else '') or ''
-                if state in ('queued', 'working', 'waiting_model'):
-                    # and the goal must not stay runnable: closing the row here takes it out of sweep()'s reach
-                    # (sweep() looks for `outcome=''`), and a runnable child left behind would be picked up by
-                    # the next run on whatever brain that process has, with no cap ledger (#382 review, this
-                    # push). sweep() pauses exactly this for the process-died case; this is the in-process one.
-                    with rt.store.transaction():
-                        rt.store.update(child, state='paused', error='its run ended without a report '
-                                                                    '(a delegate child run by another goal)')
-                    state = 'paused'
-                # the report's state is the goal's, so it says `paused` where the goal was just paused
-                rt.store.delegate_done(child, 'failed', dict(child=child, outcome='failed', state=state or 'error',
-                                                             summary='the run of this child ended without a report'))
-                rt.store.event('delegate_done', dict(child=child, outcome='failed'), parent)
-        except Exception:
-            pass                          # (a closing write must never mask the error that ended the run)
+            if not row or row.get('outcome'):
+                return                        # the normal path closed the row already
+            # a direct read, not store.goal(): that raises on an unknown id, and the write closing the row must
+            # not be skipped because the goal row went missing
+            r = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (child,)).fetchone()
+            state = (r['state'] if r else '') or ''
+            if state in ('queued', 'working', 'waiting_model'):
+                # and the goal must not stay runnable: closing the row here takes it out of sweep()'s reach
+                # (sweep() looks for `outcome=''`), and a runnable child left behind would be picked up by
+                # the next run on whatever brain that process has, with no cap ledger (#382 review, this
+                # push). sweep() pauses exactly this for the process-died case; this is the in-process one.
+                with rt.store.transaction():
+                    rt.store.update(child, state='paused', error='its run ended without a report '
+                                                                '(a delegate child run by another goal)')
+                state = 'paused'
+            # the report's state is the goal's, so it says `paused` where the goal was just paused
+            rt.store.delegate_done(child, 'failed', dict(child=child, outcome='failed', state=state or 'error',
+                                                         summary='the run of this child ended without a report'))
+            rt.store.event('delegate_done', dict(child=child, outcome='failed'), parent)
+
+        # A failed close must never mask the error that ended the run, but it must not vanish either: a row left
+        # `outcome=''` keeps its child slot, and the runtime's sweep() runs only at a start, so a long-lived
+        # parent would be refused every further delegate until a restart with nothing said (#382 review). One
+        # retry (the usual cause is a transient lock), then a line on the parent's events.
+        for attempt in (1, 2):
+            try:
+                close()
+                break
+            except Exception as e:
+                if attempt == 2:
+                    try:
+                        rt.store.event('delegate_close_failed', dict(child=child, error=str(e)[:300]), parent)
+                    except Exception:
+                        pass              # (and the trace itself must not mask the error that ended the run)
 
 
 def capped(rt, gid):
@@ -381,14 +390,21 @@ def note_spend(rt, gid, usd, allowance):
 def sweep(rt):
     """At a runtime start, a child left runnable belongs to a run that ended (the store has one writer, and the
     runtime lock proved no other process holds it): pause it so it cannot run later on the wrong brain."""
-    for r in rt.store.db.execute("SELECT child FROM delegates WHERE outcome=''").fetchall():
+    for r in rt.store.db.execute("SELECT child,role,model,provider,cap_usd,spend_usd,allowance_usd,started "
+                                 "FROM delegates WHERE outcome=''").fetchall():
         # a direct read, not store.goal(): that raises on an unknown id, and this runs bare in the runtime loop,
         # so one row whose goal is gone (a partial restore) would end the daemon on every pass and leave the row
         # open for good (#382 review). A row without its goal is closed as orphaned - it can never report.
         row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (r['child'],)).fetchone()
         if row is None:
-            rt.store.delegate_done(r['child'], 'orphaned', dict(outcome='orphaned', child=r['child'],
-                                                                summary='this child\'s goal row is gone'))
+            # the same shape run_child reports, so the spend it already made is not lost from the record: the
+            # close is the last thing written about this child, and a report without its spend reads as a free
+            # run (#382 review).
+            rt.store.delegate_done(r['child'], 'orphaned', dict(
+                child=r['child'], role=r['role'], model=r['model'], provider=r['provider'], outcome='orphaned',
+                state='error', spend_usd=round(r['spend_usd'] or 0.0, 6),
+                allowance_usd=round(r['allowance_usd'] or 0.0, 6), cap_usd=r['cap_usd'] or 0.0,
+                summary='this child\'s goal row is gone'))
             continue
         if row['state'] in ('queued', 'working', 'waiting_model'):
             with rt.store.transaction():

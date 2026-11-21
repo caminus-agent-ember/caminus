@@ -2712,6 +2712,10 @@ class Runtime:
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot time budget reached')
+                if gid in self.delegate_caps:
+                    # the child's report reads its caps from this event, not the clock: a pause for another
+                    # reason past a passed deadline is not the deadline ending it (#382 review)
+                    self.store.event('delegate_capped', dict(kind='deadline', deadline=g['deadline']), gid)
             return True
         if gid in self.delegate_caps and delegate.capped(self, gid):
             return True                       # its spend (money + plan allowance) reached its cap: the parent hears it
@@ -2728,6 +2732,10 @@ class Runtime:
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot model-step budget reached')
+                if gid in self.delegate_caps:
+                    # one fact per cap, in the pause's own transaction (the dollar cap's is delegate.capped())
+                    self.store.event('delegate_capped', dict(kind='step_limit', steps=g['steps'],
+                                                             step_limit=g['step_limit']), gid)
             return True
         if gid in self._held:
             # only the human's message lifts it, not a harness note ([gate], [answer ...]: same rule as unsend)
