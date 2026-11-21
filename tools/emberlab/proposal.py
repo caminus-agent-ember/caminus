@@ -202,6 +202,19 @@ def approval_missing(a, brains):
     return missing
 
 
+def arm_mechanism(prop, arms):
+    """What makes the two arms differ: `--arm-checkout`, or the config/env override that carries the proposal.
+
+    The plan prints the arms' paths and configs, but not which flag produced the difference, so a second observer
+    auditing the plan against `arms.json` had to infer it (#385 review P2).
+    """
+    if len(arms) == 2 and Path(arms[0].checkout) != Path(arms[1].checkout):
+        return f'--arm-checkout (base runs {arms[0].checkout}, arm runs {arms[1].checkout})'
+    named = [f'--{k.replace("_", "-")}' for k in ('config', 'env', 'base_config', 'base_env')
+             if isinstance(prop.get(k), dict)]
+    return ', '.join(named) or '(none: the two arms are identical)'
+
+
 def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=None, unlocked=''):
     """The plan the owner reads before anything runs, and the one thing that names everything that will run.
 
@@ -224,6 +237,7 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
              f"- timeout: {timeout}s per goal",
              f"- brains: {', '.join(b.label() for b in brains)}",
              f"- arms: {', '.join(a.name + ' @ ' + str(a.checkout) + ' ' + a.commit for a in arms)}",
+             f"- difference: {arm_mechanism(prop, arms)}",
              f"- runs: {runs} in {out}",
              '- verdict: an arm is better only if it is better across the board (report.compare)']
     if paid:
@@ -311,6 +325,14 @@ def cmd_propose(a, run):
     if why:
         raise SystemExit(f'{out} holds a different experiment ({why}): use a fresh --out (a shared folder '
                          "would reuse the other experiment's rows by id)")
+    # the status guard above reads one snapshot. A resident that closes the record while the plan prints would
+    # otherwise be caught only by `write_observation`, after every arm has run and been billed (#385 review P1):
+    # re-read it here, before the first run, so a closed record refuses with nothing spent.
+    again = load_record(home, a.record)
+    if again is None or again.get('status') != 'proposed':
+        what = 'gone from the log' if again is None else repr(again.get('status') or 'unstated')
+        raise SystemExit(f'SIM record {a.record} is no longer proposed ({what}): nothing was run (it changed '
+                         'while the plan printed)')
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
     # both flags are carried as given: cmd_run asks hosts.local_refusal about the resolved host, and that rule
     # reads either name. Folding --unsafe-free into unsafe_local here would hide which flag allowed the run.

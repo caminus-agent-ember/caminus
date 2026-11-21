@@ -439,6 +439,66 @@ except SystemExit as e:
     code = str(e)
 check(code == 1 and proposal.load_record(ph, r10['id'])['status'] == 'observed',
       f'propose: a `worse` verdict exits 1 and still closes the record ({code!r})')
+# a record the resident closes between the plan and the runs refuses before the first run: the status guard at the
+# top reads one snapshot, and without the re-read a closed record was caught only after every arm had run and been
+# billed (#385 review P1)
+r12 = sim_record(ph, status='proposed')
+raced = S / 'propose-raced'
+ns3 = argparse.Namespace(sim_home=str(ph), record=r12['id'], suite='basic', brain=['scripted:solve'], repeats=1,
+                         only='read', host=None, jobs=1, parallel=None, out=str(raced),
+                         config='{"sim": false}', env=None, base_config=None, base_env=None,
+                         arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
+                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+claimed = []
+real_claim = proposal.claim_folder
+
+
+def claim_then_close(arms_file, spec):
+    """The resident closes the record in the window between the plan and the runs, as a live one may."""
+    why = real_claim(arms_file, spec)
+    claimed.append(why)
+    sim, store, rt = proposal._open(ph)
+    try:
+        sim.observe(rt, 'g-propose', r12['id'], 'closed by the resident while the plan printed')
+    finally:
+        store.close()
+    return why
+
+
+def must_not_run(runs):
+    raise AssertionError('the arms ran although the record was closed before them')
+
+
+proposal.claim_folder = claim_then_close
+try:
+    proposal.cmd_propose(ns3, must_not_run)
+    err12 = 'returned instead of refusing'
+except SystemExit as e:
+    err12 = str(e)
+finally:
+    proposal.claim_folder = real_claim
+check('no longer proposed' in err12 and 'nothing was run' in err12 and claimed == ['']
+      and proposal.load_record(ph, r12['id'])['status'] == 'observed'
+      and not (raced / 'results.jsonl').exists(),
+      f'propose: a record closed before the runs refuses with nothing spent ({err12[:200]})')
+# the plan says which flag makes the arms differ, so a second observer need not infer it from arms.json (#385
+# review P2). The dry-run line covers the flag in the rendered plan; the helper covers the shapes a flag can take.
+r13 = sim_record(ph, status='proposed')
+p = lab('propose', '--sim-home', str(ph), '--record', r13['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--env', '{"SIM_X": "1"}', '--only', 'read', '--out', str(S / 'propose-diff'),
+        '--dry-run')
+check(p.returncode == 0 and '- difference: --config, --env' in p.stdout,
+      f'propose: the plan names the config/env flags that carry the proposal ({p.returncode}; {p.stdout[-300:]})')
+mech = proposal.arm_mechanism
+check(mech({'config': {'sim': False}}, [argparse.Namespace(checkout=Path('/a')),
+                                        argparse.Namespace(checkout=Path('/b'))]).startswith('--arm-checkout (base runs'),
+      'propose: two checkouts are named as --arm-checkout, not inferred from the arms line')
+check(mech({'base_config': {'sim': True}}, [argparse.Namespace(checkout=Path('/a')),
+                                            argparse.Namespace(checkout=Path('/a'))]) == '--base-config',
+      'propose: a base-side override is named as --base-config')
+check(mech({}, [argparse.Namespace(checkout=Path('/a')), argparse.Namespace(checkout=Path('/a'))])
+      == '(none: the two arms are identical)',
+      'propose: a difference nothing produced says so rather than naming no flag')
 
 # ---- tui
 if shutil.which('tmux'):
