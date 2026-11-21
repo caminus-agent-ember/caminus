@@ -5100,6 +5100,47 @@ for line in sys.stdin:
         self.assertIsNone(op.refusal('mistral-larg'), 'a failed refresh does not turn a typo back into a wait')
         self.assertEqual(op.refusal('mistral-large-latest')[4], True, 'a known name still waits with the file')
 
+    def test_a_known_name_the_last_good_table_never_priced_is_a_403_not_a_wait(self):
+        """The review's P1: the price file goes unreadable while the alias list and the last good table are loaded. A
+        name the list carries whose whole alias group the table prices nothing for is not waiting on the file — the
+        last good read proved the file does not price it, so the answer is the same 403 a readable file gives. A
+        name the table DOES price keeps pricing through its alias (the mid-rewrite case), and once the table is
+        dropped (past the grace) the 503 wait is right again: then a price may come back with the file."""
+        from caminus.ember import relay
+        pf, lines = self.home/('prices-'+uuid.uuid4().hex+'.json'), []
+        pf.write_text(json.dumps({'mistral-large-2512': [0.7, 2.1]}))
+        listed = dict(data=[dict(id='mistral-large-2512', aliases=['mistral-large-latest']),
+                            dict(id='open-mistral-4')])
+        op = relay.OwnerPrices(str(pf), lines.append, fetch=lambda: listed)
+        self.assertIsNone(op.get('open-mistral-4'), 'the file does not price it')
+        self.assertTrue(op.names, 'the alias list loaded')
+        pf.unlink()                                          # (the file becomes unreadable)
+        self.assertIsNone(op.get('open-mistral-4'))
+        self.assertTrue(any('price file unreadable' in l for l in lines), lines)
+        self.assertIsNone(op.refusal('open-mistral-4'),
+                          'the last good table never priced it: the 403 a readable file gives, not an hour of 503s')
+        self.assertEqual(op.get('mistral-large-latest'), (0.7, 2.1, 0.7), 'the table still prices its alias')
+        op.error_at -= relay.PRICE_FILE_GRACE + 1            # (unreadable long enough that the table is dropped)
+        self.assertIsNone(op.get('open-mistral-4'))
+        self.assertEqual(op.refusal('open-mistral-4')[0], 503,
+                         'an empty table waits: the price may come back with the file')
+
+    def test_a_refusal_never_names_a_zero_wait_after_the_clock_steps_back(self):
+        """A clock step backwards (NTP) leaves a due time in the past: `max(0, ceil(next-now))` was 0, so the 503
+        said Retry-After: 0 and the client retried at once rather than when the next load is due (#389 review P2)."""
+        from caminus.ember import relay
+        def boom():
+            raise OSError('network is down')
+        lp = relay.ListPrices(lambda m: None, boom, backoff=(300,))
+        with lp.lock:
+            lp.at, lp.tries, lp.error, lp.next = time.time(), 1, 'OSError: down', 0.0   # (a due time in the past)
+        status, kind, message, wait, local = lp.refusal('some-model')
+        self.assertEqual(status, 503)
+        self.assertEqual(wait, relay.PRICE_WAIT_FLOOR, 'a past due time still names a wait')
+        op = relay.OwnerPrices(str(self.home/('prices-'+uuid.uuid4().hex+'.json')), lambda m: None, fetch=boom)
+        op.names_error, op.names_at = 'OSError: down', time.time() - 120   # (its 60 s retry time is past)
+        self.assertEqual(op.refusal('unlisted')[3], relay.PRICE_WAIT_FLOOR, 'the wait floors, never 0')
+
     def test_an_alias_whose_model_list_never_loaded_is_a_503_waited_out_not_a_403(self):
         """Mistral's aliases come from the provider's own model list. While that list has never loaded, a name the
         owner's file does not price may simply be an alias of one it does, so it is not a fact about the model: the

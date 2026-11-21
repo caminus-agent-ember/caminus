@@ -89,6 +89,10 @@ LOAD_BACKOFF = (10, 30, 60, 300)
 # The wait a refusal names while the owner's price file cannot be read: the file is re-read on every request, so
 # this only tells the agent how long to wait before the retry that may find the file written.
 PRICE_FILE_RETRY = 60
+# The shortest wait a refusal names. A clock step backwards (NTP) leaves a due time in the past, and the wait then
+# rounded to 0, so the 503 said `Retry-After: 0` and the client retried at once instead of when the next load is
+# due. A few seconds costs nothing and is still shorter than every real backoff (#389 review P2).
+PRICE_WAIT_FLOOR = 5
 # Seconds a last good price table outlives the price file becoming unreadable. A file caught mid-rewrite (truncate,
 # then write) must keep pricing the models it priced a moment ago, so the table is not dropped on the first failed
 # read; but a file the owner DELETED must not meter at its old rates forever. After this grace the relay drops the
@@ -336,7 +340,7 @@ class ListPrices:
                 return None                  # (not a model name: the caller refuses it; `model in self.table` needs a key)
             if self.at:
                 if self.tries and self.error and model not in self.table:
-                    wait = max(0, math.ceil(self.next - time.time()))
+                    wait = max(PRICE_WAIT_FLOOR, math.ceil(self.next - time.time()))
                     return _cannot_price('the price list refresh failed (%s) and the last good list does not price '
                                          'it' % self.error, model, wait)
                 return None
@@ -344,7 +348,7 @@ class ListPrices:
                 return _cannot_price('the price list is still loading', model, LOAD_BACKOFF[0])
             if not self.error:
                 return None
-            wait = max(0, math.ceil(self.next - time.time()))
+            wait = max(PRICE_WAIT_FLOOR, math.ceil(self.next - time.time()))
             return _cannot_price('the price list has not loaded yet (%s)' % self.error, model, wait)
 
     def prime(self):
@@ -484,6 +488,11 @@ class OwnerPrices:
                     return self.table[other]
             return None
 
+    def _priced(self, model):
+        """Whether any name in MODEL's alias group prices a model: the name itself or a sibling from the provider's
+        list (a price under the dated id covers `mistral-large-latest`). Called with the lock held."""
+        return model in self.table or any(other in self.table for other in self.names.get(model, ()))
+
     def refusal(self, model):
         """(status, kind, message, retry_after, local) for a model this relay cannot price, or None when it has no
         better account than 'no price for MODEL'. Two causes are not about the model: a price file that cannot be
@@ -499,7 +508,14 @@ class OwnerPrices:
 
         A name the provider's list knows it does not carry is a typo whatever the file is doing, so it is refused at
         once even when the last refresh failed (a list that loaded once keeps its names). With the list never loaded
-        there is nothing to compare against: the name waits with the file (the PR body states this trade-off)."""
+        there is nothing to compare against: the name waits with the file (the PR body states this trade-off).
+
+        A name the list DOES carry, whose whole alias group the last good table prices nothing for, is the other way
+        round: that read already proved the file does not price it, so a file that has since become unreadable
+        changes nothing about this model and the answer is the same 403 a readable file gives. The 503 wait is for a
+        price the file coming back could supply; this one it never had (#389 review P1: an unpriced model was waited
+        on for up to an hour and then ended the goal). An empty table (dropped after the grace) or a list that never
+        loaded still waits: there the price plausibly returns with the file."""
         with self.lock:
             if not isinstance(model, str):
                 return None                  # (the caller's own 403 names the model; do_POST guards every table lookup)
@@ -509,6 +525,11 @@ class OwnerPrices:
                 # 403 "no price for"), whatever the file is doing. A name it does know still waits below.
                 return None
             if self.error:
+                if self.table and self.names and not self._priced(model):
+                    # the alias group is known and the last good table priced none of it: this model's answer is the
+                    # 403 a readable file would give it. Waiting an hour on the 503 (then ending the goal) for a price
+                    # the file never had is what the review found; the failed-read log line still names the file.
+                    return None
                 what = 'the relay cannot read its price file (%s)' % self.error
                 tail = 'the owner re-reads it on change, no restart, so retry in %ds'
                 if not self.table and self.error_at:
@@ -524,7 +545,7 @@ class OwnerPrices:
                 # ListPrices.refusal does, never the 403 that stops a goal (#389 review P2).
                 return _cannot_price('the price list is still loading', model, LOAD_BACKOFF[0])
             if self.fetch and self.names_error and model not in self.names:
-                wait = max(0, math.ceil(60 - (time.time() - self.names_at)))
+                wait = max(PRICE_WAIT_FLOOR, math.ceil(60 - (time.time() - self.names_at)))
                 return _cannot_price('the price list has not loaded yet (%s), so the name cannot be resolved to a '
                                      'priced model' % self.names_error, model, wait)
             return None
