@@ -267,7 +267,8 @@ check('tasks 1/5 (read)' in (closed.get('eval_context') or ''),
 spec = json.loads((po / 'arms.json').read_text())
 plan_j = json.loads((po / 'plan.json').read_text())
 check(spec['arms'] == {x['name']: x for x in plan_j['arms']} and spec['plan']['suite'] == 'basic'
-      and spec['plan']['brains'] == ['scripted:solve'] and spec['plan']['only'] == ['read'],
+      and spec['plan']['brains'] == ['scripted:solve'] and spec['plan']['only'] == ['read']
+      and 'approvals' in spec['plan'] and plan_j.get('approvals') is None,
       f'propose: arms.json is plan.json\'s arms and the plan that reads them ({sorted(spec.get("arms", {}))}, '
       f'{spec.get("plan")})')
 check(closed['observed_by']['model'] == 'emberlab' and closed['brain']['model'] == 'm',
@@ -392,6 +393,61 @@ check(why == '' and why2 and 'commit' in why2 and why3 == '' and (cf / 'arms.jso
 why4 = proposal.claim_folder(cf / 'trunc.json', spec_a)
 check(why4 and 'not written by this command' in why4 and not list(cf.glob('.trunc.json.*.tmp')),
       f'propose: a non-JSON arms.json names what it is, and the temporary file is gone ({why4!r})')
+
+
+def _raise(exc):
+    def boom(*a, **k):
+        raise exc
+    return boom
+
+
+# a filesystem that cannot hard-link (overlay/CIFS: EPERM/ENOSYS) falls back to an exclusive create instead of dying
+# with a traceback after the plan printed; a create that fails for another reason is a refusal naming both errors
+# (#385 review P2)
+nolink = cf / 'nolink.json'
+real_link, real_open = os.link, os.open
+os.link = _raise(OSError(13, 'Permission denied'))
+try:
+    why5 = proposal.claim_folder(nolink, spec_a)
+    why6 = proposal.claim_folder(nolink, spec_b)
+finally:
+    os.link = real_link
+check(why5 == '' and why6 and 'commit' in why6 and json.loads(nolink.read_text())['plan']['suite'] == 'basic'
+      and not list(cf.glob('.nolink.json.*.tmp')),
+      f'propose: an unsupported hard link falls back to an exclusive create, then compares ({why5!r}, {why6!r})')
+os.link = _raise(OSError(13, 'Permission denied'))
+os.open = _raise(OSError(30, 'Read-only file system'))
+try:
+    why7 = proposal.claim_folder(cf / 'nope.json', spec_a)
+finally:
+    os.link, os.open = real_link, real_open
+check(why7 and 'cannot be created exclusively' in why7 and not (cf / 'nope.json').exists(),
+      f'propose: a folder that holds neither a hard link nor an exclusive create is refused, not a traceback '
+      f'({why7!r})')
+# the approval flags granted are part of the plan record and of the folder's identity: --unsafe-free is the same gate
+# as --unsafe-local, and a log that names only the latter misses a run authorised under the alias; a folder written
+# before approvals were recorded has no such key and still resumes (#385 review P2)
+check(proposal.approvals_granted(argparse.Namespace(unsafe_local=False, unsafe_free=True, approve_paid=True))
+      == ['--approve-paid', '--unsafe-free'] and proposal.approvals_granted(argparse.Namespace()) is None,
+      'propose: the approval flags are recorded as given, and none is None so an older folder still resumes')
+sp = proposal.arms_spec([argparse.Namespace(name='base', describe=lambda: {'checkout': 'a', 'commit': '1'}),
+                         argparse.Namespace(name='arm', describe=lambda: {'checkout': 'b', 'commit': '2'})],
+                        dict(suite='basic', brains=['scripted:solve'], only=[], repeats=1,
+                             approvals=['--unsafe-free']))
+old = dict(sp, plan={k: v for k, v in sp['plan'].items() if k != 'approvals'})
+check(sp['plan']['approvals'] == ['--unsafe-free']
+      and 'approvals' in proposal.arms_mismatch(sp, dict(sp, plan=dict(sp['plan'], approvals=['--unsafe-local'])))
+      and proposal.arms_mismatch(sp, dict(sp, plan=dict(sp['plan'], approvals=None)))
+      and proposal.arms_mismatch(old, dict(sp, plan=dict(sp['plan'], approvals=None))) == '',
+      f'propose: another approval is another experiment, and a folder from before approvals resumes a run that '
+      f'grants none ({sp["plan"]}; {proposal.arms_mismatch(old, sp)!r})')
+# `observed_text` runs after every arm has been paid for: a cell without median steps is rendered, not a KeyError
+# that leaves the record open, and a number the rows do not carry is not invented (#385 review P2)
+txt = proposal.observed_text(dict(verdict='no difference', errored=[], brains=[
+    dict(brain='scripted:solve', base=dict(passed=1, runs=1, false_completions=0, median_steps=7),
+         arm=dict(passed=1, runs=1, false_completions=0, median_steps=None))]))
+check('median steps: scripted:solve 7 -> not measured' in txt,
+      f'propose: a cell without median steps is recorded as not measured, not a KeyError ({txt!r})')
 # one rule for both commands: a real model on the local host needs --unsafe-local OR --unsafe-free, and `run` accepts
 # both names, so `propose --unsafe-free` cannot start what `run --unsafe-free` refuses (#385 review P2)
 import brains as brains_mod
@@ -410,9 +466,10 @@ p = lab('propose', '--sim-home', str(ph), '--record', r11['id'], '--brain', 'ant
         '--host', 'local', '--approve-paid', '--unsafe-free', '--config', '{"sim": false}', '--only', 'read',
         '--out', str(free), '--dry-run')
 check(p.returncode == 0 and '- host: local' in p.stdout and '--unsafe-free' in p.stdout
+      and '- approvals: --approve-paid, --unsafe-free' in p.stdout
       and '- timeout: 1500s per goal' in p.stdout and not free.exists(),
-      f'propose: --unsafe-free unlocks the local host as it does for run, and the plan names the host, the flag and '
-      f'the timeout ({p.returncode}; {(p.stderr or p.stdout)[-300:]})')
+      f'propose: --unsafe-free unlocks the local host as it does for run, and the plan names the host, the approval '
+      f'flags granted as given, and the timeout ({p.returncode}; {(p.stderr or p.stdout)[-300:]})')
 # the documented exit code: 1 on a `worse` verdict, and the record is still observed (docs/dev/ember.md)
 worse = S / 'propose-worse'
 r10 = sim_record(ph, status='proposed')

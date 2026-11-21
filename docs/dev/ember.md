@@ -198,7 +198,8 @@ python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
   (`recorded` is refused: its change is already in the tree, so the A/B would measure nothing). A verdict of
   `incomplete` (a brain with no run of one arm) leaves the record open.
 - **One folder, one experiment.** `--out` records the arms (checkout, commit, tree state, config, env) and the plan
-  (suite, brains, `--only`, repeats), and a rerun that differs in any of them is refused: run ids carry no record id,
+  (suite, brains, `--only`, repeats, the approval flags granted as given), and a rerun that differs in any of them is
+  refused: run ids carry no record id,
   so a shared folder would reuse the other experiment's rows. The checkouts are recorded as given, so an
   `--arm-checkout` under your home leaves that absolute path in `arms.json`: keep an `--out` folder private unless
   the paths in it are ones you would publish.

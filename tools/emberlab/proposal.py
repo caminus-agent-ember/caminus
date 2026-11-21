@@ -101,7 +101,23 @@ def arms_from_proposal(prop, base_checkout=None, arm_checkout=None):
 
 
 ARM_KEYS = ('checkout', 'commit', 'dirty', 'config', 'env')
-PLAN_KEYS = ('suite', 'brains', 'only', 'repeats')
+PLAN_KEYS = ('suite', 'brains', 'only', 'repeats', 'approvals')
+APPROVAL_FLAGS = ('--approve-paid', '--unsafe-local', '--unsafe-free')
+
+
+def approvals_granted(a):
+    """The approval flags this command line actually carries, as given, or None when it carries none.
+
+    The flag that unlocked a run is part of what a folder records: `--unsafe-free` is the same permission as
+    `--unsafe-local`, and a log that names only the latter misses a run authorised under the alias (the review asked
+    for plan.json/the record to name it). None, not [], when nothing was granted: a folder written before approvals
+    were recorded has no such key, and a run that grants nothing must still resume it.
+
+    A flag that is not on the command line is read with getattr, so a namespace built by hand (`lab.py run`, a test)
+    does not have to add every name.
+    """
+    got = [f for f in APPROVAL_FLAGS if getattr(a, f[2:].replace('-', '_'), False)]
+    return got or None
 
 
 def arms_spec(arms, plan=None):
@@ -112,9 +128,11 @@ def arms_spec(arms, plan=None):
     commit, a rebase) would close a new record with the previous rows (#385 review: reproduced by committing
     between two runs into one folder).
 
-    The suite, brains, `--only` and repeats belong to it for the same reason: one folder holds one experiment. A
-    first run that errored partway leaves its rows, and a rerun with another `--brain` (or another suite or task
-    set) would pass the arms check and close its record with numbers this command never chose (#385 review P1).
+    The suite, brains, `--only`, repeats and the approval flags granted belong to it for the same reason: one folder
+    holds one experiment. A first run that errored partway leaves its rows, and a rerun with another `--brain` (or
+    another suite or task set) would pass the arms check and close its record with numbers this command never chose
+    (#385 review P1). The approvals are the same kind of fact: a folder filled under `--unsafe-local` was allowed to
+    do what a later command without it was not, and resuming must not silently drop that (#385 review P2).
     """
     return dict(arms={x.name: x.describe() for x in arms},
                 plan=None if plan is None else {k: plan.get(k) for k in PLAN_KEYS})
@@ -159,6 +177,11 @@ def claim_folder(arms_file, spec):
     first and filled it after, so a second `propose` starting in that window read an empty or half-written file and
     was told 'is not JSON' - a message about the wrong thing (#385 review). A hard link either fails because the
     name exists or makes the whole file appear at once, and it fails the same way on every filesystem this runs on.
+
+    A filesystem that cannot hard-link (overlay, CIFS, some network mounts: EPERM/ENOSYS/EOPNOTSUPP) falls back to
+    an exclusive create of the name and the whole spec written inside it: refusing there would make `propose`
+    unusable in those folders, and the only cost is that a loser of a concurrent race can see the file before it is
+    whole. A create that fails for any other reason is a refusal naming both errors, not a traceback (#385 review P2).
     """
     tmp = arms_file.with_name('.%s.%d.tmp' % (arms_file.name, os.getpid()))
     tmp.write_text(json.dumps(spec, indent=1))
@@ -167,6 +190,20 @@ def claim_folder(arms_file, spec):
         return ''
     except FileExistsError:
         pass
+    except OSError as e:
+        try:
+            fd = os.open(str(arms_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            pass
+        except OSError as e2:
+            return (f'{arms_file} cannot be created exclusively (hard link: {e}; create: {e2}): use a fresh --out '
+                    'on a local filesystem')
+        else:
+            with os.fdopen(fd, 'w') as f:
+                f.write(json.dumps(spec, indent=1))
+                f.flush()
+                os.fsync(f.fileno())
+            return ''
     finally:
         try:
             tmp.unlink()
@@ -215,12 +252,14 @@ def arm_mechanism(prop, arms):
     return ', '.join(named) or '(none: the two arms are identical)'
 
 
-def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=None, unlocked=''):
+def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=None, unlocked='', approvals=None):
     """The plan the owner reads before anything runs, and the one thing that names everything that will run.
 
     The host decides where a real model runs (as the user, or on the agent account) and the timeout is how long one
     goal may take, so a plan without them did not name everything (#385 review). `host` is the resolved kind
-    (`hosts.kind`), not the flag: `--host local` and a real brain with no flag resolve to the same place.
+    (`hosts.kind`), not the flag: `--host local` and a real brain with no flag resolve to the same place. The
+    approval flags are printed as given: `--unsafe-free` is the same permission as `--unsafe-local`, and a plan that
+    names only the latter hides which flag unlocked the run (#385 review P2).
     """
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
     real = [b.label() for b in brains if getattr(b, 'real', False)]
@@ -235,6 +274,8 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
                                     + (unlocked or '--unsafe-local or --unsafe-free') + ')'
                                     if host == 'local' and real else ''),
              f"- timeout: {timeout}s per goal",
+             '- approvals: ' + (', '.join(approvals) if approvals else
+                                'none (nothing billed, no real model runs as you)'),
              f"- brains: {', '.join(b.label() for b in brains)}",
              f"- arms: {', '.join(a.name + ' @ ' + str(a.checkout) + ' ' + a.commit for a in arms)}",
              f"- difference: {arm_mechanism(prop, arms)}",
@@ -243,6 +284,16 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
     if paid:
         lines.append(f"- **billed through the owner's relay: {', '.join(paid)}** (the relay's daily cap is the guard)")
     return '\n'.join(lines)
+
+
+def _steps(v):
+    """One cell's median steps for the record, or 'not measured' when the row did not carry them.
+
+    The record is written after every run has been paid for: a malformed row must not raise a KeyError there and
+    leave the record open, and a number the rows do not carry must not be invented (#385 review P2).
+    """
+    v = v.get('median_steps') if isinstance(v, dict) else None
+    return f'{v:g}' if isinstance(v, (int, float)) else 'not measured'
 
 
 def observed_text(verdict):
@@ -256,7 +307,7 @@ def observed_text(verdict):
         parts.append('false completions: ' + ', '.join(
             f"{o['brain']} {o['base']['false_completions']} -> {o['arm']['false_completions']}" for o in cells))
         parts.append('median steps: ' + ', '.join(
-            f"{o['brain']} {o['base']['median_steps']:g} -> {o['arm']['median_steps']:g}" for o in cells))
+            f"{o['brain']} {_steps(o['base'])} -> {_steps(o['arm'])}" for o in cells))
     if verdict.get('errored'):
         parts.append(f"{len(verdict['errored'])} run(s) ended in error and are left out: "
                      + ', '.join(verdict['errored'][:5]))
@@ -304,10 +355,10 @@ def cmd_propose(a, run):
     tasks = [t for t in suite['tasks'] if not only or t['key'] in only]
     if only and len(tasks) != len(only):
         raise SystemExit(f'unknown task in --only: {sorted(set(only) - {t["key"] for t in tasks})}')
-    unlocked = ('--unsafe-free' if getattr(a, 'unsafe_free', False) else '') or (
-        '--unsafe-local' if getattr(a, 'unsafe_local', False) else '')
+    approvals = approvals_granted(a)
     print(plan_md(prop, suite, brains, arms, a.repeats, out, len(tasks),
-                  host=hosts_mod.kind(a.host, brains), timeout=suite.get('timeout', 1500), unlocked=unlocked),
+                  host=hosts_mod.kind(a.host, brains), timeout=suite.get('timeout', 1500),
+                  unlocked=' or '.join(f for f in approvals or () if f != '--approve-paid'), approvals=approvals),
           flush=True)
     missing = approval_missing(a, brains)
     if missing:
@@ -320,7 +371,7 @@ def cmd_propose(a, run):
     # and the first of two concurrent commands to create arms.json owns it (a run id is task.brain.arm.rN, so a
     # shared folder would reuse the other experiment's rows by id)
     spec = arms_spec(arms, dict(suite=suite['name'], brains=sorted(b.label() for b in brains), only=sorted(only),
-                                repeats=a.repeats))
+                                repeats=a.repeats, approvals=approvals))
     why = claim_folder(arms_file, spec)
     if why:
         raise SystemExit(f'{out} holds a different experiment ({why}): use a fresh --out (a shared folder '

@@ -75,6 +75,10 @@ def cmd_run(a):
     host.prepare(arms)
     (out / 'plan.json').write_text(json.dumps(dict(suite=suite['name'], host=host_kind, repeats=a.repeats,
                                                    brains=[b.label() for b in bs], arms=[x.describe() for x in arms],
+                                                   # the flag that unlocked the host, as given: --unsafe-free is the
+                                                   # same gate as --unsafe-local, and a record naming only one of them
+                                                   # hides runs authorised under the other (#385 review P2)
+                                                   approvals=proposal_mod.approvals_granted(a),
                                                    runs=[r['id'] for r in runs]), indent=1))
     lock = threading.Lock()
     gates = {b.spec: threading.Semaphore(b.parallel) for b in bs}
