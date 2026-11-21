@@ -2820,6 +2820,42 @@ for line in sys.stdin:
             self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting is unchanged')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
 
+    def test_a_corrupt_config_is_an_error_the_owner_can_act_on_not_a_traceback(self):
+        # review P2: the `language` op read config.json unguarded. It writes the setting, so unlike `prompt` it
+        # must not fall back to the defaults (that would rewrite the file and lose the rest), and it must not
+        # traceback: valid JSON of the wrong shape reached cfg['language'] as a TypeError.
+        for text,why in (('not json{','not valid JSON'),('[]','not a JSON object'),('[1, 2]','not a JSON object')):
+            (self.home/'config.json').write_text(text)
+            for extra in (['--to','Chinese'],['--auto']):
+                out=self.cmd('language',extra,code=1)
+                self.assertIn(why,out['error'],'%s %s names the shape: %s' % (text,extra,out['error']))
+                self.assertIn('config.json',out['error'],'the error says which file to fix')
+            self.assertEqual((self.home/'config.json').read_text(),text,'the op did not rewrite the corrupt file')
+        (self.home/'config.json').write_text('{"name": "test"}')
+        self.assertEqual(self.cmd('language',[])['language'],'English','a repaired config works again')
+
+    def test_a_restart_derives_the_same_language_from_the_same_goals(self):
+        # review P2: `_language_named` is sticky on one runtime and not persisted; a restart re-reads the first
+        # eight goals and must land on the same name, or the prompt (a cached prefix) would change across a
+        # restart and every reply of the session would be nudged. Pins the invariant a later `derive` change or
+        # a moved goal window has to keep.
+        from caminus.ember.resident import language
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+            first=language.owner(rt)
+        finally:
+            rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)
+        try:
+            again=language.owner(rt)
+            self.assertEqual((first['name'],first['source']),('Chinese','your goals'),'the goal names Chinese')
+            self.assertEqual(again,first,'a restart re-derives the same name, scripts and source')
+            self.assertEqual(getattr(rt,'_language_named',None),first,'the re-derived name is cached again')
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_a_named_language_is_not_renamed_by_a_later_goal(self):
         # `derive` reads the first eight goals, so a ninth goal could otherwise flip the name - and the prompt
         # is a cached prefix that must not change as goals are added. Once the goals name a language it is the

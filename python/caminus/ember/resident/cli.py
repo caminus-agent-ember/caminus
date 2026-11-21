@@ -809,7 +809,18 @@ def main(argv=None,stdin=None):
             # op (#390 review).
             from types import SimpleNamespace
             from . import language
-            cfg=json.loads((home/'config.json').read_text())
+            try:
+                cfg=json.loads((home/'config.json').read_text())
+            except OSError:
+                raise ValueError('cannot read config.json in %s: run agent init first' % home)
+            except ValueError:
+                # A corrupt config must read as an error, not a traceback: `prompt` survives one by falling back to
+                # the defaults, but this op writes `language`, and a silent fallback would overwrite the file and
+                # lose whatever else it held (#390 review).
+                raise ValueError('config.json is not valid JSON: fix or remove %s' % (home/'config.json'))
+            if not isinstance(cfg,dict):
+                # Valid JSON of the wrong shape (a list, a string) used to traceback at cfg['language'] below.
+                raise ValueError('config.json is not a JSON object: fix or remove %s' % (home/'config.json'))
             if a.to is not None:
                 if not a.to.strip():
                     # `--to ''` is falsy, so it used to skip both writes and print a derived answer while an old

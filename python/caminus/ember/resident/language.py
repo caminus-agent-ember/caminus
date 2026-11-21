@@ -232,7 +232,10 @@ def owner(rt):
     A corpus that names a language names it once, for good: a later goal cannot rename the session, so the
     prompt (a cached prefix) changes only until the first decisive goal. While the corpus is undecided the
     answer is cached on the runtime by goal count, so a turn that is plainly English pays for no census, and a
-    short first goal does not pin the session before one that names it.
+    short first goal does not pin the session before one that names it. Both caches live on the runtime, not in
+    config: a restart re-derives from the same first eight goals and must land on the same name (`derive` is a
+    pure function of that corpus), which `test_a_restart_derives_the_same_language_from_the_same_goals` pins -
+    a later change to `derive` or to the goal window has to keep that true.
     """
     name = str((getattr(rt, 'config', None) or {}).get('language') or '').strip()
     if name:
