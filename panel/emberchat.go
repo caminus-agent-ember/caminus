@@ -36,14 +36,15 @@ type residentChat struct {
 	seq, rendered, renderWidth              int
 	content                                 string
 	markdown                                *glamour.TermRenderer
-	cardMarkdown                            *glamour.TermRenderer // an open card's renderer: narrower by its rule's 5 cells
-	mdSource                                bool                  // Ctrl+Y: open cards show Markdown as its source, not rendered
-	mdCache                                 map[mdKey]string      // each card text's drawing by cardMarkdown ("": as it is)
-	headOpen                                bool                  // Alt+G: the whole goal under the title, as Markdown
-	headFor                                 string                // the goal it was opened on: a switch to another goal hides it
-	headTop                                 int                   // the expanded goal's first row (PgUp/PgDn scroll it)
-	headMD                                  map[headKey]string    // the expanded goal's drawing, by width and source
-	calls                                   map[string]callInfo   // each tool call's arguments by id: its result's card names what it acted on
+	cardMarkdown                            *glamour.TermRenderer         // an open card's renderer: narrower by its rule's 5 cells
+	mdSource                                bool                          // Ctrl+Y: open cards show Markdown as its source, not rendered
+	mdCache                                 map[mdKey]string              // each card text's drawing by cardMarkdown ("": as it is)
+	headOpen                                bool                          // Alt+G: the whole goal under the title, as Markdown
+	headFor                                 string                        // the goal it was opened on: a switch to another goal hides it
+	headTop                                 int                           // the expanded goal's first row (PgUp/PgDn scroll it)
+	headMD                                  map[headKey]string            // the expanded goal's drawing, by width and source
+	headR                                   map[int]*glamour.TermRenderer // the expansion's renderer by wrap width, until syncChat builds markdown
+	calls                                   map[string]callInfo           // each tool call's arguments by id: its result's card names what it acted on
 	question                                *emberReq
 	questionChoice                          int
 	questionCustom                          bool
@@ -237,6 +238,9 @@ func (m *emberModel) initChat() {
 	// recomputes ANSI widths across the entire history even for AtBottom/View,
 	// turning every editor keystroke and cursor blink into a full transcript scan.
 	c.transcript.SoftWrap = false
+	// The expansion's renderer cache: made here (a pointer receiver) so headExpandedBody's value receiver writes
+	// into the same map instead of a copy's (#370 review).
+	c.headR = map[int]*glamour.TermRenderer{}
 	m.chat = c
 	m.chatStyles()
 }
@@ -516,6 +520,7 @@ func (m *emberModel) syncChat() {
 			glamour.WithWordWrap(max(10, min(w-8, readingWidth))))
 		m.chat.mdCache = map[mdKey]string{}
 		m.chat.headMD = map[headKey]string{}
+		m.chat.headR = map[int]*glamour.TermRenderer{}
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
 	// a command first seen running and later seen to end: its card is drawn again with the exit
@@ -849,9 +854,18 @@ func (m emberModel) headExpandedBody(w int) string {
 	if d, ok := m.chat.headMD[key]; ok {
 		return d
 	}
+	wrap := max(10, min(w-4, readingWidth))
 	r := m.chat.markdown
 	if r == nil {
-		r, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
+		// Before syncChat has built chat.markdown (the first frames of a session, or a theme switch that clears
+		// it), the expansion used to build a renderer per call: chatHead runs on every frame and bodyHeight on
+		// every poll, so one wide goal cost a glamour renderer per frame (#370 review). Kept by wrap width, whose
+		// set is as small as the terminal's; the map is made in initChat and renewed on a resize.
+		r = m.chat.headR[wrap]
+		if r == nil {
+			r, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(wrap))
+			m.chat.headR[wrap] = r
+		}
 	}
 	body := renderWith(r, max(10, w-4), text)
 	if m.chat.headMD != nil {
@@ -876,9 +890,12 @@ func (m emberModel) toggleHead() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// headGoalID is the selected goal's id, or "" when the chat shows no goal (the same cases headGoalText blanks).
+// headGoalID is the selected goal's id, or "" when the chat shows no goal: the same cases headGoalText blanks for
+// *status* (no status yet, no selected goal, a new goal being written), not the text it ends up with. Keying it off
+// the text read a goal whose prompt is blank as "no goal", so an expansion opened on it stored "" and could never
+// match that goal again (#370 review).
 func (m emberModel) headGoalID() string {
-	if m.headGoalText() == "" {
+	if m.statusAt.IsZero() || (m.chat.newGoal && m.chat.forceNew) {
 		return ""
 	}
 	if sel := m.selectedResidentGoal(); sel != nil {
