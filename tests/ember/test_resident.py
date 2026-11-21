@@ -2783,6 +2783,33 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_a_brace_in_the_language_setting_reaches_the_prompt_literally(self):
+        # review P2 (could not be reproduced): str.format substitutes the value and does not parse it again, so a
+        # configured `{notakey}` is text in the prompt, not a KeyError on every turn. Pinned so a later second
+        # formatting pass over the rendered prompt cannot reintroduce it silently.
+        from caminus.ember.resident.prompt import render
+        for value in ('{notakey}', '{sim_head}', 'a{b}c}'):
+            text=render(str(self.home),sim=True,language=value)
+            self.assertIn('works in %s.' % value,text,'the setting reaches the prompt as written')
+            self.assertIn('## SIM: predict',text,'the SIM section is still filled by the one format pass')
+
+    def test_a_drift_on_the_reply_that_ends_the_goal_queues_no_nudge(self):
+        # review P2: `check` ran before the finish check, so a plain reply (no tool call) that ends the goal also
+        # queued a nudge for a turn that never comes. The drift is still an event; `nudged` stays false.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.assertEqual(language.check(rt,gid,zh,due=False),'','no nudge for a turn that cannot come')
+            rows=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(rows),1,'the drift is still an event')
+            self.assertFalse(rows[0]['nudged'],'and it does not advance the cadence')
+            self.assertIn('Reply in English',language.check(rt,gid,zh),'the next turn that comes is nudged')
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_an_empty_language_setting_is_refused_instead_of_silently_ignored(self):
         # review P2: `--to ''` is falsy, so it skipped both writes and printed a derived answer while an old
         # `language` key stayed in config.json, disagreeing with the display.

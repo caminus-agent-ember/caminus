@@ -2357,8 +2357,9 @@ class Runtime:
                 return True
             # A reply that slid into another language is an event every turn, and one nudge to the goal's next
             # turn when it is due (issue #354); the prompt names the language, this is what holds a brain that
-            # drifts past it anyway.
-            if (note := language.check(self, gid, reply.get('content') or '')):
+            # drifts past it anyway. A plain reply ends the goal on this tick, so it gets the event and no nudge
+            # for a turn that never comes (review P2).
+            if (note := language.check(self, gid, reply.get('content') or '', due=bool(reply.get('tool_calls')))):
                 with self.store.transaction():
                     self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
             self.progress[gid] = time.time()

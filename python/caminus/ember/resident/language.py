@@ -286,13 +286,18 @@ def from_home(home):
     return derive(prompts) or named(DEFAULT, 'default')
 
 
-def check(rt, gid, text, cfg=None):
+def check(rt, gid, text, cfg=None, due=True):
     """Record a drift in `text` and, when the goal is due for one, return the nudge for its next turn.
 
     Every detection is an event (kind `language_drift`, the brain in its data, so a rate per brain is a count
     of that event); the nudge comes at most once every DRIFT_EVERY assistant turns of the goal, counted from
     the last turn that was nudged (not the last detection: a reply that keeps drifting is detected every turn,
     and counting from the detection would push the next nudge back on every one of them).
+
+    `due=False` is for a reply that ends the goal on this tick (no tool call): the drift is still an event, but
+    no nudge is queued for a turn that never comes, and `nudged` stays false so the cadence is not advanced by
+    it (review P2). Both queries run over the goal's own rows (`events_goal`), so the per-turn cost is bounded
+    by this goal's history, not by the whole log.
     """
     who = owner(rt)
     hit = drift(text, who['scripts'])
@@ -307,7 +312,7 @@ def check(rt, gid, text, cfg=None):
                                "json_extract(data,'$.nudged')=1", (gid,)).fetchone()[0]
     since = rt.store.db.execute("SELECT COUNT(*) FROM events WHERE goal=? AND kind='assistant' AND seq>?",
                                 (gid, last or 0)).fetchone()[0]
-    nudge = last is None or since >= DRIFT_EVERY
+    nudge = due and (last is None or since >= DRIFT_EVERY)
     rt.store.event('language_drift', dict(script=script, language=who['name'], share=round(share, 3),
                                           brain=sim.brain(sim.serving(rt, cfg)), nudged=nudge), gid)
     if not nudge:
