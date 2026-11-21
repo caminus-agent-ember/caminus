@@ -2829,18 +2829,18 @@ for line in sys.stdin:
             rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))]
             self.assertTrue(any('Reply in English' in t for t in rows),'the nudge is queued for that turn')
             self.assertNotIn(rt.store.goal(gid)['state'],('completed','paused'),'the goal kept running')
-            self.assertTrue(rt._plain_continues(gid),'the first plain reply leaves a turn behind')
+            self.assertTrue(rt._plain_dispatch(gid)[1],'the first plain reply leaves a turn behind')
             # the shapes `_plain_reply` branches on decide `due`; a separate goal so its events do not overlap
             g2=rt.store.enqueue('Second goal.')
             rt.plain_replies[g2]=2
-            self.assertFalse(rt._plain_continues(g2),'the third plain reply in a row pauses the goal: no turn follows')
+            self.assertFalse(rt._plain_dispatch(g2)[1],'the third plain reply in a row pauses the goal: no turn follows')
             rt.plain_replies.pop(g2)
             rt.store.event('finished',{},g2)
             rt.store.event('goal_continued',{},g2)
             rt.store.event('assistant',dict(content='ok'),g2)
-            self.assertTrue(rt._plain_continues(g2),'a reopened goal is prompted for one more turn')
+            self.assertTrue(rt._plain_dispatch(g2)[1],'a reopened goal is prompted for one more turn')
             rt.__dict__.setdefault('_reopen_prompted',set()).add(g2)
-            self.assertFalse(rt._plain_continues(g2),'its second plain reply completes the goal: no turn')
+            self.assertFalse(rt._plain_dispatch(g2)[1],'its second plain reply completes the goal: no turn')
         finally:
             rt.mail.close();rt.store.close()
 
@@ -2871,6 +2871,59 @@ for line in sys.stdin:
                           'the next turn with a working store detects the drift again')
         finally:
             rt.store=real
+            rt.mail.close();rt.store.close()
+
+    def test_a_store_error_during_the_drift_check_is_recorded_not_only_swallowed(self):
+        # review P2 (r6): the cadence query and the drift write sat in one `except sqlite3.Error: return ''`, so a
+        # locked store lost the event with no trace and the per-brain drift rate -- the number this check is
+        # measured by -- under-reported silently. The failure is now its own event, best effort: when the store is
+        # what failed, the record fails the same way and is lost, and that is still no second exception.
+        import sqlite3
+        import types
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        real=rt.store
+        def boom(*a,**k):
+            raise sqlite3.Error('database is locked')
+        try:
+            gid=real.enqueue('Open the pull request against ember-next.')
+            rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=real.event)
+            self.assertEqual(language.check(rt,gid,zh),'','a locked store is no nudge, not an exception')
+            errs=[json.loads(r[0]) for r in real.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='drift_check_error'",(gid,))]
+            self.assertEqual(len(errs),1,'the lost drift is recorded, not only swallowed')
+            self.assertIn('database is locked',errs[0]['error'])
+            self.assertEqual(errs[0]['script'],'Han','the record says what the drift was')
+            rt.store=real
+            self.assertEqual([r[0] for r in real.db.execute(
+                "SELECT COUNT(*) FROM events WHERE goal=? AND kind='language_drift'",(gid,))],[0],
+                'no drift event was invented')
+        finally:
+            rt.store=real
+            rt.mail.close();rt.store.close()
+
+    def test_the_plain_dispatch_and_the_language_check_are_one_predicate(self):
+        # review P2 (r6): `_plain_continues` copied `_plain_reply`'s branches, so a later change to one could leave
+        # the other saying a turn comes when none does -- and the nudge it queues would defer the `_finish` on the
+        # same tick. They are one function now: `_plain_reply` dispatches on what `_plain_dispatch` returns. A copy
+        # could not follow a patched dispatch; this asserts the single predicate by moving it.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal whose reply is plain.')
+            rt._plain_dispatch=lambda g: ('asked', False, 0)      # (the branch `_answering` would not pick here)
+            self.assertTrue(rt._plain_reply(gid))
+            last=rt.store.goal(gid)['messages'][-1]['content']
+            self.assertIn('Carry on with the goal',last,'`_plain_reply` took the branch the dispatch named')
+            kinds=[r[0] for r in rt.store.db.execute(
+                "SELECT kind FROM events WHERE goal=? AND kind='plain_answer'",(gid,))]
+            self.assertEqual(kinds,['plain_answer'])
+            # the count is the dispatch's too: a patched count of 3 pauses, it is not recomputed from plain_replies
+            g2=rt.store.enqueue('A second goal.')
+            rt._plain_dispatch=lambda g: ('', False, 3)
+            self.assertTrue(rt._plain_reply(g2))
+            self.assertEqual(rt.store.goal(g2)['state'],'paused','the dispatch count reached PLAIN_TEXT_LIMIT')
+        finally:
             rt.mail.close();rt.store.close()
 
     def test_an_empty_language_setting_is_refused_instead_of_silently_ignored(self):

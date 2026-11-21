@@ -321,11 +321,18 @@ def check(rt, gid, text, cfg=None, due=True):
         nudge = due and (last is None or since >= DRIFT_EVERY)
         rt.store.event('language_drift', dict(script=script, language=who['name'], share=round(share, 3),
                                               brain=sim.brain(sim.serving(rt, cfg)), nudged=nudge), gid)
-    except sqlite3.Error:
-        # a locked db or a schema drift here raises inside runtime._tick right after the reply was recorded and
-        # before the inbox write, so the turn dies mid-tool-call; owner() above already treats an unreadable store
-        # as tolerable, and a drift event lost this turn is re-detected on the next one, not worth a dead turn
-        # (review P2)
+    except sqlite3.Error as e:
+        # A locked db or a schema drift here raises inside runtime._tick right after the reply was recorded and
+        # before the inbox write, so the turn died mid-tool-call; owner() above already treats an unreadable store
+        # as tolerable, and a drift event lost this turn is re-detected on the next one - not worth a dead turn
+        # (review P2). Losing it silently is its own cost, though: the event log's per-brain drift rate is what
+        # this feature is measured by, so the failure itself is recorded (review P2). If the store is the thing
+        # that failed, the record fails the same way and is lost too: best effort, never a second exception.
+        try:
+            rt.store.event('drift_check_error', dict(error='%s: %s' % (type(e).__name__, str(e)[:200]),
+                                                     script=script, language=who['name']), gid)
+        except sqlite3.Error:
+            pass
         return ''
     if not nudge:
         return ''

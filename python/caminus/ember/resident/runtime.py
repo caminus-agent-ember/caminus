@@ -1827,30 +1827,32 @@ class Runtime:
             if k=='assistant':break
         return ''
 
-    def _plain_continues(self, gid):
-        """Whether a plain reply leaves a turn behind: `_plain_reply`'s dispatch, without its writes.
+    def _plain_dispatch(self, gid):
+        """(how, turn, count) for a plain reply, the one place `_plain_reply`'s branches live.
 
-        Read before the language check so a drift on this reply is nudged exactly when a turn will read the
-        nudge. A nudge for a turn that never comes is worse than a late one: the unconsumed inbox row defers the
-        completion `_finish` makes on the same tick. Mirrors `_plain_reply` branch for branch - the reopened
-        goal's first plain reply is prompted on (a turn), the second finishes (no turn); an answer to the
-        human's question is told to carry on; otherwise the third plain reply in a row pauses the goal.
+        `_plain_reply` dispatches on this and the language check reads `turn` from it, so a change to one branch
+        cannot leave the other saying a turn comes when none does (review P2: the two were written twice, and a
+        nudge queued for a turn that never comes defers the `_finish` on the same tick). `turn` is whether a turn
+        follows this reply: a reopened goal's first plain reply is prompted on, its second finishes; an answer to
+        the human's question is told to carry on; otherwise the third plain reply in a row pauses the goal.
+        `count` is the reply's place in a plain run (0 for the two answer branches), which `_plain_reply` records.
         """
         how = self._answering(gid)
         if how == 'reopened':
-            return gid not in self.__dict__.get('_reopen_prompted', set())
+            return how, gid not in self.__dict__.get('_reopen_prompted', set()), 0
         if how == 'asked':
-            return True
-        return self.plain_replies.get(gid, 0) + 1 < PLAIN_TEXT_LIMIT
+            return how, True, 0
+        count = self.plain_replies.get(gid, 0) + 1
+        return how, count < PLAIN_TEXT_LIMIT, count
 
     def _plain_reply(self, gid):
         """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal. A reply to the
         human is not that: on a finished goal they reopened with a message, the answer ends the turn and the goal is
         complete again (it was nudged back to work instead, and with nothing left to do it re-ran its done check in a
         loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted."""
-        how=self._answering(gid)
+        how, turn, count = self._plain_dispatch(gid)
         prompted=self.__dict__.setdefault('_reopen_prompted',set())
-        if how=='reopened' and gid not in prompted:
+        if how=='reopened' and turn:
             # The agent decides, not a guess from its words: a reopened goal is either a question (the answer is
             # the whole job) or new work ("now do step 6", answered "Sure, I'll start"). One gentle prompt; a second
             # plain reply in a row completes it, so the old loop cannot come back.
@@ -1880,8 +1882,7 @@ class Runtime:
                 self.store.update(gid,messages=messages)
                 self.store.event('plain_answer',{},gid)
             return True
-        count=self.plain_replies.get(gid,0)+1
-        self.plain_replies[gid]=count
+        count=self.plain_replies[gid]=count
         with self.store.transaction():
             if self.store.goal(gid)['state']=='cancelled':return True
             if count>=PLAIN_TEXT_LIMIT:
@@ -2382,7 +2383,7 @@ class Runtime:
             follows = True
             if plain:
                 kind = self.store.goal(gid).get('kind', 'work')
-                follows = kind not in FREE_KINDS and self.loop_gates and self._plain_continues(gid)
+                follows = kind not in FREE_KINDS and self.loop_gates and self._plain_dispatch(gid)[1]
             if (note := language.check(self, gid, reply.get('content') or '', due=follows)):
                 with self.store.transaction():
                     self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
