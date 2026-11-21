@@ -194,21 +194,8 @@ def letters(text):
     return per, sum(per.values())
 
 
-def derive(prompts):
-    """The owner's language from their own prompts, when one script is clear enough to name, else None.
-
-    Read as letters over prose, across all the prompts: an owner who writes English around a pasted line in
-    another script is English, and one excerpt cannot name the session (a wrong name changes the prompt and
-    nudges every reply of it). Fenced code is not the owner's prose either. Japanese is kanji and kana
-    together, so Kana shares the count with Han instead of splitting it.
-
-    Latin is the exception: English, Spanish, French and German are one script, so a Latin-majority corpus
-    names no language (None, and the caller keeps the documented default). Naming it English would tell a
-    Spanish owner "your human works in English" and steer their replies there; `--to LANGUAGE` is the setting
-    for an owner who writes a Latin-script language other than English.
-    """
-    joined = '\n'.join(p or '' for p in prompts)
-    per, total = letters(joined)
+def _decisive(per, total):
+    """The language a letter census names, else None: one script at DERIVE_SHARE of at least MIN_UNITS letters."""
     if total < MIN_UNITS:
         return None
     script = max(per, key=per.get)
@@ -223,26 +210,56 @@ def derive(prompts):
     return None
 
 
-_GOALS = 'SELECT prompt FROM goals ORDER BY COALESCE(position, created), created LIMIT 8'
+def derive(prompts):
+    """The owner's language from their own prompts, when one script is clear enough to name, else None.
+
+    Read as letters over prose, and the FIRST prefix that names a language names it: a later goal cannot
+    rename the session, so the prompt (a cached prefix) changes only until then. That rule is a property of the
+    corpus, not of the running process, so `owner` (a turn), `from_home` (the CLI) and a restart all land on
+    the same answer for the same goals. Reading the whole window and deciding once let a second goal flip a
+    first one that had already named the session, and a pin kept on the runtime hid that from every other
+    reader (review P2).
+
+    Read as letters over prose: an owner who writes English around a pasted line in another script is English,
+    and one excerpt cannot name the session (a wrong name changes the prompt and nudges every reply of it).
+    Fenced code is not the owner's prose either. Japanese is kanji and kana together, so Kana shares the count
+    with Han instead of splitting it.
+
+    Latin is the exception: English, Spanish, French and German are one script, so a Latin-majority corpus
+    names no language (None, and the caller keeps the documented default). Naming it English would tell a
+    Spanish owner "your human works in English" and steer their replies there; `--to LANGUAGE` is the setting
+    for an owner who writes a Latin-script language other than English.
+    """
+    per, total = {}, 0
+    for p in prompts:
+        more, n = letters(p or '')
+        if not n:
+            continue
+        total += n
+        for script, count in more.items():
+            per[script] = per.get(script, 0) + count
+        if (language := _decisive(per, total)):
+            return language
+    return None
+
+
+# Created order, never `position`: a queue reorder rewrites `position` (store.queue_move), and the corpus
+# a session derives its language from must not change under the owner, the CLI or a restart for that reason.
+_GOALS = 'SELECT prompt FROM goals ORDER BY created, id LIMIT 8'
 
 
 def owner(rt):
     """The owner's language for this session: config `language`, else the letters of their goals, else English.
 
-    A corpus that names a language names it once, for good: a later goal cannot rename the session, so the
-    prompt (a cached prefix) changes only until the first decisive goal. While the corpus is undecided the
-    answer is cached on the runtime by goal count, so a turn that is plainly English pays for no census, and a
-    short first goal does not pin the session before one that names it. Both caches live on the runtime, not in
-    config: a restart re-derives from the same first eight goals and must land on the same name (`derive` is a
-    pure function of that corpus), which `test_a_restart_derives_the_same_language_from_the_same_goals` pins -
-    a later change to `derive` or to the goal window has to keep that true.
+    `derive` is a pure function of the goal window and the window is created order, so this answer cannot drift
+    between a turn, the CLI (`from_home`) and a restart; the cache below is an optimisation, not a second
+    opinion, and is keyed by the goal count so a short first goal does not pin the session before one names it.
+    Neither cache lives in config: the setting is `--to`, and a derived name that were written there would be
+    a pin `--auto` could not drop.
     """
     name = str((getattr(rt, 'config', None) or {}).get('language') or '').strip()
     if name:
         return named(name, 'config')
-    sticky = getattr(rt, '_language_named', None)
-    if sticky:
-        return sticky
     try:
         count = rt.store.db.execute('SELECT COUNT(*) FROM goals').fetchone()[0]
     except sqlite3.Error:
@@ -255,8 +272,6 @@ def owner(rt):
     except sqlite3.Error:
         prompts = []
     who = derive(prompts) or named(DEFAULT, 'default')
-    if who['source'] == 'your goals':
-        rt._language_named = who
     if count is not None:
         rt._language_owner = (count, who)
     return who
@@ -301,8 +316,11 @@ def check(rt, gid, text, cfg=None, due=True):
 
     `due=False` is for a reply that ends the goal on this tick (no tool call): the drift is still an event, but
     no nudge is queued for a turn that never comes, and `nudged` stays false so the cadence is not advanced by
-    it (review P2). Both queries run over the goal's own rows (`events_goal`), so the per-turn cost is bounded
-    by this goal's history, not by the whole log.
+    it (review P2). A free-time goal (`free`, `dream`) is `due=False` for the same reason and has no next
+    graded turn: a drift there is recorded, and the prompt's language is the only thing holding it (review P2).
+    Both queries run over the goal's own rows (`events_goal`), so the per-turn cost is bounded by this goal's
+    history, not by the whole log; `EXPLAIN QUERY PLAN` serves the first from that index and the second as a
+    covering index with `rowid>?` (review P2: not a full scan).
     """
     who = owner(rt)
     hit = drift(text, who['scripts'])

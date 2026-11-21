@@ -2718,6 +2718,13 @@ for line in sys.stdin:
         self.assertIsNone(language.derive(['Fix the failing push step. ```\u5206\u652f\u5df2\u63a8\u9001\u3002```']),
                           'a fenced block is not the owner\'s prose')
         self.assertIsNone(language.derive(['ok']),'too few letters cannot name a language')
+        # review P2 (answered, not a defect): a reply of pure kana with no kanji is Japanese, not Chinese.
+        # `per` holds no Han at all there, so the Han branch never runs and the Kana majority decides.
+        self.assertEqual(language.derive(['\u306f\u3044\u3001\u305d\u3046\u3067\u3059\u3002'])['name'],'Japanese',
+                         'pure kana, no kanji, is still Japanese')
+        self.assertEqual(language.derive(['\u305d\u3046\u3067\u3059\u306d\u3001\u308f\u304b\u308a\u307e\u3057\u305f\u3002'
+                                          '\u30c6\u30b9\u30c8\u3092\u5b9f\u884c\u3057\u3066\u304b\u3089\u30d7\u30c3'
+                                          '\u30b7\u30e5\u3057\u307e\u3059\u3002'])['name'],'Japanese')
 
     def test_a_latin_script_corpus_names_no_language_and_says_so(self):
         # one Latin script is English, Spanish, French and German alike: letters cannot name a language from
@@ -2951,10 +2958,10 @@ for line in sys.stdin:
         self.assertEqual(self.cmd('language',[])['language'],'English','a repaired config works again')
 
     def test_a_restart_derives_the_same_language_from_the_same_goals(self):
-        # review P2: `_language_named` is sticky on one runtime and not persisted; a restart re-reads the first
-        # eight goals and must land on the same name, or the prompt (a cached prefix) would change across a
-        # restart and every reply of the session would be nudged. Pins the invariant a later `derive` change or
-        # a moved goal window has to keep.
+        # review P2: a derived name must not live only on the running runtime. `derive` is a pure function of
+        # the goal window and the window is created order, so a turn, the CLI (`from_home`) and a restart all
+        # land on the same name, or the prompt (a cached prefix) changes across a restart and every reply of
+        # the session would be nudged. Pins the invariant a later `derive` change or a moved window keeps.
         from caminus.ember.resident import language
         rt=Runtime(self.home)
         try:
@@ -2968,7 +2975,8 @@ for line in sys.stdin:
             again=language.owner(rt)
             self.assertEqual((first['name'],first['source']),('Chinese','your goals'),'the goal names Chinese')
             self.assertEqual(again,first,'a restart re-derives the same name, scripts and source')
-            self.assertEqual(getattr(rt,'_language_named',None),first,'the re-derived name is cached again')
+            self.assertEqual(getattr(rt,'_language_owner',(None,None))[1],first,'the answer is cached by goal count')
+            self.assertEqual(language.from_home(self.home),first,'the CLI reads the same name as the turn')
         finally:
             rt.mail.close();rt.store.close()
 
@@ -2985,6 +2993,9 @@ for line in sys.stdin:
                 rt.store.enqueue('Fix the failing push step and open the pull request against ember-next.')
             self.assertEqual(language.owner(rt)['name'],'Chinese',
                              'a named language is the session\'s, not the first eight goals\'')
+            # every reader agrees after the later goals: the CLI (`from_home`) and a fresh runtime derive the
+            # same name the running turn reads (review P2: a sticky in-process pin said otherwise)
+            self.assertEqual(language.from_home(self.home)['name'],'Chinese','the CLI agrees after later goals')
         finally:
             rt.mail.close();rt.store.close()
 
