@@ -827,8 +827,9 @@ def main(argv=None,stdin=None):
                 if not a.to.strip():
                     # `--to ''` is falsy, so it used to skip both writes and print a derived answer while an old
                     # `language` key stayed in config.json, disagreeing with the display (review P2): say so.
+                    # One block for both the refusal and the write: as two back-to-back `if a.to is not None:`
+                    # blocks, a later edit to the first would read as guarding both (#390 review P2).
                     raise ValueError('--to needs a language name; use --auto to drop the setting')
-            if a.to is not None:
                 cfg['language']=a.to.strip()
                 atomic_json(home/'config.json',cfg)
             elif a.auto:

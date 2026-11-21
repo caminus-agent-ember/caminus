@@ -3096,6 +3096,63 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_a_finish_call_on_a_drifting_reply_queues_no_nudge_that_would_defer_it(self):
+        # review P1 (r13): `follows` started True for every tool-call reply, but a reply that calls `finish`
+        # ends the goal on this very tick, and `_finish` defers whenever an unconsumed inbox row waits: the
+        # drift nudge written a few lines earlier would defer the completion it precedes by a paid turn (or
+        # for good, if the daemon stops). The drift is still an event; only the nudge is withheld.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            # The fixture's loop gates are off: a `finish` call reaches `_finish` without a `define_done` first,
+            # so the goal really completes on this tick (with the gates on it would be refused before that).
+            self.assertFalse(rt.loop_gates)
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(call('finish',dict(summary='done')),content=zh))
+            self.assertTrue(rt._tick(gid))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1,'the drift is still an event')
+            self.assertFalse(drifts[0]['nudged'],'the finish call ends the goal, so no turn follows it')
+            rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))]
+            self.assertFalse([t for t in rows if 'Reply in English' in t],
+                             'no nudge is left for the finish on this tick to defer: %r' % (rows,))
+            # The control: the same drifting prose with a call that does NOT end the goal is still nudged,
+            # so the helper reads the call's name rather than making every tool-call reply silent.
+            g2=rt.store.enqueue('A second goal, whose reply keeps running.')
+            self.replies(dict(call('read',dict(path='x')),content=zh))
+            self.assertTrue(rt._tick(g2))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(g2,))]
+            self.assertEqual(len(drifts),1)
+            self.assertTrue(drifts[0]['nudged'],'a turn follows a call that does not finish')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_language_setting_with_no_script_table_says_so_in_the_log_once(self):
+        # review P2 (r13): `--to Pali` leaves the drift check switched off, and the CLI's `check: false` note
+        # was the only place that said so: a session started elsewhere had nothing in its log to say why no
+        # drift was ever detected. One `language_setting_unchecked` event per process per name, not per turn.
+        conf=json.loads((self.home/'config.json').read_text());conf['language']='Pali'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal in a language with no script table.')
+            self.replies(dict(role='assistant',content='ok'))
+            self.assertTrue(rt._tick(gid))
+            rows=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_setting_unchecked'",(gid,))]
+            self.assertEqual(len(rows),1,'the unchecked setting is in the log')
+            self.assertEqual(rows[0]['language'],'Pali')
+            g2=rt.store.enqueue('A second goal in the same session.')
+            self.replies(dict(role='assistant',content='ok'))
+            self.assertTrue(rt._tick(g2))
+            self.assertEqual(rt.store.db.execute(
+                "SELECT COUNT(*) FROM events WHERE kind='language_setting_unchecked'").fetchone()[0],1,
+                'one per process per name, not one per turn')
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_an_empty_language_setting_is_refused_instead_of_silently_ignored(self):
         # review P2: `--to ''` is falsy, so it skipped both writes and printed a derived answer while an old
         # `language` key stayed in config.json, disagreeing with the display.

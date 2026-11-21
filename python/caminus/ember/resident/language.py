@@ -336,7 +336,22 @@ def check(rt, gid, text, cfg=None, due=True):
     covering index with `rowid>?` (review P2: not a full scan).
     """
     who = owner(rt)
-    hit = drift(text, who['scripts'])
+    scripts = who['scripts']
+    if not scripts:
+        # A configured name with no script table (`--to Pali`) leaves the drift check switched off: the CLI prints a
+        # `check: false` note, but a session started before or elsewhere had nothing in its log to say why no drift
+        # was ever detected (#390 review P2). One event per process per resolved name, not per turn: this runs on
+        # every reply, and the answer cannot change while the process holds the same config.
+        seen = rt.__dict__.setdefault('_language_unchecked', set())
+        if who['source'] == 'config' and who['name'] not in seen:
+            seen.add(who['name'])
+            try:
+                rt.store.event('language_setting_unchecked',
+                               dict(language=who['name'], reason='no script table for this name'), gid)
+            except sqlite3.Error:
+                pass        # (the same best effort as the drift event below: never a dead turn for a log line)
+        return ''
+    hit = drift(text, scripts)
     if not hit:
         return ''
     script, share = hit

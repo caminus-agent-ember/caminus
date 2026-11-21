@@ -280,6 +280,23 @@ class _Skipped(Exception):
     """A call not run because an earlier call of the same turn was refused (its result says so; not a failure)."""
 
 
+def _calls_finish(calls):
+    """Whether a reply's tool calls include `finish`, the one call that ends the goal on this same tick.
+
+    Written defensively: the reply comes from a model adapter, and a call is a dict in the OpenAI shape
+    (`{'function': {'name': ...}}`) only for the adapters that use it. A missing or malformed call must read as
+    "not a finish" (the reply's own turn logic is unchanged), never raise inside the tick.
+    """
+    for call in calls or ():
+        if not isinstance(call, dict):
+            continue
+        fn = call.get('function')
+        name = fn.get('name') if isinstance(fn, dict) else call.get('name')
+        if name == 'finish':
+            return True
+    return False
+
+
 def tool(name, description, properties, required=()):
     return dict(type='function', function=dict(name=name, description=description,
         parameters=dict(type='object', properties=properties, required=list(required), additionalProperties=False)))
@@ -2382,7 +2399,11 @@ class Runtime:
             # A nudge for a turn that never comes is worse than late: the unconsumed inbox row would defer the
             # completion `_finish` makes on this very tick.
             plain = not reply.get('tool_calls')
-            follows, dispatch = True, None
+            # A reply that calls `finish` ends the goal on this tick too: the action runs before the next turn and
+            # `_finish` defers whenever an unconsumed inbox row waits. A tool-call reply generally does leave a
+            # turn, so `follows` starts True, but this one must not queue the nudge that would defer its own
+            # completion (review P1). The drift is still an event; only the nudge is withheld.
+            follows, dispatch = not _calls_finish(reply.get('tool_calls')), None
             if plain:
                 kind = self.store.goal(gid).get('kind', 'work')
                 # A plain reply leaves a turn only on the branches `_plain_reply` takes, and every branch that
