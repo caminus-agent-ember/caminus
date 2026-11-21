@@ -149,7 +149,9 @@ def drift(text, scripts):
     if not scripts:
         return None
     other = total - sum(per.get(s, 0) for s in scripts)
-    if not other or other == total and other < WHOLE_MIN_UNITS or other < total and total < MIN_UNITS:
+    # (parenthesised: `and` binds tighter than `or`, and the three conditions encode the review-fix history - a
+    # later edit must not regroup them by accident, #390 review)
+    if not other or (other == total and other < WHOLE_MIN_UNITS) or (other < total and total < MIN_UNITS):
         return None
     if other / total <= OTHER_SHARE:
         return None

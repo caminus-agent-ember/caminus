@@ -803,6 +803,10 @@ def main(argv=None,stdin=None):
         store=Store(home)
         if a.op=='language':
             # The owner's language (issue #354): the prompt names it, and the per-turn check holds a reply to it.
+            # Unlike `agent prompt` (which reads config through language.from_home, mode=ro, and creates nothing),
+            # this op opens the Store first, so `agent language --home NEW` creates the home and agent.sqlite3 as
+            # a side effect of setting a setting. Intended for a settings op - but do not copy it into a read-only
+            # op (#390 review).
             from types import SimpleNamespace
             from . import language
             cfg=json.loads((home/'config.json').read_text())
