@@ -740,7 +740,7 @@ TOOLS = [
          dict(command={'type':'string'}, folder={'type':'string'}, hosts={'type':'array','items':{'type':'string'}},
               timeout={'type':'integer'}, session={'type':'string'}, stdin={'type':'string'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, max_output={'type':'integer'})),
-    tool('delegate', 'Run a bounded, read-only child goal through this harness\'s own goal loop and get its short report back. Give the task and what done looks like for the child (it becomes the child\'s define_done); the child cannot write, edit, ask your human, message a peer, or delegate further, and it has no terminal or gate on this machine - its commands run only in the sandbox (its folder is a read-only mount at /work). Use it for research or a check you would otherwise do yourself, to run it on a cheaper or different-family brain (model/provider, from `models`), and with cap_usd to bound what it may spend (default delegate_usd, 0.50; a call may lower it, never raise it). The report has the outcome (completed / capped / failed / incomplete), summary, what it verified and skipped, the model, steps, spend and allowance. One child runs at a time: this call returns when its report is ready.',
+    tool('delegate', 'Run a bounded, read-only child goal through this harness\'s own goal loop and get its short report back. Give the task and what done looks like for the child (it becomes the child\'s define_done); the child cannot write, edit, ask your human, message a peer, or delegate further, and it has no terminal or gate on this machine - its commands run only in the sandbox (its folder is a read-only mount at /work). Use it for research or a check you would otherwise do yourself, to run it on a cheaper or different-family brain (model/provider, from `models`), and with cap_usd to bound what it may spend (default delegate_usd, 0.50; a call may lower it, never raise it). The report has the outcome (completed / capped / failed / incomplete), summary, what it verified and skipped, the model, steps, spend and allowance. One call runs one child and returns when its report is ready; a parent may have no more than delegate_max_children (4 by default) children still running (start() refuses past it).',
          dict(task={'type':'string'}, done_check={'type':'string'}, role={'type':'string','enum':list(delegate.ROLES)},
               model={'type':'string'}, provider={'type':'string'}, cap_usd={'type':'number'},
               max_steps={'type':'integer'}, max_seconds={'type':'integer'}), ('task','done_check')),
@@ -2712,9 +2712,10 @@ class Runtime:
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot time budget reached')
-                if gid in self.delegate_caps:
+                if gid in self.delegate_caps or delegate.open_child(self, gid):
                     # the child's report reads its caps from this event, not the clock: a pause for another
-                    # reason past a passed deadline is not the deadline ending it (#382 review)
+                    # reason past a passed deadline is not the deadline ending it (#382 review). The set is this
+                    # process's memory; the open row is the fact, so a restarted runtime still writes it.
                     self.store.event('delegate_capped', dict(kind='deadline', deadline=g['deadline']), gid)
             return True
         if gid in self.delegate_caps and delegate.capped(self, gid):
@@ -2732,8 +2733,9 @@ class Runtime:
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot model-step budget reached')
-                if gid in self.delegate_caps:
-                    # one fact per cap, in the pause's own transaction (the dollar cap's is delegate.capped())
+                if gid in self.delegate_caps or delegate.open_child(self, gid):
+                    # one fact per cap, in the pause's own transaction (the dollar cap's is delegate.capped());
+                    # the open row covers a runtime that did not start this child (#382 review)
                     self.store.event('delegate_capped', dict(kind='step_limit', steps=g['steps'],
                                                              step_limit=g['step_limit']), gid)
             return True

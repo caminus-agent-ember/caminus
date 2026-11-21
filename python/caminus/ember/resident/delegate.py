@@ -380,6 +380,17 @@ def capped(rt, gid):
     return True
 
 
+def open_child(rt, gid):
+    """True when gid is a delegate child whose row is still open (it has not reported yet).
+
+    `rt.delegate_caps` is this process's memory of the children it started, not the fact: a runtime that did not
+    run start() for the child (a restart, another process's row) has an empty set while the row is still open.
+    Keyed on the set alone, the deadline and step-limit pauses wrote no `delegate_capped`, and the report read
+    `failed` where the child was capped (#382 review). The row is the fact; the set is only a fast path."""
+    row = rt.store.delegate(gid)
+    return bool(row) and not row.get('outcome')
+
+
 def note_spend(rt, gid, usd, allowance):
     """A child's turn: the per-subagent ledger (delegates.spend_usd / allowance_usd), the metric the cap reads."""
     if gid not in (getattr(rt, 'delegate_caps', None) or ()):

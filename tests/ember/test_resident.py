@@ -3208,6 +3208,38 @@ for line in sys.stdin:
             self.assertFalse([e for e in rt.store.events() if e['goal']==plain and e['kind']=='delegate_capped'])
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_restarted_runtime_still_writes_the_cap_event_for_an_open_child(self):
+        # delegate_caps is this process's memory of the children it started, not the fact. A runtime that
+        # restarted while a child's row was still open has an empty set, so the deadline and step-limit pauses
+        # wrote no delegate_capped and the parent's report read `failed` where the child was capped (#382
+        # review). The open delegates row is the fact; the set is only a fast path.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate',max_steps=0)
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+        finally:rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)                  # a restart: a new process, no delegate_caps
+        try:
+            self.assertEqual(rt.delegate_caps,{},'the restarted runtime remembers no child')
+            self.assertTrue(rt._tick(child))
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('step budget',rt.store.goal(child)['error'])
+            self.assertTrue(delegate._capped(rt,child),'the step-limit pause of an open child leaves the event')
+            late=rt.store._enqueue('c2',kind='delegate',max_seconds=600)
+            rt.store.delegate_add(late,parent,'','','worker',.5)
+            with rt.store.transaction():rt.store.update(late,deadline=time.time()-5)
+            self.assertTrue(rt._tick(late))
+            self.assertIn('time budget',rt.store.goal(late)['error'])
+            self.assertTrue(delegate._capped(rt,late),'the deadline pause of an open child leaves the event')
+            # and the report those events feed: a paused child with its event is `capped`, not `failed`
+            with unittest.mock.patch.object(rt,'run',side_effect=lambda target=None,stop=None,**kw:None):
+                report=delegate.run_child(rt,parent,dict(child=child,role='worker'))
+            self.assertEqual(report['outcome'],'capped')
+            self.assertEqual(rt.store.delegate(child)['outcome'],'capped')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_null_delegate_limit_takes_the_default_and_a_zero_is_refused(self):
         # `delegate_max_steps: null` raised TypeError at every delegate call (#382 review), as a null dollar cap
         # used to. Zero is not read as "the default" either: the same silent literal the table's DEFAULT 0 was.
