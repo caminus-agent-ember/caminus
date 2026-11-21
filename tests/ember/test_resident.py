@@ -2744,6 +2744,55 @@ for line in sys.stdin:
         self.assertEqual(language.drift('I pushed the branch and opened the pull request against ember-next, '
                                         'please review it.',('Han',))[0],'Latin','an English reply still drifts')
 
+    def test_a_short_reply_entirely_in_another_script_is_still_a_drift(self):
+        # review P2: MIN_UNITS was the floor for both shapes, so a reply with no unit in the owner's script at all
+        # ("好的。完成了。" is 5 units) was never an event or a nudge, however many arrived. A whole reply in
+        # another script is that language from WHOLE_MIN_UNITS on; the 6-unit floor still holds the mixed shape,
+        # where a word or a path in another script is not a language.
+        from caminus.ember.resident import language
+        self.assertEqual(language.units('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002')[1],5,'five Han units')
+        self.assertEqual(language.drift('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002',('Latin',)),('Han',1.0),
+                         'a short reply entirely in another script is a drift')
+        self.assertEqual(language.drift('\u597d\u4e86\u3002',('Latin',)),('Han',1.0),'two units are enough when none are the owner\'s')
+        self.assertIsNone(language.drift('\u597d',('Latin',)),'one unit cannot name a language')
+        self.assertIsNone(language.drift('ok \u6587\u4ef6',('Latin',)),
+                          'a short reply that also has the owner\'s units keeps the 6-unit floor')
+        self.assertIsNone(language.drift('```\n\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002\n```',('Latin',)),
+                          'a fenced block is still not prose')
+
+    def test_a_nudge_is_not_forgotten_by_a_long_run_of_drifting_replies(self):
+        # review P2: the last nudged drift was found in a LIMIT 32 window of the newest drifts, so a goal that
+        # drifted 32 more times since its nudge lost it; `last` became None and `since` counted every assistant
+        # turn of the goal, which fired the next nudge early. The log is asked for the last nudged seq instead.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            brain=dict(provider='fixture',model='fixture',effort='')
+            for _ in range(3):                                  # (the nudge below is turn 3 of this goal)
+                rt.store.event('assistant',dict(content='ok'),gid)
+            rt.store.event('language_drift',dict(script='Han',language='English',share=1.0,brain=brain,nudged=True),gid)
+            for _ in range(40):                                 # (more drifts than the old window held)
+                rt.store.event('language_drift',dict(script='Han',language='English',share=1.0,brain=brain,nudged=False),gid)
+            rt.store.event('assistant',dict(content='ok'),gid)  # (one turn since the real nudge)
+            self.assertEqual(language.check(rt,gid,zh),'','one turn after a nudge is not due, whatever came between')
+            for _ in range(2):                                  # (now DRIFT_EVERY turns have passed)
+                rt.store.event('assistant',dict(content='ok'),gid)
+            self.assertIn('Reply in English',language.check(rt,gid,zh),'the cadence counts from the real nudge')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_an_empty_language_setting_is_refused_instead_of_silently_ignored(self):
+        # review P2: `--to ''` is falsy, so it skipped both writes and printed a derived answer while an old
+        # `language` key stayed in config.json, disagreeing with the display.
+        self.cmd('language',['--to','Chinese'])
+        for empty in ('','   '):
+            out=self.cmd('language',['--to',empty],code=1)
+            self.assertIn('--auto',out['error'],'the refusal names how to drop the setting')
+            self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting is unchanged')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
+
     def test_a_named_language_is_not_renamed_by_a_later_goal(self):
         # `derive` reads the first eight goals, so a ninth goal could otherwise flip the name - and the prompt
         # is a cached prefix that must not change as goals are added. Once the goals name a language it is the

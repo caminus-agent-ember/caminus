@@ -33,7 +33,8 @@ import urllib.parse
 from . import sim
 
 DEFAULT = 'English'
-MIN_UNITS = 6          # fewer letters than this cannot name a language: "ok", a path, a one-word reply
+MIN_UNITS = 6          # fewer units than this cannot name a language: "ok", a path, a one-word reply
+WHOLE_MIN_UNITS = 2    # a reply with none of the owner's units at all is another language from the first word pair
 DRIFT_EVERY = 3        # assistant turns between two nudges on one goal (the issue's "at most once every N turns")
 OTHER_SHARE = .5       # "most letters of a reply are in another script": a strict majority
 DERIVE_SHARE = .6      # your goals name a language only when one script holds this share of their letters
@@ -135,14 +136,22 @@ def drift(text, scripts):
     the clauses that also carry the owner's script; those are terms, not the reply's language, and counting
     them would nudge a correct Chinese reply back to Chinese. A clause that is entirely in another script is
     still the reply switching, so a real drift is caught.
+
+    The floor depends on which shape the reply is: a reply that also has units in the owner's script is held to
+    MIN_UNITS, because a word or a path in another script is not a language ("ok", `文件 missing`); a reply
+    with none of the owner's units at all is another language from WHOLE_MIN_UNITS on ("好的。完成了。" is 5).
+    One floor for both let an English owner's short Chinese confirmations pass unheld forever, however many
+    arrived (review P2).
     """
     if any(s in SPACELESS for s in (scripts or ())):
         text = _without_borrowed(text, scripts)
     per, total = units(text)
-    if total < MIN_UNITS or not scripts:
+    if not scripts:
         return None
     other = total - sum(per.get(s, 0) for s in scripts)
-    if not other or other / total <= OTHER_SHARE:
+    if not other or other == total and other < WHOLE_MIN_UNITS or other < total and total < MIN_UNITS:
+        return None
+    if other / total <= OTHER_SHARE:
         return None
     script = max((s for s in per if s not in scripts), key=lambda s: per[s])
     return script, other / total
@@ -290,9 +299,12 @@ def check(rt, gid, text, cfg=None):
     if not hit:
         return ''
     script, share = hit
-    recent = list(rt.store.db.execute("SELECT seq, data FROM events WHERE goal=? AND kind='language_drift' "
-                                      "ORDER BY seq DESC LIMIT 32", (gid,)))
-    last = next((r['seq'] for r in recent if json.loads(r['data']).get('nudged')), None)
+    # The last nudged drift, from the whole log: a LIMIT 32 window of the newest drifts forgot the nudge as soon
+    # as a goal drifted 32 more times, and the cadence then fired again early (review P2). Ask SQLite for the
+    # maximum seq with json_extract, which is how other event data is read here; a runtime attribute would be
+    # lost on the daemon's restart, and the log is already the record.
+    last = rt.store.db.execute("SELECT MAX(seq) FROM events WHERE goal=? AND kind='language_drift' AND "
+                               "json_extract(data,'$.nudged')=1", (gid,)).fetchone()[0]
     since = rt.store.db.execute("SELECT COUNT(*) FROM events WHERE goal=? AND kind='assistant' AND seq>?",
                                 (gid, last or 0)).fetchone()[0]
     nudge = last is None or since >= DRIFT_EVERY
