@@ -2385,6 +2385,11 @@ class Runtime:
             follows, dispatch = True, None
             if plain:
                 kind = self.store.goal(gid).get('kind', 'work')
+                # A plain reply leaves a turn only on the branches `_plain_reply` takes, and every branch that
+                # does not take one finishes or pauses the goal. Default False: a loop-gated reply sets it from
+                # the dispatch, and a reply that finishes (`loop_gates` off, a FREE kind) must not queue a nudge
+                # the `_finish` on this same tick would defer (review P2).
+                follows = False
                 if kind not in FREE_KINDS and self.loop_gates:
                     dispatch = self._plain_dispatch(gid)
                     follows = dispatch[1]

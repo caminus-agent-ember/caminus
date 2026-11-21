@@ -2817,6 +2817,30 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_a_plain_reply_that_finishes_the_goal_queues_no_nudge_without_loop_gates(self):
+        # review P2 (a regression from the `_plain_dispatch` refactor): `follows` started True and was only
+        # overwritten inside the loop-gated branch. With the loop gates off a plain reply finishes the goal, so a
+        # drifting one still queued a nudge, and the `_finish` on the same tick found an unconsumed inbox row and
+        # deferred the completion to a turn that never comes. The drift is an event, `nudged` is false, and the
+        # goal completes on this tick.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            self.assertFalse(rt.loop_gates)
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(gid))
+            self.assertEqual(rt.store.goal(gid)['state'],'completed','the plain reply finished the goal')
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1)
+            self.assertFalse(drifts[0]['nudged'],'no turn follows the reply, so the drift is not nudged')
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[],'no nudge is left to defer the finish')
+            self.assertFalse(any(e['kind']=='completion_deferred' and e['goal']==gid for e in rt.store.events()))
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_a_loop_gated_plain_reply_is_nudged_because_a_turn_follows_it(self):
         # review P2: `due=bool(reply.get('tool_calls'))` assumed a plain reply ends the goal. A goal whose loop
         # gates are on keeps running after one (`_plain_reply` nudges it back to work), so a drifting plain reply
@@ -2979,6 +3003,21 @@ for line in sys.stdin:
             self.assertEqual(language.from_home(self.home),first,'the CLI reads the same name as the turn')
         finally:
             rt.mail.close();rt.store.close()
+
+    def test_the_cli_reads_a_home_whose_path_holds_a_uri_metacharacter(self):
+        # review P2 (could not be reproduced): `from_home` builds a read-only URI from the store path, and
+        # `urllib.parse.quote` escapes `?` and `#` by default, so a home `a?b#c` reads its goals rather than
+        # silently losing them. Pinned because that percent-encoding is load-bearing: `quote(..., safe='/')` or
+        # an unquoted path would break such a home quietly, and the CLI would name a different language than a
+        # turn on the same goals.
+        from caminus.ember.resident import language
+        odd=Path(str(self.home)+'?x#y')
+        store=Store(odd)
+        try:
+            store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c\u7136\u540e\u5f00 PR\u3002')
+        finally:
+            store.close()
+        self.assertEqual(language.from_home(odd)['name'],'Chinese','a home with ? and # still reads its goals')
 
     def test_a_named_language_is_not_renamed_by_a_later_goal(self):
         # `derive` reads the first eight goals, so a ninth goal could otherwise flip the name - and the prompt
