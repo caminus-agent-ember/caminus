@@ -34,12 +34,14 @@ func TestWorkersRowNamesTheNewestFinishedChildAndCountsAllowance(t *testing.T) {
 	}
 	// #384 review: with one child still running, a finished child's spend vanished from the row (the loop
 	// added only the running ones), so the total the card showed fell while the finished card below it still
-	// read its own spend. The label counts the running children; the money is every child the card lists.
+	// read its own spend. The label counts the running children; the money is every child the card lists. The
+	// cap is the running children's alone: a finished child's cap is not a limit anything is still under, and
+	// summing all rows drifted the "$Y" upward over a session (#384 review).
 	ws = []residentWorker{
 		{Child: "r1", SpendUSD: 0.01, CapUSD: 0.5, Running: true},
 		{Child: "f1", SpendUSD: 0.02, CapUSD: 0.25, Outcome: "completed"},
 	}
-	if got, want := workersRow(ws), "1 child · $0.0300 of $0.75"; got != want {
+	if got, want := workersRow(ws), "1 child · $0.0300 of $0.50"; got != want {
 		t.Fatalf("mixed row: %q, want %q", got, want)
 	}
 }

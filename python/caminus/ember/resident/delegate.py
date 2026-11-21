@@ -503,6 +503,9 @@ def _commit(row):
         if not _git(['-C', wt, 'status', '--porcelain']).strip():
             return ''                 # nothing changed: the branch already points at the base commit
         _git(['-C', wt, 'add', '-A'])
+        # `-c` here stamps the commit object's identity and writes no config file, which is why the harness may use
+        # it while a child may not (GIT_INJECT): the harness is trusted, a child's command line is not. Do not copy
+        # this spelling into a child-facing path or into `refused()`'s allow-list (#384 review P2).
         _git(['-C', wt, '-c', 'user.name=Caminus delegate', '-c', 'user.email=delegate@caminus.invalid',
               'commit', '-q', '-m', 'delegate %s: what its report describes' % (row.get('child') or '')[:8]])
     except ValueError as e:
@@ -626,6 +629,13 @@ def start(rt, parent, args, prepared=None):
 CAPPED_ERRORS = ('delegate spend cap reached', 'oneshot time budget reached', 'oneshot model-step budget reached')
 
 
+def _capped_error(err):
+    """True when an error text is one of the caps' own messages: the message itself, or the message followed by
+    ': detail' (the way capped() writes its spend). Not `startswith` on the bare prefix: a future message that
+    merely begins with one of these strings would be read as a cap (#384 review)."""
+    return any(err == m or err.startswith(m + ':') for m in CAPPED_ERRORS)
+
+
 def _report(rt, row, g, outcome=None):
     """The short structured report a parent reads: the child's goal, what it verified, what it skipped, its spend
     and (a writing child) what it changed and the commands that keep or drop it."""
@@ -634,7 +644,7 @@ def _report(rt, row, g, outcome=None):
         err = g.get('error') or ''
         if state == 'completed':
             outcome = 'completed'
-        elif state == 'paused' and err.startswith(CAPPED_ERRORS):
+        elif state == 'paused' and _capped_error(err):
             outcome = 'capped'       # the dollar cap, the step budget or the time budget ended it
         elif state == 'cancelled':
             outcome = 'incomplete'   # its parent was cancelled: it did not finish its own work
@@ -765,7 +775,11 @@ def settle(rt):
             except (ValueError, TypeError, AttributeError):
                 pass
         lines, ids = [], []
-        for r in [r for r in rows if r['child'] not in shown] or rows[-8:]:
+        # The fallback window obeys the same filter: a second wake that repeats a report the parent already read
+        # used to print it again with the row's older JSON (#384 review), so only a wake with nothing new at all
+        # falls back to the newest rows whole.
+        fresh = [r for r in rows if r['child'] not in shown]
+        for r in fresh or [r for r in rows[-8:] if r['child'] not in shown] or rows[-8:]:
             try:
                 rep = json.loads(r.get('report') or '{}')
             except ValueError:
