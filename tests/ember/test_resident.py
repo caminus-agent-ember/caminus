@@ -5275,7 +5275,7 @@ for line in sys.stdin:
         op = relay.OwnerPrices(str(pf), lines.append)
         self.assertEqual(op.get('mistral-large-2512'), (0.7, 2.1, 0.7))
         def boom(*a, **k):
-            raise ValueError("Expecting value: line 1 column 1 (char 0) in /home/owner/secret/prices.json")
+            raise ValueError('Expecting value: line 1 column 1 (char 0) in /opt/pricedir/secret/prices.json')
         with mock.patch.object(pathlib.Path, 'read_text', boom):
             op.mtime = None                                     # (the file looks changed: it is re-read)
             self.assertIsNone(op.get('some-other-model'))       # (the failed read: the last good table stays)
