@@ -854,13 +854,17 @@ def main(argv=None,stdin=None):
             # The end-of-goal reflection switch (issue #341): a paid model call per graded goal, whose only product
             # is a proposed SIM record a person reads, so it is off unless the session asks for it. The daemon
             # follows this key at the next turn boundary (runtime._follow_config), as it follows 'sim'.
-            cfg=json.loads((home/'config.json').read_text())
-            if a.on and a.off:
-                raise ValueError('use --on or --off, not both')
-            if a.on or a.off:
-                cfg['reflect']=bool(a.on)
-                atomic_json(home/'config.json',cfg)
-            store.close()
+            # The store opened above is closed on every path out, including a config read or write that raises
+            # (review P2: atomic_json failing left it open).
+            try:
+                cfg=json.loads((home/'config.json').read_text())
+                if a.on and a.off:
+                    raise ValueError('use --on or --off, not both')
+                if a.on or a.off:
+                    cfg['reflect']=bool(a.on)
+                    atomic_json(home/'config.json',cfg)
+            finally:
+                store.close()
             emit(dict(name=a.name,reflect=bool(cfg.get('reflect',False))),a.json)
             return 0
         if a.op=='fallback':

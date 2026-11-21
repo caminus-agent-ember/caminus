@@ -74,6 +74,11 @@ def maybe(rt, gid, summary='', open_work=''):
         text = _ask(rt, gid, msgs)
         rec = parse(text)
         if rec is None:
+            # A second 60 s call after a daemon got SIGTERM (the first reply was unreadable) is the shutdown wait
+            # stopping()'s docstring warns about: the flag is read again before the retry spends another timeout.
+            if rt.stopping():
+                rt.store.event('reflection_failed', dict(reason='stopping before the retry', reply=text[:500]), gid)
+                return None
             text = _ask(rt, gid, msgs + [dict(role='assistant', content=text[:2000]),
                                          dict(role='user', content=STRICT)])
             rec = parse(text)
@@ -86,7 +91,7 @@ def maybe(rt, gid, summary='', open_work=''):
         goal = rt.store.goal(gid) or {}
         rec.update(status='proposed',
                    eval_context='goal %s · %s steps · judge %s' % (
-                       gid[:8], goal.get('steps') or 0, _judge(rt, gid, _episode_start(rt, gid)) or 'not run'))
+                       gid[:8], goal.get('steps') or 0, _judge(rt, gid, _episode_start(rt, gid))[0] or 'not run'))
         return sim.record(rt, gid, rec)
     except Exception as e:
         try:
@@ -130,10 +135,12 @@ def parse(text):
 
 
 def _episode_start(rt, gid):
-    """The seq this episode began after: the goal's previous `finished` event (a reopened goal's earlier episode is
-    not this one's evidence), or 0 for a first finish."""
+    """The seq this episode began after: how the previous episode ended — an earlier `finished` event, or the error
+    that stopped the goal before it was resumed. A re-enqueued goal has no earlier `finished`, so counting only
+    `finished` left the boundary at 0 and the pre-error episode's evidence entered the new reflection (review P2)."""
     row = rt.store.db.execute(
-        "SELECT seq FROM events WHERE goal=? AND kind='finished' ORDER BY seq DESC LIMIT 1 OFFSET 1", (gid,)).fetchone()
+        "SELECT seq FROM events WHERE goal=? AND kind IN ('finished','runtime_error','model_refused','model_gave_up') "
+        "ORDER BY seq DESC LIMIT 1 OFFSET 1", (gid,)).fetchone()
     return row['seq'] if row else 0
 
 
@@ -159,13 +166,18 @@ def _may_spend(rt, gid):
 
 
 def _judge(rt, gid, since=0):
+    """The newest `judged` event this episode, as (verdict, reason): the query is here once, and `brief` reads the
+    reason from the same row it took the verdict from (review P2: it ran the identical SELECT a second time)."""
     row = rt.store.db.execute(
         "SELECT data FROM events WHERE goal=? AND kind='judged' AND seq>? ORDER BY seq DESC LIMIT 1",
         (gid, since)).fetchone()
     try:
-        return json.loads(row['data']).get('verdict') if row else None
+        d = json.loads(row['data']) if row else None
     except (ValueError, KeyError, TypeError):
-        return None
+        return None, ''
+    if not isinstance(d, dict):
+        return None, ''
+    return (d.get('verdict') or None), str(d.get('reason') or '')[:600]
 
 
 def brief(rt, gid, summary, open_work):
@@ -186,15 +198,8 @@ def brief(rt, gid, summary, open_work):
         parts.append('LEFT OPEN (the agent says):\n' + open_work[:1000])
     parts.append('THE GOAL TOOK %s MODEL TURNS, the agent changed approach %s times, and %d steer(s) arrived.' % (
         g.get('steps') or 0, g.get('approach_changes') or 0, len(rt.store.steers(gid))))
-    verd = _judge(rt, gid, since)
+    verd, reason = _judge(rt, gid, since)
     if verd:
-        row = rt.store.db.execute(
-            "SELECT data FROM events WHERE goal=? AND kind='judged' AND seq>? ORDER BY seq DESC LIMIT 1",
-            (gid, since)).fetchone()
-        try:
-            reason = str(json.loads(row['data']).get('reason') or '')[:600]
-        except (ValueError, KeyError, TypeError):
-            reason = ''
         parts.append('THE FINISH JUDGE: %s — %s' % (verd, reason))
     row = rt.store.db.execute(
         "SELECT data FROM events WHERE goal=? AND kind='verified' AND seq>? ORDER BY seq DESC LIMIT 1",

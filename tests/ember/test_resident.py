@@ -8409,11 +8409,67 @@ for line in sys.stdin:
             rt.store.event('finished',dict(summary='second episode'),gid)
             since=reflect._episode_start(rt,gid)
             self.assertGreater(since,0,'the previous episode’s finish bounds this one')
-            self.assertIsNone(reflect._judge(rt,gid,since),'the earlier verdict is not this episode’s')
+            self.assertEqual(reflect._judge(rt,gid,since),(None,''),'the earlier verdict is not this episode’s')
             self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
             rt.store.event('judged',dict(verdict='met',reason='this episode'),gid)
-            self.assertEqual(reflect._judge(rt,gid,reflect._episode_start(rt,gid)),'met','a verdict this episode is seen')
-            self.assertIn('THE FINISH JUDGE: met',reflect.brief(rt,gid,'Done.',''))
+            self.assertEqual(reflect._judge(rt,gid,reflect._episode_start(rt,gid)),('met','this episode'),'a verdict this episode is seen')
+            self.assertIn('THE FINISH JUDGE: met — this episode',reflect.brief(rt,gid,'Done.',''))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_errored_then_resumed_goal_starts_a_new_episode(self):
+        # #383 review P2: _episode_start counted only `finished` events, so a goal that errored and was resumed had
+        # no earlier finish to bound the episode: seq 0 let the pre-error episode's judge and evidence into the new
+        # reflection. The error that ended the episode bounds it now, as the previous finish does.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('judged',dict(verdict='unmet',reason='the episode that errored'),gid)
+            rt.store.event('runtime_error',dict(error='ValueError: boom'),gid)
+            # this episode's own finish: _finish writes it before it calls the reflection
+            rt.store.event('finished',dict(summary='the resumed episode finished'),gid)
+            since=reflect._episode_start(rt,gid)
+            self.assertGreater(since,0,'the error that ended the previous episode bounds this one')
+            self.assertEqual(reflect._judge(rt,gid,since),(None,''),'the errored episode’s verdict is not this one’s')
+            self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
+            # the two other ways the model ends a goal without a finish bound it the same way
+            for kind in ('model_refused','model_gave_up'):
+                g2=rt.store.enqueue('Again.');rt.store.update(g2,done_check='x',state='working')
+                rt.store.event('judged',dict(verdict='unmet',reason='before'),g2)
+                rt.store.event(kind,dict(error='x'),g2)
+                rt.store.event('finished',dict(summary='after'),g2)
+                self.assertGreater(reflect._episode_start(rt,g2),0,'%s bounds the episode after it' % kind)
+                self.assertEqual(reflect._judge(rt,g2,reflect._episode_start(rt,g2)),(None,''),'%s: the old verdict stays out' % kind)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_reflection_stops_before_the_retry_when_the_daemon_is_going(self):
+        # #383 review P2: stopping() was read once before the first call; a SIGTERM while an unreadable reply was in
+        # flight let the retry spend another 60 s timeout — the wait stopping()'s docstring warns about. It is read
+        # again before the retry now.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                return {'content':'not json'}
+        rt=Runtime(self.home)
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            seen=[]
+            rt._stop=lambda:(seen.append(1),len(seen)>1)[1]   # False on entry, True by the time the retry is due
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1,'the retry spent another timeout after the stop')
+            failed=[e for e in rt.store.events() if e['kind']=='reflection_failed']
+            self.assertEqual(len(failed),1)
+            self.assertIn('stopping before the retry',failed[0]['data']['reason'])
         finally:rt.mail.close();rt.store.close()
 
 
