@@ -478,7 +478,9 @@ class OwnerPrices:
                     self.table, self.error_at = {}, now     # one line per grace, not one per request
                 self.error, self.mtime = why, None
             if model in self.table or not self.fetch:
-                return self.table.get(model)
+                return self.table.get(model)     # (this returns None only with `error` set when the table never read:
+                                                 #  refusal()'s file branch relies on that, it is what makes the
+                                                 #  unreadable file a 503 rather than a plain 403 — #389 review P2-2)
             due = self._names_due(model, time.time())
         if due:
             self._load_names()               # (a fetch already in flight returns at once)
@@ -506,26 +508,32 @@ class OwnerPrices:
         self.names` raised TypeError for an unhashable one, out of the handler, and the client's connection dropped
         with no logged refusal (#389 review P2).
 
-        A name the provider's list knows it does not carry is a typo whatever the file is doing, so it is refused at
-        once even when the last refresh failed (a list that loaded once keeps its names). With the list never loaded
-        there is nothing to compare against: the name waits with the file (the PR body states this trade-off).
+        A name a CURRENT list (its last refresh succeeded) knows it does not carry is a typo whatever the file is
+        doing, so it is refused at once. When the last refresh failed the names it kept may be stale (the owner can
+        add an alias upstream), so a name they do not carry waits on the 503 the 60 s retry refetches, never the 403
+        that ends a goal. With the list never loaded there is nothing to compare against: the name waits with the
+        file (the PR body states this trade-off).
 
         A name the list DOES carry, whose whole alias group the last good table prices nothing for, is the other way
         round: that read already proved the file does not price it, so a file that has since become unreadable
         changes nothing about this model and the answer is the same 403 a readable file gives. The 503 wait is for a
         price the file coming back could supply; this one it never had (#389 review P1: an unpriced model was waited
-        on for up to an hour and then ended the goal). An empty table (dropped after the grace) or a list that never
-        loaded still waits: there the price plausibly returns with the file."""
+        on for up to an hour and then ended the goal). An empty table (dropped after the grace), a list that never
+        loaded or a list whose last refresh failed still waits: there the price, or the model's place in the list,
+        plausibly returns."""
         with self.lock:
             if not isinstance(model, str):
                 return None                  # (the caller's own 403 names the model; do_POST guards every table lookup)
-            if self.names and model not in self.names:
-                # the file's absence says nothing about a NAME, the provider's own list does: a name that list does
-                # not know is a typo, and waiting an hour on a 503 for it hides that. Refused at once (the caller's
-                # 403 "no price for"), whatever the file is doing. A name it does know still waits below.
+            if self.names and model not in self.names and not self.names_error:
+                # the file's absence says nothing about a NAME, the provider's own list does: a name a list that is
+                # CURRENT does not know is a typo, and waiting an hour on a 503 for it hides that. Refused at once
+                # (the caller's 403 "no price for"), whatever the file is doing. A name it does know still waits
+                # below; a name a list that has since failed to refresh does not know may have been added upstream
+                # since the last good load, so it takes the 503 wait below, never the 403 that ends a goal (#389
+                # review P2: a new alias during a network drop was called a typo).
                 return None
             if self.error:
-                if self.table and self.names and not self._priced(model):
+                if self.table and self.names and not self.names_error and not self._priced(model):
                     # the alias group is known and the last good table priced none of it: this model's answer is the
                     # 403 a readable file would give it. Waiting an hour on the 503 (then ending the goal) for a price
                     # the file never had is what the review found; the failed-read log line still names the file.

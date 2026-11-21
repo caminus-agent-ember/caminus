@@ -5094,11 +5094,20 @@ for line in sys.stdin:
         self.assertIn('cannot read its price file', message)
         self.assertGreater(wait, 0)
         self.assertIsNone(op.refusal('mistral-larg'), 'a name the list does not know is refused at once, never waited out')
-        # a refresh that FAILED keeps the names it loaded: a typo is still a typo while the list is down (the old
-        # test asked names_error too, so one failed refresh sent every typo back to the hour-long 503 wait)
+        # a refresh that FAILED leaves the names stale: the owner may have added an alias upstream since the last good
+        # load, so a name they do not carry is NOT called a typo (the 403 ends the goal); it takes the 503 wait the
+        # 60 s retry refetches (#389 review P2-1: a new alias during a network drop was refused as a typo)
         op.names_error, op.names_at = 'OSError: network is down', time.time() - 120
-        self.assertIsNone(op.refusal('mistral-larg'), 'a failed refresh does not turn a typo back into a wait')
+        status, kind, message, wait, local = op.refusal('mistral-larg')
+        self.assertEqual((status, kind, local), (503, 'api_error', True), 'a stale list never calls a name a typo')
+        self.assertIn('cannot read its price file', message)   # (the file branch answers first: still a 503 wait)
+        self.assertGreater(wait, 0)
         self.assertEqual(op.refusal('mistral-large-latest')[4], True, 'a known name still waits with the file')
+        # the next refresh succeeds with the new alias in it: the name resolves, and a name still unknown is a typo
+        listed['data'].append(dict(id='mistral-larg', aliases=[]))
+        op._load_names()
+        self.assertEqual(op.names_error, '')
+        self.assertIsNone(op.refusal('mistral-larg-x'), 'a current list calls an unknown name a typo again')
 
     def test_a_known_name_the_last_good_table_never_priced_is_a_403_not_a_wait(self):
         """The review's P1: the price file goes unreadable while the alias list and the last good table are loaded. A
