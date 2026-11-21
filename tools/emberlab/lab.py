@@ -52,8 +52,12 @@ def cmd_run(a):
     arms = runner.load_arms(a.arm, a.arms)
     bs = [brains_mod.parse(s, a.parallel) for s in a.brain]
     host_kind = hosts_mod.kind(a.host, bs)
-    if host_kind == 'local' and any(b.real for b in bs) and not a.unsafe_local:
-        raise SystemExit('a real model on the local host gets a shell as you: use --host agent (or --unsafe-local)')
+    # one rule for both commands (hosts.local_refusal): `propose` accepts --unsafe-free as the same permission, so
+    # `run` must too, or the two answer `--unsafe-free` differently (#385 review)
+    why = hosts_mod.local_refusal(a.host, bs, unsafe_local=a.unsafe_local,
+                                  unsafe_free=getattr(a, 'unsafe_free', False))
+    if why:
+        raise SystemExit(why)
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     host = hosts_mod.make(host_kind, out, runner.REPO)
@@ -129,6 +133,8 @@ def main(argv=None):
     p.add_argument('--only', help='comma-separated task keys')
     p.add_argument('--host', choices=('local', 'agent'))
     p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
+    p.add_argument('--unsafe-free', action='store_true',
+                   help='the same permission under the name an unattended run uses (hosts.local_refusal reads both)')
     p.add_argument('--jobs', type=int, default=4, help='runs at once (each brain still caps its own: --parallel)')
     p.add_argument('--parallel', type=int, help="override every brain's parallel cap")
     p.add_argument('--timeout', type=int, help='seconds per goal (default: the suite\'s)')

@@ -154,41 +154,74 @@ def claim_folder(arms_file, spec):
     read the same absent file and both write it, last writer wins, and the shared `results.jsonl` would then hold
     both experiments' rows by id — the reuse bug the plan check closes for the sequential case (#385 review P2).
     An existing file is only read, never rewritten: the folder's identity is written once.
+
+    The create is `os.link` of a fully written temporary file in the same folder: `O_CREAT|O_EXCL` made the name
+    first and filled it after, so a second `propose` starting in that window read an empty or half-written file and
+    was told 'is not JSON' - a message about the wrong thing (#385 review). A hard link either fails because the
+    name exists or makes the whole file appear at once, and it fails the same way on every filesystem this runs on.
     """
-    data = json.dumps(spec, indent=1)
+    tmp = arms_file.with_name('.%s.%d.tmp' % (arms_file.name, os.getpid()))
+    tmp.write_text(json.dumps(spec, indent=1))
     try:
-        fd = os.open(str(arms_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.link(str(tmp), str(arms_file))
+        return ''
     except FileExistsError:
+        pass
+    finally:
         try:
-            prior = json.loads(arms_file.read_text())
-        except ValueError:
-            return f'{arms_file} is not JSON: use a fresh --out'
-        return arms_mismatch(prior, spec)
-    with os.fdopen(fd, 'w') as f:
-        f.write(data)
-    return ''
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        prior = json.loads(arms_file.read_text())
+    except ValueError:
+        # this command writes the file whole or not at all, so a file that is not JSON was made by something else
+        return (f'{arms_file} is not JSON and was not written by this command: use a fresh --out (or fix or remove '
+                'the file)')
+    return arms_mismatch(prior, spec)
 
 
 def approval_missing(a, brains):
-    """What the owner still has to allow before this run starts: the plan alone never starts one."""
+    """What the owner still has to allow before this run starts: the plan alone never starts one.
+
+    The local-host rule is `hosts.local_refusal`, the same function `lab.py run` calls, and its own `--unsafe-free`
+    is the same permission there: this command used to accept either flag and then set `unsafe_local` on the run
+    namespace, so `propose --unsafe-free` started a paid real brain as the user where `run --unsafe-free` was
+    refused (#385 review). A flag that is not on the command line is read with getattr, so a caller building the
+    namespace by hand (a test, `lab.py run`) does not have to add it.
+    """
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
-    real = [b.label() for b in brains if getattr(b, 'real', False)]
     missing = []
     if paid and not a.approve_paid:
         missing.append("--approve-paid (billed through the owner's relay: " + ', '.join(paid) + ')')
-    # the same rule as cmd_run, paid brains included: on the local host a real model gets a shell as you
-    if real and hosts_mod.kind(a.host, brains) == 'local' and not (a.unsafe_local or a.unsafe_free):
+    why = hosts_mod.local_refusal(a.host, brains, unsafe_local=getattr(a, 'unsafe_local', False),
+                                  unsafe_free=getattr(a, 'unsafe_free', False))
+    if why:
+        real = [b.label() for b in brains if getattr(b, 'real', False)]
         missing.append('--unsafe-local (a real model runs as you on the local host: ' + ', '.join(real) + ')')
     return missing
 
 
-def plan_md(prop, suite, brains, arms, repeats, out, tasks):
+def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=None, unlocked=''):
+    """The plan the owner reads before anything runs, and the one thing that names everything that will run.
+
+    The host decides where a real model runs (as the user, or on the agent account) and the timeout is how long one
+    goal may take, so a plan without them did not name everything (#385 review). `host` is the resolved kind
+    (`hosts.kind`), not the flag: `--host local` and a real brain with no flag resolve to the same place.
+    """
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
+    real = [b.label() for b in brains if getattr(b, 'real', False)]
     runs = len(arms) * len(brains) * tasks * max(1, repeats)
+    host = host or hosts_mod.kind(None, brains)
+    timeout = suite.get('timeout', 1500) if timeout is None else timeout
     lines = [f"proposal {prop['id']} · {prop.get('problem_group') or 'unclassified'}", '',
              f"- change: {(prop.get('change') or '').strip()[:400]}",
              f"- predicted: {(prop.get('predicted') or '').strip()[:400]}",
              f"- suite: {suite['name']} ({tasks} tasks), {repeats} repeat(s)",
+             f"- host: {host}" + (' (a real model runs as you here: '
+                                    + (unlocked or '--unsafe-local or --unsafe-free') + ')'
+                                    if host == 'local' and real else ''),
+             f"- timeout: {timeout}s per goal",
              f"- brains: {', '.join(b.label() for b in brains)}",
              f"- arms: {', '.join(a.name + ' @ ' + str(a.checkout) + ' ' + a.commit for a in arms)}",
              f"- runs: {runs} in {out}",
@@ -257,7 +290,11 @@ def cmd_propose(a, run):
     tasks = [t for t in suite['tasks'] if not only or t['key'] in only]
     if only and len(tasks) != len(only):
         raise SystemExit(f'unknown task in --only: {sorted(set(only) - {t["key"] for t in tasks})}')
-    print(plan_md(prop, suite, brains, arms, a.repeats, out, len(tasks)), flush=True)
+    unlocked = ('--unsafe-free' if getattr(a, 'unsafe_free', False) else '') or (
+        '--unsafe-local' if getattr(a, 'unsafe_local', False) else '')
+    print(plan_md(prop, suite, brains, arms, a.repeats, out, len(tasks),
+                  host=hosts_mod.kind(a.host, brains), timeout=suite.get('timeout', 1500), unlocked=unlocked),
+          flush=True)
     missing = approval_missing(a, brains)
     if missing:
         raise SystemExit('not started: ' + '; '.join(missing))
@@ -275,9 +312,11 @@ def cmd_propose(a, run):
         raise SystemExit(f'{out} holds a different experiment ({why}): use a fresh --out (a shared folder '
                          "would reuse the other experiment's rows by id)")
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
+    # both flags are carried as given: cmd_run asks hosts.local_refusal about the resolved host, and that rule
+    # reads either name. Folding --unsafe-free into unsafe_local here would hide which flag allowed the run.
     runs = type('Run', (), dict(suite=a.suite, brain=list(a.brain), arm=None, arms=str(arms_file), out=str(out),
                                 repeats=a.repeats, only=a.only, host=a.host,
-                                unsafe_local=a.unsafe_local or a.unsafe_free,
+                                unsafe_local=a.unsafe_local, unsafe_free=a.unsafe_free,
                                 jobs=a.jobs, parallel=a.parallel, timeout=None, rerun=False))()
     if run(runs):
         raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')

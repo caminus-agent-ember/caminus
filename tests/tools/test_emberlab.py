@@ -221,8 +221,10 @@ r1 = sim_record(ph)
 po = S / 'propose'
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve',
         '--config', '{"sim": false}', '--only', 'read', '--out', str(po), '--dry-run')
-check(p.returncode == 0 and f"proposal {r1['id']}" in p.stdout and 'runs: 6' in p.stdout and not po.exists(),
-      f'propose: --dry-run prints the plan (2 arms x 3 repeats) and creates nothing ({p.returncode}; {p.stdout[-300:]})')
+check(p.returncode == 0 and f"proposal {r1['id']}" in p.stdout and 'runs: 6' in p.stdout and not po.exists()
+      and '- host: local' in p.stdout and '- timeout: 1500s per goal' in p.stdout,
+      f'propose: --dry-run prints the plan (2 arms x 3 repeats), the host and the timeout, and creates nothing '
+      f'({p.returncode}; {p.stdout[-300:]})')
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'anthropic:8091#claude-haiku-5-5',
         '--config', '{"sim": false}', '--out', str(po))
 check(p.returncode != 0 and '--approve-paid' in (p.stderr + p.stdout) and not po.exists(),
@@ -383,6 +385,34 @@ why3 = proposal.claim_folder(cf / 'arms.json', spec_a)
 check(why == '' and why2 and 'commit' in why2 and why3 == '' and (cf / 'arms.json').read_text() == first,
       f'propose: the first command to create arms.json owns it, the second compares instead of rewriting '
       f'({why!r}, {why2!r}, {why3!r})')
+# the file appears whole: it is linked into place after it is written, so a loser of the race never reads a partial
+# one, and a file that is not JSON was not left by this command (the message used to say 'is not JSON', naming the
+# wrong reason: #385 review P2)
+(cf / 'trunc.json').write_text('{"arms": {"base": ')
+why4 = proposal.claim_folder(cf / 'trunc.json', spec_a)
+check(why4 and 'not written by this command' in why4 and not list(cf.glob('.trunc.json.*.tmp')),
+      f'propose: a non-JSON arms.json names what it is, and the temporary file is gone ({why4!r})')
+# one rule for both commands: a real model on the local host needs --unsafe-local OR --unsafe-free, and `run` accepts
+# both names, so `propose --unsafe-free` cannot start what `run --unsafe-free` refuses (#385 review P2)
+import brains as brains_mod
+import hosts as hosts_mod
+real = [brains_mod.parse('anthropic:8091#claude-haiku-5-5')]
+scripted = [brains_mod.parse('scripted:solve')]
+check(hosts_mod.local_refusal('local', real) and not hosts_mod.local_refusal(None, real)  # no --host: agent
+      and not hosts_mod.local_refusal('local', real, unsafe_local=True)
+      and not hosts_mod.local_refusal('local', real, unsafe_free=True)
+      and not hosts_mod.local_refusal('agent', real) and not hosts_mod.local_refusal('local', scripted),
+      'propose: local_refusal is one rule (real + local host + neither flag), read by run and propose')
+check('--unsafe-free' in lab('run', '--help').stdout, 'propose: `run` accepts --unsafe-free, as `propose` does')
+r11 = sim_record(ph, status='proposed')
+free = S / 'propose-free'
+p = lab('propose', '--sim-home', str(ph), '--record', r11['id'], '--brain', 'anthropic:8091#claude-haiku-5-5',
+        '--host', 'local', '--approve-paid', '--unsafe-free', '--config', '{"sim": false}', '--only', 'read',
+        '--out', str(free), '--dry-run')
+check(p.returncode == 0 and '- host: local' in p.stdout and '--unsafe-free' in p.stdout
+      and '- timeout: 1500s per goal' in p.stdout and not free.exists(),
+      f'propose: --unsafe-free unlocks the local host as it does for run, and the plan names the host, the flag and '
+      f'the timeout ({p.returncode}; {(p.stderr or p.stdout)[-300:]})')
 # the documented exit code: 1 on a `worse` verdict, and the record is still observed (docs/dev/ember.md)
 worse = S / 'propose-worse'
 r10 = sim_record(ph, status='proposed')

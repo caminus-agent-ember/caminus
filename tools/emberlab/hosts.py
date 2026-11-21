@@ -138,6 +138,20 @@ def kind(explicit, brains):
     return explicit or ('agent' if any(getattr(b, 'real', False) for b in brains) else 'local')
 
 
+def local_refusal(explicit, brains, unsafe_local=False, unsafe_free=False):
+    """Why a real model may not run on the local host, or ''. One rule, read by both commands.
+
+    `--unsafe-free` is the same permission under the name an unattended run uses, so a check that accepted it on one
+    command line and not the other answered the same rule two ways: `propose --unsafe-free` ran a paid real brain as
+    the user where `run --unsafe-free` would have been refused (#385 review). Here it is one function, and the
+    command that prints the plan and the command that starts the runs both call it.
+    """
+    if (any(getattr(b, 'real', False) for b in brains) and kind(explicit, brains) == 'local'
+            and not (unsafe_local or unsafe_free)):
+        return 'a real model on the local host gets a shell as you: use --host agent (or --unsafe-local)'
+    return ''
+
+
 def make(kind, out, checkout):
     if kind == 'local':
         return Local(out)
