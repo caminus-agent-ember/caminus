@@ -5135,6 +5135,44 @@ for line in sys.stdin:
         self.assertIsNone(op.get('nope'))
         self.assertIsNone(op.refusal('nope'))
 
+    def test_a_slow_model_list_does_not_block_a_price_the_file_already_has(self):
+        """The alias list is a provider HTTPS GET, and get() ran it inside `with self.lock`, the one lock every
+        request thread shares: while a provider accepted and stalled, every model the owner's file prices waited for
+        that GET, and so did every request behind it (#389 review P2). It now runs outside the lock, as
+        ListPrices._load does: a priced model answers from the table at once, a name the in-flight fetch may yet
+        resolve gets the 503 wait rather than the 403 that stops a goal, and a second request for it starts no
+        second fetch."""
+        from caminus.ember import relay
+        pf = self.home/('prices-'+uuid.uuid4().hex+'.json')
+        pf.write_text(json.dumps({'priced-model': [1.0, 2.0], 'dated-id': [3.0, 4.0]}))
+        started, release, calls = threading.Event(), threading.Event(), []
+        listed = dict(data=[dict(id='dated-id', aliases=['alias-name']), dict(id='priced-model')])
+        def fetch():
+            calls.append(1)
+            started.set()
+            release.wait(20)                     # (the provider accepted and stalls)
+            return listed
+        op = relay.OwnerPrices(str(pf), lambda m: None, fetch=fetch)
+        slow = threading.Thread(target=op.get, args=('alias-name',))
+        slow.start()
+        try:
+            self.assertTrue(started.wait(20), 'the first request started the fetch')
+            t0 = time.time()
+            self.assertEqual(op.get('priced-model'), (1.0, 2.0, 1.0), 'a price the file has is not behind the GET')
+            self.assertLess(time.time() - t0, 5, 'the stalled fetch held no lock')
+            status, kind, message, wait, local = op.refusal('alias-name')
+            self.assertEqual((status, kind, local), (503, 'api_error', True), 'unresolved mid-fetch: waited out')
+            self.assertIn('still loading', message)
+            self.assertEqual(wait, relay.LOAD_BACKOFF[0])
+            self.assertIsNone(op.get('alias-name'), 'mid-fetch the names are what they were')
+            self.assertEqual(len(calls), 1, 'a second request does not start a second fetch')
+        finally:
+            release.set()
+            slow.join(20)
+        self.assertEqual(op.get('alias-name'), (3.0, 4.0, 3.0), 'the fetch lands and the alias resolves')
+        self.assertEqual(len(calls), 1, 'and it is not fetched again for the hourly refresh')
+        self.assertIsNone(op.refusal('alias-name'))
+
     def test_a_client_hang_up_closes_upstream_even_while_upstream_is_silent(self):
         """An interrupt closes the resident's call; the relay saw that only at its next write, after upstream's next
         line, so a long prompt read or a model thinking kept the provider generating. Now it closes upstream at once."""

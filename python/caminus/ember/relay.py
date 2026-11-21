@@ -389,8 +389,57 @@ class OwnerPrices:
         self.error = ''                                    # why the file last could not be read ('' once it could)
         self.error_at = 0.0                                # when this unreadable streak began (0.0 = no failure)
         self.names_error = ''                              # why the model list (for aliases) last could not be read
+        self.names_loading = False                         # (one alias-list fetch at a time, with the lock released)
+
+    def _names_due(self, model, now):
+        """Whether the provider's alias list is due for a fetch: hourly, and 60 s after a name it does not know (the
+        alias may have been added since). A failed fetch still moves `names_at`, so that rule is the retry, not every
+        request."""
+        if now - self.names_at > PRICE_REFRESH:
+            return True
+        return model not in self.names and now - self.names_at > 60
+
+    def _load_names(self):
+        """One alias-list fetch: the provider's HTTPS GET outside the lock, the swap and the clock under it.
+
+        The fetch used to run inside get()'s `with self.lock`, and this class is shared by every request thread, so a
+        provider that accepted and stalled made every price lookup wait for it (#389 review P2). As in
+        ListPrices._load, one loader runs at a time and a request that arrives mid-fetch answers from the names as
+        they are; refusal() says the list is still loading. The clock is read after the fetch, so a stalled
+        provider's delay is not already spent when the retry rule is asked again.
+        """
+        with self.lock:
+            if self.names_loading:
+                return
+            self.names_loading = True
+        try:
+            names, err = None, None
+            try:
+                names = {}
+                for m in self.fetch().get('data') or []:
+                    group = [m['id'], *(m.get('aliases') or [])]
+                    for n in group:
+                        names.setdefault(n, set()).update(group)
+            except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
+                err = e
+            with self.lock:
+                now = time.time()
+                if err is None:
+                    self.names, self.names_at, self.names_error = names, now, ''
+                else:
+                    why = '%s: %s' % (type(err).__name__, str(err)[:200])
+                    if why != self.names_error:
+                        self.log('model list unavailable: %s' % why)
+                    # a failed fetch still moves the clock: names_at used to stay 0, so every request fetched a list
+                    # that was down (the 60 s rule in _names_due is the retry, not every call)
+                    self.names_at, self.names_error = now, why
+        finally:
+            with self.lock:
+                self.names_loading = False
 
     def get(self, model):
+        """The price for MODEL, or None. The price file is read under the lock (a local file, fast); the provider's
+        model list is fetched outside it and its names swapped in under the lock, as ListPrices._load does."""
         with self.lock:
             try:
                 mt = self.path.stat().st_mtime
@@ -426,21 +475,10 @@ class OwnerPrices:
                 self.error, self.mtime = why, None
             if model in self.table or not self.fetch:
                 return self.table.get(model)
-            if time.time() - self.names_at > PRICE_REFRESH or (model not in self.names and time.time() - self.names_at > 60):
-                try:
-                    names = {}
-                    for m in self.fetch().get('data') or []:
-                        group = [m['id'], *(m.get('aliases') or [])]
-                        for n in group:
-                            names.setdefault(n, set()).update(group)
-                    self.names, self.names_at, self.names_error = names, time.time(), ''
-                except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
-                    why = '%s: %s' % (type(e).__name__, str(e)[:200])
-                    if why != self.names_error:
-                        self.log('model list unavailable: %s' % why)
-                    # a failed fetch still moves the clock: names_at used to stay 0, so every request fetched a list
-                    # that was down (the 60 s rule below is the retry, not every call)
-                    self.names_at, self.names_error = time.time(), why
+            due = self._names_due(model, time.time())
+        if due:
+            self._load_names()               # (a fetch already in flight returns at once)
+        with self.lock:
             for other in sorted(self.names.get(model, ())):
                 if other in self.table:
                     return self.table[other]
@@ -480,6 +518,11 @@ class OwnerPrices:
                              % PRICE_FILE_GRACE)
                     tail = 'nothing is priced until the file is back; retry in %ds'
                 return _cannot_price(what, model, PRICE_FILE_RETRY, tail)
+            if self.fetch and self.names_loading and not self.names and not self.names_error:
+                # the first fetch is still in flight (it runs outside the lock, so get() answered None from the names
+                # as they are): the name may be an alias of a priced model. A 503 with the short wait, as
+                # ListPrices.refusal does, never the 403 that stops a goal (#389 review P2).
+                return _cannot_price('the price list is still loading', model, LOAD_BACKOFF[0])
             if self.fetch and self.names_error and model not in self.names:
                 wait = max(0, math.ceil(60 - (time.time() - self.names_at)))
                 return _cannot_price('the price list has not loaded yet (%s), so the name cannot be resolved to a '
