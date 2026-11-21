@@ -237,6 +237,7 @@ class ListPrices:
         self.log, self.fetch, self.rates, self.backoff = log, fetch, rates, tuple(backoff)
         self.table, self.rows, self.at, self.lock = {}, {}, 0.0, threading.Lock()
         self.tries, self.next, self.error = 0, 0.0, ''      # (the failed loads in a row, when the next may run, why)
+        self.loading = False                                # (one fetch at a time, with the lock released)
 
     def _due(self, model, now):
         if now < self.next:                                 # a load failed: its backoff, whatever made it due
@@ -247,53 +248,85 @@ class ListPrices:
             return True
         return model not in self.table and now - self.at > 60
 
+    def _fetch(self):
+        """The provider's list parsed to (table, rows), with no lock held: the fetch is the slow part.
+
+        A 200 whose data is a number or a bool raised a TypeError out of get() (the client's connection dropped
+        and next/tries never advanced, so every later request fetched again); a row whose id was a list or a dict
+        put an unhashable key in the table, the same TypeError by another route; a list that prices nothing is a
+        truncated or empty reply, not a list. All three reach _load's handler as a failed load.
+        """
+        table, rows = {}, {}
+        data = self.fetch().get('data') or []
+        if not isinstance(data, list):
+            raise ValueError('the model list is not a list: %s' % type(data).__name__)
+        for m in data:
+            # an entry with a null price or no id is skipped, never the whole table. The id must be a string.
+            try:
+                r = self.rates(m) if isinstance(m.get('id'), str) and m['id'] else None
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if r is not None:
+                table[m['id']], rows[m['id']] = r, m
+        if not table:
+            raise ValueError('no priced model in the list')
+        return table, rows
+
     def _load(self, now):
+        """One load: the fetch outside the lock, the swap and the backoff under it.
+
+        The lock used to be held across the fetch, and `prime()` starts the first load exactly when the relay's
+        port starts answering, so a provider that accepted and stalled kept the first request blocked for the
+        whole fetch instead of getting the prompt 503 it waits out (#389 review P2). One loader at a time: a
+        request that arrives mid-fetch is answered from the table as it is, and refusal() says it is loading.
+        """
+        with self.lock:
+            if self.loading:
+                return
+            self.loading = True
         try:
-            table, rows = {}, {}
-            data = self.fetch().get('data') or []
-            if not isinstance(data, list):
-                # a 200 whose data is a number or a bool: iterating it raised a TypeError out of get(), which
-                # dropped the client's connection and left next/tries unadvanced (the per-request hammering the
-                # backoff exists to stop). A list is the only shape a model list has.
-                raise ValueError('the model list is not a list: %s' % type(data).__name__)
-            for m in data:
-                # an entry with a null price or no id is skipped, never the whole table (a TypeError there
-                # dropped the client's connection and left every model unpriced). The id must be a string: a row
-                # whose id is a list or a dict went into table[...] as an unhashable key, a TypeError out of get().
-                try:
-                    r = self.rates(m) if isinstance(m.get('id'), str) and m['id'] else None
-                except (TypeError, ValueError, AttributeError):
-                    continue
-                if r is not None:
-                    table[m['id']], rows[m['id']] = r, m
-            if not table:
-                # a list that prices nothing is a truncated or empty reply, not a list: every model stays unpriced
-                raise ValueError('no priced model in the list')
-            self.table, self.rows, self.at = table, rows, now
-            self.tries, self.next, self.error = 0, 0.0, ''
-            self.log('prices: %d priced models' % len(table))
-        except (OSError, ValueError, AttributeError, http.client.HTTPException) as e:
-            # http.client.HTTPException too: BadStatusLine and IncompleteRead are not OSErrors, and one escaping here
-            # dropped the client's connection (the price list was simply never loaded)
-            self.tries += 1
-            delay = self.backoff[min(self.tries, len(self.backoff)) - 1]
-            self.next = now + delay
-            self.error = '%s: %s' % (type(e).__name__, str(e)[:200])
-            self.log('price list unavailable (%d in a row): %s; next try in %ds'
-                     % (self.tries, self.error, round(delay)))
+            try:
+                table, rows = self._fetch()
+                err = None
+            except (OSError, ValueError, AttributeError, http.client.HTTPException) as e:
+                # http.client.HTTPException too: BadStatusLine and IncompleteRead are not OSErrors, and one
+                # escaping here dropped the client's connection (the price list was simply never loaded)
+                err = e
+            with self.lock:
+                if err is None:
+                    self.table, self.rows, self.at = table, rows, now
+                    self.tries, self.next, self.error = 0, 0.0, ''
+                    self.log('prices: %d priced models' % len(table))
+                else:
+                    self.tries += 1
+                    delay = self.backoff[min(self.tries, len(self.backoff)) - 1]
+                    self.next = now + delay
+                    self.error = '%s: %s' % (type(err).__name__, str(err)[:200])
+                    self.log('price list unavailable (%d in a row): %s; next try in %ds'
+                             % (self.tries, self.error, round(delay)))
+        finally:
+            with self.lock:
+                self.loading = False
 
     def get(self, model):
         with self.lock:
             now = time.time()
-            if self._due(model, now):
-                self._load(now)
+            due = self._due(model, now)
+        if due:
+            self._load(now)                  # (a fetch already in flight returns at once)
+        with self.lock:
             return self.table.get(model)
 
     def refusal(self, model):
         """(status, kind, message, retry_after, local) while the list has never loaded, or None once it has: a model
-        a good list does not price is a fact about the model, a list that never loaded is not."""
+        a good list does not price is a fact about the model, a list that never loaded is not. A first load still in
+        flight is neither: it is a 503 with the short wait, not the 403 that stops the agent's goal."""
         with self.lock:
-            if self.at or not self.error:
+            if self.at:
+                return None
+            if self.loading and not self.error:
+                return _cannot_price('the price list is still loading', model, LOAD_BACKOFF[0])
+            if not self.error:
                 return None
             wait = max(0, math.ceil(self.next - time.time()))
             return _cannot_price('the price list has not loaded yet (%s)' % self.error, model, wait)
@@ -416,8 +449,15 @@ class OwnerPrices:
                 # 403 "no price for"), whatever the file is doing. A name it does know still waits below.
                 return None
             if self.error:
-                return _cannot_price('the relay cannot read its price file (%s)' % self.error, model,
-                                     PRICE_FILE_RETRY, 'the owner re-reads it on change, no restart, so retry in %ds')
+                what = 'the relay cannot read its price file (%s)' % self.error
+                tail = 'the owner re-reads it on change, no restart, so retry in %ds'
+                if not self.table and self.error_at:
+                    # the grace has passed: the last good table is gone. Say so, or the 503 reads as a file that
+                    # was just caught mid-rewrite however long the relay has been refusing (#389 review P2).
+                    what += ('; the last good table was dropped after %d s unreadable'
+                             % PRICE_FILE_GRACE)
+                    tail = 'nothing is priced until the file is back; retry in %ds'
+                return _cannot_price(what, model, PRICE_FILE_RETRY, tail)
             if self.fetch and self.names_error and model not in self.names:
                 wait = max(0, math.ceil(60 - (time.time() - self.names_at)))
                 return _cannot_price('the price list has not loaded yet (%s), so the name cannot be resolved to a '

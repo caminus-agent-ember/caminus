@@ -4809,6 +4809,45 @@ for line in sys.stdin:
             self.assertEqual(bad.refusal('zai-org/GLM-5.2')[0], 503)
             self.assertIn('price list unavailable (1 in a row)', lines[-1], lines[-1])
 
+    def test_a_first_price_load_in_flight_answers_at_once_instead_of_blocking_the_request(self):
+        """#389 review P2: the lock was held across the fetch, and prime() starts the first load exactly when the
+        relay's port starts answering, so a provider that accepted and stalled kept the first POST blocked for the
+        whole fetch instead of getting the prompt 503 it waits out. The fetch now runs outside the lock: a request
+        mid-fetch is answered from the table as it is, one loader runs at a time, and the loaded table lands."""
+        import threading
+        from caminus.ember import relay
+        started, release = threading.Event(), threading.Event()
+        good = dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2)))])
+        calls, lines = [], []
+        def fetch():
+            calls.append(1)
+            started.set()
+            release.wait(10)                                 # (a provider that accepted and stalled)
+            return good
+        prices = relay.ListPrices(lines.append, fetch, backoff=(300,))
+        loader = threading.Thread(target=prices.get, args=('zai-org/GLM-5.2',), daemon=True)
+        loader.start()
+        try:
+            self.assertTrue(started.wait(10), 'the first load started')
+            # the first load is in flight: both calls must answer now, not block on the fetch's lock
+            began = time.time()
+            self.assertIsNone(prices.get('zai-org/GLM-5.2'))
+            self.assertLess(time.time() - began, 5, 'a request mid-fetch does not wait on the fetch')
+            status, kind, message, wait, local = prices.refusal('zai-org/GLM-5.2')
+            self.assertEqual(status, 503, 'neither a 403 fact about the model nor a blocked request')
+            self.assertIn('still loading', message)
+            self.assertEqual(wait, relay.LOAD_BACKOFF[0], 'the short wait, to be retried once the load lands')
+            self.assertEqual(len(calls), 1, 'one loader: the second call did not start another fetch')
+            release.set()
+            loader.join(10)
+            self.assertFalse(loader.is_alive(), 'the first load finished')
+            self.assertEqual(prices.get('zai-org/GLM-5.2'), (0.6, 2.2, 0.6), 'the loaded table prices the model')
+            self.assertIsNone(prices.refusal('zai-org/GLM-5.2'))
+            self.assertEqual(len(calls), 1)
+        finally:
+            release.set()
+            loader.join(10)
+
     def test_a_failed_hourly_refresh_waits_out_its_backoff_instead_of_fetching_every_request(self):
         """A refresh that fails is a failed load too. _due() used to test only 'the hour is up' once the table had
         loaded, so a provider that went down was fetched again on every single request (the opposite of the backoff
@@ -4923,7 +4962,10 @@ for line in sys.stdin:
             self.assertFalse(any('dropping the last good table' in l for l in log), log)
             prices.error_at -= relay.PRICE_FILE_GRACE + 1     # (the same file, unreadable for over 15 minutes)
             self.assertIsNone(prices.get('open-mistral-4'), 'past the grace the stale table is dropped, not priced')
-            self.assertEqual(prices.refusal('open-mistral-4')[0], 503, 'the file may come back: a wait, not a 403')
+            status, kind, why, wait, local = prices.refusal('open-mistral-4')
+            self.assertEqual(status, 503, 'the file may come back: a wait, not a 403')
+            self.assertIn('last good table was dropped', why, 'the 503 says the table is gone, not that it is loading')
+            self.assertIn('nothing is priced until the file is back', why)
             self.assertEqual(sum('dropping the last good table' in l for l in log), 1, log)
             self.assertIsNone(prices.get('open-mistral-4'))
             self.assertEqual(sum('dropping the last good table' in l for l in log), 1, 'one line per grace, not per request')
