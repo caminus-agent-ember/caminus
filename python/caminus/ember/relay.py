@@ -392,6 +392,7 @@ class OwnerPrices:
         self.fetch, self.names, self.names_at = fetch, {}, 0.0
         self.error = ''                                    # why the file last could not be read ('' once it could)
         self.error_at = 0.0                                # when this unreadable streak began (0.0 = no failure)
+        self.dropped = False                               # whether the grace dropped a table (a file never read has none)
         self.names_error = ''                              # why the model list (for aliases) last could not be read
         self.names_loading = False                         # (one alias-list fetch at a time, with the lock released)
 
@@ -455,6 +456,7 @@ class OwnerPrices:
                         else:
                             table[k] = (float(v[0]), float(v[1]), float(v[2] if len(v) > 2 else v[0]))
                     self.table, self.mtime, self.error, self.error_at = table, mt, '', 0.0
+                    self.dropped = False
                     self.log('prices: %d models from %s' % (len(table), self.path))
             except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
                 # logged on the first failure too: a price file missing at start (a relay that starts before the owner
@@ -476,6 +478,7 @@ class OwnerPrices:
                     self.log('price file unreadable for %ds: dropping the last good table (%d models)'
                              % (round(now - self.error_at), len(self.table)))
                     self.table, self.error_at = {}, now     # one line per grace, not one per request
+                    self.dropped = True
                 self.error, self.mtime = why, None
             if model in self.table or not self.fetch:
                 return self.table.get(model)     # (this returns None only with `error` set when the table never read:
@@ -540,12 +543,25 @@ class OwnerPrices:
                     return None
                 what = 'the relay cannot read its price file (%s)' % self.error
                 tail = 'the owner re-reads it on change, no restart, so retry in %ds'
-                if not self.table and self.error_at:
+                if self.table and self.error_at:
+                    # the last good table still serves (the grace is not over): say so, or the 503 reads as if
+                    # nothing were priced and the agent cannot tell how long what it has still holds (#389 review P2)
+                    left = math.ceil(PRICE_FILE_GRACE - (time.time() - self.error_at))
+                    if left > 0:
+                        what += ('; the last good table still prices what it priced, for %ds more unreadable'
+                                 % left)
+                elif self.dropped:
                     # the grace has passed: the last good table is gone. Say so, or the 503 reads as a file that
                     # was just caught mid-rewrite however long the relay has been refusing (#389 review P2).
                     what += ('; the last good table was dropped after %d s unreadable'
                              % PRICE_FILE_GRACE)
                     tail = 'nothing is priced until the file is back; retry in %ds'
+                elif not self.table and self.error_at:
+                    # nothing is priced and nothing was dropped: the file has never read (missing since the relay
+                    # started) or it read as an empty table. Name that rather than the grace, which had nothing to
+                    # drop, so the 503 says where it stands (#389 review P2: the wording)
+                    what += '; no price table is loaded'
+                    tail = 'nothing is priced until the file is readable; retry in %ds'
                 return _cannot_price(what, model, PRICE_FILE_RETRY, tail)
             if self.fetch and self.names_loading and not self.names and not self.names_error:
                 # the first fetch is still in flight (it runs outside the lock, so get() answered None from the names

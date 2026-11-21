@@ -5150,6 +5150,50 @@ for line in sys.stdin:
         op.names_error, op.names_at = 'OSError: down', time.time() - 120   # (its 60 s retry time is past)
         self.assertEqual(op.refusal('unlisted')[3], relay.PRICE_WAIT_FLOOR, 'the wait floors, never 0')
 
+    def test_a_header_is_found_whatever_case_the_caller_asks_in(self):
+        """`header()` is the case-insensitive lookup a refusal leans on (a plain dict is not, an HTTPMessage is): its
+        fallback compared the stored key to the NAME as passed, so a caller passing 'Retry-After' found nothing while
+        'retry-after' worked — a latent trap for the next caller, not a live bug (#389 review P2)."""
+        from caminus.ember.resident import model
+        self.assertEqual(model.header({'Retry-After': '9'}, 'retry-after'), '9')
+        self.assertEqual(model.header({'Retry-After': '9'}, 'Retry-After'), '9')
+        self.assertEqual(model.header({'retry-after': '8'}, 'Retry-After'), '8')
+        self.assertEqual(model.retry_after({'Retry-After': '9'}), 9.0)
+        self.assertIsNone(model.header({}, 'Retry-After'))
+
+    def test_an_unreadable_price_file_says_whether_the_last_good_table_still_serves(self):
+        """The 503 for an unreadable file is the same code either way, so its text carries what the agent (and the
+        owner reading the log) cannot otherwise tell: whether the last good table still prices what it priced, that
+        the grace dropped it, or that no table was ever read. Saying "dropped" when nothing was ever read, or nothing
+        at all while the table still serves, reads as a file that was just caught mid-rewrite (#389 review P2)."""
+        from caminus.ember import relay
+        pf, lines = self.home/('prices-'+uuid.uuid4().hex+'.json'), []
+        pf.write_text(json.dumps({'mistral-large-2512': [0.7, 2.1]}))
+        op = relay.OwnerPrices(str(pf), lines.append)
+        self.assertEqual(op.get('mistral-large-2512'), (0.7, 2.1, 0.7))
+        pf.unlink()
+        self.assertIsNone(op.get('open-mistral-4'))          # (the failed read: the table stays, the grace starts)
+        why = op.refusal('open-mistral-4')[2]
+        self.assertIn('the last good table still prices what it priced', why)
+        self.assertIn('more unreadable', why)
+        self.assertNotIn('was dropped', why)
+        op.error_at -= relay.PRICE_FILE_GRACE + 1            # (unreadable past the grace: the table is dropped)
+        self.assertIsNone(op.get('open-mistral-4'))
+        why = op.refusal('open-mistral-4')[2]
+        self.assertIn('the last good table was dropped', why)
+        self.assertIn('nothing is priced until the file is back', why)
+        # a file that never read has no table to drop: the drop wording would be a lie
+        never = relay.OwnerPrices(str(self.home/('prices-'+uuid.uuid4().hex+'.json')), lambda m: None)
+        never.get('open-mistral-4')
+        never.error_at -= relay.PRICE_FILE_GRACE + 1
+        why = never.refusal('open-mistral-4')[2]
+        self.assertIn('no price table is loaded', why)
+        self.assertNotIn('was dropped', why)
+        # a good read clears the drop: the last good table serves again
+        pf.write_text(json.dumps({'open-mistral-4': [0.4, 2.0]}))
+        self.assertEqual(op.get('open-mistral-4'), (0.4, 2.0, 0.4))
+        self.assertFalse(op.dropped, 'a readable file is no longer a dropped table')
+
     def test_an_alias_whose_model_list_never_loaded_is_a_503_waited_out_not_a_403(self):
         """Mistral's aliases come from the provider's own model list. While that list has never loaded, a name the
         owner's file does not price may simply be an alias of one it does, so it is not a fact about the model: the

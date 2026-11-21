@@ -236,6 +236,7 @@ def header(headers, name):
     a refusal must not hinge on the case a proxy chose."""
     value = (headers or {}).get(name)
     if value is None:
+        name = name.lower()
         for k, v in (headers or {}).items():
             if isinstance(k, str) and k.lower() == name:
                 return v
