@@ -2794,8 +2794,12 @@ for line in sys.stdin:
         # the two shapes the earlier rounds fixed must survive this table
         self.assertEqual(language.drift('\u597d\u7684\u3002\u8bf7\u68c0\u67e5 branch: pr-390-fix.', ('Latin',)),
                          ('Han', .625), 'a short mixed reply with a borrowed clause is still a drift')
-        self.assertIsNone(language.drift('I pushed the branch and opened the pull request, please review it.',
-                                         ('Han',)), 'the reverse direction is held by the same floor')
+        # the reverse direction: an English reply to a Chinese owner has none of the owner's units, so the
+        # whole-reply floor applies and it drifts; a one-word English reply is still under that floor
+        self.assertEqual(language.drift('I pushed the branch and opened the pull request, please review it.',
+                                        ('Han',)), ('Latin', 1.0),
+                         'an English reply to a Chinese owner is a drift')
+        self.assertIsNone(language.drift('ok', ('Han',)), 'one unit cannot name a language, either way')
 
     def test_a_deleted_goal_does_not_leave_a_stale_language_cached(self):
         # review P2: `owner` cached on COUNT(*) FROM goals, so deleting one goal and adding another kept the
