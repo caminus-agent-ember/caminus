@@ -2668,6 +2668,46 @@ for line in sys.stdin:
         self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
         self.assertEqual(self.steers(goal['id']),[])
 
+    def test_a_fully_quoted_foreign_sentence_is_not_a_drift(self):
+        # a quotation is a citation, not the reply's language: an owner who quotes a whole foreign sentence inside a
+        # correct English reply must not be nudged, even though the quoted characters are most of its units (#354
+        # review P2). A straight apostrophe (`don't`) is not read as an opening quote.
+        from caminus.ember.resident import language
+        self.assertIsNone(language.drift(
+            "The reply said '\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002' and then opened it.",
+            ('Latin',)))
+        self.assertIsNone(language.drift('It printed \u201c\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 '
+                                         'PR\u3002\u201d in the log.', ('Latin',)))
+        self.assertEqual(language.units("Don't")[1], 2,
+                         'an apostrophe ends a run of letters: a contraction is two units')
+        quoted=call('terminal',dict(command='printf ok'))
+        quoted['content']=("The reply said '\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002' and "
+                           'then opened the pull request.')
+        self.replies(quoted,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
+        self.assertEqual(self.steers(goal['id']),[])
+
+    def test_an_unbalanced_fence_is_blinded_like_a_closed_one(self):
+        # a reply cut off mid-block (or a ```markdown that never closes) has no closing fence; the code body is not
+        # the reply's language, so the narration must be censused alone. With the body left in, its CJK literals
+        # outweigh the narration and a correct English reply drifts (#354 review P2).
+        from caminus.ember.resident import language
+        fenced=('Checked the store, then wrote the fixture:\n```python\ndoc = "\u6587\u4ef6\u5728"\n'
+                'more("\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002")\n')
+        self.assertIsNone(language.drift(fenced, ('Latin',)))
+        closed=('Checked the store, then wrote the fixture:\n```python\ndoc = "\u6587\u4ef6\u5728"\n```\n'
+                'The branch is pushed and the pull request is open.')
+        self.assertIsNone(language.drift(closed, ('Latin',)))
+        # narration before the fence really in the other script is still held
+        self.assertEqual(language.drift('\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002\n```\ncode()\n',
+                                        ('Latin',))[0], 'Han')
+        # and text after an unterminated fence is the block's, not the reply's, so it is not censused (the cost of
+        # blinding a block with no closing fence: a reply cut off mid-block is read by its narration alone)
+        self.assertIsNone(language.drift('Done:\n```\ncode()\n\n\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002',
+                                         ('Latin',)))
+
     def test_a_goal_that_keeps_drifting_is_nudged_again_only_after_the_interval(self):
         # a reply that keeps drifting is detected on every turn, so the interval counts from the last *nudged*
         # drift (not the last detection): turn 2 drifts but is not nudged, turn 4 is nudged again. Counting from

@@ -94,8 +94,22 @@ _SCRIPTS_FOR['한국어'] = ('Hangul',)
 _LANG_OF = {'Cyrillic': 'Russian', 'Greek': 'Greek', 'Arabic': 'Arabic', 'Hebrew': 'Hebrew',
             'Devanagari': 'Hindi', 'Thai': 'Thai', 'Hangul': 'Korean', 'Kana': 'Japanese', 'Han': 'Chinese'}
 
-_FENCE = re.compile(r'```.*?```', re.S)
+_FENCE = re.compile(r'```.*?(?:```|\Z)', re.S)      # an unterminated fence runs to the end of the reply
 _TICK = re.compile(r'`[^`\n]*`')
+# a quotation is a citation, not the reply's language: a quoted foreign sentence must not make an English reply a
+# drift. Straight quotes need guards so an apostrophe (`don't`, `it's`) is not read as an opening quote: the opening
+# one follows a non-letter and the closing one precedes a non-letter (#354 review P2).
+_QUOTED = re.compile(r'「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|«[^»]*»|"[^"]*"'
+                     r"|(?<![\w'])'[^']*'(?![\w'])")
+
+
+def prose(text):
+    """The text without code and quotations: a code block or a cited sentence is not a reply's language.
+
+    An unterminated fence (a reply cut off mid-block, or a ` ```markdown ` that never closes) truncates the rest:
+    leaving its body in the census let a code block's CJK literals outweigh the narration around it (#354 review P2).
+    """
+    return _TICK.sub(' ', _QUOTED.sub(' ', _FENCE.sub(' ', text or '')))
 
 
 def script_of(ch):
@@ -107,11 +121,6 @@ def script_of(ch):
         if o <= last:
             return script
     return ''
-
-
-def prose(text):
-    """The text without fenced code and inline `code` spans: a code block is not a reply's language."""
-    return _TICK.sub(' ', _FENCE.sub(' ', text or ''))
 
 
 def units(text):
