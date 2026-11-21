@@ -2838,6 +2838,14 @@ for line in sys.stdin:
                     'date -s 2020-01-01',
                     'date --set=2020-01-01',
                     'date 010100002020',
+                    # an attached value is the rest of its own word (GNU date sets the clock on the first one,
+                    # verified), so the -s after it must still be read as a set (#382 review, fifth round)
+                    'date -d2024-01-01 -s@1700000000',
+                    'date -f/dev/null -s@1700000000',
+                    'date -d2024-01-01 --unknown',
+                    'date -d2024-01-01 --set=2020-01-01',
+                    'date --rfc-3339',                # a required value that is missing
+                    'date -d',                        # ...and one with no word left at all
                     # --plugin dlopens a shared object: verified live, `nm --plugin evil.so a.out` ran its constructor
                     'nm --plugin x.so a.out',
                     'nm --pl=x a.out',
@@ -2850,7 +2858,10 @@ for line in sys.stdin:
                     'amd-smi list','amd-smi static --clock','amd-smi metric -g 0 --temp',
                     'awk \'{print $1}\' f','awk -F: \'NR==2\' f','rg -n x','rg -n x f.txt',
                     'file x','file -b x','date','date -u','date +%F','date -d yesterday','date -r f','date -Iseconds',
-                    'date --iso-8601','sed -n 1p f','nm a.out','objdump -d a.out','readelf -h a.out'):
+                    'date --iso-8601','date -d2024-01-01 -u','date -d 2024-01-01 -u','date --date=2024-01-01 -u',
+                    'date -I seconds','date --iso-8601=seconds','date --iso-8601 seconds','date --date 2024-01-01 +%F',
+                    'date --resolution','date --rfc-3339=seconds','date -f /dev/null','date -ur f',
+                    'sed -n 1p f','nm a.out','objdump -d a.out','readelf -h a.out'):
             self.assertTrue(ro(cmd),cmd)
 
     def test_read_only_allow_lists_refuse_abbreviations_and_clusters(self):
@@ -3031,6 +3042,51 @@ for line in sys.stdin:
             delegate.sweep(rt)
             self.assertEqual(rt.store.goal(live)['state'],'paused')
             self.assertEqual(rt.store.delegate(live)['outcome'],'orphaned')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_parent_whose_goal_row_is_gone_does_not_raise_in_the_child(self):
+        # parent_gone() read the parent with store.goal(), which raises on an unknown id: a hand-restored store
+        # missing the parent row turned the child's run and its stop check into a raw ValueError instead of a
+        # report (#382 review, fifth round). It reads the state directly now, and a parent with no row is no
+        # cancel - the child finishes its own work and reports it.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            self.assertEqual(delegate._state(rt,parent),'queued')
+            rt.store.db.execute('DELETE FROM goals WHERE id=?',(parent,))
+            self.assertEqual(delegate._state(rt,parent),'','a missing row is no state, not an exception')
+            def fake_run(target=None,stop=None,**kw):
+                self.assertFalse(stop(),'a parent with no row is no cancel')
+                rt.store.update(child,state='completed',summary='the child finished')
+            with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
+                report=delegate.run_child(rt,parent,dict(child=child,role='worker'))
+            self.assertEqual(report['outcome'],'completed')
+            self.assertEqual(rt.store.delegate(child)['outcome'],'completed')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_capped_childs_pause_and_its_event_commit_together(self):
+        # the pause write and the delegate_capped event were two transactions, so a crash between them left a
+        # paused child with no line saying why (#382 review, fifth round). One transaction now: a failed event
+        # write rolls the pause back with it, and the ordinary path still writes both.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            rt.store.delegate_spend(child,.75,0.0)
+            with unittest.mock.patch.object(rt.store,'event',side_effect=RuntimeError('the disk is full')):
+                with self.assertRaises(RuntimeError):
+                    delegate.capped(rt,child)
+            self.assertEqual(rt.store.goal(child)['state'],'queued','the pause rolled back with its event')
+            self.assertEqual([e for e in rt.store.events() if e['kind']=='delegate_capped'],[])
+            self.assertTrue(delegate.capped(rt,child))
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('cap reached',rt.store.goal(child)['error'])
+            self.assertEqual(len([e for e in rt.store.events() if e['kind']=='delegate_capped']),1)
         finally:rt.mail.close();rt.store.close()
 
     def test_a_null_delegate_limit_takes_the_default_and_a_zero_is_refused(self):

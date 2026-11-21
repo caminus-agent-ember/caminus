@@ -203,17 +203,14 @@ work has no arbitrary step limit; explicit oneshot test budgets still apply.
 {delegate}'''
 
 
-# only where the delegate tool is offered (config delegate, true by default; issue #342)
+# only where the delegate tool is offered (config delegate, true by default; issue #342). The tool's own description
+# carries the child's limits, its report's shape and the cap rule; this block adds only the judgement a schema cannot:
+# when to reach for it, and that a change is not its work (#382 review: one fact in one file).
 DELEGATION = '''
 ## Delegation
-delegate runs a bounded, read-only child goal through this same loop and returns its
-short report: outcome, summary, what it verified and skipped, the model, steps, spend
-and allowance. Use it for a self-contained research or check you would otherwise do
-yourself, and when a cheaper brain (a local worker) or a different family is a fair
-judge of the question; set model/provider and cap_usd to bound it (the cap can lower
-delegate_usd, never raise it). The child cannot write, edit, run a changing command,
-ask your human, message a peer, or delegate further. One child runs at a time and this
-call returns only when its report is ready; do not delegate a change, do it yourself.
+delegate runs a read-only child of this goal; its tool description says what the child may do and what it returns.
+Reach for it for a self-contained research or check you would otherwise do yourself, when a cheaper brain or a
+different family is a fair judge. Do not delegate a change: do it yourself.
 '''
 
 

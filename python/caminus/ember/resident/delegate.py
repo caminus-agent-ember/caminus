@@ -236,6 +236,16 @@ def start(rt, parent, args, prepared=None):
                 _delegate_run=True, note='the child runs now; this result is replaced by its report')
 
 
+def _state(rt, gid):
+    """A goal's state by a direct read, '' when its row is gone.
+
+    Not store.goal(): that raises on an unknown id, and this runs inside the child's run and its stop check, where
+    a hand-restored store can be missing the parent row (the sweep() path was hardened the same way, #382 review).
+    A parent with no row is no longer a parent that can cancel its child."""
+    r = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (gid,)).fetchone()
+    return (r['state'] if r else '') or ''
+
+
 def run_child(rt, parent, job):
     """Run the child through the loop and turn its goal into the short report the parent reads.
 
@@ -248,13 +258,13 @@ def run_child(rt, parent, job):
         """True when the daemon is stopping, or the parent was cancelled, paused or failed while the child ran."""
         if daemon_stop and daemon_stop():
             return True
-        return rt.store.goal(parent)['state'] in ('cancelled', 'paused', 'error')
+        return _state(rt, parent) in ('cancelled', 'paused', 'error')
 
     try:
         rt.run(target=child, stop=parent_gone)
         g = rt.store.goal(child)
         state = g['state']
-        if rt.store.goal(parent)['state'] == 'cancelled' and state in ('working', 'queued', 'waiting_model'):
+        if _state(rt, parent) == 'cancelled' and state in ('working', 'queued', 'waiting_model'):
             with rt.store.transaction():
                 rt.store.update(child, state='cancelled', error='its parent was cancelled while it ran')
             g, state = rt.store.goal(child), 'cancelled'
@@ -332,9 +342,11 @@ def capped(rt, gid):
     spend, allowance = float(row.get('spend_usd') or 0.0), float(row.get('allowance_usd') or 0.0)
     if spend + allowance < cap:
         return False
+    # one transaction: a crash between them would leave a paused child with no delegate_capped line, and the two
+    # are one fact - the cap was reached - so they commit together (#382 review).
     with rt.store.transaction():
         rt.store.update(gid, state='paused', error='delegate spend cap reached: $%.4f of $%.4f' % (spend + allowance, cap))
-    rt.store.event('delegate_capped', dict(spend_usd=spend, allowance_usd=allowance, cap_usd=cap), gid)
+        rt.store.event('delegate_capped', dict(spend_usd=spend, allowance_usd=allowance, cap_usd=cap), gid)
     return True
 
 

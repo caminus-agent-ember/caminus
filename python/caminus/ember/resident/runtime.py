@@ -409,11 +409,13 @@ NULL_REDIRECT = re.compile(r'(?<![\w>])(?:\d|&)?>>?\s*/dev/null\b|(?<![\w>])\d?>
 CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b|--pre\b')
 
 
-# date's long names: a bare read name, or a name that takes a value. Any other (--set, an abbreviation, an
-# unknown) is a change; a bare operand sets the clock (checked by _date_sets).
+# date's long names: a bare read name, a name that takes a required value (it is missing when the next word is an
+# option), or --iso-8601's optional one. Any other name (--set, an abbreviation, an unknown) is a change; a bare
+# operand sets the clock (checked by _date_sets).
 DATE_READ_LONG = frozenset(('utc', 'universal', 'rfc-2822', 'rfc-email', 'iso-8601', 'debug', 'help', 'version',
                             'date', 'reference', 'file', 'resolution', 'rfc-3339'))
-DATE_VALUE_LONG = frozenset(('date', 'reference', 'file', 'resolution', 'rfc-3339', 'iso-8601'))
+DATE_VALUE_LONG = frozenset(('date', 'reference', 'file', 'rfc-3339'))
+DATE_OPTIONAL_LONG = frozenset(('iso-8601',))
 
 
 # sed and awk read only in a narrow form, checked word by word (shlex) on an exact grammar; anything else is a change.
@@ -498,34 +500,48 @@ def _awk_reads(words):
 
 def _date_sets(args):
     """date writes the clock with -s / --set and with a bare operand (`date 010100002020`); a +FORMAT operand, -d,
-    -r, -f, -u, -I and -R only read. Any long name or short flag not known to read counts as a set."""
-    value_next = False
-    for w in args:
-        if value_next:
-            value_next = False
-            continue
+    -r, -f, -u, -I and -R only read. Any long name or short flag not known to read counts as a set.
+
+    A value is the rest of its own word (`-d2024-01-01`) or, failing that, the next word - and a next word starting
+    with `-` is never a value here, as in _allow_ok. The attached form must not swallow the word after it: GNU date
+    sets the clock on `date -d2024-01-01 -s@1700000000` (verified), and value_next used to skip that -s. -I and
+    --iso-8601 take an optional value, attached or in the next word when that word is not an option (GNU consumes
+    `-I seconds`, and `date --iso-8601 --set=...` still sets the clock); --resolution takes none (`date
+    --resolution <date>` reads the word as a date operand)."""
+    i, n = 0, len(args)
+    while i < n:
+        w = args[i]
+        i += 1
         if w.startswith('+'):
             continue
         if w.startswith('--'):
-            name = w[2:].split('=', 1)[0]
-            if '=' in w:
-                if name not in DATE_VALUE_LONG:
-                    return True
+            name, eq, _ = w[2:].partition('=')
+            if name not in DATE_READ_LONG:
+                return True           # (--set, an abbreviation, an unknown name)
+            if eq:
                 continue
             if name in DATE_VALUE_LONG:
-                value_next = True
-            elif name not in DATE_READ_LONG:
-                return True           # (--set, --set=..., and any abbreviation or unknown name)
+                if i >= n or args[i].startswith('-'):
+                    return True       # a required value that is missing or is the next option: no read of this
+                i += 1
+            elif name in DATE_OPTIONAL_LONG and i < n and not args[i].startswith('-'):
+                i += 1
             continue
         if w.startswith('-') and w != '-':
-            for ch in w[1:]:
+            body = w[1:]
+            for j, ch in enumerate(body):
                 if ch == 's':
                     return True
                 if ch in 'drf':
-                    value_next = True
-                    break             # the rest of the cluster is its value
+                    if j + 1 == len(body):     # no attached value: the next word is it
+                        if i >= n or args[i].startswith('-'):
+                            return True
+                        i += 1
+                    break                      # else the rest of the cluster is its value
                 if ch == 'I':
-                    break             # -I takes an optional attached value (hours, minutes, seconds, ns)
+                    if j + 1 == len(body) and i < n and not args[i].startswith('-'):
+                        i += 1                 # the optional value (hours, minutes, seconds, ns) is the next word
+                    break
                 if ch not in 'uRhvc':
                     return True
             continue
