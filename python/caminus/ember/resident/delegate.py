@@ -17,7 +17,10 @@ from inside another goal:
   $0 of money and real allowance;
 - a short structured report back: outcome (completed / capped / failed / incomplete), summary, what it
   verified, what it skipped, steps, spend, allowance and its cap. `capped` covers all three limits: the dollar
-  cap, the step limit and the time limit each end a child the same way and say so in its error text;
+  cap, the step limit and the time limit each end a child the same way, and the report recognises one from the
+  fact it leaves (the `delegate_capped` event in the pause's own transaction, `steps >= step_limit`, or a dead
+  deadline), never from its error text — an unrelated pause whose message named a delegate used to read as
+  capped (#382 review);
 
 - the count is capped too: start() counts the children this parent still has **running** (`outcome=''`) and
   refuses past `delegate_max_children` (4 by default), so a parent cannot grow an unbounded tree and a finished
@@ -246,6 +249,25 @@ def _state(rt, gid):
     return (r['state'] if r else '') or ''
 
 
+def _capped(rt, child, g):
+    """True when one of the child's own three caps ended its run. Explicit facts only, never its error text.
+
+    The report used to call a paused child `capped` when its error contained 'delegate' or 'budget', so any pause
+    whose message happened to carry either word (a watchdog line naming the goal, a future timer mentioning a
+    delegate) told the parent its child had been stopped by a limit (#382 review, second round). Each cap leaves
+    a fact of its own: the dollar cap writes `delegate_capped` in the same transaction as the pause (capped()),
+    the step limit and the deadline are columns on the child's own row, and a run that reached one has
+    steps >= step_limit or is past its deadline."""
+    if rt.store.db.execute("SELECT 1 FROM events WHERE goal=? AND kind='delegate_capped' LIMIT 1",
+                           (child,)).fetchone():
+        return True
+    limit = g.get('step_limit')
+    if limit is not None and int(g.get('steps') or 0) >= int(limit):
+        return True
+    deadline = g.get('deadline')
+    return bool(deadline) and time.time() >= float(deadline)
+
+
 def run_child(rt, parent, job):
     """Run the child through the loop and turn its goal into the short report the parent reads.
 
@@ -268,11 +290,10 @@ def run_child(rt, parent, job):
             with rt.store.transaction():
                 rt.store.update(child, state='cancelled', error='its parent was cancelled while it ran')
             g, state = rt.store.goal(child), 'cancelled'
-        err = g.get('error') or ''
         if state == 'completed':
             outcome = 'completed'
-        elif state == 'paused' and ('delegate' in err or 'budget' in err):
-            outcome = 'capped'       # the dollar cap, the step budget or the time budget ended it
+        elif state == 'paused' and _capped(rt, child, g):
+            outcome = 'capped'       # the dollar cap, the step limit or the deadline ended it
         elif state == 'cancelled':
             outcome = 'incomplete'   # its parent was cancelled: it did not finish its own work
         elif state in ('working', 'queued', 'waiting_model'):

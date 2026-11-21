@@ -3089,6 +3089,49 @@ for line in sys.stdin:
             self.assertEqual(len([e for e in rt.store.events() if e['kind']=='delegate_capped']),1)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_pause_is_capped_by_a_fact_and_never_by_its_words(self):
+        # run_child called a paused child `capped` when its error contained 'delegate' or 'budget', so a pause for
+        # any other reason whose message happened to carry either word read to the parent as a spent limit (#382
+        # review, second round). The report reads the facts the caps leave: the delegate_capped event (written in
+        # the pause's own transaction), steps >= step_limit, or a deadline that has passed.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child(*,steps=None,deadline=None):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                if steps is not None or deadline is not None:
+                    with rt.store.transaction():rt.store.update(gid,step_limit=steps,deadline=deadline)
+                return gid
+            other=child()
+            with rt.store.transaction():
+                rt.store.update(other,state='paused',error='another delegate asked the same question')  # the old false positive
+            self.assertFalse(delegate._capped(rt,other,rt.store.goal(other)))
+            stopped=child(steps=3)
+            with rt.store.transaction():
+                rt.store.update(stopped,state='paused',steps=3,error='any words at all')
+            self.assertTrue(delegate._capped(rt,stopped,rt.store.goal(stopped)),'the step limit is a fact of its row')
+            late=child(deadline=time.time()-5)
+            with rt.store.transaction():
+                rt.store.update(late,state='paused',error='any words at all')
+            self.assertTrue(delegate._capped(rt,late,rt.store.goal(late)),'a passed deadline is a fact of its row')
+            dollars=child()
+            rt.store.delegate_spend(dollars,.75,0.0)
+            self.assertTrue(delegate.capped(rt,dollars))
+            self.assertTrue(delegate._capped(rt,dollars,rt.store.goal(dollars)),'the dollar cap is its event')
+            with rt.store.transaction():
+                rt.store.update(other,state='completed')
+            self.assertFalse(delegate._capped(rt,other,rt.store.goal(other)),'a completed child is never capped')
+
+            # and the report itself: a pause that names a delegate is `incomplete`, not `capped`
+            def fake_run(target=None,stop=None,**kw):
+                with rt.store.transaction():rt.store.update(target,state='paused',error='delegate work stopped early')
+            with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
+                report=delegate.run_child(rt,parent,dict(child=other,role='worker'))
+            self.assertEqual(report['outcome'],'failed','a pause with no cap behind it is not a cap')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_null_delegate_limit_takes_the_default_and_a_zero_is_refused(self):
         # `delegate_max_steps: null` raised TypeError at every delegate call (#382 review), as a null dollar cap
         # used to. Zero is not read as "the default" either: the same silent literal the table's DEFAULT 0 was.
