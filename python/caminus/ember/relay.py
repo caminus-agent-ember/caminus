@@ -272,13 +272,16 @@ class ListPrices:
             raise ValueError('no priced model in the list')
         return table, rows
 
-    def _load(self, now):
+    def _load(self):
         """One load: the fetch outside the lock, the swap and the backoff under it.
 
-        The lock used to be held across the fetch, and `prime()` starts the first load exactly when the relay's
-        port starts answering, so a provider that accepted and stalled kept the first request blocked for the
-        whole fetch instead of getting the prompt 503 it waits out (#389 review P2). One loader at a time: a
-        request that arrives mid-fetch is answered from the table as it is, and refusal() says it is loading.
+        The clock is read here, after the fetch, and never taken from the caller: the backoff and `at` both start
+        when the fetch ENDS (a stalled provider's delay must not be already spent). A `now` parameter read before
+        the fetch would say the opposite (#389 review P2). The lock used to be held across the fetch, and `prime()`
+        starts the first load exactly when the relay's port starts answering, so a provider that accepted and
+        stalled kept the first request blocked for the whole fetch instead of getting the prompt 503 it waits out.
+        One loader at a time: a request that arrives mid-fetch is answered from the table as it is, and refusal()
+        says it is loading.
         """
         with self.lock:
             if self.loading:
@@ -314,21 +317,28 @@ class ListPrices:
 
     def get(self, model):
         with self.lock:
-            now = time.time()
-            due = self._due(model, now)
+            due = self._due(model, time.time())
         if due:
-            self._load(now)                  # (a fetch already in flight returns at once)
+            self._load()                     # (a fetch already in flight returns at once)
         with self.lock:
             return self.table.get(model)
 
     def refusal(self, model):
         """(status, kind, message, retry_after, local) while the list has never loaded, or None once it has: a model
         a good list does not price is a fact about the model, a list that never loaded is not. A first load still in
-        flight is neither: it is a 503 with the short wait, not the 403 that stops the agent's goal."""
+        flight is neither: it is a 503 with the short wait, not the 403 that stops the agent's goal.
+
+        A refresh that failed is not a fact about the model either: a name the last good table does not price may be
+        one the retried refresh will price, so within its backoff it gets the same 503 and wait (#389 review P2).
+        Only a loaded table with no failed load behind it answers None for an unpriced name (the caller's 403)."""
         with self.lock:
             if not isinstance(model, str):
                 return None                  # (not a model name: the caller refuses it; `model in self.table` needs a key)
             if self.at:
+                if self.tries and self.error and model not in self.table:
+                    wait = max(0, math.ceil(self.next - time.time()))
+                    return _cannot_price('the price list refresh failed (%s) and the last good list does not price '
+                                         'it' % self.error, model, wait)
                 return None
             if self.loading and not self.error:
                 return _cannot_price('the price list is still loading', model, LOAD_BACKOFF[0])

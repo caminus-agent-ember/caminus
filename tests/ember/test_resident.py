@@ -4870,6 +4870,33 @@ for line in sys.stdin:
         self.assertEqual(len(calls), 2, 'a refresh that failed is not retried on every request')
         self.assertTrue(any('price list unavailable (1 in a row)' in l for l in lines), lines)
 
+    def test_a_new_name_during_a_failed_refresh_waits_rather_than_taking_the_403(self):
+        """A failed refresh says nothing about a name the last good table does not price: the provider may have added
+        it after that table was fetched, and the retried refresh may price it. refusal() answered None for any name
+        once `at` was set, so that name took the caller's 403 (a goal stopped or rerouted) where a 503 would have
+        waited out the backoff (#389 review P2). A loaded table with no failed load behind it still answers None:
+        a good list not pricing a name is a fact about the model."""
+        from caminus.ember import relay
+        good = dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2)))])
+        calls, lines = [], []
+        def fetch():
+            calls.append(1)
+            if len(calls) == 1:
+                return good
+            raise OSError('network is down')
+        prices = relay.ListPrices(lines.append, fetch, backoff=(300,))
+        self.assertEqual(prices.get('zai-org/GLM-5.2'), (0.6, 2.2, 0.6))
+        self.assertIsNone(prices.refusal('zai-org/GLM-5.3'),
+                          'a loaded table with no failed refresh: an unpriced name is a fact about the model')
+        prices.at -= relay.PRICE_REFRESH + 1                 # (the hourly refresh is now due)
+        self.assertIsNone(prices.get('zai-org/GLM-5.3'))     # (the refresh fails; the stale table serves the old name)
+        self.assertEqual(len(calls), 2)
+        status, kind, why, wait, local = prices.refusal('zai-org/GLM-5.3')
+        self.assertEqual((status, kind, local), (503, 'api_error', True), 'waits for the retry, not a 403')
+        self.assertIn('refresh failed', why)
+        self.assertGreater(wait, 0, 'the 503 names the wait the backoff earned')
+        self.assertIsNone(prices.refusal('zai-org/GLM-5.2'), 'a priced name is never refused by a failed refresh')
+
     def test_a_stalled_price_fetch_stamps_its_backoff_when_it_ends_not_when_it_began(self):
         """The backoff exists so a provider that is down is not hammered. _load stamped `next` from the `now` it read
         BEFORE the fetch (the lock is released across it), so a provider that stalled for longer than the delay left
