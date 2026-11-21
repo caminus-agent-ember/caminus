@@ -8335,8 +8335,9 @@ for line in sys.stdin:
                 return {'content':json.dumps(dict(problem_group='x',change='y',predicted='z'))}
         class FakeBrains:
             budget=0.5
-            def __init__(self,model):self.fallback=model;self.cfg=dict(budget_usd=self.budget)
+            def __init__(self,model):self.fallback=model;self.cfg=dict(budget_usd=self.budget);self.spent=0.0
             def spent_today(self):return self.spent
+            def _allowed(self,gid):return self.spent < self.cfg['budget_usd']   # the runtime's own gate, copied here
         rt=Runtime(self.home)
         try:
             model=Model();rt.model=model;rt.brains=FakeBrains(model)
@@ -8356,6 +8357,41 @@ for line in sys.stdin:
             rt.model.complete=Model().complete;rt.brains.fallback=object()
             self.assertTrue(reflect._may_spend(rt,gid),'the fallback is not in force: no budget applies')
         finally:rt.mail.close();rt.store.close()
+
+    def test_the_reflection_never_spends_on_a_brain_the_runtime_would_refuse(self):
+        # #383 review P1: _may_spend restated the runtime's gate and drifted - it checked only spent_today() <
+        # budget_usd, so an unpriced remote fallback (which brain._allowed refuses outright: "an unpriced remote
+        # fallback cannot be limited") still served a billed reflection past the cap the runtime enforces on the
+        # goal's own turns. It calls brains._allowed now, so every reason the runtime has for refusing a turn is a
+        # reason this call does not happen, and the skip says which brain and why.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        from caminus.ember.resident.brain import Brains
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            remote=object.__new__(type('R',(),{'config':{'model':'a-relay-name-nobody-priced'},'remote':True}))
+            remote.static=False
+            remote.complete=lambda *a,**k:self.fail('an unpriced remote must not be called')
+            class Free:
+                def is_free(self,gid):return False
+            class FakeBrains(Brains):
+                def __init__(self):self.fallback=remote;self.cfg=dict(budget_usd=0.5);self.rt=rt;self.spent=0.0
+                def spent_today(self):return self.spent
+            brains=FakeBrains();rt.brains=brains;rt.model=remote
+            rt.free=Free()
+            self.assertFalse(brains._allowed(gid),'the runtime itself refuses an unpriced remote fallback')
+            self.assertFalse(reflect._may_spend(rt,gid),'so the reflection may not call it either')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1,'the skip is on the record')
+            self.assertIn('allowance is spent',skipped[0]['data']['reason'])
+            # and the budget cannot buy an unpriced brain: the refusal is about the price, not the allowance
+            brains.spent=0.0
+            self.assertFalse(brains._allowed(gid),'still unpriced: the budget does not make it refusable-but-callable')
+        finally:rt.mail.close();rt.store.close()
+
 
     def test_a_reopened_goals_reflection_reads_only_this_episodes_judge(self):
         # #383 review P2: the brief and the record's eval_context took the newest `judged` event for the goal. A

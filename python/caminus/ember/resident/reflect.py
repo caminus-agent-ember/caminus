@@ -138,16 +138,24 @@ def _episode_start(rt, gid):
 
 
 def _may_spend(rt, gid):
-    """Whether the brain in force may take this call. The primary is the model the user chose, so it always may; the
-    fallback has a daily allowance (`budget_usd`, brain.py) that gates its work turns, and a reflection billed to a
-    fallback past its allowance would spend money the runtime just refused to spend on the goal's own turns."""
+    """Whether the brain in force may take this call: the primary is the model the user chose, so it always may; the
+    fallback is gated by the runtime's own rule, not a copy of it (brain.Brains._allowed).
+    """
     brains = getattr(rt, 'brains', None)
     try:
         if brains is None or not brains.cfg or getattr(rt, 'model', None) is not brains.fallback:
             return True
-        return brains.spent_today() < float(brains.cfg['budget_usd'])
+        # Reuse the runtime's gate rather than restating it. A copy drifted once already: this guard checked only
+        # spent_today() < budget_usd, so an unpriced remote fallback (brain._allowed refuses it: "cannot be
+        # limited") still served a billed reflection past the cap the runtime enforces on the goal's own turns
+        # (review P1). _allowed is the one rule now: unpriced remote is refused, a spent allowance is refused,
+        # and a free-time goal follows _free_choice exactly as a work turn does.
+        return bool(brains._allowed(gid))
     except Exception:
-        return True               # (a stub brain in a test: the call is not a spend the guard can price)
+        # fail closed when the fallback is in force and the gate cannot be evaluated at all: skipping a
+        # reflection costs a proposal, a call past an unreadable cap costs money (a stub runtime never reaches
+        # here - `not brains.cfg` above is the stub case).
+        return False
 
 
 def _judge(rt, gid, since=0):
