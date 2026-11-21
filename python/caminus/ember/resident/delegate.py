@@ -192,7 +192,21 @@ def _escaping(cmd, wt, writing=True, base=''):
             # A bare `GIT_` name without `=` is not refused, so `grep GIT_ f` still reads a file.
             return ('%s sets a git environment variable, and git reads or runs what it names: the worktree shares '
                     'its repository with the parent' % w)
+        if '=' in w and w.split('=', 1)[1].startswith('~') and (
+                at_cmd or (j and words[j - 1].rsplit('/', 1)[-1]
+                           in ('export', 'declare', 'local', 'typeset', 'readonly'))):
+            # an assignment's value is a value, but the shell still expands it: `X=~/notes` is $HOME/notes, so
+            # `X=~` reached outside where `~` alone was refused (#384 review). Assignment position is a command
+            # word, or the word after the builtin that declares one (`export X=~/x` expands the same way), so
+            # `grep X=~ f` still reads a file. A value holding `$` is left alone: an expansion cannot be
+            # resolved here, and `PATH=./bin:$PATH make` is an ordinary build command.
+            return '%s could resolve outside the worktree, because the shell expands its ~' % w
         if at_cmd and '=' in w:
+            # a command-position assignment's value is path-checked like any other word: `X=../x make` names a
+            # directory outside the worktree the command then runs in (#384 review)
+            v = w.split('=', 1)[1]
+            if v and not _inside(wt, v if os.path.isabs(v) else os.path.join(cwd, v)):
+                return '%s climbs out of the worktree' % w
             j += 1
             continue                               # another plain env assignment: still before the command word
         at_cmd = False
@@ -454,11 +468,15 @@ def _git(args, cwd=None):
 
 def _worktree(rt, child, repo):
     """(repo top, base commit, worktree path, branch) for a writing child; creates the worktree and its branch.
-    The parent's tree is never touched: the child works in its own checkout, on its own branch off HEAD."""
+    The parent's tree is never touched: the child works in its own checkout, on its own branch off HEAD.
+
+    The branch and the checkout carry the child's whole id: an eight-character prefix collided for two children
+    whose ids share it, and `git worktree add -b` fails on a branch name that already exists, so a branch left
+    un-merged by an earlier child made every later collision lethal (#384 review)."""
     top = _git(['-C', str(repo), 'rev-parse', '--show-toplevel'])
     base = _git(['-C', top, 'rev-parse', 'HEAD'])
-    branch = 'delegate/' + child[:8]
-    wt = rt.home / 'worktrees' / child[:8]
+    branch = 'delegate/' + child
+    wt = rt.home / 'worktrees' / child
     wt.parent.mkdir(parents=True, exist_ok=True)
     _git(['-C', top, 'worktree', 'add', '-b', branch, str(wt), 'HEAD'])
     return top, base, str(wt), branch
@@ -602,6 +620,12 @@ def start(rt, parent, args, prepared=None):
     return out
 
 
+# The three errors a child's own caps leave when they pause it: delegate.capped() for the dollar cap, and the
+# runtime for the step limit and the deadline. _report reads an outcome from these exact messages, never from the
+# words 'delegate' or 'budget' appearing somewhere in an error (#384 review).
+CAPPED_ERRORS = ('delegate spend cap reached', 'oneshot time budget reached', 'oneshot model-step budget reached')
+
+
 def _report(rt, row, g, outcome=None):
     """The short structured report a parent reads: the child's goal, what it verified, what it skipped, its spend
     and (a writing child) what it changed and the commands that keep or drop it."""
@@ -610,7 +634,7 @@ def _report(rt, row, g, outcome=None):
         err = g.get('error') or ''
         if state == 'completed':
             outcome = 'completed'
-        elif state == 'paused' and ('delegate' in err or 'budget' in err):
+        elif state == 'paused' and err.startswith(CAPPED_ERRORS):
             outcome = 'capped'       # the dollar cap, the step budget or the time budget ended it
         elif state == 'cancelled':
             outcome = 'incomplete'   # its parent was cancelled: it did not finish its own work
@@ -632,6 +656,22 @@ def _report(rt, row, g, outcome=None):
     return report
 
 
+def _unchanged(row):
+    """True when a writing child's checkout holds nothing of its own: a clean status and HEAD still at the base.
+
+    _survey runs _commit first, so whatever the child left uncommitted is already on its branch; a clean checkout
+    whose HEAD is the base commit is a child that changed nothing, and its checkout and branch can go."""
+    wt = row.get('worktree') or ''
+    if not wt or not os.path.isdir(wt):
+        return False                  # already gone: nothing to remove, and the branch is not ours to guess about
+    try:
+        if _git(['-C', wt, 'status', '--porcelain']).strip():
+            return False
+        return _git(['-C', wt, 'rev-parse', 'HEAD']) == (row.get('base') or '')
+    except ValueError:
+        return False
+
+
 def _close(rt, parent, report):
     """File a child's report once: its delegates row, the event the parent and a UI read, the SIM observation,
     and the brain registration that must not outlive the run. The first close wins (settle and run_child may both
@@ -640,6 +680,16 @@ def _close(rt, parent, report):
     row = rt.store.delegate(child) or {}
     if not row or row.get('outcome'):
         return report
+    if row.get('worktree') and report['outcome'] != 'completed' and _unchanged(row):
+        # A stopped parent used to leave its child's checkout and branch in the parent's repo, and the report's
+        # discard command was the only pointer to them (#384 review). A child that changed nothing has nothing
+        # to keep, so both go now and the report says so; a child that did change something keeps its checkout
+        # and its merge/discard commands.
+        _remove_worktree(row.get('repo') or '', row['worktree'], row.get('branch') or '')
+        for k in ('merge', 'discard', 'files', 'diffstat', 'commit_failed'):
+            report.pop(k, None)
+        report['worktree_removed'] = ('the child changed nothing, so its checkout and branch are gone: there is '
+                                      'nothing to merge or discard')
     rt.store.delegate_done(child, report['outcome'], report)
     rt.store.event('delegate_done', {k: v for k, v in report.items() if k not in ('summary', 'skipped')}, parent)
     rid = row.get('sim') or ''
@@ -773,18 +823,27 @@ def run_child(rt, parent, job):
     try:
         rt.run(target=child, stop=parent_gone)
         g = rt.store.goal(child)
-        if rt.store.goal(parent)['state'] == 'cancelled' and g['state'] in ('working', 'queued', 'waiting_model'):
+        pstate = rt.store.goal(parent)['state']
+        outcome = None
+        if pstate in ('cancelled', 'paused', 'error') and g['state'] in ('working', 'queued', 'waiting_model'):
+            # parent_gone() ended the loop, so the child's own state does not say why it stopped. Named here, and
+            # reported incomplete: the report used to read 'capped' off the word 'delegate' in the generic error
+            # text below, telling the parent a spend limit ended a child its own pause had ended (#384 review).
+            state = 'cancelled' if pstate == 'cancelled' else 'paused'
+            error = ('its parent was cancelled while it ran' if pstate == 'cancelled'
+                     else 'its parent stopped (%s) while it ran' % pstate)
             with rt.store.transaction():
-                rt.store.update(child, state='cancelled', error='its parent was cancelled while it ran')
-            g = rt.store.goal(child)
+                rt.store.update(child, state=state, error=error)
+            g, outcome = rt.store.goal(child), 'incomplete'
         if g['state'] in ('working', 'queued', 'waiting_model'):
             # it must not be left runnable: the next turn would pick the parent's brain (its model registration
-            # is this process's), and no other runtime can serve it either
+            # is this process's), and no other runtime can serve it either. Not a cap either: the daemon stopped,
+            # or the model went away, and neither is a limit the child spent.
             with rt.store.transaction():
                 rt.store.update(child, state='paused', error='delegate child did not finish: its model was '
                                                             'unreachable or it ran out of its budget')
-            g = rt.store.goal(child)
-        return _close(rt, parent, _report(rt, rt.store.delegate(child) or {}, g))
+            g, outcome = rt.store.goal(child), 'incomplete'
+        return _close(rt, parent, _report(rt, rt.store.delegate(child) or {}, g, outcome))
     finally:
         rt._stop = daemon_stop
 

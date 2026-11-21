@@ -3220,6 +3220,104 @@ for line in sys.stdin:
             self.assertIn('delegate child',str(caught.exception),'a resumed child would run uncapped on the parent brain')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_writing_childs_worktree_is_named_by_its_whole_id(self):
+        # #384 review: branch and checkout were `delegate/<child[:8]>`, so two ids sharing eight characters
+        # collided, and `git worktree add -b` fails on a branch an earlier, un-merged child left behind. The whole
+        # id names both, so a leftover branch is just another branch.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo4';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        rt=Runtime(self.home)
+        try:
+            a='abc12345'+'0'*24;b='abc12345'+'1'*24     # two ids that share their first eight characters
+            top,base,wt_a,branch_a=delegate._worktree(rt,a,repo)
+            self.assertEqual(branch_a,'delegate/'+a)
+            self.assertEqual(wt_a,str(self.home/'worktrees'/a))
+            # the checkout goes, its branch stays - the state an un-merged child leaves behind
+            subprocess.run(['git','-C',str(repo),'worktree','remove','--force',wt_a],check=True)
+            top,base,wt_b,branch_b=delegate._worktree(rt,b,repo)
+            self.assertEqual(branch_b,'delegate/'+b)
+            self.assertEqual(wt_b,str(self.home/'worktrees'/b))
+            self.assertNotEqual(branch_a,branch_b)
+            self.assertTrue(os.path.isdir(wt_b))
+            # before the fix the second `worktree add -b delegate/abc12345` died on the first one's branch
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_assignment_value_is_checked_where_it_is_an_assignment(self):
+        # #384 review: `at_cmd and '=' in w: continue` skipped every check for a command-position assignment, so
+        # `X=~ make` and `X=../x make` named a home or a parent directory where `~` and `../x` alone are refused.
+        # A value is checked like any other word; a value holding `$` is left alone, and a word that only looks
+        # like an assignment (`grep X=~ f`) is not one.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'feed5678')
+        row=dict(permissions='write',worktree=wt)
+        for cmd in ('cd %s && X=~ make'%wt,'cd %s && X=~/notes make test'%wt,
+                    'cd %s && X=../x make'%wt,'cd %s && make && Y=../../y make'%wt,
+                    'cd %s && export X=~/x'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'worktree' in why,(cmd,why))
+        for cmd in ('cd %s && FOO=1 make test'%wt,'cd %s && PATH=./bin:$PATH make'%wt,
+                    'cd %s && grep X=~ notes.txt'%wt,'cd %s && X=sub/../ok make'%wt,
+                    'cd %s && Y=ok.txt make'%wt):
+            self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
+
+    def test_a_parent_stopped_while_its_child_runs_is_not_a_cap(self):
+        # #384 review: a child ended by its parent's PAUSE was reported `capped` whenever the pause text carried
+        # 'delegate' or 'budget' (the old _report read the words), so the parent read that a spend limit had ended
+        # a child its own pause ended. The stop is named in the child's state and the outcome is incomplete.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.update(parent,state='paused',error='paused from the panel while the delegate ran')
+            report=delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
+            self.assertEqual(report['outcome'],'incomplete',report)
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('its parent stopped (paused)',rt.store.goal(child)['error'])
+            self.assertEqual(rt.store.delegate(child)['outcome'],'incomplete')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_stopped_childs_unchanged_worktree_is_removed_when_it_closes(self):
+        # #384 review: a stopped parent's writing child left its checkout and branch in the parent's repo, and only
+        # the report's discard line named them. _close removes both when the child changed nothing; a child that
+        # did change something keeps its checkout and the merge and discard commands.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo5';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            for changed in (False,True):
+                child=rt.store._enqueue('c',kind='delegate')
+                top,base,wt,branch=delegate._worktree(rt,child,repo)
+                rt.store.delegate_add(child,parent,'','','worker',0.5,permissions='write',worktree=wt,branch=branch,
+                                      base=base,repo=top)
+                if changed:(Path(wt)/'NOTES.md').write_text('one line\n')
+                with rt.store.transaction():
+                    rt.store.update(child,state='paused',error='paused from the panel while the delegate ran')
+                report=delegate._close(rt,parent,delegate._report(rt,rt.store.delegate(child),
+                                                                  rt.store.goal(child),'incomplete'))
+                if changed:
+                    self.assertTrue(os.path.isdir(wt),'a child that changed something keeps its checkout')
+                    self.assertIn('NOTES.md',report['files'])
+                    self.assertIn('merge',report)
+                    self.assertNotIn('worktree_removed',report)
+                else:
+                    self.assertFalse(os.path.isdir(wt),'a child that changed nothing leaves no checkout behind')
+                    self.assertIn('worktree_removed',report)
+                    self.assertNotIn('merge',report)
+                    left=subprocess.run(['git','-C',str(repo),'branch','--list','delegate/'+child],
+                                        capture_output=True,text=True).stdout
+                    self.assertEqual(left.strip(),'','its branch is gone too')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_finished_delegate_child_cannot_be_continued(self):
         # `send --continue` on a completed goal revived it with no delegate check, so a child ran again on the
         # default brain with no cap (#382 review, and resume_goal refuses the same move). Same answer on both paths.
