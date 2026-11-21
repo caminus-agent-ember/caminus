@@ -8444,6 +8444,32 @@ for line in sys.stdin:
                 self.assertEqual(reflect._judge(rt,g2,reflect._episode_start(rt,g2)),(None,''),'%s: the old verdict stays out' % kind)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_paused_then_resumed_goal_starts_a_new_episode(self):
+        # #383 review P2: a paused goal is resumed in place (resume_goal), so a pause ends the episode before the
+        # one that finishes next. `paused` was not a boundary, so the judge and tool calls from before the pause
+        # entered the resumed episode's reflection.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('judged',dict(verdict='unmet',reason='the episode before the pause'),gid)
+            rt.store.event('paused',dict(by='owner'),gid)
+            rt.store.update(gid,state='working')          # (resume_goal, in place)
+            rt.store.event('finished',dict(summary='the resumed episode finished'),gid)
+            since=reflect._episode_start(rt,gid)
+            self.assertGreater(since,0,'the pause that ended the previous episode bounds this one')
+            self.assertEqual(reflect._judge(rt,gid,since),(None,''),'the pre-pause verdict is not this one’s')
+            self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
+            # a cancelled goal cannot be resumed today; the boundary is still written for the day one is
+            g2=rt.store.enqueue('Cancelled.');rt.store.update(g2,done_check='x',state='working')
+            rt.store.event('judged',dict(verdict='unmet',reason='before the cancel'),g2)
+            rt.store.event('cancelled',{},g2)
+            rt.store.event('finished',dict(summary='after'),g2)
+            self.assertGreater(reflect._episode_start(rt,g2),0,'a cancel bounds the episode after it too')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_reflection_stops_before_the_retry_when_the_daemon_is_going(self):
         # #383 review P2: stopping() was read once before the first call; a SIGTERM while an unreadable reply was in
         # flight let the retry spend another 60 s timeout — the wait stopping()'s docstring warns about. It is read
@@ -8471,6 +8497,64 @@ for line in sys.stdin:
             self.assertEqual(len(failed),1)
             self.assertIn('stopping before the retry',failed[0]['data']['reason'])
         finally:rt.mail.close();rt.store.close()
+
+    def test_a_hung_reflection_call_ends_when_the_daemon_stops(self):
+        # #383 review P2: the socket timeout given to complete() bounds each read, not the call, so a stream that
+        # trickled just under it held the loop past SIGTERM's shutdown budget. The call now runs under _bounded,
+        # which closes the socket (Model.abort) when the stop flag is read. Here the model blocks until aborted.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        started, aborted = threading.Event(), threading.Event()
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                started.set()
+                aborted.wait(10)          # blocks like a read that never returns more bytes
+                raise OSError('the socket was closed')
+            def abort(self):aborted.set()
+        rt=Runtime(self.home)
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            flag=[]
+            rt._stop=lambda:bool(flag)  # the stop must arrive while the call is blocked, like SIGTERM
+            def stop_it():
+                started.wait(5);flag.append(1)
+            threading.Thread(target=stop_it,daemon=True).start()
+            t0=time.monotonic()
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertLess(time.monotonic()-t0,5,'the reflection held the loop until its 60 s read timeout')
+            self.assertTrue(aborted.is_set(),'the hung call was not aborted')
+            self.assertEqual(Model.calls,1,'the retry ran after the stop')
+            failed=[e for e in rt.store.events() if e['kind']=='reflection_failed']
+            self.assertEqual(len(failed),1)
+            self.assertIn('the daemon is stopping',failed[0]['data']['reason'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_reflection_call_over_its_own_timeout_is_aborted(self):
+        # The whole-attempt bound, directly: a call that ignores the stop flag and never answers is aborted at its
+        # own deadline instead of at the socket's per-read timeout (which a trickling stream never reaches).
+        from caminus.ember.resident import reflect
+        aborted=threading.Event()
+        class Rt:
+            model=type('M',(),dict(abort=lambda s:aborted.set()))()
+            def stopping(self):return False
+        def never():aborted.wait(10);raise OSError('closed')
+        t0=time.monotonic()
+        with self.assertRaises(TimeoutError) as e:
+            reflect._bounded(Rt(),never,seconds=.2)
+        self.assertLess(time.monotonic()-t0,5)
+        self.assertTrue(aborted.is_set(),'the call was not aborted at its deadline')
+        self.assertIn('no reply in 0.2s',str(e.exception))
+        # and a call that raises hands its own exception back, not a timeout
+        def boom():raise ValueError('the server said no')
+        with self.assertRaises(ValueError):
+            reflect._bounded(Rt(),boom,seconds=5)
 
 
 class Wire:

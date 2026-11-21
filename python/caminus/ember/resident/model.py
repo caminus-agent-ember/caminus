@@ -464,7 +464,9 @@ class Model:
         (a tool call's name starts), value is the text or the name. on_delta returning False cancels: the
         stream is closed and Cancelled is raised, so a cancelled turn stores no reply and runs no tool.
         session: the conversation's id, sent to an OpenCode plan (headers). timeout: this call's own socket
-        timeout in seconds (a side call that must not hold its caller for the 900 s a turn may take)."""
+        timeout in seconds, per read and not for the whole call (a streaming reply reads many times): a side call
+        that must not hold its caller for the 900 s a turn may take bounds the call itself, as reflect._bounded
+        does for the reflection."""
         remaining = self.context_size() - self.tokens(messages, tools or []) - 256
         if remaining < 1:
             raise ModelContextError('request exceeds the model context; compact or shorten the goal')

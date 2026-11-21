@@ -18,13 +18,16 @@ The system message begins with REFLECT so a log reader (and the test fixture) ca
 judge's begins with JUDGE.
 """
 import json
+import threading
+import time
 
 from . import sim
 
 MAX_TOKENS = 700              # well under model.SHORT_CALL: this call runs with thinking off
-TIMEOUT = 60                  # seconds per attempt: the goal is complete, so a hung endpoint must not hold the loop
-                              # for a turn's 900 s. The call runs on the loop thread, so this is the bound: one
-                              # attempt normally, a second only when the first reply could not be read (60-120 s).
+TIMEOUT = 60                  # seconds per attempt, whole: the goal is complete, so a hung endpoint must not hold the
+                              # loop for a turn's 900 s. The socket timeout passed with the call only bounds each
+                              # read, so the total is enforced by closing the socket (_bounded): one attempt
+                              # normally, a second only when the first reply could not be read (60-120 s).
 SYSTEM = '''REFLECT. You review one finished agent goal and propose at most one change to the harness (the system
 prompt, a tool, a gate, a cap) that would have made this goal faster or more reliable. You see the goal, its
 done check, how it ended, its tool calls and the failures along the way. Propose only a change the evidence
@@ -101,12 +104,52 @@ def maybe(rt, gid, summary='', open_work=''):
         return None
 
 
+def _bounded(rt, fn, seconds=None):
+    """Run fn() with a whole-call bound, or as soon as the daemon is asked to stop.
+
+    The socket timeout passed to complete() bounds each read, not the call: a stream that trickles one byte just
+    under the timeout holds the caller indefinitely, and a call already in flight when SIGTERM arrives still adds
+    its read to the shutdown wait. The call runs on a worker thread and this one waits at most `seconds` (TIMEOUT
+    unless a test says otherwise), checking the stop flag on the way, then closes the call's socket with
+    Model.abort() so the blocked read ends now. What fn returned is returned; what it raised is raised again.
+    """
+    out = {}
+
+    def run():
+        try:
+            out['value'] = fn()
+        except BaseException as e:      # handed back to the loop thread, so a Cancelled still cancels
+            out['error'] = e
+
+    worker = threading.Thread(target=run, name='reflect-call', daemon=True)
+    worker.start()
+    end = time.monotonic() + (TIMEOUT if seconds is None else seconds)
+    while worker.is_alive():
+        left = end - time.monotonic()
+        if left <= 0 or rt.stopping():
+            stop = bool(rt.stopping())
+            abort = getattr(getattr(rt, 'model', None), 'abort', None)
+            if callable(abort):
+                try:
+                    abort()             # (the server stops generating too: an abandoned call keeps it busy)
+                except Exception:
+                    pass
+            worker.join(5)              # (a call that ignores the closed socket is left to daemon exit)
+            if stop:
+                raise TimeoutError('the reflection call did not finish: the daemon is stopping')
+            raise TimeoutError('the reflection call did not finish: no reply in %gs' % (seconds or TIMEOUT))
+        worker.join(min(0.2, max(0.01, left)))
+    if 'error' in out:
+        raise out['error']
+    return out.get('value')
+
+
 def _ask(rt, gid, msgs):
     """One short call, priced into the goal's spend like any other turn, on its own timeout: the goal is already
     complete, so a hung endpoint must not hold the loop for a turn's 900 s. It runs on the loop thread (one call per
-    completed goal, and the loop is idle between goals), so the bound that matters is TIMEOUT per attempt: two at
-    most, when the first reply could not be read."""
-    reply = rt.model.complete(msgs, tools=None, max_tokens=MAX_TOKENS, timeout=TIMEOUT)
+    completed goal, and the loop is idle between goals), so the bound that matters is TIMEOUT per attempt, whole
+    (_bounded): two at most, when the first reply could not be read, and never one past a stop request."""
+    reply = _bounded(rt, lambda: rt.model.complete(msgs, tools=None, max_tokens=MAX_TOKENS, timeout=TIMEOUT))
     try:
         rt.brains.account(gid)
     except Exception:
@@ -137,9 +180,14 @@ def parse(text):
 def _episode_start(rt, gid):
     """The seq this episode began after: how the previous episode ended — an earlier `finished` event, or the error
     that stopped the goal before it was resumed. A re-enqueued goal has no earlier `finished`, so counting only
-    `finished` left the boundary at 0 and the pre-error episode's evidence entered the new reflection (review P2)."""
+    `finished` left the boundary at 0 and the pre-error episode's evidence entered the new reflection (review P2).
+    `paused` is a boundary too: a paused goal is resumed in place (resume_goal), so the pause ends the episode
+    before the one that finishes next, and without it that episode's judge and tool calls came along. `cancelled`
+    is listed for the same reason even though a cancelled goal cannot be resumed today: if it ever is, the episode
+    before the cancel must not leak into the one that finishes after it."""
     row = rt.store.db.execute(
-        "SELECT seq FROM events WHERE goal=? AND kind IN ('finished','runtime_error','model_refused','model_gave_up') "
+        "SELECT seq FROM events WHERE goal=? AND kind IN "
+        "('finished','runtime_error','model_refused','model_gave_up','paused','cancelled') "
         "ORDER BY seq DESC LIMIT 1 OFFSET 1", (gid,)).fetchone()
     return row['seq'] if row else 0
 
