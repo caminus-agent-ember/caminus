@@ -805,8 +805,13 @@ func (m emberModel) headExpanded(agent, state string, steps, w int) string {
 // the screen has nowhere to go, and PgUp/PgDn must then page the transcript as they always did.
 func (m *emberModel) scrollHead(n int) bool {
 	lines := lipgloss.Height(m.headExpandedBody(max(20, m.width)))
-	top := max(0, min(m.chat.headTop+n, max(0, lines-m.headRows())))
-	was := m.chat.headTop
+	maxTop := max(0, lines-m.headRows())
+	// The row the display is on, not the one the state holds: the goal under the title can change while the
+	// expansion stays open (a re-aim keeps headFor, so headShown stays true), and headExpanded clamps the stale
+	// row for drawing. Clamped here too, a press moves from what is on the screen instead of being eaten by rows
+	// the display never showed. The clamp is written back, so the state does not keep the stale row either.
+	was := max(0, min(m.chat.headTop, maxTop))
+	top := max(0, min(was+n, maxTop))
 	m.chat.headTop = top
 	return top != was
 }
@@ -817,9 +822,15 @@ type headKey struct {
 	text  string
 }
 
+// headMDMax bounds headMD. It is keyed by width and goal text, and syncChat clears it only when the width changes,
+// so a long run that shows many goals (each re-aim is a new text) would keep every drawing for the life of the
+// process. Past the bound the cache starts over: only the goal on the screen is ever asked for, and drawing it again
+// costs one glamour render.
+const headMDMax = 8
+
 // headExpandedBody is the goal drawn as Markdown, as the expanded header shows it. chatHead runs on every frame (and
 // bodyHeight on every poll), and glamour rendering a 2,000-character goal each time is not free, so the drawing is
-// kept in headMD: a map, whose writes a value receiver keeps (mdCache is the same).
+// kept in headMD: a map, whose writes (and clears) a value receiver keeps (mdCache is the same).
 func (m emberModel) headExpandedBody(w int) string {
 	text := m.headGoalText()
 	key := headKey{width: w, text: text}
@@ -832,6 +843,9 @@ func (m emberModel) headExpandedBody(w int) string {
 	}
 	body := renderWith(r, max(10, w-4), text)
 	if m.chat.headMD != nil {
+		if len(m.chat.headMD) >= headMDMax {
+			clear(m.chat.headMD)
+		}
 		m.chat.headMD[key] = body
 	}
 	return body

@@ -6,6 +6,8 @@ package main
 // #370: three P2s from the maintainer's review of #316 — the expansion is a view of the goal it was opened on (so
 // Ctrl+N or a switch to another goal hides it, and the next Esc is not eaten), the scroll hint is cut to the
 // terminal's width, and the click that clears a copy left on the screen does not also toggle the goal under it.
+// The follow-up round added two: the scrolled row is clamped to what the goal on the screen has (a re-aim can shrink
+// the goal while the expansion stays open), and headMD is bounded so a long run's goals do not accumulate drawings.
 
 import (
 	"fmt"
@@ -134,5 +136,73 @@ func TestTheClickThatClearsACopyDoesNotToggleTheGoal(t *testing.T) {
 	m = next.(emberModel)
 	if m.headShown() {
 		t.Fatal("a plain click on the header no longer closes the goal")
+	}
+}
+
+// shortGoalChat: the long goal's fixture, scrolled down, then re-aimed to a short text — the "↪ " case, where the
+// expansion stays open on the same goal id while its text shrinks under the row the scroll left behind.
+func shortGoalChat(t *testing.T) emberModel {
+	t.Helper()
+	m := openHead(t, longGoalChat(t, 100, 30))
+	for i := 0; i < 3 && m.chat.headTop == 0; i++ {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m = next.(emberModel)
+	}
+	if m.chat.headTop == 0 {
+		t.Fatal("fixture: PgDn did not scroll the long goal (it fits, so there is nothing to leave stale)")
+	}
+	for i := 2; i < 60; i++ {
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: i, Goal: "original", Kind: "assistant", Data: map[string]any{"content": fmt.Sprintf("Observation %d stays in the transcript.", i)}}}})
+	}
+	// the re-aim a message followed by a new done check makes: the header now shows a short text
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 60, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "something"}},
+		residentEvent{Seq: 61, Goal: "original", Kind: "user_message", Data: map[string]any{"text": "short"}},
+		residentEvent{Seq: 62, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "short is done"}})
+	m.render()
+	return m
+}
+
+// TestTheScrollRowFollowsTheGoalOnTheScreen: the goal shrinks while the expansion stays open, so the row the state
+// holds is past the new goal's last row. headExpanded clamps it for drawing; the press must move from that drawn row
+// too, or it is spent on rows the screen never showed and the transcript does not page.
+func TestTheScrollRowFollowsTheGoalOnTheScreen(t *testing.T) {
+	m := shortGoalChat(t)
+	if !strings.Contains(ansi.Strip(m.chatHead(100)), "↪ short") {
+		t.Fatalf("fixture: the re-aim is not what the header shows:\n%s", ansi.Strip(m.chatHead(100)))
+	}
+	m.chat.transcript.GotoTop()
+	before := m.chat.transcript.YOffset()
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = next.(emberModel)
+	if m.chat.headTop != 0 {
+		t.Fatalf("the press left the stale row in the state (headTop %d, the goal has a row or two)", m.chat.headTop)
+	}
+	if m.chat.transcript.YOffset() == before {
+		t.Fatal("PgDn did not page the transcript: it was spent on a row the expanded goal does not have")
+	}
+}
+
+// TestTheGoalDrawingsStayBounded: headMD is keyed by width and goal text and syncChat clears it only on a resize, so
+// a long run that shows many goals would keep every drawing. Past the bound the cache starts over and the goal on
+// the screen is drawn again.
+func TestTheGoalDrawingsStayBounded(t *testing.T) {
+	m := openHead(t, longGoalChat(t, 100, 30))
+	m.syncChat()
+	for i := 0; i < headMDMax+4; i++ {
+		m.residentEvents = append(m.residentEvents,
+			residentEvent{Seq: 10 + 2*i, Goal: "original", Kind: "user_message", Data: map[string]any{"text": fmt.Sprintf("goal %d", i)}},
+			residentEvent{Seq: 11 + 2*i, Goal: "original", Kind: "done_check", Data: map[string]any{"check": fmt.Sprintf("goal %d is done", i)}})
+		_ = m.chatHead(100)
+	}
+	if n := len(m.chat.headMD); n > headMDMax {
+		t.Fatalf("headMD holds %d drawings of goals no longer on the screen (bound %d)", n, headMDMax)
+	}
+	// the goal on the screen is drawn once and then taken from the cache: asking for it again adds nothing
+	_ = m.chatHead(100)
+	n := len(m.chat.headMD)
+	_ = m.chatHead(100)
+	if got := len(m.chat.headMD); got != n {
+		t.Fatalf("drawing the same goal twice added an entry (%d then %d)", n, got)
 	}
 }
