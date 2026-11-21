@@ -17,7 +17,9 @@ enough for every turn:
   DRIFT_EVERY assistant turns, one short nudge goes into the goal's inbox: the next turn reads
   "[nudge #N, keeps your plan: ... Reply in English ...]".
 
-What a unit is: one letter in a script that does not space its words (Han, Kana) and one word otherwise.
+What a unit is: one letter in a script that does not space its words (Han, Kana) and one run of letters
+otherwise, so a comma, a digit or a hyphen ends a run: `don't` and `ember-next` are two units each, and
+"OK, let me check and rerun" is six. The floors below are in units, not words (review P2).
 Counting Han characters is what catches a reply like the one above, where raw letters are mostly Latin
 identifiers ("PR", "base", "ember-next"); counting words keeps an English reply that quotes a few CJK
 characters far under the threshold. Fenced code and inline `code` spans are not prose and are left out, so a

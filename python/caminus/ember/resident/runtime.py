@@ -1845,12 +1845,14 @@ class Runtime:
         count = self.plain_replies.get(gid, 0) + 1
         return how, count < PLAIN_TEXT_LIMIT, count
 
-    def _plain_reply(self, gid):
+    def _plain_reply(self, gid, dispatch=None):
         """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal. A reply to the
         human is not that: on a finished goal they reopened with a message, the answer ends the turn and the goal is
         complete again (it was nudged back to work instead, and with nothing left to do it re-ran its done check in a
-        loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted."""
-        how, turn, count = self._plain_dispatch(gid)
+        loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted.
+        `dispatch` is `_plain_dispatch(gid)` when the caller already asked for it (the language check in `_tick`
+        needs its `turn` too, and two calls were two extra `_answering` queries per plain reply - review P2)."""
+        how, turn, count = dispatch or self._plain_dispatch(gid)
         prompted=self.__dict__.setdefault('_reopen_prompted',set())
         if how=='reopened' and turn:
             # The agent decides, not a guess from its words: a reopened goal is either a question (the answer is
@@ -2380,10 +2382,12 @@ class Runtime:
             # A nudge for a turn that never comes is worse than late: the unconsumed inbox row would defer the
             # completion `_finish` makes on this very tick.
             plain = not reply.get('tool_calls')
-            follows = True
+            follows, dispatch = True, None
             if plain:
                 kind = self.store.goal(gid).get('kind', 'work')
-                follows = kind not in FREE_KINDS and self.loop_gates and self._plain_dispatch(gid)[1]
+                if kind not in FREE_KINDS and self.loop_gates:
+                    dispatch = self._plain_dispatch(gid)
+                    follows = dispatch[1]
             if (note := language.check(self, gid, reply.get('content') or '', due=follows)):
                 with self.store.transaction():
                     self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
@@ -2395,7 +2399,7 @@ class Runtime:
                     # Free time is not graded: a plain reply is the resident choosing to rest.
                     self._finish(gid,reply['content'])
                 elif self.loop_gates:
-                    return self._plain_reply(gid)
+                    return self._plain_reply(gid, dispatch)
                 else:
                     self._finish(gid,reply['content'])
             else:
