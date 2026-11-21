@@ -271,7 +271,9 @@ def tool(rt, gid, args):
         return dict(record=rec)
     if action == 'list':
         # status: the proposal queue is `list` with status proposed; _load keeps each id's newest version first,
-        # so one filter on it names a record once, at its current status
+        # so one filter on it names a record once, at its current status. Without a goal (gid is None when the
+        # caller passes no goal) that queue is every goal of the session on purpose: a person reads what the
+        # harness proposes across all of them; pass the goal to see only its own (#383 review P2).
         status = str(args.get('status') or '').strip()
         if status and status not in STATUSES:
             raise ValueError('status must be one of ' + ', '.join(STATUSES))

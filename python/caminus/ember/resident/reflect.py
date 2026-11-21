@@ -112,6 +112,12 @@ def _bounded(rt, fn, seconds=None):
     its read to the shutdown wait. The call runs on a worker thread and this one waits at most `seconds` (TIMEOUT
     unless a test says otherwise), checking the stop flag on the way, then closes the call's socket with
     Model.abort() so the blocked read ends now. What fn returned is returned; what it raised is raised again.
+
+    Accounting contract for the abandoned path (#383 review P2): the caller's own metering (`rt._meter`,
+    `rt.brains.account`) runs on THIS thread after this returns, so a call abandoned here is never priced by the
+    caller. The abandoned call keeps running on its daemon thread and may still write model.last_usage/last_call/
+    last_speed when it finally returns; that write cannot be priced either, because every metering site pairs with
+    a complete() that rewrote them first, and it cannot write the store (those calls stay on the loop thread).
     """
     out = {}
 
@@ -271,9 +277,11 @@ def brief(rt, gid, summary, open_work):
         name = d.get('name') or '?'
         names[name] = names.get(name, 0) + 1
         res = d.get('result')
-        if isinstance(res, dict) and res.get('error'):
+        # A tool's failure shape: the runtime's own tools put the reason under 'error'; a tool that only says
+        # {'ok': False} (no 'error') is a failure too, or the reflection never sees it (#383 review P2).
+        if isinstance(res, dict) and (res.get('error') or res.get('ok') is False):
             failed += 1
-            errors.append('%s: %s' % (name, str(res['error'])[:200]))
+            errors.append('%s: %s' % (name, str(res.get('error') or 'ok=False')[:200]))
     parts.append('ITS TOOL CALLS (newest first, at most 200): ' +
                  (', '.join('%s×%d' % (k, v) for k, v in names.items()) or '(none)'))
     if failed:

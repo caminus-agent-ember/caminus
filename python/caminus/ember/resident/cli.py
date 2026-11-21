@@ -855,7 +855,8 @@ def main(argv=None,stdin=None):
             # is a proposed SIM record a person reads, so it is off unless the session asks for it. The daemon
             # follows this key at the next turn boundary (runtime._follow_config), as it follows 'sim'.
             # The store opened above is closed on every path out, including a config read or write that raises
-            # (review P2: atomic_json failing left it open).
+            # (review P2: atomic_json failing left it open). A write that dies midway leaves the previous file (it
+            # renames), so `--on`/`--off` again is the whole repair and no other key is lost (#383 review P2).
             try:
                 cfg=json.loads((home/'config.json').read_text())
                 if a.on and a.off:

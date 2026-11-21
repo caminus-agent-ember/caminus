@@ -8470,6 +8470,25 @@ for line in sys.stdin:
             self.assertGreater(reflect._episode_start(rt,g2),0,'a cancel bounds the episode after it too')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_tool_failure_shaped_ok_false_reaches_the_reflection(self):
+        # #383 review P2: the brief counted a failed call only when its result carried 'error', so a tool that reports
+        # {'ok': False} with no 'error' key never reached the reflection's evidence. Both shapes count now.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('tool_result',dict(name='error_tool',call_id='c1',result=dict(error='it broke')),gid)
+            rt.store.event('tool_result',dict(name='ok_tool',call_id='c2',result=dict(ok=False)),gid)
+            rt.store.event('tool_result',dict(name='fine_tool',call_id='c3',result=dict(ok=True)),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('2 of those calls failed',text,'the ok=False failure was invisible')
+            self.assertIn('it broke',text)
+            self.assertIn('ok_tool: ok=False',text,'the ok=False result is named with its shape')
+            self.assertNotIn('fine_tool: ',text,'a successful call is not reported as failed')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_reflection_stops_before_the_retry_when_the_daemon_is_going(self):
         # #383 review P2: stopping() was read once before the first call; a SIGTERM while an unreadable reply was in
         # flight let the retry spend another 60 s timeout — the wait stopping()'s docstring warns about. It is read
