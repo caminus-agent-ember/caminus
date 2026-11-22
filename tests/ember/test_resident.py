@@ -2759,19 +2759,25 @@ for line in sys.stdin:
         self.assertEqual(language.named('\u16a0\u16a2\u16a6\u16a8','config')['scripts'],(),
                          'a name whose letters are in no known script is still off')
 
-    def test_a_multiline_straight_quote_stays_in_the_census_and_a_typographic_one_does_not(self):
-        # review P2 (r18): bounding a straight-quote pair to one line (r16) buys the stray-quote fix at a cost: a
-        # genuine quotation that spans lines is no longer read as a citation. The cost is accepted and this is the
-        # boundary, measured: the same paragraph cited with typographic quotes is dropped and no drift; with
-        # straight quotes it stays in the census and a short English reply around it measures as Han. A miss would
-        # be the silent failure this feature exists to prevent, a nudge is visible and cheap, so the bound stays.
+    def test_a_multiline_quotation_stays_in_the_census_in_every_quote_form(self):
+        # review P2 (r18), then r24: bounding a quote pair to one line buys the stray-quote fix at a cost - a genuine
+        # quotation that spans lines is no longer read as a citation, so its units stay in the census and a short
+        # English reply around it measures as Han. r24 made that bound uniform: the typographic forms used to cross
+        # lines, and a pair opened in one paragraph and closed in another swallowed the prose between them (#390
+        # review P2-2, 73 characters in and 6 out). The cost is now the same in every form, and this is the
+        # boundary, measured: restating it for one form only is how this test went stale against the fix (CI
+        # resident, head 1ee6bca: the typographic half still asserted the pre-r24 behaviour). A miss would be the
+        # silent failure this feature exists to prevent, a nudge is visible and cheap, so the bound stays.
         from caminus.ember.resident import language
         zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002'
         body='\n'.join([zh]*3)
-        straight='The log said:\n"'+body+'"\nand then the PR was opened.'
-        typographic='The log said:\n\u201c'+body+'\u201d\nand then the PR was opened.'
-        self.assertEqual(language.drift(straight,('Latin',))[0],'Han','a multi-line straight citation stays in the census')
-        self.assertIsNone(language.drift(typographic,('Latin',)),'the same text in typographic quotes is a citation')
+        for open_q,close_q,form in (('"','"','straight'),('\u201c','\u201d','typographic')):
+            multi='The log said:\n'+open_q+body+close_q+'\nand then the PR was opened.'
+            self.assertEqual(language.drift(multi,('Latin',))[0],'Han',
+                             'a multi-line %s citation stays in the census'%form)
+            inline='The log said: '+open_q+zh+close_q+' and then the PR was opened.'
+            self.assertIsNone(language.drift(inline,('Latin',)),
+                              'the same paragraph in one-line %s quotes is a citation'%form)
 
     def test_a_stray_straight_quote_does_not_blind_the_rest_of_the_reply(self):
         # review P2 (r16): `_QUOTED` paired two strays across a newline and dropped everything between them, so a
