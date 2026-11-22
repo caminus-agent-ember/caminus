@@ -3533,6 +3533,74 @@ for line in sys.stdin:
                     self.assertEqual(left.strip(),'','its branch is gone too')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_row_without_a_repo_never_points_git_at_the_daemons_cwd(self):
+        # #384 review P2: _close passed `row.get('repo') or ''` to _remove_worktree, and `git -C ''` runs in the
+        # directory the daemon was started from - `git -C '' branch -D delegate/<child>` there deletes a branch
+        # of whatever repo that happens to be. A row whose repo column is empty (a pre-migration database) is
+        # now skipped whole: the report keeps the commands that name the checkout, and nothing moves.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo6';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        rt=Runtime(self.home)
+        here=os.getcwd()
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            top,base,wt,branch=delegate._worktree(rt,child,repo)
+            rt.store.delegate_add(child,parent,'','','worker',0.5,permissions='write',worktree=wt,branch=branch,
+                                  base=base)              # repo='' - the row lost the field it was written with
+            with rt.store.transaction():
+                rt.store.update(child,state='paused',error='paused from the panel while the delegate ran')
+            os.chdir(str(repo))                           # the daemon's cwd is inside the parent's repo
+            report=delegate._close(rt,parent,delegate._report(rt,rt.store.delegate(child),
+                                                              rt.store.goal(child),'incomplete'))
+            left=subprocess.run(['git','-C',str(repo),'branch','--list','delegate/'+child],
+                                capture_output=True,text=True).stdout
+            self.assertNotEqual(left.strip(),'','a branch in the daemon cwd repo is not deleted from it')
+            self.assertTrue(os.path.isdir(wt),'its checkout is left where the report says it is')
+            self.assertIn('merge',report,'the report still names the commands that keep or drop the checkout')
+            self.assertIn('discard',report)
+            self.assertNotIn('worktree_removed',report)
+        finally:
+            os.chdir(here);rt.mail.close();rt.store.close()
+
+    def test_a_corrupt_reports_event_repeats_a_report_and_never_hides_one(self):
+        # #384 review P2 read the `pass` in settle's shown-ledger as counting an unreadable row's children as
+        # shown, so a corrupt event would filter them out of the next wake. It does the opposite: a failed parse
+        # adds nothing to `shown`, so those children stay eligible and are named again - at worst one duplicate
+        # wake (bounded by WAKE_LINES), never a report the parent does not hear about.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            kids=[]
+            for i in range(6):
+                child=rt.store._enqueue('c%d'%i,kind='delegate')
+                rt.store.delegate_add(child,parent,'','','worker',0.5)
+                rt.store.delegate_done(child,'completed',dict(outcome='completed',summary='report %d'%i,steps=i))
+                kids.append(child)
+            with rt.store.transaction():rt.store.update(parent,state='waiting_children')
+            rt.store.event('delegate_reports',dict(children=kids[:2]),parent)
+            # a wake whose event was written but whose data did not survive: the ids it named are in the text
+            # and unreadable as JSON, which is exactly the row a `pass` must not read as 'these were shown'
+            rt.store.db.execute('INSERT INTO events(ts,goal,kind,data) VALUES(?,?,?,?)',
+                                (time.time(),parent,'delegate_reports',
+                                 '{"children": ["%s", "%s",' % (kids[2],kids[3])))
+            self.assertTrue(delegate.settle(rt))
+            text=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(parent,))][0]
+            for child in kids[2:]:
+                self.assertIn(child[:8],text,'the report of %s is still named'%child[:8])
+            self.assertNotIn(kids[0][:8],text,'a report a readable event already delivered is not repeated')
+            woke=[]
+            for r in rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='delegate_reports' "
+                                        'ORDER BY seq',(parent,)):
+                try:woke.append(json.loads(r['data']))
+                except ValueError:pass            # the corrupt row itself: the wake after it is what matters
+            self.assertEqual(woke[-1]['children'],kids[2:],'the new event names them, so the next wake is quiet')
+        finally:rt.mail.close();rt.store.close()
+
     def test_sweep_skips_a_child_this_process_registered(self):
         # #384 review: sweep ran on every pass, so the child a delegate(wait=false) call had just queued was paused
         # and reported orphaned on the next pass before it ran a step. It runs once before any work, and a child in

@@ -833,12 +833,14 @@ def _close(rt, parent, report):
     row = rt.store.delegate(child) or {}
     if not row or row.get('outcome'):
         return report
-    if row.get('worktree') and report['outcome'] != 'completed' and _unchanged(row):
+    if row.get('repo') and row.get('worktree') and report['outcome'] != 'completed' and _unchanged(row):
         # A stopped parent used to leave its child's checkout and branch in the parent's repo, and the report's
         # discard command was the only pointer to them (#384 review). A child that changed nothing has nothing
         # to keep, so both go now and the report says so; a child that did change something keeps its checkout
-        # and its merge/discard commands.
-        _remove_worktree(row.get('repo') or '', row['worktree'], row.get('branch') or '')
+        # and its merge/discard commands. A row with no repo is skipped whole: `git -C ''` runs at the daemon's
+        # own cwd, so a `delegate/<child>` branch there could be deleted from whatever repository that happens
+        # to be, and the report keeps its discard command as the pointer to a checkout that still exists.
+        _remove_worktree(row['repo'], row['worktree'], row.get('branch') or '')
         for k in ('merge', 'merge_note', 'discard', 'files', 'diffstat', 'commit_failed'):
             report.pop(k, None)
         report['worktree_removed'] = ('the child changed nothing, so its checkout and branch are gone: there is '
@@ -916,6 +918,10 @@ def settle(rt):
             try:
                 shown.update(json.loads(e['data']).get('children') or [])
             except (ValueError, TypeError, AttributeError):
+                # An unreadable row adds nothing to `shown`, so the children it named stay out of the set and
+                # this wake names them again. The set only ever grows, so a parse failure can duplicate a report
+                # the parent already read (bounded by WAKE_LINES), never hide one (#384 review P2 read this bare
+                # `pass` as counting an unreadable row's children as shown, which is the opposite of what it does).
                 pass
         lines, ids = [], []
         # The fallback window obeys the same filter: a second wake that repeats a report the parent already read
