@@ -3391,6 +3391,42 @@ for line in sys.stdin:
                                         '\u03bd\u03be\u03bf\u03c0 \u03c1\u03c3\u03c4\u03c5',('Han',)),
                          ('Greek',1.0),'a reply really in Greek still drifts')
 
+    def test_the_language_event_records_every_foreign_script_in_the_reply(self):
+        # review P2 (r22): the event's `script` is the largest foreign script while its `share` is the SUM of all
+        # of them, so a reply split between two scripts was recorded as if the one named held the whole share
+        # (probed: 9 Han + 5 Greek units of a Russian owner's reply named 'Han' at 0.933 when Han itself was
+        # 0.600). The split rides beside them now, `script` stays the same max `drift` names, and the nudge names
+        # the runner-up when it holds at least half the winner: unnamed, it read as the owner's own script.
+        from caminus.ember.resident import language
+        han='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00\u53d1\u3002'
+        greek=('\u03b1\u03b2\u03b3\u03b4 \u03b5\u03b6\u03b7\u03b8 \u03b9\u03ba\u03bb\u03bc \u03bd\u03be\u03bf\u03c0 '
+               '\u03c1\u03c3\u03c4\u03c5')
+        conf=json.loads((self.home/'config.json').read_text());conf['language']='Russian'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal its owner writes in Russian.')
+            nudge=language.check(rt,gid,han+' '+greek+' \u0438')
+            self.assertIn('Reply in Russian',nudge)
+            self.assertIn('(Han and Greek)',nudge,
+                          "the runner-up is named: alone it read as the owner's own script")
+            rows=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(rows),1)
+            data=rows[0]
+            self.assertEqual(data['scripts'],{'Han':9,'Greek':5},'every foreign script is in the event')
+            self.assertEqual(data['script'],max(data['scripts'],key=data['scripts'].get),
+                             'the named script is still the largest one, as `drift` returns it')
+            self.assertEqual(data['share'],round(14/15,3),'share is still their sum, not the winner\'s')
+            self.assertEqual(sum(data['scripts'].values()),14,'the split adds up to the share it explains')
+            # a clear winner is named alone: the runner-up under half the winner is not what the reply slid into,
+            # so naming it would send the owner looking for a script their reply barely used.
+            g2=rt.store.enqueue('A second goal in the same session.')
+            self.assertIn('(Han)',language.check(rt,g2,han+' '+han+' \u03b1\u03b2\u03b3\u03b4 \u0438'))
+            self.assertNotIn('and Greek',language.check(rt,g2,han+' '+han+' \u03b1\u03b2\u03b3\u03b4 \u0438'))
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_the_language_cadence_counts_the_reply_being_censused(self):
         # review P2 (r20): the count of assistant events since the last nudge is only right because
         # `store.model_reply` writes the reply's `assistant` event before `_tick` calls `check`. Hand-written

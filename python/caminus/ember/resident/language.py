@@ -170,19 +170,33 @@ def drift(text, scripts):
     separate that from a real switch, since by units it is one, and the replies the floors were tuned on (ten or
     more English units around a few CJK terms) stay far under it; the phrase has to be quoted to read as cited.
     """
-    if any(s in SPACELESS for s in (scripts or ())):
-        text = _without_borrowed(text, scripts)
-    per, total = units(text)
+    hit = drift_detail(text, scripts)
+    return (hit['script'], hit['share']) if hit else None
+
+
+def drift_detail(text, scripts):
+    """The census behind `drift`: the drift's script, every foreign script's units, own units and total.
+
+    `drift` returns one script and a share, and the share is the SUM of the non-owner scripts while the name
+    is only the largest of them, so a reply split near evenly between two foreign scripts is described by a
+    name that holds half its share (review P2, r22). The caller that records the event has to show the split;
+    the caller that only needs a yes/no keeps the pair `drift` returns.
+    """
     if not scripts:
         return None
-    other = total - sum(per.get(s, 0) for s in scripts)
+    if any(s in SPACELESS for s in scripts):
+        text = _without_borrowed(text, scripts)
+    per, total = units(text)
+    foreign = {s: n for s, n in per.items() if s not in scripts}
+    other = sum(foreign.values())
     own = total - other
     if not other or other < WHOLE_MIN_UNITS or (own >= 2 and total < MIN_UNITS):
         return None
     if other / total <= OTHER_SHARE:
         return None
-    script = max((s for s in per if s not in scripts), key=lambda s: per[s])
-    return script, other / total
+    return dict(script=max(foreign, key=foreign.get),
+                scripts=dict(sorted(foreign.items(), key=lambda kv: (-kv[1], kv[0]))),
+                own=own, total=total, share=other / total)
 
 
 _CLAUSE = re.compile(r'[.!?;,\u3002\uff01\uff1f\uff1b\uff0c\n]')
@@ -355,8 +369,17 @@ def from_home(home, config=None):
     return derive(prompts) or named(DEFAULT, 'default')
 
 
-def _reply_in(name, script):
-    """The nudge's text: one line, naming the owner's language and the script the reply slid into."""
+def _reply_in(name, detail):
+    """The nudge's text: one line, naming the owner's language and the script(s) the reply slid into.
+
+    `share` is the sum of the foreign scripts, so a reply split near evenly between two of them is nudged
+    naming only the larger one and reads as if the other were the owner's (review P2, r22). Name the runner-up
+    too when it is at least half the winner.
+    """
+    per, script = detail['scripts'], detail['script']
+    runner = next((s for s in per if s != script), None)
+    if runner and per[runner] * 2 >= per[script]:
+        script = '%s and %s' % (script, runner)
     return ("Reply in %s, the owner's language: your last reply came out mostly in another script (%s)."
             % (name, script))
 
@@ -393,10 +416,10 @@ def check(rt, gid, text, cfg=None, due=True):
             except sqlite3.Error:
                 pass        # (the same best effort as the drift event below: never a dead turn for a log line)
         return ''
-    hit = drift(text, scripts)
-    if not hit:
+    detail = drift_detail(text, scripts)
+    if not detail:
         return ''
-    script, share = hit
+    script, share = detail['script'], detail['share']
     # The last nudged drift, from the whole log: a LIMIT 32 window of the newest drifts forgot the nudge as soon
     # as a goal drifted 32 more times, and the cadence then fired again early (review P2). Ask SQLite for the
     # maximum seq with json_extract, which is how other event data is read here; a runtime attribute would be
@@ -413,7 +436,10 @@ def check(rt, gid, text, cfg=None, due=True):
         since = rt.store.db.execute("SELECT COUNT(*) FROM events WHERE goal=? AND kind='assistant' AND seq>?",
                                     (gid, last or 0)).fetchone()[0]
         nudge = due and (last is None or since >= DRIFT_EVERY)
-        rt.store.event('language_drift', dict(script=script, language=who['name'], share=round(share, 3),
+        # `script` is the largest foreign script and `share` the sum of all of them, so the split is recorded
+        # beside them: without it the event described a reply as more Han than it was (review P2, r22).
+        rt.store.event('language_drift', dict(script=script, scripts=dict(detail['scripts']),
+                                              language=who['name'], share=round(share, 3),
                                               brain=sim.brain(sim.serving(rt, cfg)), nudged=nudge), gid)
     except sqlite3.Error as e:
         # A locked db or a schema drift here raises inside runtime._tick right after the reply was recorded and
@@ -431,7 +457,7 @@ def check(rt, gid, text, cfg=None, due=True):
         # writes the inbox row in its own transaction, so one failed read or insert need not cost the nudge too,
         # and an unnudged real drift is the silent failure this check exists to prevent (review P2 r18). A failure
         # that repeats nudges again: a repeated correct nudge is visible and costs a turn, a lost one costs none.
-        return _reply_in(who['name'], script) if due else ''
+        return _reply_in(who['name'], detail) if due else ''
     if not nudge:
         return ''
-    return _reply_in(who['name'], script)
+    return _reply_in(who['name'], detail)

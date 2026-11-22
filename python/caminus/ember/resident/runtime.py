@@ -2419,6 +2419,10 @@ class Runtime:
                 # the `_finish` on this same tick would defer (review P2).
                 follows = False
                 if kind not in FREE_KINDS and self.loop_gates:
+                    # Computed here and handed to `_plain_reply` below, after the language check. That check only
+                    # reads the store and writes an event and an inbox row; the dispatch's inputs
+                    # (`plain_replies`, `_answering`) are not touched between the two, so asking again there
+                    # would be a second answer, not a fresher one (r22 review P2: invariant, no change needed).
                     dispatch = self._plain_dispatch(gid)
                     follows = dispatch[1]
             if (note := language.check(self, gid, reply.get('content') or '', due=follows)):
