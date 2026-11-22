@@ -107,10 +107,12 @@ func TestTheLongGoalExpandsByKeyAndClickAtEveryWidth(t *testing.T) {
 			if back := ansi.Strip(m.chatHead(w)); back != collapsed {
 				t.Fatalf("collapsed again, the header differs:\n%s\n--- was:\n%s", back, collapsed)
 			}
-			// A click on the header toggles it, at every width.
+			// A click on the header toggles it, at every width. The row is the header's own first line, not a
+			// brand spelled out here: the session draws EMBER since #350, and this test is about the click.
+			title := strings.TrimRight(strings.Split(collapsed, "\n")[0], " ")
 			y := -1
 			for i, row := range strings.Split(ansi.Strip(m.render()), "\n") {
-				if strings.Contains(row, "CAMINUS") {
+				if strings.HasPrefix(strings.TrimRight(row, " "), title) {
 					y = i
 					break
 				}
