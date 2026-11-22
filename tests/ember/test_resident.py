@@ -3021,6 +3021,66 @@ for line in sys.stdin:
             delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_sweep_close_reports_a_turn_priced_but_not_yet_in_the_ledger(self):
+        # `_meter` writes spend.json's per-goal total on the line before `note_spend` writes the child's ledger, so
+        # a process killed between the two leaves one priced turn in spend.json alone and the close reported a
+        # cheaper run than the money spent (#382 review). The close reports the larger of the two and says so; and
+        # it never invents one: no entry for the child, or a total below the ledger (an auxiliary call is priced
+        # into the ledger only, never into spend.json's goal total), leaves the ledger's number alone.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                return gid
+            lost=child()                      # priced .25, ledger .10: the kill between the two writes
+            rt.store.delegate_spend(lost,.10,.0)
+            plain=child()                     # no spend.json entry at all
+            rt.store.delegate_spend(plain,.20,.0)
+            aux=child()                       # a total below the ledger, as auxiliary calls leave it
+            rt.store.delegate_spend(aux,.30,.0)
+            (self.home/'spend.json').write_text(json.dumps(dict(goals={lost:.25,aux:.10})))
+            for gid in (lost,plain,aux):
+                rt.store.db.execute("UPDATE goals SET state='completed' WHERE id=?",(gid,))
+            delegate.sweep(rt)
+            report=json.loads(rt.store.delegate(lost)['report'])
+            self.assertEqual(report['spend_usd'],.25,'the priced turn is reported, not the ledger alone')
+            self.assertIn('priced but not yet in its ledger',report['summary'],'and the report says where it came from')
+            self.assertEqual(json.loads(rt.store.delegate(plain)['report'])['spend_usd'],.20,
+                             'an absent entry leaves the ledger as the number')
+            self.assertEqual(json.loads(rt.store.delegate(aux)['report'])['spend_usd'],.30,
+                             'a total below the ledger never lowers the report')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_sweep_closes_a_paused_child_as_incomplete_and_a_capped_one_as_capped(self):
+        # a child paused by a mechanism that writes no delegate_capped event (the owner's budget watchdog, a manual
+        # pause) is not the work failing, and it is not a spent limit either. run_child called it `failed`, and
+        # sweep()'s state map fell through to `failed` too (#382 review). One fact decides both paths: the child's
+        # own delegate_capped event, and the pause's own words ride along as the summary.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                return gid
+            watched=child()
+            with rt.store.transaction():
+                rt.store.update(watched,state='paused',error='the owner was away and the budget ran out')
+            capped=child()
+            with rt.store.transaction():
+                rt.store.update(capped,state='paused',error='delegate spend cap reached: $0.5000 of $0.5000')
+                rt.store.event('delegate_capped',dict(spend_usd=.5,allowance_usd=0.0,cap_usd=.5),capped)
+            delegate.sweep(rt)
+            row=rt.store.delegate(watched)
+            self.assertEqual(row['outcome'],'incomplete','a pause with no cap behind it is not the child failing')
+            self.assertIn('budget ran out',json.loads(row['report'])['summary'],'the pause\'s own words ride along')
+            self.assertEqual(rt.store.delegate(capped)['outcome'],'capped','its own cap event is still a cap')
+        finally:rt.mail.close();rt.store.close()
+
     def test_sweep_closes_a_child_whose_goal_row_is_gone(self):
         # sweep() ran bare in the runtime loop and read store.goal(), which raises on an unknown id: one delegates
         # row whose goal row was gone (a partial restore - the case is_child's docstring names) ended the daemon
@@ -3184,7 +3244,7 @@ for line in sys.stdin:
                 with rt.store.transaction():rt.store.update(target,state='paused',error='delegate work stopped early')
             with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
                 report=delegate.run_child(rt,parent,dict(child=other,role='worker'))
-            self.assertEqual(report['outcome'],'failed','a pause with no cap behind it is not a cap')
+            self.assertEqual(report['outcome'],'incomplete','a pause with no cap behind it is not a cap, and not the child failing')
         finally:rt.mail.close();rt.store.close()
 
     def test_a_closing_write_that_fails_leaves_a_trace_and_keeps_the_run_error(self):

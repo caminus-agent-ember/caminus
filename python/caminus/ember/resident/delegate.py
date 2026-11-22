@@ -38,6 +38,7 @@ MVP scope: one child at a time - the parent waits for its report - and the child
 Runtime.run(target=child, stop=parent_gone), so the loop's single-writer serialization keeps holding. Parallel
 children, a worktree per writing child and a card per child are the full version (#342, later).
 """
+import json
 import math
 import time
 
@@ -307,6 +308,12 @@ def run_child(rt, parent, job):
             outcome = 'completed'
         elif state == 'paused' and _capped(rt, child):
             outcome = 'capped'       # the dollar cap, the step limit or the deadline ended it
+        elif state == 'paused':
+            # a pause that is not one of the child's own three caps: the owner's budget watchdog, a manual pause,
+            # another goal's question. The work did not fail, it was stopped, and the pause's own words are the
+            # summary run_child already writes, so `incomplete` says that where `failed` blamed the child
+            # (#382 review).
+            outcome = 'incomplete'
         elif state == 'cancelled':
             outcome = 'incomplete'   # its parent was cancelled: it did not finish its own work
         elif state in ('working', 'queued', 'waiting_model'):
@@ -470,14 +477,36 @@ def _sweep_box(rt, child):
             pass
 
 
+def _priced_but_unledgered(rt, child):
+    """The money `_meter` priced for a child that its own ledger may not have seen.
+
+    `_meter` writes spend.json's per-goal total on the line before `note_spend` writes the child's ledger, so a
+    process killed between the two leaves one priced turn in spend.json alone: the close then reported a cheaper
+    run than actually happened (#382 review). Read, never invent - a spend.json without this child, or with less
+    than the ledger (an auxiliary call is priced into the ledger only), contributes nothing."""
+    try:
+        state = json.loads((rt.home / 'spend.json').read_text())
+        total = (state.get('goals') or {}).get(child)
+    except Exception:
+        return 0.0           # sweep runs bare in the runtime loop: a bad or absent file is not an error here
+    return float(total) if isinstance(total, (int, float)) else 0.0
+
+
 def _sweep_close(rt, r, outcome, state, summary):
     """Close a child's row at sweep in the same shape run_child reports.
 
     The close is the last thing written about this child, and a report without its spend reads as a free run
-    (#382 review), so the row's model, provider, spend and cap always ride along."""
+    (#382 review), so the row's model, provider, spend and cap always ride along. The spend is the larger of the
+    ledger and spend.json's total for the child (see _priced_but_unledgered), and the summary says when the
+    difference was real money rather than a rounding."""
+    spent = round(r['spend_usd'] or 0.0, 6)
+    priced = round(_priced_but_unledgered(rt, r['child']), 6)
+    if priced > spent:
+        summary = f'{summary}; ${priced:.4f} of it was priced but not yet in its ledger'
+        spent = priced
     rt.store.delegate_done(r['child'], outcome, dict(
         child=r['child'], role=r['role'], model=r['model'], provider=r['provider'], outcome=outcome, state=state,
-        spend_usd=round(r['spend_usd'] or 0.0, 6), allowance_usd=round(r['allowance_usd'] or 0.0, 6),
+        spend_usd=spent, allowance_usd=round(r['allowance_usd'] or 0.0, 6),
         cap_usd=r['cap_usd'] or 0.0, summary=summary))
 
 
@@ -496,7 +525,7 @@ def sweep(rt):
         # a direct read, not store.goal(): that raises on an unknown id, and this runs bare in the runtime loop,
         # so one row whose goal is gone (a partial restore) would end the daemon on every pass and leave the row
         # open for good (#382 review). A row without its goal is closed as orphaned - it can never report.
-        row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (r['child'],)).fetchone()
+        row = rt.store.db.execute('SELECT state, error FROM goals WHERE id=?', (r['child'],)).fetchone()
         if row is None:
             _sweep_close(rt, r, 'orphaned', 'error', 'this child\'s goal row is gone')
             _sweep_box(rt, r['child'])
@@ -507,9 +536,19 @@ def sweep(rt):
             _sweep_close(rt, r, 'orphaned', 'paused', 'its runtime ended mid-delegation')
             _sweep_box(rt, r['child'])
             continue
-        # The goal already ended (completed / cancelled / error): the crash window run_child's fall-back close
-        # cannot reach, because that process is gone. The goal's own state names the outcome.
-        outcome = dict(completed='completed', cancelled='incomplete').get(row['state'], 'failed')
-        _sweep_close(rt, r, outcome, row['state'], 'this child\'s goal ended without a report')
+        # The goal already ended (completed / cancelled / paused / error): the crash window run_child's fall-back
+        # close cannot reach, because that process is gone. The goal's own state names the outcome, and a pause
+        # is `capped` only when one of the child's own three caps wrote its event - the same fact `run_child`
+        # reads, so a watchdog or manual pause is not reported as the child failing or as a spent limit (#382
+        # review).
+        state = row['state']
+        if state == 'paused':
+            outcome = 'capped' if _capped(rt, r['child']) else 'incomplete'
+            summary = 'this child\'s goal was paused and never reported' + \
+                      (': ' + row['error'] if row['error'] else '')
+        else:
+            outcome = dict(completed='completed', cancelled='incomplete').get(state, 'failed')
+            summary = 'this child\'s goal ended without a report'
+        _sweep_close(rt, r, outcome, state, summary)
         if outcome != 'completed':
             _sweep_box(rt, r['child'])
