@@ -2252,8 +2252,13 @@ class Runtime:
                 self.store.event('summary_cut',dict(limit=summary_limit,chars=len(part)),gid)
             finally:
                 # a summary call is a turn of this brain too, and on a delegate child it must reach its dollar cap
-                # (#382 review); it is charged here, before the next call overwrites the model's usage
-                delegate.note_aux(self, gid, (summary_options or {}).get('model'), since=before)
+                # (#382 review); it is charged here, before the next call overwrites the model's usage. Wrapped: a
+                # ledger write that failed must not replace the summary's own error (a truncated or refused call),
+                # the same reason the judge's call sites keep their own try.
+                try:
+                    delegate.note_aux(self, gid, (summary_options or {}).get('model'), since=before)
+                except Exception:
+                    pass
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
         after_tokens = self.model.tokens([system,*compacted,*tail],self.tools)
