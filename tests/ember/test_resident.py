@@ -8636,6 +8636,36 @@ for line in sys.stdin:
         with self.assertRaises(ValueError):
             reflect._bounded(Rt(),boom,seconds=5)
 
+    def test_an_abandoned_reflection_call_is_not_priced_by_the_caller(self):
+        # #383 review P2: _ask() prices its call only after _bounded() RETURNS it, on this thread. A call abandoned
+        # at its deadline raises out of _bounded, so neither brains.account nor _meter runs: the abandoned call is
+        # never charged from a last_usage its own daemon thread has not written yet, and cannot be charged twice
+        # when it finally does. This asserts the contract at the call site (the totals tests only cover the normal
+        # arm), so a later change that meters inside _bounded, or before it returns, fails here.
+        from caminus.ember.resident import reflect
+        calls=[]
+        class Brains:
+            def account(self,gid):calls.append(('account',gid))
+        aborted=threading.Event()
+        class Model:
+            def abort(self):aborted.set()
+            def complete(self,msgs,**k):
+                aborted.wait(10)                 # never answers: the deadline closes the socket instead
+                raise OSError('closed')
+        class Rt:
+            model=Model();brains=Brains();stopping=lambda s:False
+            def _meter(self,gid):calls.append(('meter',gid))
+        with unittest.mock.patch.object(reflect,'TIMEOUT',.2):
+            with self.assertRaises(TimeoutError):
+                reflect._ask(Rt(),'g1',[dict(role='user',content='x')])
+        self.assertEqual(calls,[],'an abandoned call was priced by the caller')
+        # the answered arm is priced exactly once, in this order
+        class Answered(Model):
+            def complete(self,msgs,**k):return dict(content='{}')
+        rt=Rt();rt.model=Answered()
+        reflect._ask(rt,'g2',[dict(role='user',content='x')])
+        self.assertEqual(calls,[('account','g2'),('meter','g2')])
+
 
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""

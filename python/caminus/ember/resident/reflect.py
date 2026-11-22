@@ -40,7 +40,12 @@ Answer with only a JSON object:
 
 Or, when this goal shows no recurring problem worth a change:
 {"skip": true, "reason": "why"}'''
-STRICT = 'Answer with only the JSON object (or {"skip": true, "reason": "..."}), nothing else.'
+# The retry after an unreadable reply gets the same MAX_TOKENS budget, so a reply clipped at 700 tokens comes back
+# clipped again and the goal ends with `reflection_failed` (#383 review P2). Asking for short fields is what makes
+# the retry able to succeed: four fields under 200 characters is ~250 tokens, well inside the budget, and a fence or
+# a paragraph of preamble is the other way a reply is unreadable (parse -> judge.object_in).
+STRICT = ('Answer with only the JSON object (or {"skip": true, "reason": "..."}), nothing else: no markdown fence, '
+          'no text before or after it, and every field under 200 characters.')
 
 
 def maybe(rt, gid, summary='', open_work=''):
