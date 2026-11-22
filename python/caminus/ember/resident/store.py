@@ -304,8 +304,8 @@ class Store:
         # stores a NaN as NULL, and the column is NOT NULL); an infinite cap is stored and `spend < inf` never
         # trips, so the child ran with no effective cap (#382 review, rev-glm P2)
         if not math.isfinite(cap) or cap <= 0:
-            raise ValueError('a delegate needs a positive, finite dollar cap: %r read as no cap at all (#382 review)'
-                             % cap_usd)
+            raise ValueError('a delegate needs a positive dollar cap, and a finite one: %r read as no cap at all '
+                             '(#382 review)' % cap_usd)
         self.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) VALUES(?,?,?,?,?,?,?)',
                         (child, parent, model or '', provider or '', role, cap, time.time()))
 

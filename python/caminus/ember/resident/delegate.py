@@ -145,8 +145,8 @@ def _caps(rt, args):
     if args.get('cap_usd') is not None:
         their = float(args['cap_usd'])
         if not math.isfinite(their) or their <= 0:
-            raise ValueError('cap_usd must be a finite number more than 0: it is what the child may spend, and 0 '
-                             'used to mean "uncapped". Omit it to use delegate_usd ($%s)' % cap)
+            raise ValueError('cap_usd must be more than 0, and a finite number: it is what the child may spend, '
+                             'and 0 used to mean "uncapped". Omit it to use delegate_usd ($%s)' % cap)
         cap = min(cap, their)
     steps = int(_limit(rt, 'delegate_max_steps'))
     if args.get('max_steps') is not None:

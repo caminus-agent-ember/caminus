@@ -3439,10 +3439,10 @@ for line in sys.stdin:
             rt.config.pop('delegate_max_steps',None)
             self.assertEqual(delegate._caps(rt,dict())[0],.5)
             parent,child=rt.store.enqueue('p'),rt.store.enqueue('c')
-            for bad in (float('nan'),float('inf')):
+            for bad in (float('nan'),float('inf'),-float('inf')):
                 with self.assertRaises(ValueError) as caught:
                     rt.store.delegate_add(child,parent,'','','worker',bad)
-                self.assertIn('finite dollar cap',str(caught.exception))
+                self.assertIn('finite',str(caught.exception))
             # a row written around delegate_add with an infinite cap still pauses: capped() fails closed on it
             rt.store.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) '
                                 'VALUES(?,?,?,?,?,?,?)',(child,parent,'','','worker',float('inf'),time.time()))
