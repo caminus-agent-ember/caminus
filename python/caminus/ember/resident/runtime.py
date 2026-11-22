@@ -2018,8 +2018,11 @@ class Runtime:
                 if self.store.goal(action['goal'])['state'] != 'cancelled':
                     self.store.update(action['goal'], state='waiting_plan')
         elif action['name'] == 'delegate' and parked and 'error' not in result:
-            # wait=false: nothing to do until the children report; settle wakes this goal with their reports
-            delegate.park(self, action['goal'], result)
+            # wait=false: nothing to do until the children report; settle wakes this goal with their reports.
+            # Park only once this reply's calls are all dispatched: parked on the first of them, the parent never
+            # dispatched the rest until a child finished, so a batch of children ran one at a time (#384 review).
+            if not self.store.actions(action['goal']):
+                delegate.park(self, action['goal'], result)
         elif action['name'] == 'finish' and result.get('pause'):
             # the judge found it impossible, or refused it too often: a person decides
             with self.store.transaction():
@@ -2985,6 +2988,11 @@ class Runtime:
         last_heartbeat=0
         if not target:
             self._note_cut_turns()
+            # Children left runnable belong to a run that ended: sweep them ONCE, before any live work starts. Ran
+            # on every pass, it paused the child a `delegate(wait=false)` call had just queued on the very next
+            # pass and reported it orphaned, so background delegation never ran (#384 review). sweep also skips a
+            # child this process registered, so the once-only call can never end a child of this run either.
+            delegate.sweep(self)
         while stop is None or not stop():
             if not target and self._maybe_update():
                 return None                   # systemd restarts the daemon on the new runtime
@@ -3001,8 +3009,6 @@ class Runtime:
             self.mail.receive(self.store)
             sandbox.sweep(self)               # boxes of goals that ended elsewhere (a cancel from the command line)
             delegate.settle(self)             # children that finished, and the parents waiting on them
-            if not target:
-                delegate.sweep(self)          # delegate children left runnable by a run that ended
             for gid in self.store.pending_requests('compact'):
                 self.compact_request(gid)
             progressed = False

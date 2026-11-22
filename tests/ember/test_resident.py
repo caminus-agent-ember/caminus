@@ -3385,6 +3385,121 @@ for line in sys.stdin:
                     self.assertEqual(left.strip(),'','its branch is gone too')
         finally:rt.mail.close();rt.store.close()
 
+    def test_sweep_skips_a_child_this_process_registered(self):
+        # #384 review: sweep ran on every pass, so the child a delegate(wait=false) call had just queued was paused
+        # and reported orphaned on the next pass before it ran a step. It runs once before any work, and a child in
+        # delegate_caps (started here, brain and cap in this process) is not an orphan.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            live=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(live,parent,'','','worker',0.5)
+            rt.delegate_caps[live]=0.5
+            orphan=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(orphan,parent,'','','worker',0.5)
+            delegate.sweep(rt)
+            self.assertEqual(rt.store.goal(live)['state'],'queued','the child this process queued is not an orphan')
+            self.assertEqual(rt.store.delegate(live)['outcome'],'')
+            self.assertEqual(rt.store.goal(orphan)['state'],'paused')
+            self.assertIn('runtime ended mid-delegation',rt.store.goal(orphan)['error'])
+            self.assertEqual(rt.store.delegate(orphan)['outcome'],'orphaned')
+            done=[e['data'] for e in rt.store.events() if e['kind']=='delegate_done']
+            self.assertEqual([d['child'] for d in done],[orphan])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_resident_keeps_its_own_brain_after_a_childs_run(self):
+        # #384 review: a child's turn put its own brain in rt.model and nothing put the resident's back; with one
+        # brain configured Brains.choose returned rt.model, so the parent's next turn - and every later goal - ran
+        # on the child's model. choose answers with the resident's brain, and run_child restores rt.model.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.model import Model
+        rt=Runtime(self.home)
+        try:
+            resident=rt.model
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            child_brain=Model(dict(rt.config,model='other'))
+            # choose reads the resident brain, whatever a side run left in rt.model
+            rt.model=child_brain
+            self.assertIsNone(rt.brains.fallback,'the fixture has one brain')
+            self.assertIs(rt.brains.choose(parent),resident,'choose answers with the resident brain')
+            rt.model=resident
+            def fake_run(**kw):rt.model=child_brain        # what a child's turn does to rt.model
+            rt.run=fake_run
+            delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
+            self.assertIs(rt.model,resident,'the resident got its brain back')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_paid_child_must_be_priceable_and_gets_its_entrys_limits(self):
+        # #384 review: _brain built the child's config by hand - it kept the parent's max_tokens and never read the
+        # entry's output cap or effort levels - and every paid remote child was accepted, so a child whose price the
+        # catalog does not know could never trip its dollar cap. Both build a config with catalog.apply_entry, the
+        # normalization `agent model` uses, and an unpriced paid child is refused.
+        from caminus.ember.resident import catalog, delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['providers']={'deepinfra':dict(kind='openai',endpoint='https://api.deepinfra.com/v1/openai')}
+            catalog.path(self.home).write_text(json.dumps(dict(updated=None,providers={},models=[
+                dict(id='unpriced',name='unpriced',provider='deepinfra',context=None,max_output=None,efforts=[],
+                     thinking='',vision=False,prices=None),
+                dict(id='priced',name='priced',provider='deepinfra',context=200000,max_output=999999,
+                     efforts=['low','high'],thinking='',vision=False,
+                     prices=dict(input=0.1,output=0.2,cache_read=0.05))])))
+            with self.assertRaises(ValueError) as r:
+                delegate._brain(rt,dict(model='unpriced'))
+            self.assertIn('no price for unpriced',str(r.exception))
+            brain,who=delegate._brain(rt,dict(model='priced'))
+            self.assertEqual(who['model'],'priced')
+            self.assertEqual(brain.config['max_tokens'],65536,'the entry output cap, not the parent maximum')
+            self.assertEqual(brain.config['efforts'],['low','high'],'the entry effort levels')
+            self.assertEqual(brain.config['context'],200000)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_batch_of_background_children_starts_before_the_parent_parks(self):
+        # #384 review: the parent parked on the FIRST wait=false delegate of a reply, so the rest of the batch was
+        # not dispatched until a child had finished: two children asked for together ran one at a time. It parks
+        # only once every call in the reply has been dispatched.
+        (self.home/'a.txt').write_text('alpha\nbeta\n')
+        (self.home/'b.txt').write_text('gamma\ndelta\n')
+        self.gates_on()
+        batch=dict(role='assistant',content='',tool_calls=[
+            dict(id='call-'+uuid.uuid4().hex,type='function',
+                 function=dict(name='delegate',arguments=json.dumps(dict(task='Quote the second line of a.txt.',
+                                                                        done_check='a.txt line 2 is quoted',wait=False)))),
+            dict(id='call-'+uuid.uuid4().hex,type='function',
+                 function=dict(name='delegate',arguments=json.dumps(dict(task='Quote the second line of b.txt.',
+                                                                        done_check='b.txt line 2 is quoted',wait=False))))])
+        self.replies(
+            call('define_done',dict(check='both children quoted their file')),
+            batch,
+            # a.txt's child
+            call('define_done',dict(check='a.txt second line is quoted')),
+            call('terminal',dict(command='sed -n 2p a.txt')),
+            call('verify',dict(evidence='sed printed beta')),
+            call('finish',dict(summary='a.txt line 2 is beta.')),
+            # b.txt's child
+            call('define_done',dict(check='b.txt second line is quoted')),
+            call('terminal',dict(command='sed -n 2p b.txt')),
+            call('verify',dict(evidence='sed printed delta')),
+            call('finish',dict(summary='b.txt line 2 is delta.')),
+            # the parent, woken with both reports
+            call('collect',dict()),
+            call('verify',dict(evidence='collect shows both children completed')),
+            call('finish',dict(summary='The children quoted beta and delta.')))
+        goal=self.cmd('once',['--goal','Have two children quote a.txt and b.txt.'])
+        self.assertEqual(goal['state'],'completed')
+        events=[e for e in self.cmd('events')]
+        started=[e for e in events if e['kind']=='delegate_started']
+        parked=[e for e in events if e['kind']=='delegate_parked']
+        self.assertEqual(len(started),2)
+        self.assertEqual(len(parked),1)
+        self.assertLess(max(e['seq'] for e in started),parked[0]['seq'],
+                        'both children were dispatched before the parent parked')
+        results=[e['data']['result'] for e in events if e['kind']=='tool_result' and e['data'].get('name')=='collect']
+        self.assertEqual({c['outcome'] for c in results[0]['children']},{'completed'})
+
     def test_a_finished_delegate_child_cannot_be_continued(self):
         # `send --continue` on a completed goal revived it with no delegate check, so a child ran again on the
         # default brain with no cap (#382 review, and resume_goal refuses the same move). Same answer on both paths.

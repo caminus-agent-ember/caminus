@@ -429,7 +429,7 @@ def _caps(rt, args):
 def _brain(rt, args):
     """(Model, {model, provider}) the child runs: a call's model/provider from the catalog, the role's
     configured delegate.<role>_model, or the parent's own brain (the default)."""
-    from .model import Model, remember_prices
+    from .model import Model, price
     from . import catalog
     role = args.get('role') or 'worker'
     name = str(args.get('model') or '').strip()
@@ -451,20 +451,15 @@ def _brain(rt, args):
     endpoint, api = catalog.transport(spec, entry)
     conf = dict(rt.config)
     conf.update(model=entry['id'], provider=entry['provider'], provider_kind=spec['kind'], endpoint=endpoint, api=api)
-    for k in ('relay', 'prices', 'context', 'context_cap', 'thinking', 'model_variants', 'efforts', 'vision'):
-        conf.pop(k, None)                 # (the parent's brain's facts, not this one's)
-    if spec.get('relay'):
-        conf['relay'] = True
-    if entry.get('prices'):
-        conf['prices'] = entry['prices']
-        remember_prices(entry['id'], entry['prices'])
-    if entry.get('context'):
-        conf['context'] = int(entry['context'])
-    if entry.get('vision'):
-        conf['vision'] = True
-    if entry.get('variants'):
-        conf['model_variants'] = entry['variants']
-    return Model(conf), dict(model=entry['id'], provider=entry['provider'])
+    # the entry's own facts, by the same normalization /model uses (an OpenCode plan charges what its reply says, so
+    # its price tables are not needed; any other paid brain must be priceable or its cap can never be read)
+    catalog.apply_entry(conf, entry, spec)
+    brain = Model(conf)
+    if (brain.remote and spec['kind'] not in catalog.OPENCODE and price(entry['id'], {}) is None):
+        raise ValueError('no price for %s: a paid remote child must be priceable, or its dollar cap can never trip '
+                         '(the catalog has no prices for it, and only an OpenCode plan reports its own charge)'
+                         % entry['id'])
+    return brain, dict(model=entry['id'], provider=entry['provider'])
 
 
 def prepare(rt, args):
@@ -877,6 +872,10 @@ def run_child(rt, parent, job):
     its next check (#382 review: _stop alone is only the daemon's stop, so a cancelled parent's child ran on)."""
     child = job['child']
     daemon_stop = getattr(rt, '_stop', None)
+    # The child's turn puts its own brain in rt.model (runtime._tick). Put the resident's back when the run ends, or
+    # the parent's next turn - and every later goal - would run on the child's model: with one brain configured,
+    # Brains.choose has nothing to switch back to (#384 review).
+    resident_model = getattr(rt, 'model', None)
 
     def parent_gone():
         """True when the daemon is stopping, or the parent was cancelled, paused or failed while the child ran."""
@@ -910,6 +909,7 @@ def run_child(rt, parent, job):
         return _close(rt, parent, _report(rt, rt.store.delegate(child) or {}, g, outcome))
     finally:
         rt._stop = daemon_stop
+        rt.model = resident_model
 
 
 def capped(rt, gid):
@@ -940,8 +940,14 @@ def note_spend(rt, gid, usd, allowance):
 def sweep(rt):
     """At a runtime start, a child left runnable belongs to a run that ended (the store has one writer, and the
     runtime lock proved no other process holds it): pause it so it cannot run later on the wrong brain, and close
-    its report as orphaned - its parent, if it is still waiting, wakes from `settle`."""
+    its report as orphaned - its parent, if it is still waiting, wakes from `settle`.
+
+    A child this process registered (delegate_caps, filled by start()) is live here: its model and cap are in this
+    process's memory, so it is not an orphan, and pausing it would end the very child a delegate(wait=false) call
+    just queued (#384 review: the daemon swept on every pass, so every background child died with zero steps)."""
     for row in rt.store.delegates(open_only=True):
+        if row['child'] in (getattr(rt, 'delegate_caps', None) or ()):
+            continue                      # running in this process now
         g = rt.store.goal(row['child'])
         orphaned = False
         if g['state'] in ('queued', 'working', 'waiting_model'):

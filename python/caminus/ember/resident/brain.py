@@ -144,10 +144,10 @@ class Brains:
                 self.rt.free.end_off_plan(gid)
                 return None
             if self.fallback is None:
-                return self.rt.model
+                return self.primary
             use = name
         elif self.fallback is None:
-            return self.rt.model            # one brain: whatever the runtime holds, untouched
+            return self.primary          # one brain: the resident's own, never the brain a side run left in rt.model
         else:
             use = 'primary' if self._primary_up() or not self._allowed(gid) else 'fallback'
         if self.last.get(gid) != use:
