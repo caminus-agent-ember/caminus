@@ -3119,6 +3119,43 @@ for line in sys.stdin:
             self.assertIn('do not wait again',r['note'])
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_store_that_fails_mid_wait_is_not_reported_as_a_goal_that_went_away(self):
+        # the per-pass deadline read ended in `except Exception: row = None`, so a store that closed or locked
+        # under a wait told the goal its own row was gone: the wrong fault, and one that reads as "you are
+        # finished, stop waiting" (#382 review, rev-glm P2). The two cases say which happened.
+        import sqlite3
+        from caminus.ember.resident import housemate
+        housemate.POLL=0.05
+        rt=Runtime(self.home)
+        class Wrap:
+            def __init__(s,db,act): s.db,s.act,s.n=db,act,0
+            def execute(s,sql,*a):
+                if sql.startswith('SELECT deadline FROM goals'):
+                    s.n+=1
+                    return s.act(s.db,s.n,sql,a)
+                return s.db.execute(sql,*a)
+            def __getattr__(s,name): return getattr(s.db,name)
+        def locked(db,n,sql,a): raise sqlite3.OperationalError('database is locked')
+        try:
+            gid=rt.store.enqueue('Wait.')
+            rt.store.db=Wrap(rt.store.db,locked)
+            r=housemate.wait(rt,gid,'message',timeout=1800)
+            self.assertIn('store could not be read',r['happened'])
+            self.assertIn('OperationalError',r['note'])
+            self.assertIn('database is locked',r['note'])
+            # the row that really goes away, after the wait has started: the second pass finds it gone
+            gid2=rt.store.enqueue('Wait.')
+            def vanish(db,n,sql,a):
+                if n==2: db.execute('DELETE FROM goals WHERE id=?',(gid2,));db.commit()
+                return db.execute(sql,*a)
+            rt.store.db=Wrap(rt.store.db.db,vanish)
+            r=housemate.wait(rt,gid2,'message',timeout=1800)
+            self.assertEqual(r['happened'],'the goal is no longer in the store','a row that went away still says so')
+        finally:
+            housemate.POLL=1.0
+            while isinstance(rt.store.db,Wrap): rt.store.db=rt.store.db.db
+            rt.mail.close();rt.store.close()
+
     def test_the_children_limit_counts_running_children_not_every_child_ever_made(self):
         # count(*) counted every child the parent ever made, so after 4 finished children it could never delegate
         # again, while the refusal said finishing one frees a slot (#382 review). Running rows count; a child's

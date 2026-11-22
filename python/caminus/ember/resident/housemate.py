@@ -92,12 +92,23 @@ def wait(rt, gid, until, target='', timeout=300):
     queued = _queued(rt, gid)
     while True:
         # The wait lasts at most the caller's timeout AND the goal's time budget, and the budget is re-read every
-        # pass: a deadline extended or shortened mid-wait is the one that counts (#382 review, rev-glm P2). A
-        # direct read, because a goal row going away must end the wait, not raise out of it.
+        # pass: a deadline extended or shortened mid-wait is the one that counts (rev-glm P2). A direct read, not
+        # store.goal() (which loads the whole row and its messages on every poll), and every way that read can fail
+        # ends the wait with a reply instead of raising out of the goal loop: the store closing under the wait, or
+        # the goal's row going away.
         limit = timeout
-        row = rt.store.db.execute('SELECT deadline FROM goals WHERE id=?', (gid,)).fetchone()
-        if row is not None:
-            deadline = row['deadline'] or None
+        try:
+            row = rt.store.db.execute('SELECT deadline FROM goals WHERE id=?', (gid,)).fetchone()
+        except Exception as e:
+            # a store that will not answer this pass is not a goal that went away: say which happened, so the goal
+            # pauses on the store's real fault instead of being told its own row is gone (#382 review, rev-glm P2)
+            return dict(happened='the store could not be read while this waited',
+                        waited_s=round(time.monotonic() - start, 1),
+                        note=f'{type(e).__name__}: {e}; the wait ended here rather than raising out of the goal loop')
+        if row is None:
+            return dict(happened='the goal is no longer in the store', waited_s=round(time.monotonic() - start, 1),
+                        note='nothing left to wait for; check the goal before waiting again')
+        deadline = row['deadline'] or None
         if deadline is not None:
             left = deadline - time.time()
             if left < 1:
