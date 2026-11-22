@@ -69,7 +69,10 @@ func workersRow(ws []residentWorker) string {
 	if out == "" {
 		out = "done"
 	}
-	return fmt.Sprintf("no children running · last %s $%.4f", out, w.SpendUSD+w.AllowanceUSD)
+	// The money is every listed child's spend, like the running row above, and the label says so: the previous
+	// "last completed $x" printed only the newest finished child's spend inside a phrase that read like a total,
+	// so one label meant two quantities (#384 review).
+	return fmt.Sprintf("no children running · $%.4f spent · last %s", spent, out)
 }
 
 // workersLines is one line per child for the session card (#342 full): what it may do, the goal it was given, the

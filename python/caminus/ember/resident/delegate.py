@@ -862,6 +862,16 @@ def _close(rt, parent, report):
         report['worktree_removed'] = ('the child changed nothing, so its checkout and branch are gone: there is '
                                       'nothing to merge or discard')
     rt.store.delegate_done(child, report['outcome'], report)
+    try:
+        rt.store.goal(parent)
+    except ValueError:
+        # The parent's goal is gone (its session was removed): the delegates row above still closes, so the child
+        # stops being listed, but the event and the SIM observation are for a goal nothing can read. The worktree
+        # cleanup above already ran, and the row keeps the report's merge/discard commands. The brain registration
+        # still has to go with the run.
+        rt.delegate_models.pop(child, None)
+        rt.delegate_caps.pop(child, None)
+        return report
     rt.store.event('delegate_done', {k: v for k, v in report.items() if k not in ('summary', 'skipped')}, parent)
     rid = row.get('sim') or ''
     if rid:
@@ -882,16 +892,32 @@ def _close(rt, parent, report):
 
 def park(rt, parent, handle):
     """After a delegate(wait=false) call: the goal has nothing to do until its children report, so it waits
-    rather than spending turns asking whether they are done. The loop's settle wakes it."""
+    rather than spending turns asking whether they are done. The loop's settle wakes it.
+
+    Only a working goal is parked. A pause that landed between the action's dispatch and this call (a person's, or
+    the watchdog's) outranks the park and must stay a pause: moving it to `waiting_children` let settle wake it, so
+    the goal a human had just stopped resumed (#384 review)."""
     with rt.store.transaction():
-        if rt.store.goal(parent)['state'] not in ('cancelled',):
+        parked = rt.store.goal(parent)['state'] == 'working'
+        if parked:
             rt.store.update(parent, state='waiting_children')
-    rt.store.event('delegate_parked', dict(child=handle.get('child')), parent)
+    if parked:
+        rt.store.event('delegate_parked', dict(child=handle.get('child')), parent)
 
 
 def waiting(rt, parent):
     """This goal's children that are still running, oldest first."""
     return [r['child'] for r in rt.store.delegates(parent=parent, open_only=True)]
+
+
+def _parent_state(rt, parent):
+    """The parent goal's state, or None when its goal is gone (its session was removed). A child of a deleted
+    parent is an orphan, and settle must close it rather than raise `unknown goal` out of the loop on every pass
+    (#384 review)."""
+    try:
+        return rt.store.goal(parent)['state']
+    except ValueError:
+        return None
 
 
 def settle(rt):
@@ -901,8 +927,21 @@ def settle(rt):
     moved = False
     for row in rt.store.delegates(open_only=True):
         parent = row['parent']
-        pstate = rt.store.goal(parent)['state']
+        pstate = _parent_state(rt, parent)
         g = rt.store.goal(row['child'])
+        if pstate is None:
+            # The parent's goal is gone: nothing will read this child's report, and a child still runnable must
+            # not run on this process's registrations. Close the row as orphaned, the way sweep closes a
+            # leftover, without filing into a goal that no longer exists (#384 review).
+            if g['state'] in ('queued', 'working', 'waiting_model'):
+                with rt.store.transaction():
+                    rt.store.update(g['id'], state='paused',
+                                    error='its parent goal was deleted mid-delegation')
+                g = rt.store.goal(g['id'])
+            if g['state'] in ('completed', 'cancelled', 'paused', 'error'):
+                _close(rt, parent, _report(rt, row, g, None if g['state'] == 'completed' else 'orphaned'))
+                moved = True
+            continue
         if pstate in ('cancelled', 'paused', 'error'):
             if g['state'] in ('queued', 'working', 'waiting_model'):
                 with rt.store.transaction():
@@ -919,7 +958,7 @@ def settle(rt):
     # A parent parked on its children wakes once none is running: the reports arrive as one nudge, the way peer
     # mail does, so its next turn has them in the conversation it reads.
     for parent in {r['parent'] for r in rt.store.delegates()}:
-        if rt.store.goal(parent)['state'] != 'waiting_children':
+        if _parent_state(rt, parent) != 'waiting_children':
             continue
         if rt.store.delegates(parent=parent, open_only=True):
             continue

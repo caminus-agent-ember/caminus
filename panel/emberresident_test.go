@@ -22,7 +22,7 @@ func TestWorkersRowNamesTheNewestFinishedChildAndCountsAllowance(t *testing.T) {
 		{Child: "b", SpendUSD: 0.01, AllowanceUSD: 0.02, CapUSD: 0.5, Outcome: "completed"},
 		{Child: "a", SpendUSD: 0.03, AllowanceUSD: 0, CapUSD: 0.5, Outcome: "capped"},
 	}
-	if got, want := workersRow(ws), "no children running · last completed $0.0300"; got != want {
+	if got, want := workersRow(ws), "no children running · $0.0600 spent · last completed"; got != want {
 		t.Fatalf("last row: %q, want %q", got, want)
 	}
 	ws = []residentWorker{

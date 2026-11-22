@@ -3770,6 +3770,51 @@ for line in sys.stdin:
         results=[e['data']['result'] for e in events if e['kind']=='tool_result' and e['data'].get('name')=='collect']
         self.assertEqual({c['outcome'] for c in results[0]['children']},{'completed'})
 
+    def test_park_leaves_a_paused_parent_paused(self):
+        # #384 review P2: park() moved any parent that was not cancelled to waiting_children, so a pause that
+        # landed between the action's dispatch and the park (a person's, or the watchdog's) was lifted and settle
+        # woke the goal a human had just stopped. A working parent still parks as before.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():rt.store.update(parent,state='paused')
+            delegate.park(rt,parent,dict(child=child))
+            self.assertEqual(rt.store.goal(parent)['state'],'paused','the park must not lift a pause')
+            self.assertFalse([e for e in rt.store.events() if e['kind']=='delegate_parked'],
+                             'a parent that did not park has no park event')
+            with rt.store.transaction():rt.store.update(parent,state='working')
+            delegate.park(rt,parent,dict(child=child))
+            self.assertEqual(rt.store.goal(parent)['state'],'waiting_children')
+            self.assertTrue([e for e in rt.store.events() if e['kind']=='delegate_parked'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_settle_closes_a_child_whose_parent_goal_is_gone(self):
+        # #384 review P2: settle read rt.store.goal(row['parent']) before closing, so a child whose parent goal was
+        # deleted with its session raised `unknown goal` out of the settle call on every pass, and its row stayed
+        # open forever. The row still closes (orphaned, named in its report) and nothing is filed into the parent
+        # that no longer exists.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            rt.delegate_caps[child]=0.5
+            rt.delegate_models[child]=rt.model
+            with rt.store.transaction():rt.store.db.execute('DELETE FROM goals WHERE id=?',(parent,))
+            self.assertTrue(delegate.settle(rt))
+            row=rt.store.delegate(child)
+            self.assertEqual(row['outcome'],'orphaned')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertNotIn(child,rt.delegate_caps,'the brain registration must not outlive the child')
+            self.assertFalse([e for e in rt.store.events() if e['kind']=='delegate_done'],
+                             'nothing is filed into a goal that does not exist')
+            self.assertFalse(delegate.settle(rt),'the closed row is not closed again on the next pass')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_finished_delegate_child_cannot_be_continued(self):
         # `send --continue` on a completed goal revived it with no delegate check, so a child ran again on the
         # default brain with no cap (#382 review, and resume_goal refuses the same move). Same answer on both paths.
