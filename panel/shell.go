@@ -122,8 +122,10 @@ func stateStyle(state string) (string, lipgloss.Style) {
 	return g.idle, lipgloss.NewStyle().Foreground(cMuted)
 }
 
-// shellHeader: the agent, its state, what it is doing, and on the right the step count.
-func shellHeader(agent, state, goal string, steps, w int) string {
+// shellHeader: the agent, its state, what it is doing, and on the right the step count. cut reports that the header
+// truncated the goal off its title line to fit the width: a caller that has to know whether the goal is whole on the
+// title line reads that, never a marker in the drawn string, because a goal may hold a "…" of its own.
+func shellHeader(agent, state, goal string, steps, w int) (head string, cut bool) {
 	icon, st := stateStyle(state)
 	detail := ""
 	if goal != "" {
@@ -133,8 +135,9 @@ func shellHeader(agent, state, goal string, steps, w int) string {
 }
 
 // screenHeader is every screen's first two lines (the env chat, caminus panel, caminus top): CAMINUS · what · its
-// state in its one colour · dim details, something on the right, and a chrome rule under it.
-func screenHeader(what, state string, st lipgloss.Style, detail, right string, w int) string {
+// state in its one colour · dim details, something on the right, and a chrome rule under it. cut reports that the
+// left side was truncated with a "…" to leave room for right.
+func screenHeader(what, state string, st lipgloss.Style, detail, right string, w int) (head string, cut bool) {
 	left := emberTitle.Render("CAMINUS") + emberDim.Render(" · ") + lipgloss.NewStyle().Foreground(cText).Render(what)
 	if state != "" {
 		left += " " + st.Render(state)
@@ -144,10 +147,12 @@ func screenHeader(what, state string, st lipgloss.Style, detail, right string, w
 	}
 	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
-		left = ansi.Truncate(left, max(1, w-lipgloss.Width(right)-2), "…")
+		limit := max(1, w-lipgloss.Width(right)-2)
+		cut = lipgloss.Width(left) > limit
+		left = ansi.Truncate(left, limit, "…")
 		gap = max(1, w-lipgloss.Width(left)-lipgloss.Width(right))
 	}
-	return left + strings.Repeat(" ", gap) + right + "\n" + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", w))
+	return left + strings.Repeat(" ", gap) + right + "\n" + lipgloss.NewStyle().Foreground(cGray).Render(strings.Repeat("─", w)), cut
 }
 
 // shellMessage: a turn of the conversation, with a thin rule instead of a box.

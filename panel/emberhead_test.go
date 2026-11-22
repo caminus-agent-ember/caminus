@@ -6,7 +6,7 @@ package main
 // #316: the goal at the top of the chat expands and collapses — by Alt+G and by a click on the header, at 80, 100
 // and 160 columns, with the "… (N more lines, Alt+G expands)" hint only while it is cut, the whole goal drawn as
 // Markdown (lists, code), and select-to-copy taking the whole goal rather than the lines the header had room for.
-// The later rounds (#370 review) added the expansion as a view of the goal it was opened on (Ctrl+N or a switch to
+// The later rounds added the expansion as a view of the goal it was opened on (Ctrl+N or a switch to
 // another goal hides it, and the next Esc is not eaten), the hint cut to the terminal's width, the click that clears
 // a copy not also toggling the goal under it, the scrolled row clamped to what the goal on the screen has, headMD
 // bounded, an expansion opened on a goal whose prompt is blank still keyed to that goal, and the expansion's own
@@ -235,7 +235,7 @@ func TestCopyingTheHeaderTakesTheWholeGoal(t *testing.T) {
 	}
 }
 
-// ---- #370 review rounds: the expansion as a view of its goal, the click, the scroll row, the caches ----
+// ---- #370 rounds: the expansion as a view of its goal, the click, the scroll row, the caches ----
 
 // openHead expands the goal under the title through the key the chat really reads.
 func openHead(t *testing.T, m emberModel) emberModel {
@@ -469,7 +469,7 @@ func TestTheExpandedGoalKeepsThreeRowsOnATinyScreen(t *testing.T) {
 
 // TestTheGoalDrawingsStayBounded: headMD is keyed by width and goal text and syncChat clears it only on a resize, so
 // a long run that shows many goals would keep every drawing. Past the bound one other drawing is evicted per insert:
-// the cache stays bounded and the goal on the screen keeps the drawing the next frame asks for (#370 review).
+// the cache stays bounded and the goal on the screen keeps the drawing the next frame asks for.
 func TestTheGoalDrawingsStayBounded(t *testing.T) {
 	m := openHead(t, longGoalChat(t, 100, 30))
 	m.syncChat()
@@ -490,7 +490,7 @@ func TestTheGoalDrawingsStayBounded(t *testing.T) {
 		t.Fatalf("drawing the same goal twice added an entry (%d then %d)", n, got)
 	}
 	// The goal on the screen is the one the cache keeps: clearing the whole map with every insert dropped its
-	// drawing too, and the very next frame (chatHead runs on every frame) rendered it again (#370 review).
+	// drawing too, and the very next frame (chatHead runs on every frame) rendered it again.
 	if _, ok := m.chat.headMD[headKey{width: 100, text: m.headGoalText()}]; !ok {
 		t.Fatalf("the goal on the screen is not in headMD after %d goals (%d entries)", headMDMax+4, len(m.chat.headMD))
 	}
@@ -499,7 +499,7 @@ func TestTheGoalDrawingsStayBounded(t *testing.T) {
 // TestAnExpansionOnABlankPromptStillBelongsToItsGoal: headGoalID keyed off headGoalText, which is "" for a goal
 // whose prompt is blank, so it answered "" for a goal that is on the screen. The id comes from the cases headGoalText
 // blanks for *status* (no status yet, no selected goal, a new goal being written), not from the text the goal happens
-// to have (#370 review). The key cannot reach the old bug today - Alt+G only opens a goal that is cut, and a blank
+// to have. The key cannot reach the old bug today - Alt+G only opens a goal that is cut, and a blank
 // prompt is never cut - but the id it stores is what headShown compares against, and any other caller would have hit
 // it.
 func TestAnExpansionOnABlankPromptStillBelongsToItsGoal(t *testing.T) {
@@ -534,7 +534,7 @@ func TestAnExpansionOnABlankPromptStillBelongsToItsGoal(t *testing.T) {
 
 // TestCopyingTheHeaderPastTheGoalTakesTheHintAsItself: the goal under the title occupies rows 1..rows, and the row
 // after them is the cut hint (collapsed) or the scroll footer (open). A selection that reaches that row copies it as
-// what it is — the header's goal substitution stops at the goal's own rows instead of running to the rule (#370 review).
+// what it is: the header's goal substitution stops at the goal's own rows instead of running to the rule (#316).
 func TestCopyingTheHeaderPastTheGoalTakesTheHintAsItself(t *testing.T) {
 	t.Run("collapsed", func(t *testing.T) {
 		m := longGoalChat(t, 100, 30)
@@ -627,5 +627,26 @@ func TestCopyingAnOpenScrolledGoalAndTheRowsUnderIt(t *testing.T) {
 	m.chat.sel.moved, m.chat.sel.dragging = true, false
 	if got := m.selectedText(); strings.Contains(got, "The last line of the goal") {
 		t.Fatalf("a transcript selection took the header's goal:\n%s", got)
+	}
+}
+
+// TestAGoalWithItsOwnEllipsisIsNotCut: the header's own report is what says the goal was cut, not a "…" anywhere in
+// the drawn title line. A short goal that writes "…" itself is whole on the title row, and the header says so.
+func TestAGoalWithItsOwnEllipsisIsNotCut(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	const goal = "Fix the parser… then the printer"
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: goal}}
+	m.goalSel, m.chat.target = 0, "original"
+	if m.headCut(100) {
+		t.Fatalf("a goal whose own text holds a … was taken for a cut one:\n%s", ansi.Strip(m.chatHead(100)))
+	}
+	head := ansi.Strip(m.chatHead(100))
+	title, _, _ := strings.Cut(head, "\n")
+	if !strings.Contains(title, goal) {
+		t.Fatalf("the goal is not whole on the title line:\n%s", head)
+	}
+	if got := rows(head); got != 2 { // the title and the rule, with no goal rows under the title
+		t.Fatalf("the header drew %d rows: it moved the goal under the title:\n%s", got, head)
 	}
 }

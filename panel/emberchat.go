@@ -239,7 +239,7 @@ func (m *emberModel) initChat() {
 	// turning every editor keystroke and cursor blink into a full transcript scan.
 	c.transcript.SoftWrap = false
 	// The expansion's renderer cache: made here (a pointer receiver) so headExpandedBody's value receiver writes
-	// into the same map instead of a copy's (#370 review).
+	// into the same map instead of a copy's.
 	c.headR = map[int]*glamour.TermRenderer{}
 	m.chat = c
 	m.chatStyles()
@@ -474,7 +474,7 @@ func (m *emberModel) targetSelectedGoal() {
 // forgetMarkdown drops every drawing and renderer made with the theme that was in force: syncChat builds them again
 // from the theme now set. A cache keyed by width (headR) or by width and text (headMD) cannot know the theme changed,
 // so each theme path drops them where the change happens rather than relying on syncChat running before the next
-// frame is drawn (#370 review).
+// frame is drawn.
 func (m *emberModel) forgetMarkdown() {
 	m.chat.markdown = nil
 	clear(m.chat.mdCache)
@@ -675,7 +675,7 @@ func headGoalRowsUnderTitle(goalText string, w int) []string {
 // headExpansion is what the expanded header shows of the goal: the rows drawn under the title, the goal row the
 // first of them is, and how many rows the goal has. One computation, read by the drawing, the copy (emberselect)
 // and scrollHead alike: computed twice, a stale headTop against a shorter body could put the scroll footer under
-// rows the copy does not call the goal (#370 review).
+// rows the copy does not call the goal.
 type headExpansion struct {
 	rows  []string // the goal rows under the title (headTop applied, capped at headRows)
 	top   int      // the goal row rows[0] is
@@ -709,14 +709,14 @@ func (m emberModel) chatHead(w int) string {
 	if m.headShown() {
 		return m.headExpanded(agent, state, steps, w)
 	}
-	// The header with the goal on its title line, built once: headCut reads the cut from this string and the uncut
-	// header is exactly this string, which chatHead used to build a second time on every frame (and bodyHeight on
-	// every poll) (#370 review).
-	withGoal := shellHeader(agent, state, goalText, steps, w)
-	if !headCutParts(goalText, withGoal, w) { // (one test, shared with Alt+G and the click: see headCut)
+	// The header with the goal on its title line, built once: its own report of the cut fixes the layout test and
+	// the uncut header is exactly this string, which chatHead used to build a second time on every frame (and
+	// bodyHeight on every poll).
+	withGoal, cutOnTitle := shellHeader(agent, state, goalText, steps, w)
+	if !headCutParts(goalText, cutOnTitle, w) { // (one test, shared with Alt+G and the click: see headCut)
 		return withGoal
 	}
-	head := shellHeader(agent, state, "", steps, w)
+	head, _ := shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
 	// Wrap breaks a long path too (Wordwrap left it to be cut at the edge with no marker)
 	wrapped := headWrappedLines(goalText, w)
@@ -799,32 +799,24 @@ func headWrappedLines(goal string, w int) []string {
 // question is headWrapsPastLines.
 func (m emberModel) headCut(w int) bool {
 	state, steps, goalText := m.headParts()
-	return headCutParts(goalText, shellHeader(residentText(m.agentName), state, goalText, steps, w), w)
+	_, cutOnTitle := shellHeader(residentText(m.agentName), state, goalText, steps, w)
+	return headCutParts(goalText, cutOnTitle, w)
 }
 
 // headCutParts is headCut over a header the caller has already built (chatHead draws that same string), so the layout
-// test costs no second build on a frame. Its two clauses answer different questions, and neither alone is the
-// expansion test (#370 review): headCutAtTitle is "the title row cut the goal off beside the agent",
-// headWrapsPastLines is "the goal has more rows than the collapsed header draws" — only the second means some of
-// the goal is hidden.
-func headCutParts(goalText, head string, w int) bool {
-	return headCutAtTitle(goalText, head) || headWrapsPastLines(goalText, w)
-}
-
-// headCutAtTitle: screenHeader cut the goal off the title line with a "…" (it did not fit beside the agent).
-func headCutAtTitle(goalText, head string) bool {
-	if goalText == "" {
-		return false
-	}
-	first, _, _ := strings.Cut(head, "\n")
-	return strings.Contains(ansi.Strip(first), "…")
+// test costs no second build on a frame. cutOnTitle is the header's own report that it cut the goal off the title
+// row beside the agent; the two clauses answer different questions, and neither alone is the expansion test:
+// cutOnTitle is "the goal is not whole on the title line", headWrapsPastLines is "the goal has more rows than the
+// collapsed header draws" — only the second means some of the goal is hidden.
+func headCutParts(goalText string, cutOnTitle bool, w int) bool {
+	return (goalText != "" && cutOnTitle) || headWrapsPastLines(goalText, w)
 }
 
 // headWrapsPastLines: the goal wraps to more rows than the collapsed header draws (headLines), so some of it is not on
 // the screen. This, not headCut, is the expansion test: the hint, Alt+G and a click on the header all use it, so a goal
 // cut off the title line that wraps into headLines or fewer is drawn whole under the title — the hint stays away and
 // the key does nothing, rather than opening an expansion that would repeat what is shown. It reads only the goal's
-// text, not the model (#370 review).
+// text, not the model.
 func headWrapsPastLines(goalText string, w int) bool {
 	return goalText != "" && len(headWrappedLines(goalText, w)) > headLines
 }
@@ -844,17 +836,16 @@ func (m emberModel) headShown() bool {
 // headRows is how many rows of the expanded goal the header shows at once: half the screen less the title and the
 // rule, so the transcript keeps some room under it.
 // The 12-row floor is what keeps this at three rows on a tiny terminal (below 24 rows, h/2-3 is under 9 and would
-// reach 0 at 6): with it, h/2-3 is never below 3, so the outer max(3, …) that used to wrap it could not be reached
-// (#370 review).
+// reach 0 at 6): with it, h/2-3 is never below 3, so the outer max(3, …) that used to wrap it could not be reached.
 func (m emberModel) headRows() int { return max(12, m.height)/2 - 3 }
 
 // headExpanded is the header with the whole goal under the title, drawn as Markdown like a reply, capped at half
 // the screen and scrolled by headTop (PgUp/PgDn; Alt+G or Esc collapses it).
 func (m emberModel) headExpanded(agent, state string, steps, w int) string {
-	head := shellHeader(agent, state, "", steps, w)
+	head, _ := shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
 	// The rows, the row they start at and the goal's length all come from one computation, the same one the copy
-	// reads (#370 review).
+	// reads.
 	e := m.headExpansion(w)
 	out := title
 	for _, ln := range e.rows {
@@ -872,8 +863,7 @@ func (m emberModel) headExpanded(agent, state string, steps, w int) string {
 // scrollHead moves the expanded goal's first row by n, and reports whether it moved: a goal that fits its half of
 // the screen has nowhere to go, and PgUp/PgDn must then page the transcript as they always did.
 func (m *emberModel) scrollHead(n int) bool {
-	// The rows, the row the display is on and the last row all come from the same computation the drawing uses
-	// (#370 review).
+	// The rows, the row the display is on and the last row all come from the same computation the drawing uses.
 	e := m.headExpansion(max(20, m.width))
 	// The row the display is on, not the one the state holds: the goal under the title can change while the
 	// expansion stays open (a re-aim keeps headFor, so headShown stays true), and headExpansion clamps the stale
@@ -894,7 +884,7 @@ type headKey struct {
 // headMDMax bounds headMD. It is keyed by width and goal text, and syncChat clears it only when the width changes,
 // so a long run that shows many goals (each re-aim is a new text) would keep every drawing for the life of the
 // process. Past the bound one other drawing is evicted per insert: only the goal on the screen is ever asked for,
-// and dropping that one too would re-render it on the very next frame (#370 review).
+// and dropping that one too would re-render it on the very next frame.
 const headMDMax = 8
 
 // headExpandedBody is the goal drawn as Markdown, as the expanded header shows it. chatHead runs on every frame (and
@@ -911,7 +901,7 @@ func (m emberModel) headExpandedBody(w int) string {
 	if r == nil {
 		// Before syncChat has built chat.markdown (the first frames of a session, or a theme switch that clears
 		// it), the expansion used to build a renderer per call: chatHead runs on every frame and bodyHeight on
-		// every poll, so one wide goal cost a glamour renderer per frame (#370 review). Kept by wrap width, whose
+		// every poll, so one wide goal cost a glamour renderer per frame. Kept by wrap width, whose
 		// set is as small as the terminal's; the map is made in initChat and renewed on a resize.
 		r = m.chat.headR[wrap]
 		if r == nil {
@@ -923,7 +913,7 @@ func (m emberModel) headExpandedBody(w int) string {
 	if m.chat.headMD != nil {
 		if len(m.chat.headMD) >= headMDMax {
 			// One other drawing goes, not the whole cache: the goal on the screen is asked for every frame, and a
-			// clear dropped its drawing with the rest, so the next frame rendered it again (#370 review). Any one
+			// clear dropped its drawing with the rest, so the next frame rendered it again. Any one
 			// key will do — map order is the eviction order this cache never promised.
 			for k := range m.chat.headMD {
 				if k != key {
@@ -938,7 +928,7 @@ func (m emberModel) headExpandedBody(w int) string {
 }
 
 // collapseHead closes the goal under the title and forgets the row it was scrolled to. Every way out (Alt+G, Esc)
-// goes through here, so a new expansion always opens at its first line (#370 review).
+// goes through here, so a new expansion always opens at its first line.
 func (m *emberModel) collapseHead() { m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0 }
 
 // toggleHead expands the goal under the title, or collapses it back to its three lines. Only a goal with rows the
@@ -960,7 +950,7 @@ func (m emberModel) toggleHead() (tea.Model, tea.Cmd) {
 // headGoalID is the selected goal's id, or "" when the chat shows no goal: the same cases headGoalText blanks for
 // *status* (no status yet, no selected goal, a new goal being written), not the text it ends up with. Keying it off
 // the text read a goal whose prompt is blank as "no goal", so an expansion opened on it stored "" and could never
-// match that goal again (#370 review).
+// match that goal again.
 func (m emberModel) headGoalID() string {
 	if m.statusAt.IsZero() || (m.chat.newGoal && m.chat.forceNew) {
 		return ""

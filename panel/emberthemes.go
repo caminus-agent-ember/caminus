@@ -425,7 +425,8 @@ func themePreview(name string, w int) string {
 	fgc := func(role string) lipgloss.Style { return lipgloss.NewStyle().Foreground(themeColor(role)) }
 	var out []string
 	add := func(s ...string) { out = append(out, s...) }
-	add(shellHeader("resident", "working", "add tests for the parser and make them pass", 42, w))
+	header, _ := shellHeader("resident", "working", "add tests for the parser and make them pass", 42, w)
+	add(header)
 	add("")
 	add(fgc("user").Render(g.user+" ")+fgc("text").Render("add tests for the parser, then make them pass"), "")
 	add(emberThink.Render("  I should read the parser first and see which cases have no test."), "")
