@@ -900,7 +900,10 @@ class Runtime:
         three repeats. No tool in the tree answers `ok: False` today - the only `ok=False` dict is
         `catalog.refresh`'s per-provider status, which is not a tool result - so narrowing the arm to a name list
         would only re-split the one rule this class exists to keep whole. The same contract is stated for tool
-        authors in docs/resident-agent.md (## Tools), next to the tool table."""
+        authors in docs/resident-agent.md (## Tools), next to the tool table, and
+        tests/ember/test_resident.py::test_the_tool_result_failure_contract_allows_no_ok_false enforces it: a tool
+        result that gains a literal `ok: False` fails that test and names the site, so a neutral no-op cannot start
+        pausing goals through the watchdog."""
         if not isinstance(result, dict):
             return ''
         if result.get('error'):

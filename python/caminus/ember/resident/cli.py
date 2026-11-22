@@ -529,6 +529,9 @@ def resume_goal(store,gid,max_steps=None,max_seconds=None):
             raise ValueError('submit a new goal instead of replaying a finished one')
         store.update(gid,state='working',step_limit=g['steps']+max_steps if max_steps else None,
                      deadline=time.time()+max_seconds if max_seconds else None,error='')
+        # Where an episode begins (reflect._episode_start): the boundary is written on the resume, not on the
+        # stop, because the stop kinds are many and a list of them went stale (#383 review P2).
+        store.event('episode_resumed', dict(state=g['state']), gid)
 
 
 def unit_text(name,home,program=None):
@@ -1325,6 +1328,8 @@ def main(argv=None,stdin=None):
                     if state=='completed':
                         store.update(a.goal_id,state='working',summary='',error='',deadline=None,step_limit=None)
                         store.event('goal_continued',{},a.goal_id)
+                        # a continued goal is a new episode too (reflect._episode_start)
+                        store.event('episode_resumed',dict(state='completed'),a.goal_id)
                     store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',
                                      (a.goal_id,text,'steer' if a.steer else 'nudge'))
                     store.event('user_message',dict(text=text,kind='steer' if a.steer else 'nudge'),a.goal_id)

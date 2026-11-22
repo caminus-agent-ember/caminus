@@ -8402,7 +8402,8 @@ for line in sys.stdin:
     def test_a_reopened_goals_reflection_reads_only_this_episodes_judge(self):
         # #383 review P2: the brief and the record's eval_context took the newest `judged` event for the goal. A
         # reopened goal that finished again without a judge this episode would quote the earlier verdict, which
-        # describes a different episode. Both lookups are now scoped to the episode (after the previous `finished`).
+        # describes a different episode. Both lookups are scoped to the episode now, and the episode begins at the
+        # resume (`send --continue` writes `episode_resumed`), not at a list of stop kinds.
         self.gates_on()
         self.reflect_on()
         from caminus.ember.resident import reflect
@@ -8411,10 +8412,14 @@ for line in sys.stdin:
             gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
             rt.store.event('judged',dict(verdict='unmet',reason='the old episode'),gid)
             rt.store.event('finished',dict(summary='first episode'),gid)
+            with rt.store.transaction():   # what send --continue writes on a finished goal
+                rt.store.update(gid,state='working',summary='',error='',deadline=None,step_limit=None)
+                rt.store.event('goal_continued',{},gid)
+                rt.store.event('episode_resumed',dict(state='completed'),gid)
             # this episode's own finish: _finish writes it before it calls the reflection (runtime._finish)
             rt.store.event('finished',dict(summary='second episode'),gid)
             since=reflect._episode_start(rt,gid)
-            self.assertGreater(since,0,'the previous episode’s finish bounds this one')
+            self.assertGreater(since,0,'the resume that began this episode bounds it')
             self.assertEqual(reflect._judge(rt,gid,since),(None,''),'the earlier verdict is not this episode’s')
             self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
             rt.store.event('judged',dict(verdict='met',reason='this episode'),gid)
@@ -8422,58 +8427,37 @@ for line in sys.stdin:
             self.assertIn('THE FINISH JUDGE: met — this episode',reflect.brief(rt,gid,'Done.',''))
         finally:rt.mail.close();rt.store.close()
 
-    def test_an_errored_then_resumed_goal_starts_a_new_episode(self):
-        # #383 review P2: _episode_start counted only `finished` events, so a goal that errored and was resumed had
-        # no earlier finish to bound the episode: seq 0 let the pre-error episode's judge and evidence into the new
-        # reflection. The error that ended the episode bounds it now, as the previous finish does.
+    def test_any_stop_kind_then_a_resume_starts_a_new_episode(self):
+        # #383 review P2: _episode_start listed the event kinds that end an episode, and the list was already
+        # incomplete (the watchdog, the plain-text guard, the emergency stop, either oneshot budget -- two wrote no
+        # event at all -- a model truncation, a refused model and delegate_row_missing all stop a goal). A goal
+        # stopped by a kind the list never named kept its stopped episode's judge and tool calls in the next
+        # reflection. The boundary is written on the resume now (cli.resume_goal, and `send --continue` on a finished
+        # goal), not at the stop, so a new stop kind cannot break it.
         self.gates_on()
         self.reflect_on()
         from caminus.ember.resident import reflect
+        from caminus.ember.resident.cli import resume_goal
         rt=Runtime(self.home)
         try:
-            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
-            rt.store.event('judged',dict(verdict='unmet',reason='the episode that errored'),gid)
-            rt.store.event('runtime_error',dict(error='ValueError: boom'),gid)
-            # this episode's own finish: _finish writes it before it calls the reflection
-            rt.store.event('finished',dict(summary='the resumed episode finished'),gid)
-            since=reflect._episode_start(rt,gid)
-            self.assertGreater(since,0,'the error that ended the previous episode bounds this one')
-            self.assertEqual(reflect._judge(rt,gid,since),(None,''),'the errored episode’s verdict is not this one’s')
-            self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
-            # the two other ways the model ends a goal without a finish bound it the same way
-            for kind in ('model_refused','model_gave_up'):
-                g2=rt.store.enqueue('Again.');rt.store.update(g2,done_check='x',state='working')
-                rt.store.event('judged',dict(verdict='unmet',reason='before'),g2)
-                rt.store.event(kind,dict(error='x'),g2)
-                rt.store.event('finished',dict(summary='after'),g2)
-                self.assertGreater(reflect._episode_start(rt,g2),0,'%s bounds the episode after it' % kind)
-                self.assertEqual(reflect._judge(rt,g2,reflect._episode_start(rt,g2)),(None,''),'%s: the old verdict stays out' % kind)
-        finally:rt.mail.close();rt.store.close()
-
-    def test_a_paused_then_resumed_goal_starts_a_new_episode(self):
-        # #383 review P2: a paused goal is resumed in place (resume_goal), so a pause ends the episode before the
-        # one that finishes next. `paused` was not a boundary, so the judge and tool calls from before the pause
-        # entered the resumed episode's reflection.
-        self.gates_on()
-        self.reflect_on()
-        from caminus.ember.resident import reflect
-        rt=Runtime(self.home)
-        try:
-            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
-            rt.store.event('judged',dict(verdict='unmet',reason='the episode before the pause'),gid)
-            rt.store.event('paused',dict(by='owner'),gid)
-            rt.store.update(gid,state='working')          # (resume_goal, in place)
-            rt.store.event('finished',dict(summary='the resumed episode finished'),gid)
-            since=reflect._episode_start(rt,gid)
-            self.assertGreater(since,0,'the pause that ended the previous episode bounds this one')
-            self.assertEqual(reflect._judge(rt,gid,since),(None,''),'the pre-pause verdict is not this one’s')
-            self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
-            # a cancelled goal cannot be resumed today; the boundary is still written for the day one is
-            g2=rt.store.enqueue('Cancelled.');rt.store.update(g2,done_check='x',state='working')
-            rt.store.event('judged',dict(verdict='unmet',reason='before the cancel'),g2)
-            rt.store.event('cancelled',{},g2)
-            rt.store.event('finished',dict(summary='after'),g2)
-            self.assertGreater(reflect._episode_start(rt,g2),0,'a cancel bounds the episode after it too')
+            for kind,data in (('watchdog',dict(reason='no progress')),('runtime_error',dict(error='ValueError: boom')),
+                              ('paused',dict(by='owner')),('model_truncated',dict(error='length')),
+                              ('model_refused',dict(error='no')),('model_gave_up',dict(error='no')),
+                              ('plain_text_pause',dict()),('emergency_stop',dict())):
+                gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+                rt.store.event('tool_result',dict(name='early_tool',call_id='c1',result=dict(output='before')),gid)
+                rt.store.event('judged',dict(verdict='unmet',reason='the stopped episode'),gid)
+                with rt.store.transaction():
+                    rt.store.update(gid,state='paused',error='stop')
+                    rt.store.event(kind,data,gid)
+                resume_goal(rt.store,gid)
+                self.assertEqual(rt.store.goal(gid)['state'],'working','%s: the goal is resumed' % kind)
+                self.assertGreater(reflect._episode_start(rt,gid),0,'%s: the resume wrote no episode boundary' % kind)
+                rt.store.event('tool_result',dict(name='late_tool',call_id='c2',result=dict(output='after')),gid)
+                text=reflect.brief(rt,gid,'Done.','')
+                self.assertNotIn('early_tool',text,'%s: the stopped episode leaked into the next reflection' % kind)
+                self.assertNotIn('the stopped episode',text,'%s: the old verdict leaked into the next reflection' % kind)
+                self.assertIn('late_tool',text,'%s: this episode’s own call is missing from the reflection' % kind)
         finally:rt.mail.close();rt.store.close()
 
     def test_a_tool_failure_shaped_ok_false_reaches_the_reflection(self):
@@ -8521,6 +8505,49 @@ for line in sys.stdin:
             self.assertEqual(rt._failure_text(dict(ok=False)),'ok=False')
             self.assertEqual(rt._failure_text(dict(exit_code=0,output='ok\n')),'')
             self.assertEqual(rt._failure_text(dict(ok=True,output='ok\n')),'')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_tool_result_failure_contract_allows_no_ok_false(self):
+        # #383 review P1: `_failure_text` reads `ok: False` as a FAILED call, and that classifier feeds the
+        # repeat-failure watchdog (three repeats pause the goal), but the rule that a neutral no-op must answer
+        # `ok: True` or omit the key was only a sentence in docs/resident-agent.md. A test enforces it now: a tool
+        # that says "nothing to do" with `ok: False` fails here instead of pausing a healthy goal in the field.
+        import ast
+        pkg=ROOT/'python'/'caminus'/'ember'/'resident'
+        files=sorted(pkg.glob('*.py'))
+        self.assertGreater(len(files),10,'the glob reads the resident package')
+        # The one legitimate `ok=False` in the tree: catalog.refresh's per-provider status, which is a provider
+        # report and never a tool result. Everything else must omit `ok` or answer `ok: True`.
+        allow={('catalog.py','refresh')}
+        hits=[]
+        for f in files:
+            tree=ast.parse(f.read_text())
+            # the enclosing function of every node, so a hit names where a tool author would look
+            where={}
+            for fn in [n for n in ast.walk(tree) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))]:
+                for sub in ast.walk(fn):
+                    where.setdefault(id(sub),fn.name)
+            for node in ast.walk(tree):
+                pairs=[]
+                if isinstance(node,ast.Dict):
+                    pairs=[(k.value,v.value) for k,v in zip(node.keys,node.values)
+                           if isinstance(k,ast.Constant) and k.value=='ok' and isinstance(v,ast.Constant)]
+                elif isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='dict':
+                    pairs=[(kw.arg,kw.value.value) for kw in node.keywords
+                           if kw.arg=='ok' and isinstance(kw.value,ast.Constant)]
+                for key,value in pairs:
+                    if key=='ok' and value is False:
+                        hits.append((f.name,where.get(id(node),'?'),node.lineno))
+        bad=[h for h in hits if (h[0],h[1]) not in allow]
+        self.assertEqual(bad,[],'a resident result says ok: False; per docs/resident-agent.md (## Tools) that means '
+                                'the call FAILED and feeds the repeat-failure watchdog. Answer a neutral no-op with '
+                                'ok: True or omit the key: ' + repr(bad))
+        # the arm itself stays: the contract is `ok: False` means failed, not that the key is ignored
+        rt=Runtime(self.home)
+        try:
+            self.assertEqual(rt._failure_text(dict(ok=False)),'ok=False')
+            self.assertEqual(rt._failure_text(dict(ok=True)),'')
+            self.assertEqual(rt._failure_text({}),'')
         finally:rt.mail.close();rt.store.close()
 
     def test_the_reflection_stops_before_the_retry_when_the_daemon_is_going(self):

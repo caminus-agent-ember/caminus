@@ -184,17 +184,16 @@ def parse(text):
 
 
 def _episode_start(rt, gid):
-    """The seq this episode began after: how the previous episode ended — an earlier `finished` event, or the error
-    that stopped the goal before it was resumed. A re-enqueued goal has no earlier `finished`, so counting only
-    `finished` left the boundary at 0 and the pre-error episode's evidence entered the new reflection (review P2).
-    `paused` is a boundary too: a paused goal is resumed in place (resume_goal), so the pause ends the episode
-    before the one that finishes next, and without it that episode's judge and tool calls came along. `cancelled`
-    is listed for the same reason even though a cancelled goal cannot be resumed today: if it ever is, the episode
-    before the cancel must not leak into the one that finishes after it."""
-    row = rt.store.db.execute(
-        "SELECT seq FROM events WHERE goal=? AND kind IN "
-        "('finished','runtime_error','model_refused','model_gave_up','paused','cancelled') "
-        "ORDER BY seq DESC LIMIT 1 OFFSET 1", (gid,)).fetchone()
+    """The seq this episode began after: the newest `episode_resumed`, or 0 for a goal that was never resumed.
+
+    The marker is written where a goal starts again (cli.resume_goal, and `send --continue` on a finished goal),
+    not at the stop. A list of stop kinds cannot stay complete: the watchdog, the plain-text guard, the emergency
+    stop, either oneshot budget (those two wrote no event at all), a model truncation and a refused model each
+    stop a goal, and `delegate_row_missing` added another, so a goal stopped by a kind the list did not name kept
+    its stopped episode's judge and tool calls in the next reflection (#383 review P2). A new stop kind cannot
+    break the boundary now. A goal resumed before this version has no marker and reads its whole history once."""
+    row = rt.store.db.execute("SELECT seq FROM events WHERE goal=? AND kind='episode_resumed' "
+                              'ORDER BY seq DESC LIMIT 1', (gid,)).fetchone()
     return row['seq'] if row else 0
 
 
