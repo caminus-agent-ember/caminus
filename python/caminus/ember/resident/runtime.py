@@ -1259,7 +1259,11 @@ class Runtime:
         if self.store.goal(gid)['state'] == 'completed':
             sandbox.end(self.home, gid, self.store)   # its box ends with it
             # Post-goal reflection (#341): one cheap call outside the transaction, writing a 'proposed' SIM
-            # record; it reads the goal it just closed, and never raises.
+            # record; it reads the goal it just closed, and never raises. On this thread it can hold the loop for
+            # up to ~120 s (one 60 s attempt, plus a second only when the first reply could not be read): the goal
+            # is already committed, and stopping() cuts the wait short. Fine while 'reflect' defaults off; if that
+            # default ever flips, move the call to a worker thread (the store already serializes completions)
+            # (#383 review P2).
             reflect.maybe(self, gid, summary, open_work)
 
     def _action(self, action):

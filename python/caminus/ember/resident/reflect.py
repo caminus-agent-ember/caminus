@@ -28,6 +28,9 @@ TIMEOUT = 60                  # seconds per attempt, whole: the goal is complete
                               # loop for a turn's 900 s. The socket timeout passed with the call only bounds each
                               # read, so the total is enforced by closing the socket (_bounded): one attempt
                               # normally, a second only when the first reply could not be read (60-120 s).
+NAMES_MAX = 40                # distinct tool names the brief lists before it keeps only the ones seen twice: the
+                              # failures below them are the evidence that matters, and a churning goal's one-off
+                              # names were pushing them out of the prompt's practical window (#383 review P2)
 SYSTEM = '''REFLECT. You review one finished agent goal and propose at most one change to the harness (the system
 prompt, a tool, a gate, a cap) that would have made this goal faster or more reliable. You see the goal, its
 done check, how it ended, its tool calls and the failures along the way. Propose only a change the evidence
@@ -288,8 +291,18 @@ def brief(rt, gid, summary, open_work):
         if why:
             failed += 1
             errors.append('%s: %s' % (name, why[:200]))
-    parts.append('ITS TOOL CALLS (newest first, at most 200): ' +
-                 (', '.join('%s×%d' % (k, v) for k, v in names.items()) or '(none)'))
+    # The summary is newest-first over at most 200 calls and keyed by name, so a churning goal's long tail of
+    # one-off tool names crowds the failure list out of the prompt's practical window. Past ~40 distinct names the
+    # singletons go and the count of them is said: a name seen once carries little, the failures carry the lesson
+    # (#383 review P2).
+    shown, dropped = names, 0
+    if len(names) > NAMES_MAX:
+        shown = {k: v for k, v in names.items() if v > 1}
+        dropped = len(names) - len(shown)
+    summary = ', '.join('%s×%d' % (k, v) for k, v in shown.items()) or '(none)'
+    if dropped:
+        summary += ' (and %d name%s seen once)' % (dropped, '' if dropped == 1 else 's')
+    parts.append('ITS TOOL CALLS (newest first, at most 200): ' + summary)
     if failed:
         parts.append('%d of those calls failed; the newest:\n' % failed + '\n'.join(errors[:5]))
     return '\n\n'.join(parts)

@@ -8507,6 +8507,38 @@ for line in sys.stdin:
             self.assertEqual(rt._failure_text(dict(ok=True,output='ok\n')),'')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_churning_goal_keeps_its_failures_in_the_brief(self):
+        # #383 review P2: the tool-call summary is keyed by name, so a goal that called a long tail of one-off
+        # tools pushed the failure list below it out of the prompt's practical window. Past NAMES_MAX distinct
+        # names the singletons go, the count of them is said, and a name seen more than once (the failures)
+        # stays.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Churn.');rt.store.update(gid,done_check='x',state='working')
+            for i in range(reflect.NAMES_MAX+5):
+                rt.store.event('tool_result',dict(name='oneoff_%d'%i,call_id='o%d'%i,result=dict(ok=True)),gid)
+            rt.store.event('tool_result',dict(name='flaky_tool',call_id='f1',result=dict(error='it broke')),gid)
+            rt.store.event('tool_result',dict(name='flaky_tool',call_id='f2',result=dict(error='it broke again')),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('flaky_tool×2',text,'the repeated tool name went with the singletons')
+            self.assertNotIn('oneoff_0',text,'a one-off name crowded the summary')
+            self.assertIn('(and %d names seen once)' % (reflect.NAMES_MAX+5),text,'the drop count is not said')
+            self.assertIn('2 of those calls failed',text)
+            self.assertIn('it broke again',text,'the newest failure fell out of the brief')
+            # under the cap every name is still listed, singletons included
+            small=rt.store.enqueue('Small.');rt.store.update(small,done_check='x',state='working')
+            rt.store.event('tool_result',dict(name='only_once',call_id='s1',result=dict(ok=True)),small)
+            rt.store.event('tool_result',dict(name='again',call_id='s2',result=dict(ok=True)),small)
+            rt.store.event('tool_result',dict(name='again',call_id='s3',result=dict(ok=True)),small)
+            small_text=reflect.brief(rt,small,'Done.','')
+            self.assertIn('only_once×1',small_text)
+            self.assertIn('again×2',small_text)
+            self.assertNotIn('seen once',small_text,'a brief under the cap dropped names anyway')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_tool_result_failure_contract_allows_no_ok_false(self):
         # #383 review P1: `_failure_text` reads `ok: False` as a FAILED call, and that classifier feeds the
         # repeat-failure watchdog (three repeats pause the goal), but the rule that a neutral no-op must answer
