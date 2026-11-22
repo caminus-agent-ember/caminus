@@ -8398,6 +8398,44 @@ for line in sys.stdin:
             self.assertFalse(brains._allowed(gid),'still unpriced: the budget does not make it refusable-but-callable')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_reflection_stops_before_the_retry_once_the_first_call_spent_the_allowance(self):
+        # #383 review P1: the first call's own cost is priced into spent_today (brains.account in _ask), so the retry
+        # could start out over the allowance the runtime refuses the goal's next turn on. The gate is read again
+        # before the retry: crossing it ends the reflection instead of billing a second call past the cap.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                if Model.calls==1:
+                    return {'content':'not json'}
+                return {'content':json.dumps(dict(problem_group='x',change='y',predicted='z'))}
+        class FakeBrains:
+            cfg=dict(budget_usd=0.5)
+            spent=0.1
+            def __init__(self,model):self.fallback=model
+            def spent_today(self):return self.spent
+            def _allowed(self,gid):return self.spent < self.cfg['budget_usd']
+            def account(self,gid):
+                # what _ask does after every call: this one alone costs the rest of the allowance
+                self.spent=0.75
+        rt=Runtime(self.home)
+        try:
+            model=Model();rt.model=model;rt.brains=FakeBrains(model)
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1,'the retry billed a second call past the allowance the first one spent')
+            self.assertEqual([e for e in rt.store.events() if e['kind']=='reflection_failed'],[])
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1,'the skip is on the record with its reason')
+            self.assertIn('allowance is spent before the retry',skipped[0]['data']['reason'])
+        finally:rt.mail.close();rt.store.close()
+
 
     def test_a_reopened_goals_reflection_reads_only_this_episodes_judge(self):
         # #383 review P2: the brief and the record's eval_context took the newest `judged` event for the goal. A
@@ -8643,9 +8681,12 @@ for line in sys.stdin:
             self.assertLess(time.monotonic()-t0,5,'the reflection held the loop until its 60 s read timeout')
             self.assertTrue(aborted.is_set(),'the hung call was not aborted')
             self.assertEqual(Model.calls,1,'the retry ran after the stop')
-            failed=[e for e in rt.store.events() if e['kind']=='reflection_failed']
-            self.assertEqual(len(failed),1)
-            self.assertIn('the daemon is stopping',failed[0]['data']['reason'])
+            # #383 review P2-1: a call cut short by the stop is a skipped reflection, not a failing one - a
+            # `reflection_failed` row would read as a harness defect to the person scanning the event log
+            self.assertEqual([e for e in rt.store.events() if e['kind']=='reflection_failed'],[])
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1)
+            self.assertIn('stopping: the reflection was cut short',skipped[0]['data']['reason'])
         finally:rt.mail.close();rt.store.close()
 
     def test_a_reflection_call_over_its_own_timeout_is_aborted(self):

@@ -90,6 +90,13 @@ def maybe(rt, gid, summary='', open_work=''):
             if rt.stopping():
                 rt.store.event('reflection_failed', dict(reason='stopping before the retry', reply=text[:500]), gid)
                 return None
+            if not _may_spend(rt, gid):
+                # The first call's own cost is priced into spent_today (brains.account in _ask), so a retry can
+                # start out over the allowance the runtime just refuses the goal's next turn on: the gate is read
+                # again here, and crossing it ends the reflection instead of billing past it (#383 review P1).
+                rt.store.event('reflection_skipped',
+                               dict(reason="the fallback's allowance is spent before the retry"), gid)
+                return None
             text = _ask(rt, gid, msgs + [dict(role='assistant', content=text[:2000]),
                                          dict(role='user', content=STRICT)])
             rec = parse(text)
@@ -106,7 +113,13 @@ def maybe(rt, gid, summary='', open_work=''):
         return sim.record(rt, gid, rec)
     except Exception as e:
         try:
-            rt.store.event('reflection_failed', dict(reason='%s: %s' % (type(e).__name__, str(e)[:300])), gid)
+            if rt.stopping():
+                # _bounded ends an in-flight call when the daemon is asked to stop and raises TimeoutError for it.
+                # That is a cut-short reflection, not a failing one: a `reflection_failed` row in the event log
+                # reads as a defect of the harness to the person scanning it (#383 review P2-1).
+                rt.store.event('reflection_skipped', dict(reason='stopping: the reflection was cut short'), gid)
+            else:
+                rt.store.event('reflection_failed', dict(reason='%s: %s' % (type(e).__name__, str(e)[:300])), gid)
         except Exception:
             pass                  # the reflection is a proposal, never a reason to lose a finished goal
         return None
