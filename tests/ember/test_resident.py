@@ -3566,6 +3566,53 @@ for line in sys.stdin:
         finally:
             os.chdir(here);rt.mail.close();rt.store.close()
 
+    def test_a_report_for_a_vanished_delegates_row_names_the_goal_it_was_written_for(self):
+        # #384 review P2: run_child closes with `rt.store.delegate(child) or {}`, so a delegates row that is gone
+        # handed _report an empty dict and `row['child']` raised KeyError before _close filed anything. settle then
+        # met the same open row on every pass and raised the same KeyError, so the child never closed at all.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            g=rt.store.goal(child)
+            with rt.store.transaction():
+                rt.store.update(child,state='completed',summary='it wrote the file')
+                rt.store.delegate_done(child,outcome='completed')
+            rep=delegate._report(rt,{},rt.store.goal(child))   # the row is gone; the goal row is what is left
+            self.assertEqual(rep['child'],child,'the report names the goal, not a missing row key')
+            self.assertEqual(rep['outcome'],'completed')
+            self.assertEqual(rep['summary'],'it wrote the file')
+            self.assertNotIn('worktree',rep,'no row, no checkout to survey')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_closed_unchanged_childs_report_names_no_checkout_it_just_deleted(self):
+        # #384 review P2: _close removed the checkout and branch of a child that changed nothing, then popped only
+        # the command keys - the report still carried worktree/branch/base from _survey, so a parent reading
+        # `worktree_removed` next to `branch` and `git -C ... merge` could merge a ref `branch -D` had deleted.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo7';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            top,base,wt,branch=delegate._worktree(rt,child,repo)
+            rt.store.delegate_add(child,parent,'','','worker',0.5,permissions='write',worktree=wt,branch=branch,
+                                  base=base,repo=top)
+            with rt.store.transaction():
+                rt.store.update(child,state='cancelled',error='its parent was cancelled while it ran')
+            report=delegate._close(rt,parent,delegate._report(rt,rt.store.delegate(child),
+                                                              rt.store.goal(child),'incomplete'))
+            self.assertIn('worktree_removed',report)
+            self.assertFalse(os.path.isdir(wt))
+            for k in ('worktree','branch','base','merge','discard','files','diffstat'):
+                self.assertNotIn(k,report,'%s told the parent to use a checkout that is gone' % k)
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_corrupt_reports_event_repeats_a_report_and_never_hides_one(self):
         # #384 review P2 read the `pass` in settle's shown-ledger as counting an unreadable row's children as
         # shown, so a corrupt event would filter them out of the next wake. It does the opposite: a failed parse

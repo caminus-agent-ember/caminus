@@ -124,6 +124,14 @@ NESTED = frozenset('sh bash dash zsh ksh csh tcsh fish eval exec source xargs en
 # is the module, so `python3 -m pytest -c cfg` keeps its meaning for pytest. A word shaped like an invocation is
 # refused wherever it stands, like NESTED: `grep python3 -c f` is a false positive (write `grep -c -e python3 f`),
 # the direction a tripwire should err in.
+#
+# This list is bounded and stays bounded on purpose: a program-string runner it leaves out - `deno eval`,
+# `osascript -e`, `gnuplot -e`, `sqlite3 -cmd '.shell sh'`, `awk 'BEGIN{system("...")}'` - runs a program this
+# check cannot see, and adding each one the next review names would be an endless race against a deny-list that
+# the module docstring already declares is not a jail (the child can always `make`, `git -c alias`, or write its
+# program to a file first). The entries here are the spellings a child reaches for first; everything else is
+# refused by the writing child's own contract - it writes files with `write`, and a command it runs that the
+# deny-list does not name is the parent's diff to review.
 INLINE = {'python': ('c', 'WX', 'm', ()), 'python3': ('c', 'WX', 'm', ()),
           'pypy': ('c', 'WX', 'm', ()), 'pypy3': ('c', 'WX', 'm', ()),
           'perl': ('eE', 'IMm', '', ()),
@@ -782,7 +790,11 @@ def _capped_error(err):
 def _report(rt, row, g, outcome=None):
     """The short structured report a parent reads: the child's goal, what it verified, what it skipped, its spend
     and (a writing child) what it changed and the commands that keep or drop it."""
-    child, state = row['child'], g['state']
+    # The child id comes from the row, or from the goal when the row is gone: `run_child` closes with
+    # `rt.store.delegate(child) or {}`, and a vanished delegates row made `row['child']` raise before `_close`
+    # could file anything, so `settle` repeated the same KeyError on every pass (#384 review P2). The goal row
+    # survives the delegates row, and the report is the only record left when the row is gone.
+    child, state = row.get('child') or g['id'], g['state']
     if outcome is None:
         err = g.get('error') or ''
         if state == 'completed':
@@ -841,7 +853,11 @@ def _close(rt, parent, report):
         # own cwd, so a `delegate/<child>` branch there could be deleted from whatever repository that happens
         # to be, and the report keeps its discard command as the pointer to a checkout that still exists.
         _remove_worktree(row['repo'], row['worktree'], row.get('branch') or '')
-        for k in ('merge', 'merge_note', 'discard', 'files', 'diffstat', 'commit_failed'):
+        # `worktree`, `branch` and `base` go with the commands: `_survey` set them from the row, and a report that
+        # said `worktree_removed` while still naming the branch `git branch -D` just deleted sent the parent to a
+        # merge of a ref that is not there (#384 review P2).
+        for k in ('merge', 'merge_note', 'discard', 'files', 'diffstat', 'commit_failed',
+                  'worktree', 'branch', 'base'):
             report.pop(k, None)
         report['worktree_removed'] = ('the child changed nothing, so its checkout and branch are gone: there is '
                                       'nothing to merge or discard')
