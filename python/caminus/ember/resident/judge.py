@@ -37,6 +37,8 @@ JUDGE_LIMIT = 3
 WAIT_LIMIT = 6
 EVIDENCE_RESULTS = 12
 JUDGE_IMAGES = 4          # newest images the agent read that go with the brief to a judge that can see
+VERDICTS = ('met', 'not_yet', 'wait')     # what a judge may say ('impossible' is read as not_yet)
+STORED = VERDICTS + ('unread',)           # every verdict a `judged` event carries: the three, plus the two failure arms
 
 # advising rounds per goal before a run of refusals pauses it (each round: the advisor's, or a fresh look)
 ADVISE_ROUNDS = 3
@@ -255,7 +257,7 @@ def object_in(text):
 
 def verdict(text):
     v = object_in(text)
-    if v is None or v.get('verdict') not in ('met', 'not_yet', 'wait', 'impossible'):
+    if v is None or v.get('verdict') not in VERDICTS + ('impossible',):
         return None
     # (the judge does not declare goals impossible: a model that still says so is read as not yet done)
     return dict(verdict='not_yet' if v['verdict'] == 'impossible' else v['verdict'], reason=str(v.get('reason', ''))[:1000])

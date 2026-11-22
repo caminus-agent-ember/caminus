@@ -247,7 +247,12 @@ def _may_spend(rt, gid):
 
 def _judge(rt, gid, since=0):
     """The newest `judged` event this episode, as (verdict, reason): the query is here once, and `brief` reads the
-    reason from the same row it took the verdict from (review P2: it ran the identical SELECT a second time)."""
+    reason from the same row it took the verdict from (review P2: it ran the identical SELECT a second time).
+
+    The verdict is bounded to the values a `judged` event may carry. The row is ours, but the reflection pastes it
+    into a prompt, and `judge.verdict` normalizes a model's reply while a raw event is read verbatim: a foreign or
+    hand-edited value would reach the prompt as a verdict no judge can give (#383 review P2)."""
+    from .judge import STORED
     row = rt.store.db.execute(
         "SELECT data FROM events WHERE goal=? AND kind='judged' AND seq>? ORDER BY seq DESC LIMIT 1",
         (gid, since)).fetchone()
@@ -257,7 +262,8 @@ def _judge(rt, gid, since=0):
         return None, ''
     if not isinstance(d, dict):
         return None, ''
-    return (d.get('verdict') or None), str(d.get('reason') or '')[:600]
+    said = d.get('verdict')
+    return (said if said in STORED else None), str(d.get('reason') or '')[:600]
 
 
 def brief(rt, gid, summary, open_work):

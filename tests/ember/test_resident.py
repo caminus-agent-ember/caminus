@@ -8551,6 +8551,43 @@ for line in sys.stdin:
                 self.assertIn('late_tool',text,'%s: this episode’s own call is missing from the reflection' % kind)
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_resume_marker_records_the_state_the_resume_leaves(self):
+        # #383 review P2: resume_goal wrote `episode_resumed` with `dict(state=g['state'])`, and `g` was fetched
+        # before the update, so the event said 'paused' about a goal the row now says is 'working'. Nothing reads
+        # the field yet (reflect._episode_start takes only the seq), but an event that disagrees with the row it
+        # describes is a stale field waiting for its first reader.
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.')
+            with rt.store.transaction():
+                rt.store.update(gid,state='paused',error='stop')
+            resume_goal(rt.store,gid)
+            row=rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='episode_resumed' "
+                                    'ORDER BY seq DESC LIMIT 1',(gid,)).fetchone()
+            self.assertEqual(json.loads(row['data'])['state'],'working','the marker agrees with the row it describes')
+            self.assertEqual(rt.store.goal(gid)['state'],'working')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_judged_verdict_outside_the_known_set_never_reaches_the_reflection(self):
+        # #383 review P2: _judge returned `d.get('verdict')` verbatim, so a foreign or hand-edited `judged` row put
+        # a verdict no judge can give into the reflection prompt ("THE FINISH JUDGE: unmet"), where judge.verdict
+        # would have normalized the same text to nothing. The reader is bounded to the stored set now.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            for bad in ('unmet','MET','impossible','met ','' ,None,42):
+                rt.store.event('judged',dict(verdict=bad,reason='foreign'),gid)
+                self.assertIsNone(reflect._judge(rt,gid,0)[0],'%r is not a verdict a judged event may carry' % (bad,))
+                self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
+            for good in ('met','not_yet','wait','unread'):
+                rt.store.event('judged',dict(verdict=good,reason='ours'),gid)
+                self.assertEqual(reflect._judge(rt,gid,0)[0],good,'%r is one of the stored verdicts' % (good,))
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_tool_failure_shaped_ok_false_reaches_the_reflection(self):
         # #383 review P2: the brief counted a failed call only when its result carried 'error', so a tool that reports
         # {'ok': False} with no 'error' key never reached the reflection's evidence. Both shapes count now.

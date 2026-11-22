@@ -530,8 +530,10 @@ def resume_goal(store,gid,max_steps=None,max_seconds=None):
         store.update(gid,state='working',step_limit=g['steps']+max_steps if max_steps else None,
                      deadline=time.time()+max_seconds if max_seconds else None,error='')
         # Where an episode begins (reflect._episode_start): the boundary is written on the resume, not on the
-        # stop, because the stop kinds are many and a list of them went stale (#383 review P2).
-        store.event('episode_resumed', dict(state=g['state']), gid)
+        # stop, because the stop kinds are many and a list of them went stale (#383 review P2). The state recorded
+        # is the one this resume leaves the goal in, not `g['state']`, which is the pre-resume value the update
+        # above has already replaced: an event that disagrees with the row reads as a stale field (#383 review P2).
+        store.event('episode_resumed', dict(state='working'), gid)
 
 
 def unit_text(name,home,program=None):
