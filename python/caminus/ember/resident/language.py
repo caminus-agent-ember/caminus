@@ -177,11 +177,21 @@ _CLAUSE = re.compile(r'[.!?;,\u3002\uff01\uff1f\uff1b\uff0c\n]')
 
 
 def _without_borrowed(text, own):
-    """`text` with the Latin runs of every clause that also has one of `own`'s scripts dropped."""
+    """`text` with the Latin runs dropped from clauses the owner's own script out-measures.
+
+    A spaceless-script owner (Han, Kana) writes Latin terms inside their own clauses — `git push origin pr-390`,
+    `pytest tests/x.py` — and those are terms, not the reply switching language. Dropping every Latin run of
+    every clause that has one own-script unit went too far: a Han owner whose reply is mostly English with one
+    Han term per clause ("We pushed 分支 the branch. The pull 请求 request is open.") had all its Latin dropped
+    and measured as a Han reply, so the drift was never caught (review P2, r15). The clause decides now: Latin
+    that out-measures the owner's script in that clause is the clause's language, not a term inside it.
+    """
     kept = []
     for clause in _CLAUSE.split(prose(text)):
         if any(script_of(ch) in own for ch in clause):
-            clause = ''.join(ch for ch in clause if script_of(ch) != 'Latin')
+            per, _ = units(clause)
+            if per.get('Latin', 0) <= sum(per.get(s, 0) for s in own):
+                clause = ''.join(ch for ch in clause if script_of(ch) != 'Latin')
         kept.append(clause)
     return ' '.join(kept)
 

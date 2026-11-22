@@ -2790,6 +2790,25 @@ for line in sys.stdin:
         self.assertIsNone(language.drift(zh,('Han',)),'English terms inside Chinese clauses are not a drift')
         self.assertEqual(language.drift('I pushed the branch and opened the pull request against ember-next, '
                                         'please review it.',('Han',))[0],'Latin','an English reply still drifts')
+        # review P2 (r15): dropping every Latin run of every clause that carries one Han unit went too far. An
+        # English reply with one Han term per clause is English, not Han, and was measured as a Han reply with
+        # no drift at all. The clause decides: Latin that out-measures the owner's script in its own clause is
+        # that clause's language. The Chinese shapes above stay held, which the assertions above pin.
+        drifted='We pushed \u5206\u652f the branch. The pull \u8bf7\u6c42 request is open. Please \u5ba1\u67e5 ' \
+                'review it, thanks.'
+        self.assertEqual(language.drift(drifted,('Han',)),('Latin',0.6842105263157895),
+                         'a mostly-English reply is English however many Han terms it quotes')
+        for held in ('\u6211\u6539\u4e86 cli.py \u548c runtime.py \u4e24\u4e2a\u6587\u4ef6\uff0c'
+                     'pytest \u5168\u8fc7\u4e86\uff0c\u73b0\u5728\u7b49 CI\u3002',
+                     '\u8fd9\u4e2a\u95ee\u9898\u5728 https://github.com/jdominick05/caminus/pull/390 '
+                     '\u91cc\uff0c\u5df2\u7ecf\u4fee\u4e86\u3002'):
+            self.assertIsNone(language.drift(held,('Han',)),
+                              'a Chinese clause with more Han than Latin still borrows its terms: %s' % held)
+        # the reverse shape the review describes cannot come up: `_without_borrowed` runs only for a spaceless
+        # owner's script, so an English owner's reply is measured as written and a Latin run is never dropped.
+        english_owner='The \u6f22\u5b57 policy is complex. Each \u5b57 clause carries a glyph.'
+        self.assertIsNone(language.drift(english_owner,('Latin',)),
+                          'a Latin owner is measured as written: this reply is 8 Latin of 10 units')
 
     def test_a_short_reply_entirely_in_another_script_is_still_a_drift(self):
         # review P2: MIN_UNITS was the floor for both shapes, so a reply with no unit in the owner's script at all
@@ -7943,6 +7962,32 @@ for line in sys.stdin:
             ev=[e['data'] for e in rt.store.events() if e['kind']=='model_truncated']
             self.assertEqual(ev[0].get('boost'),32768)
             self.assertNotIn(gid,rt._out_boost,'the boost ends with the whole reply')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_failed_model_call_does_not_count_a_plain_reply(self):
+        # review P2 (r15): `_plain_reply` records `plain_replies[gid]` from a dispatch the tick computed before
+        # the call could fail. A retryable cut stores nothing and runs the tick again, so the reply that finally
+        # arrives must be the first of its run, not the second: the pause after PLAIN_TEXT_LIMIT plain replies
+        # must not be reached on retries. Pins the invariant; `_tick` recomputes the dispatch after the call,
+        # which is what makes it hold.
+        from caminus.ember.resident.model import ModelTruncated
+        self.gates_on()
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Create the file.')
+            real=rt.model.complete
+            def failing(messages,tools=None,max_tokens=None,**kw):
+                if tools is None:return real(messages,tools,max_tokens=max_tokens,**kw)   # (the judge)
+                raise ModelTruncated(dict(content='half'),retryable=True)
+            rt.model.complete=failing
+            rt.tick(gid)
+            self.assertNotIn(gid,rt.plain_replies,'a reply that never arrived is not a plain reply')
+            rt.model.complete=real
+            rt.retry.pop(gid,None);rt.store.update(gid,state='working')
+            self.replies(dict(role='assistant',content='I think it is finished.'))
+            rt.tick(gid)
+            nudges=[e['data'] for e in rt.store.events() if e['kind']=='plain_text_nudge']
+            self.assertEqual([n['replies'] for n in nudges],[1],'the reply after a retry is the first of its run')
         finally:rt.mail.close();rt.store.close()
 
     def test_three_cut_off_replies_in_a_row_pause_the_goal(self):
