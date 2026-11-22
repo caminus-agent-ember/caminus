@@ -2649,11 +2649,14 @@ for line in sys.stdin:
         self.assertEqual(len(drifts),1)
         self.assertEqual((drifts[0]['script'],drifts[0]['language'],drifts[0]['nudged']),('Han','English',True))
         self.assertEqual(drifts[0]['brain']['model'],'fixture','the brain that wrote the drift is named')
-        # the nudge rides the goal's next turn, its plan kept, and the request's prompt names English
-        body=json.dumps(Endpoint.seen[-1][1])
+        # the nudge rides the goal's next turn, its plan kept, and the request's prompt names English. Both reads are
+        # this test's own requests: `Endpoint.seen` is shared by every test in the run (other tests set another
+        # `language`), so the first request of the run is not necessarily this home's first.
+        sent=[body for key,body in Endpoint.seen if key==self.key]
+        body=json.dumps(sent[-1])
         self.assertIn('[nudge #',body)
         self.assertIn('Reply in English, the owner\'s language',body)
-        self.assertIn('Your human works in English',json.dumps(Endpoint.seen[0][1]))
+        self.assertIn('Your human works in English',json.dumps(sent[0]))
         self.assertEqual([x['kind'] for x in self.steers(goal['id'])],['nudge'])
 
     def test_an_english_reply_quoting_chinese_is_not_a_drift(self):
