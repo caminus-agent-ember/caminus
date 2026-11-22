@@ -41,6 +41,7 @@ WHOLE_MIN_UNITS = 3    # a reply with none of the owner's units at all is anothe
 DRIFT_EVERY = 3        # assistant turns between two nudges on one goal (the issue's "at most once every N turns")
 OTHER_SHARE = .5       # "most letters of a reply are in another script": a strict majority
 DERIVE_SHARE = .6      # your goals name a language only when one script holds this share of their letters
+QUOTE_MIN_UNITS = 3    # a straight-quoted span shorter than this is a term (`"on"`, `"开"`), not a citation
 
 # (first, last, script), sorted by first; Unicode blocks, letters only where a block mixes letters and digits
 _RANGES = sorted([
@@ -104,6 +105,24 @@ _QUOTED = re.compile(r'「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|�
                      r"|(?<![\w'])'[^'\n]*'(?![\w'])")
 
 
+def _strip_quoted(text):
+    """`text` with each citation removed, but a short straight-quoted span kept: it is a term, not a quotation.
+
+    A straight quote carries no signal that its author meant a citation — a markdown attribute, a shell snippet and
+    a label all use it — so the pair alone is not enough. A narration that labels flags (`set the flag "开" and
+    the label "关"`) held a reply's only foreign-script units inside two same-line pairs, and dropping them censused
+    the reply as pure English: a drift that never fired (#390 review P2, r23). The floor is on the span's units, so
+    a one-word label stays in the census and a sentence in quotes is still a citation. The typographic forms are
+    unambiguous, so they are stripped at any length.
+    """
+    def one(match):
+        span = match.group(0)
+        if span[0] in '"\'' and _census(span[1:-1])[1] < QUOTE_MIN_UNITS:
+            return span
+        return ' '
+    return _QUOTED.sub(one, text)
+
+
 def prose(text):
     """The text without code and quotations: a code block or a cited sentence is not a reply's language.
 
@@ -114,8 +133,12 @@ def prose(text):
     attribute such as `href="x`, a mis-escaped snippet) used to pair with the next quote or with nothing and drop
     everything after it, so a genuine drift later in the reply was never detected (#390 review P2). The cost is
     that a quotation spanning lines stays in the census; a term-sized one cannot move the majority on its own.
+
+    And a *short* straight-quoted span is not a citation at all: a label (`set the flag "开"`) is the reply's own
+    word, and stripping it censused an otherwise-foreign reply as English and missed the drift (#390 review P2,
+    r23). `_strip_quoted` applies the floor; the typographic forms are unambiguous and have none.
     """
-    return _TICK.sub(' ', _QUOTED.sub(' ', _FENCE.sub(' ', text or '')))
+    return _TICK.sub(' ', _strip_quoted(_FENCE.sub(' ', text or '')))
 
 
 def script_of(ch):
@@ -131,6 +154,11 @@ def script_of(ch):
 
 def units(text):
     """Units per script (see the module docstring), and their total."""
+    return _census(prose(text))
+
+
+def _census(text):
+    """Units per script of text that is already prose: the counter `units` and the quote floor share."""
     per = {}
     script, run = '', 0
     for ch in prose(text):
@@ -399,6 +427,9 @@ def check(rt, gid, text, cfg=None, due=True):
     Both queries run over the goal's own rows (`events_goal`), so the per-turn cost is bounded by this goal's
     history, not by the whole log; `EXPLAIN QUERY PLAN` serves the first from that index and the second as a
     covering index with `rowid>?` (review P2: not a full scan).
+    The event log's per-brain drift rate is therefore a count of DETECTIONS, not of nudges, and a free-time goal
+    contributes detections that were never followed by a nudge: a rate that pools free and work goals mixes the
+    two populations and should be split by goal kind before it is compared (review P2, r23).
     """
     who = owner(rt)
     scripts = who['scripts']

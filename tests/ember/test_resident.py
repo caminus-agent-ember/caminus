@@ -2734,6 +2734,28 @@ for line in sys.stdin:
         self.assertEqual(language.units(language.prose('He said "'+han+'" and opened it.'))[0]['Latin'],5,
                          'a one-line quotation is still a citation and stays out of the census')
 
+    def test_short_straight_quoted_labels_are_terms_and_a_language_quote_is_still_a_citation(self):
+        # review P2 (r23): the straight-quote pair is only a quotation because of its punctuation, and a narration
+        # that labels four flags (`set the flag "开" and the label "关"`) put a drifting reply's every foreign unit
+        # inside one-line pairs, so `prose()` dropped them and the census was pure English: a drift that never fired.
+        # The span's units decide now. The first probe is the defect (old census was {'Latin': 2}, drift None).
+        from caminus.ember.resident import language
+        labels='Flags "\u5f00" "\u5173" "\u505c" "\u8d70" set.'
+        self.assertEqual(language.units(labels),({'Latin': 2, 'Han': 4}, 6),
+                         'a short straight-quoted label is the reply\'s own word, not a citation')
+        self.assertEqual(language.drift(labels,('Latin',)),('Han',.6666666666666666),
+                         'a reply whose foreign units are all short quoted labels is still a drift')
+        # the floor is length, not script: English labels in English prose stay English, and `don't`/`it's` are
+        # still apostrophes (the closing-quote guard above), so the count is the narration around them
+        self.assertIsNone(language.drift('Set the flag "on" and the label "off" today.',('Latin',)),
+                          'labels in the owner\'s own script change nothing')
+        # and a whole quoted sentence is still a citation at any length: the floor must not re-open r21
+        han='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002'
+        self.assertIsNone(language.drift('He said "'+han+'" and opened it.',('Latin',)),
+                          'a quoted foreign sentence is still a citation')
+        self.assertNotIn('Han', language.units('He said "'+'\u5f00\u5173\u505c\u8d70\u5206\u652f\u5df2\u63a8\u9001'+'" x.')[0],
+                         'ten units clears the floor: a quote of that length is a citation, not a label')
+
     def test_the_prompt_op_and_a_live_session_name_the_same_language(self):
         # review P2 (r16): `agent prompt` reads the language through `language.from_home` and a live session
         # through `language.owner`; they agree by construction (config `language`, then the same goal window
