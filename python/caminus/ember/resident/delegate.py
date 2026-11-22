@@ -38,6 +38,7 @@ MVP scope: one child at a time - the parent waits for its report - and the child
 Runtime.run(target=child, stop=parent_gone), so the loop's single-writer serialization keeps holding. Parallel
 children, a worktree per writing child and a card per child are the full version (#342, later).
 """
+import math
 import time
 
 _UNSET = object()            # (note_aux's "no snapshot given", distinct from a snapshot of None)
@@ -72,6 +73,10 @@ def _limit(rt, key):
     default = DEFAULTS[key.replace('delegate_', '')]
     if value is None:
         return default
+    if not math.isfinite(value):
+        raise ValueError('%s is %s: a limit must be a finite number of steps or seconds, not something no child '
+                         'can reach (%s by default). Set it to at least 1, or remove the key'
+                         % (key, value, default))
     value = int(value)
     if value < 1:
         raise ValueError('%s is %s: a limit of 0 is not "no limit" and does not mean the default (%s). Set it to '
@@ -130,14 +135,18 @@ def _caps(rt, args):
     cfg = rt.config
     cap = cfg.get('delegate_usd', DEFAULTS['cap_usd'])
     cap = DEFAULTS['cap_usd'] if cap is None else float(cap)
-    if cap <= 0:
-        raise ValueError('delegate_usd is %s: a cap of 0 does not mean unlimited, so no child can run under it. '
-                         'Set a positive cap (the default is %s)' % (cfg.get('delegate_usd'), DEFAULTS['cap_usd']))
+    # (a NaN passed `cap <= 0` as False and `min(cap, nan)` carried it on, and a stored NaN is an IntegrityError the
+    # owner reads as a crash; an infinite cap is stored and `spend < inf` never trips: a non-finite cap is no cap -
+    # #382 review, rev-glm P2)
+    if not math.isfinite(cap) or cap <= 0:
+        raise ValueError('delegate_usd is %s: a cap of 0 does not mean unlimited and a cap must be a finite '
+                         'number, so no child can run under it. Set a positive cap (the default is %s)'
+                         % (cfg.get('delegate_usd'), DEFAULTS['cap_usd']))
     if args.get('cap_usd') is not None:
         their = float(args['cap_usd'])
-        if their <= 0:
-            raise ValueError('cap_usd must be more than 0: it is what the child may spend, and 0 used to mean '
-                             '"uncapped". Omit it to use delegate_usd ($%s)' % cap)
+        if not math.isfinite(their) or their <= 0:
+            raise ValueError('cap_usd must be a finite number more than 0: it is what the child may spend, and 0 '
+                             'used to mean "uncapped". Omit it to use delegate_usd ($%s)' % cap)
         cap = min(cap, their)
     steps = int(_limit(rt, 'delegate_max_steps'))
     if args.get('max_steps') is not None:
@@ -396,6 +405,10 @@ def capped(rt, gid):
     if cap is None:
         return False                      # only a missing cap is no cap: a stored 0 is a $0 cap, and it pauses
     cap = float(cap)
+    if not math.isfinite(cap):
+        # a row from before the fix, or one written around delegate_add: `spend < inf` never trips, so an infinite
+        # cap is no cap at all. Fail closed and let the pause carry the reason (#382 review, rev-glm P2).
+        cap = 0.0
     spend, allowance = float(row.get('spend_usd') or 0.0), float(row.get('allowance_usd') or 0.0)
     if spend + allowance < cap:
         return False

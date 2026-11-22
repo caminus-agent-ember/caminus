@@ -1,6 +1,7 @@
 """The resident's durable goals, conversation, actions and observable event stream."""
 from contextlib import contextmanager
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -299,8 +300,12 @@ class Store:
         """Register a delegate child: its brain, its role and its dollar cap (the metric the cap reads is this row's
         spend_usd + allowance_usd, kept by delegate_spend)."""
         cap = float(cap_usd)
-        if cap <= 0:
-            raise ValueError('a delegate needs a positive dollar cap: %r read as no cap at all (#382 review)' % cap_usd)
+        # a NaN cap passed `cap <= 0` as False here and then failed the INSERT with a bare IntegrityError (SQLite
+        # stores a NaN as NULL, and the column is NOT NULL); an infinite cap is stored and `spend < inf` never
+        # trips, so the child ran with no effective cap (#382 review, rev-glm P2)
+        if not math.isfinite(cap) or cap <= 0:
+            raise ValueError('a delegate needs a positive, finite dollar cap: %r read as no cap at all (#382 review)'
+                             % cap_usd)
         self.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) VALUES(?,?,?,?,?,?,?)',
                         (child, parent, model or '', provider or '', role, cap, time.time()))
 

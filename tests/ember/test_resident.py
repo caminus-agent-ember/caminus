@@ -3394,6 +3394,62 @@ for line in sys.stdin:
             self.assertTrue(brain.remote);self.assertEqual(who,dict(model='someone/priced',provider='deepinfra'))
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_relayed_provider_with_no_price_is_refused(self):
+        # rev-glm's P2 read a relay provider on loopback as unpriced and not remote, so the price refusal (keyed on
+        # brain.remote) would miss it. apply_entry copies the provider's relay flag and Model.remote is true for a
+        # relayed brain, so the same refusal already covers it; this pins that, and the local server it must not
+        # refuse (a local server bills nothing, so it needs no price).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        def one(id):
+            return dict(updated=1,providers={},models=[dict(id=id,name=id,provider='relay',context=32000,
+                        max_output=None,efforts=[],thinking='',vision=False,prices=None)])
+        try:
+            rt.config['providers']={'relay':dict(kind='mistral',endpoint='http://127.0.0.1:8769/v1',relay=True)}
+            (self.home/'models.json').write_text(json.dumps(one('someone/unpriced-relayed')))
+            with self.assertRaises(ValueError) as caught:
+                delegate._brain(rt,dict(model='someone/unpriced-relayed',provider='relay'))
+            self.assertIn('has a price',str(caught.exception))
+            # the same loopback endpoint without the relay flag is this machine's own server: not billed, no price
+            rt.config['providers']={'mine':dict(kind='local',endpoint='http://127.0.0.1:8092/v1')}
+            (self.home/'models.json').write_text(json.dumps(dict(one('someone/served-here'),providers={})).replace('"relay"','"mine"'))
+            brain,who=delegate._brain(rt,dict(model='someone/served-here',provider='mine'))
+            self.assertFalse(brain.remote);self.assertEqual(who['provider'],'mine')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_non_finite_cap_is_no_cap_and_is_refused(self):
+        # a NaN cap passed `cap <= 0` as False (float('nan') <= 0 is False), min(cap, nan) carried it on, and the
+        # INSERT failed as a bare IntegrityError (SQLite stores a NaN as NULL, and cap_usd is NOT NULL); an infinite
+        # cap was stored and `spend + allowance < inf` never tripped, so the child ran with no dollar cap at all
+        # (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for bad in (float('nan'),float('inf'),-float('inf')):
+                with self.assertRaises(ValueError) as caught:
+                    delegate._caps(rt,dict(cap_usd=bad))
+                self.assertIn('finite',str(caught.exception))
+                rt.config['delegate_usd']=bad
+                with self.assertRaises(ValueError):
+                    delegate._caps(rt,dict())
+            rt.config.pop('delegate_usd',None)
+            rt.config['delegate_max_steps']=float('inf')
+            with self.assertRaises(ValueError):
+                delegate._caps(rt,dict())
+            rt.config.pop('delegate_max_steps',None)
+            self.assertEqual(delegate._caps(rt,dict())[0],.5)
+            parent,child=rt.store.enqueue('p'),rt.store.enqueue('c')
+            for bad in (float('nan'),float('inf')):
+                with self.assertRaises(ValueError) as caught:
+                    rt.store.delegate_add(child,parent,'','','worker',bad)
+                self.assertIn('finite dollar cap',str(caught.exception))
+            # a row written around delegate_add with an infinite cap still pauses: capped() fails closed on it
+            rt.store.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) '
+                                'VALUES(?,?,?,?,?,?,?)',(child,parent,'','','worker',float('inf'),time.time()))
+            self.assertTrue(delegate.capped(rt,child))
+            self.assertIn('cap reached',rt.store.goal(child)['error'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_an_aux_call_is_charged_to_the_childs_cap(self):
         # _meter prices a turn after the main generation only, and every auxiliary call (a summary, a graded finish,
         # the judge's second opinion) overwrote the model's last usage before the child's ledger could read it: the
