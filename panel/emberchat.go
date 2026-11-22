@@ -695,7 +695,7 @@ func (m emberModel) chatHead(w int) string {
 	// header is exactly this string, which chatHead used to build a second time on every frame (and bodyHeight on
 	// every poll) (#370 review).
 	withGoal := shellHeader(agent, state, goalText, steps, w)
-	if !m.headCutParts(goalText, withGoal, w) { // (one test, shared with Alt+G and the click: see headCut)
+	if !headCutParts(goalText, withGoal, w) { // (one test, shared with Alt+G and the click: see headCut)
 		return withGoal
 	}
 	head := shellHeader(agent, state, "", steps, w)
@@ -776,30 +776,38 @@ func headWrappedLines(goal string, w int) []string {
 }
 
 // headCut: the goal does not fit on the header's title line, beside the agent and its state, so chatHead draws it
-// under the title in up to headLines wrapped lines instead. It is the layout test only: a goal cut off the title line
-// may still wrap into those three lines with nothing left over (headHidden).
+// under the title in up to headLines wrapped lines instead. It is the layout test only — a goal cut off the title
+// line may still wrap into those three lines with nothing left over — so it is not "the goal is expandable": that
+// question is headWrapsPastLines.
 func (m emberModel) headCut(w int) bool {
 	state, steps, goalText := m.headParts()
-	return m.headCutParts(goalText, shellHeader(residentText(m.agentName), state, goalText, steps, w), w)
+	return headCutParts(goalText, shellHeader(residentText(m.agentName), state, goalText, steps, w), w)
 }
 
 // headCutParts is headCut over a header the caller has already built (chatHead draws that same string), so the layout
-// test costs no second build on a frame.
-func (m emberModel) headCutParts(goalText, head string, w int) bool {
+// test costs no second build on a frame. Its two clauses answer different questions, and neither alone is the
+// expansion test (#370 review): headCutAtTitle is "the title row cut the goal off beside the agent",
+// headWrapsPastLines is "the goal has more rows than the collapsed header draws" — only the second means some of
+// the goal is hidden.
+func headCutParts(goalText, head string, w int) bool {
+	return headCutAtTitle(goalText, head) || headWrapsPastLines(goalText, w)
+}
+
+// headCutAtTitle: screenHeader cut the goal off the title line with a "…" (it did not fit beside the agent).
+func headCutAtTitle(goalText, head string) bool {
 	if goalText == "" {
 		return false
 	}
-	if first, _, _ := strings.Cut(head, "\n"); strings.Contains(ansi.Strip(first), "…") {
-		return true
-	}
-	return len(headWrappedLines(goalText, w)) > headLines
+	first, _, _ := strings.Cut(head, "\n")
+	return strings.Contains(ansi.Strip(first), "…")
 }
 
-// headHidden: some of the goal is not on the screen, so the hint, Alt+G and a click on the header all say the same
-// thing. A goal cut off the title line that wraps into headLines or fewer is drawn whole under the title: there the
-// hint stays away and the key does nothing, rather than opening an expansion that would repeat what is shown.
-func (m emberModel) headHidden(w int) bool {
-	_, _, goalText := m.headParts()
+// headWrapsPastLines: the goal wraps to more rows than the collapsed header draws (headLines), so some of it is not on
+// the screen. This, not headCut, is the expansion test: the hint, Alt+G and a click on the header all use it, so a goal
+// cut off the title line that wraps into headLines or fewer is drawn whole under the title — the hint stays away and
+// the key does nothing, rather than opening an expansion that would repeat what is shown. It reads only the goal's
+// text, not the model (#370 review).
+func headWrapsPastLines(goalText string, w int) bool {
 	return goalText != "" && len(headWrappedLines(goalText, w)) > headLines
 }
 
@@ -908,13 +916,16 @@ func (m emberModel) headExpandedBody(w int) string {
 	return body
 }
 
-// toggleHead expands the goal under the title, or collapses it back to its three lines.
+// toggleHead expands the goal under the title, or collapses it back to its three lines. Only a goal with rows the
+// collapsed header does not draw opens (headWrapsPastLines, not headCut: a goal cut off the title line that wraps into
+// the three rows is already shown whole) — headParts is walked here, once per key press, rather than on every frame.
 func (m emberModel) toggleHead() (tea.Model, tea.Cmd) {
 	if m.headShown() {
 		m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0
 		return m, nil
 	}
-	if !m.headHidden(max(20, m.width)) {
+	_, _, goalText := m.headParts()
+	if !headWrapsPastLines(goalText, max(20, m.width)) {
 		return m, nil
 	}
 	m.chat.headOpen, m.chat.headFor, m.chat.headTop = true, m.headGoalID(), 0

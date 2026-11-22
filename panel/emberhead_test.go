@@ -527,3 +527,57 @@ func TestCopyingTheHeaderPastTheGoalTakesTheHintAsItself(t *testing.T) {
 		}
 	})
 }
+
+// TestCopyingAnOpenScrolledGoalAndTheRowsUnderIt: the review's last combination — expanded, scrolled, a selection
+// from the title row to the header's last row — copies the goal once, then the scroll footer as itself; and a
+// selection pressed in the transcript takes transcript text only, even dragged up over the header's rows: the goal
+// substitution is for screen selections, and a press under the header makes a transcript selection (selectionAt).
+func TestCopyingAnOpenScrolledGoalAndTheRowsUnderIt(t *testing.T) {
+	m := openHead(t, longGoalChat(t, 100, 30))
+	for i := 0; i < 3 && m.chat.headTop == 0; i++ {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m = next.(emberModel)
+	}
+	if m.chat.headTop == 0 {
+		t.Fatal("fixture: PgDn did not scroll the open goal")
+	}
+	for i := 2; i < 40; i++ {
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{
+			Seq: i, Goal: "original", Kind: "assistant",
+			Data: map[string]any{"content": fmt.Sprintf("Observation %d stays in the transcript.", i)}}}})
+	}
+	_ = m.render()
+	w := max(20, m.width)
+	head := lipgloss.Height(m.chatHead(w))
+	if foot := ansi.Strip(m.chatHead(w)); !strings.Contains(foot, "PgUp/PgDn scrolls") {
+		t.Fatalf("fixture: the scrolled header has no footer:\n%s", foot)
+	}
+	// press on the title row, release on the header's last row (the rule under the scroll footer)
+	m.chat.sel = m.selectionAt(2, 0)
+	if !m.chat.sel.screen {
+		t.Fatal("fixture: a press on the title row is not a screen selection")
+	}
+	m.chat.sel.b = [2]int{head - 1, w - 1}
+	m.chat.sel.moved, m.chat.sel.dragging = true, false
+	got := m.selectedText()
+	if n := strings.Count(got, "The last line of the goal"); n != 1 {
+		t.Fatalf("the goal was copied %d times over rows 1..%d, want once:\n%s", n, head-1, got)
+	}
+	if !strings.Contains(got, "PgUp/PgDn scrolls") {
+		t.Fatalf("the scroll footer is not copied as itself:\n%s", got)
+	}
+	if strings.Contains(got, "Observation") {
+		t.Fatalf("a selection that starts on the title row reached the transcript:\n%s", got)
+	}
+	// pressed in the transcript, dragged up over the header's rows: a transcript selection, no goal injected
+	m.chat.transcript.GotoTop()
+	m.chat.sel = m.selectionAt(2, head)
+	if m.chat.sel.screen {
+		t.Fatal("fixture: a press under the header is a screen selection")
+	}
+	m.chat.sel.b = [2]int{m.chat.transcript.YOffset(), 20}
+	m.chat.sel.moved, m.chat.sel.dragging = true, false
+	if got := m.selectedText(); strings.Contains(got, "The last line of the goal") {
+		t.Fatalf("a transcript selection took the header's goal:\n%s", got)
+	}
+}
