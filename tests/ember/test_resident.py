@@ -2743,6 +2743,61 @@ for line in sys.stdin:
             self.assertEqual(delegate._caps(rt,dict(cap_usd=0.25))[0],0.25)
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_workers_window_keeps_every_running_child(self):
+        # `... ORDER BY outcome='' DESC, started DESC LIMIT 20` sorted a running child (outcome NULL, and SQLite's
+        # NULL is smallest) after every finished one, so a long-lived session's twenty finished children pushed it
+        # out of the window and the panel said "no children running" while one ran (#382 review, rev-glm P2). The
+        # open rows are all in the answer; only the finished side is bounded.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            done=[]
+            for i in range(21):
+                gid=rt.store._enqueue('done %d'%i,kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                rt.store.delegate_done(gid,'completed')
+                rt.store.db.execute('UPDATE delegates SET started=? WHERE child=?',(1000.0+i,gid))
+                done.append(gid)
+            live=rt.store._enqueue('still running',kind='delegate')
+            rt.store.delegate_add(live,parent,'','','worker',.5)
+            rt.store.db.execute('UPDATE delegates SET started=? WHERE child=?',(900.0,live))
+            ws=rt.store.workers()
+            self.assertEqual([w['child'] for w in ws], [live]+list(reversed(done[-20:])),
+                             'every open row first, then the newest 20 finished')
+            self.assertTrue(ws[0]['running'])
+            self.assertNotIn(done[0],[w['child'] for w in ws],'only the oldest finished row is left out')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_ledger_that_is_not_a_spend_still_pauses_the_child(self):
+        # spend_usd/allowance_usd are written by arithmetic (delegate_spend adds each turn), so a negative pair
+        # (a hand edit, a backup restore) made `spend + allowance < cap` skip the cap for good, and a non-finite
+        # one paused at $0 spent with "$inf of $0.50" as the reason. Neither is a spend figure: both fail closed,
+        # the pause names the term, and the event states the 0 that was compared (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child(spend,allowance):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                rt.store.db.execute('UPDATE delegates SET spend_usd=?, allowance_usd=? WHERE child=?',
+                                    (spend,allowance,gid))
+                return gid
+            under=child(.1,.0)
+            self.assertFalse(delegate.capped(rt,under),'a spend below the cap is no pause')
+            self.assertEqual(rt.store.goal(under)['state'],'queued')
+            for spend,allowance,term in ((-.4,-.4,'spend_usd'),(float('inf'),0.0,'spend_usd'),
+                                         (0.0,float('inf'),'allowance_usd')):
+                gid=child(spend,allowance)
+                self.assertTrue(delegate.capped(rt,gid),'%r/%r must not skip the cap' % (spend,allowance))
+                err=rt.store.goal(gid)['error']
+                self.assertIn('cap reached',err)
+                self.assertIn(term,err,'the reason names the term that is not a spend')
+                self.assertNotIn('$inf',err,'never "$inf of $0.50" as a spend figure')
+                self.assertEqual(len([e for e in rt.store.events()
+                                      if e['kind']=='delegate_capped' and e['goal']==gid]),1)
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_child_cannot_type_into_or_signal_a_terminal(self):
         # A child has no host terminal at all now (#382 review, fourth round): a filter cannot make a shell
         # read-only, and the child's sandbox box is a directory in the workspace, so any file it writes there

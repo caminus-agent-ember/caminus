@@ -49,12 +49,13 @@ func workersRow(ws []residentWorker) string {
 	if running > 0 {
 		return fmt.Sprintf("%s · $%.4f of $%.2f", plural(running, "child", "children"), spent, cap)
 	}
-	// The status sorts running children first and then newest first, so the first finished one is the last child.
+	// `running == 0` above means every row here has finished (running is read off the row's outcome), so the
+	// last child is the one with the newest Started, not the row's place in the list: the status's sort is its
+	// own choice, and a list that puts an older child first made the card name it (#382 review).
 	w := ws[0]
-	for _, c := range ws {
-		if !c.Running {
+	for _, c := range ws[1:] {
+		if c.Started > w.Started {
 			w = c
-			break
 		}
 	}
 	out := w.Outcome

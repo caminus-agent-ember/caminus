@@ -430,12 +430,22 @@ def capped(rt, gid):
         # cap is no cap at all. Fail closed and let the pause carry the reason (#382 review, rev-glm P2).
         cap = 0.0
     spend, allowance = float(row.get('spend_usd') or 0.0), float(row.get('allowance_usd') or 0.0)
-    if spend + allowance < cap:
+    why = 'delegate spend cap reached: $%.4f of $%.4f' % (spend + allowance, cap)
+    # The ledger is written only by delegate_spend, which adds each turn: a negative term (a hand edit, a backup
+    # restore) would make `spend + allowance < cap` skip the cap for good, and a non-finite one would decide the
+    # compare by accident and make the pause's own reason read "$inf". Neither is a spend figure, so both fail
+    # closed the way a non-finite cap does: the child pauses and the reason names the term (#382 review, P2).
+    bad = ['%s %r' % (k, v) for k, v in (('spend_usd', spend), ('allowance_usd', allowance))
+           if not math.isfinite(v) or v < 0]
+    if bad:
+        cap = spend = allowance = 0.0
+        why = 'delegate spend cap reached: the stored ledger is not a spend (%s)' % ', '.join(bad)
+    elif spend + allowance < cap:
         return False
     # one transaction: a crash between them would leave a paused child with no delegate_capped line, and the two
     # are one fact - the cap was reached - so they commit together (#382 review).
     with rt.store.transaction():
-        rt.store.update(gid, state='paused', error='delegate spend cap reached: $%.4f of $%.4f' % (spend + allowance, cap))
+        rt.store.update(gid, state='paused', error=why)
         rt.store.event('delegate_capped', dict(spend_usd=spend, allowance_usd=allowance, cap_usd=cap), gid)
     return True
 

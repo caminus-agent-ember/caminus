@@ -328,10 +328,18 @@ class Store:
 
     def workers(self):
         """What a UI shows of delegation: the running children and the newest finished ones, with the spend the cap
-        reads (money and plan allowance, kept apart so a $0 Go turn still shows its allowance)."""
+        reads (money and plan allowance, kept apart so a $0 Go turn still shows its allowance).
+
+        Every open row is in the answer. A running child's `outcome` is NULL (only `delegate_done` writes text), so
+        `ORDER BY outcome='' DESC, started DESC LIMIT 20` sorted it last - a NULL is smallest in SQLite - and twenty
+        finished children of a long-lived session crowded every running one out of the window: the panel said "no
+        children running" while one ran (#382 review, rev-glm P2). Both spellings of open count, and the finished
+        side stays bounded at 20."""
         rows = [dict(r) for r in self.db.execute(
             'SELECT child,parent,model,provider,role,cap_usd,spend_usd,allowance_usd,outcome,started,ended '
-            'FROM delegates ORDER BY outcome=\'\' DESC, started DESC LIMIT 20')]
+            'FROM delegates WHERE ifnull(outcome,\'\')=\'\' OR child IN '
+            '(SELECT child FROM delegates WHERE ifnull(outcome,\'\')<>\'\' ORDER BY started DESC LIMIT 20) '
+            'ORDER BY ifnull(outcome,\'\')=\'\' DESC, started DESC')]
         for r in rows:
             r['spend_usd'], r['allowance_usd'] = round(r['spend_usd'], 6), round(r['allowance_usd'], 6)
             r['running'] = not r['outcome']
