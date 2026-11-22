@@ -519,6 +519,53 @@ class Resident(unittest.TestCase):
         self.assertTrue(applied,'the drift nudge was consumed as a nudge')
         self.assertEqual([a['human'] for a in applied],[False],'the batch is the runtime\'s own note, not theirs')
 
+    def test_a_stale_plain_dispatch_is_asked_again_not_recommitted(self):
+        # #390 review F1: `_tick` computes `_plain_dispatch(gid)` before the language check writes an event and an
+        # inbox row, then `_plain_reply` re-committed that snapshot with `self.plain_replies[gid]=count`. Today
+        # nothing between the two moves the run, so this is an invariant, not a live bug; the guard makes it one the
+        # code holds instead of one the comment claims. Handed a snapshot that disagrees with the live run, the reply
+        # is counted from the live value.
+        self.gates_on()
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Create the file.');rt.store.update(gid,done_check='x',state='working')
+            stale=rt._plain_dispatch(gid)         # what `_tick` hands over: count 1 of a fresh run
+            rt.plain_replies[gid]=1               # a write between the two calls moves the run
+            rt._plain_reply(gid,stale)
+            nudges=[e for e in rt.store.events() if e['kind']=='plain_text_nudge']
+            self.assertEqual(nudges[-1]['data']['replies'],2,'the reply is counted from the live run, not the stale one')
+            self.assertEqual(rt.plain_replies[gid],2)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_language_check_is_handed_the_answering_brains_config(self):
+        # #390 review F2: `check` was called without `cfg`, so the drift event's brain came from a second read of
+        # `rt.model.config` inside `sim.serving`. Today that is the same dict as `rt.config`, which is why the review
+        # called it an invariant rather than a bug; a fallback turn is where the two can differ. The contract pinned
+        # here is the call itself: `_tick` hands `check` the answering model's own config object, not a re-read.
+        from caminus.ember.resident import language as langmod
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            rt.loop_gates=True
+            class Answering:
+                # a distinct config object, as a fallback's client carries: same keys, another dict
+                def __init__(self,model):self._model,self.config=model,dict(model.config)
+                def __getattr__(self,name):return getattr(self._model,name)
+            rt.model=Answering(rt.model)
+            asked=[]
+            real=langmod.check
+            def spy(runtime,gid,text,cfg=None,due=True):
+                asked.append(cfg)
+                return real(runtime,gid,text,cfg=cfg,due=due)
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(role='assistant',content=zh))
+            with unittest.mock.patch.object(langmod,'check',spy):
+                self.assertTrue(rt._tick(gid))
+            self.assertEqual(len(asked),1,'the tick censused its reply')
+            self.assertIs(asked[0],rt.model.config,'the check is handed the answering brain\'s config object')
+            self.assertIsNot(asked[0],rt.config,'not the agent config re-read: those differ on a fallback turn')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_humans_message_still_answers_a_plain_reply(self):
         # the other side of #390's P1 fix: a row the human wrote is not marked `harness`, so a plain reply to their
         # message is still told to carry on and still starts the streak over. Their messages did not get quieter.

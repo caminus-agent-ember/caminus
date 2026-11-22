@@ -1883,6 +1883,11 @@ class Runtime:
         loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted.
         `dispatch` is `_plain_dispatch(gid)` when the caller already asked for it (the language check in `_tick`
         needs its `turn` too, and two calls were two extra `_answering` queries per plain reply - review P2)."""
+        if dispatch and dispatch[2] and dispatch[2] != self.plain_replies.get(gid, 0) + 1:
+            # The caller's snapshot is stale: a write between `_tick`'s dispatch and this call moved the reply run.
+            # Re-committing it blind would count this reply at the old place and drop or double the run (#390 review
+            # F1). Asking again is one `_answering` query, paid only on the branch that already counted replies.
+            dispatch = None
         how, turn, count = dispatch or self._plain_dispatch(gid)
         prompted=self.__dict__.setdefault('_reopen_prompted',set())
         if how=='reopened' and turn:
@@ -2441,7 +2446,11 @@ class Runtime:
                     # would be a second answer, not a fresher one (r22 review P2: invariant, no change needed).
                     dispatch = self._plain_dispatch(gid)
                     follows = dispatch[1]
-            if (note := language.check(self, gid, reply.get('content') or '', due=follows)):
+            # The answering brain's config is named here rather than left to `sim.serving`'s second read: a fallback
+            # turn's drift must be stamped with the model that wrote it, and passing the agent's `rt.config` instead
+            # would mislabel exactly that turn (#390 review F2).
+            if (note := language.check(self, gid, reply.get('content') or '',
+                                       cfg=getattr(self.model, 'config', None) or self.config, due=follows)):
                 with self.store.transaction():
                     self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
                                           (gid, note, 'nudge', 'harness'))

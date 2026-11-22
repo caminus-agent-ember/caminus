@@ -459,9 +459,11 @@ def check(rt, gid, text, cfg=None, due=True):
     no nudge is queued for a turn that never comes, and `nudged` stays false so the cadence is not advanced by
     it (review P2). A free-time goal (`free`, `dream`) is `due=False` for the same reason and has no next
     graded turn: a drift there is recorded, and the prompt's language is the only thing holding it (review P2).
-    Both queries run over the goal's own rows (`events_goal`), so the per-turn cost is bounded by this goal's
-    history, not by the whole log; `EXPLAIN QUERY PLAN` serves the first from that index and the second as a
-    covering index with `rowid>?` (review P2: not a full scan).
+    Both queries run over the goal's own rows, so the per-turn cost is bounded by this goal's history, not by the
+    whole log. `EXPLAIN QUERY PLAN` on this schema shows `SEARCH events USING INDEX events_goal (goal=? AND kind=?)`
+    for the first and the same index as a covering one with `rowid>?` for the second. The `json_extract` predicate
+    in the first is a filter over this goal's drift rows, not an index term (review P2: measured, and the earlier
+    wording claimed more than the plan shows).
     The event log's per-brain drift rate is therefore a count of DETECTIONS, not of nudges, and a free-time goal
     contributes detections that were never followed by a nudge: a rate that pools free and work goals mixes the
     two populations and should be split by goal kind before it is compared (review P2, r23).
