@@ -105,11 +105,14 @@ root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the l
 `caminus ember ui` execs `caminus-panel` as `caminus ember` (panel/emberui.go, same binary and build as the control
 panel), with the settings in the environment (`CAMINUS_ENV_USER`, `CAMINUS_ENV_BRIDGE`, `CAMINUS_ENV_AUDIT`,
 `CAMINUS_ENV_KEY`, `CAMINUS_EMBER_CLI`); flags of the same names still win when given. Those five names are this
-command's reserved input: nothing else may export them into a shell that starts the panel, and a name added later
-must join this list rather than reuse one of them for another meaning. `-demo` outranks the environment for the two
-settings it has an opinion about (`user` becomes `demo`, `key` becomes `none`), so a demo started from a shell set
-up for a real agent still opens the demo. A terminal that shows the
-foreground command line therefore shows `caminus ember`, never a bridge, audit or ssh key path. This is the chat of
+command's input, and the panel reads every one of them at startup: a name added later must join this list rather
+than reuse one of them for another meaning, because a value already in the shell's environment would otherwise be
+taken as this command's setting. `-demo` outranks the environment for the two settings it has an opinion about
+(`user` becomes `demo`, `key` becomes `none`), and the other three still come from a flag or the environment, so a
+demo run needs `--bridge` and `--audit` (as `tools/ember_demo.py` passes them). A terminal that shows the foreground
+command line therefore shows `caminus ember`, never a bridge, audit or ssh key path; the process itself keeps the
+binary's own name (`caminus-panel`) in `ps`'s COMMAND column, `/proc/PID/comm` and `pgrep -x caminus-panel`, since
+argv[0] is cosmetic: find a running panel by `pgrep -f 'caminus ember'`, not `pgrep -x caminus`. This is the chat of
 [Resident agents](../resident-agent.md), with root requests and questions as prompts where you type. Answer files and
 audit lines use the same JSON schema as `bridge.py` / `audit.py`, so `caminus ember watch` / `audit` and the panel are
 interchangeable.

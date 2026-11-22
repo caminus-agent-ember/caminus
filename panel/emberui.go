@@ -178,7 +178,10 @@ type sshOutMsg struct {
 // emberSetting is one setting with the one precedence this command has: a flag the caller gave, else the value
 // -demo gives it, else the environment. `given` is whether the flag was on the command line at all, not whether
 // its value is non-empty: an explicitly empty `--user ""` is a value too, so the required check below reports it
-// instead of the panel quietly opening the environment's (possibly different) agent account.
+// instead of the panel quietly opening the environment's (possibly different) agent account. An empty demoValue
+// means -demo has no opinion about this setting: "", the zero value, cannot be told apart from `-demo` not being
+// given, so bridge, audit and the CLI argv pass "" here and come from the flag or the environment (and stay
+// reported by emberMissing when neither gives them). The two settings -demo does name are never empty.
 func emberSetting(given bool, flagValue, demoValue, env string) string {
 	if given {
 		return flagValue

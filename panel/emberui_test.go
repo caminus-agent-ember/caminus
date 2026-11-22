@@ -59,6 +59,14 @@ func TestEmberSettingsComeFromTheFlagsElseTheEnvironment(t *testing.T) {
 	if got := emberSetting(false, "", "demo", "CAMINUS_ENV_USER"); got != "demo" {
 		t.Fatalf("-demo keeps its own user even when the environment exports one: %q", got)
 	}
+	// -demo has no opinion about the other three: an empty demoValue is not "the demo says empty", it means the
+	// setting comes from the flag or the environment (see the comment on emberSetting)
+	if got := emberSetting(false, "", "", "CAMINUS_ENV_BRIDGE"); got != "/env/bridge" {
+		t.Fatalf("a setting -demo does not name still reads the environment: %q", got)
+	}
+	if got := emberSetting(false, "", "", "CAMINUS_EMBER_CLI"); got != `["env-cli"]` {
+		t.Fatalf("the CLI argv -demo does not name still reads the environment: %q", got)
+	}
 }
 
 // TestEmberFlagsAreResolvedInOnePlace: the whole `caminus ember` command line is resolved at one point, so an
@@ -94,6 +102,19 @@ func TestEmberFlagsAreResolvedInOnePlace(t *testing.T) {
 	}
 	if miss := emberMissing(c); len(miss) != 0 {
 		t.Fatalf("-demo needs no environment: %v", miss)
+	}
+	// -demo names only user and key: the other three still come from a flag or the environment, and with neither
+	// the required check reports them (a demo run passes --bridge and --audit itself, as tools/ember_demo.py does)
+	for _, k := range []string{"CAMINUS_ENV_USER", "CAMINUS_ENV_BRIDGE", "CAMINUS_ENV_AUDIT", "CAMINUS_ENV_KEY"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	c = emberConfigOf([]string{"-demo"})
+	if c.user != "demo" || c.key != "none" || c.bridge != "" || c.audit != "" || c.cli != "" {
+		t.Fatalf("-demo gives only its two settings, the rest stay empty: %+v", c)
+	}
+	if miss := emberMissing(c); len(miss) != 2 || miss[0] != "--bridge" || miss[1] != "--audit" {
+		t.Fatalf("-demo alone leaves --bridge and --audit to be reported: %v", miss)
 	}
 }
 
