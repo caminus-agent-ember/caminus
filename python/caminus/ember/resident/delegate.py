@@ -204,8 +204,20 @@ def _brain(rt, args):
     if not name:
         name = str((rt.config.get('delegate') or {}).get(role + '_model') or '').strip()
     if not name:
-        return Model(dict(rt.config)), dict(model=rt.config.get('model'),
-                                            provider=rt.config.get('provider') or rt.config.get('provider_kind'))
+        # the parent's own brain. The same priceability refusal a named catalog model gets (below), because a
+        # cap that reads a price of None can never trip: the child would be bounded by its steps and deadline
+        # only, its dollar cap a number nothing compares to (#382 review, rev-glm P2). Its provider facts are
+        # the runtime's own config, so no catalog entry is needed to know whether it bills.
+        conf = dict(rt.config)
+        brain = Model(conf)
+        spec = catalog.providers(conf).get(conf.get('provider')) or {}
+        kind = spec.get('kind') or conf.get('provider_kind')
+        if brain.remote and kind not in catalog.OPENCODE and price(conf.get('model'), {}) is None:
+            raise ValueError('no model %s has a price: the parent\'s own paid brain must be priceable, or a '
+                             'child on it could never trip its dollar cap (set `prices` in config.json, pick a '
+                             'catalog model or a priced one by name)' % (conf.get('model') or '(unnamed)'))
+        return brain, dict(model=conf.get('model'),
+                           provider=conf.get('provider') or conf.get('provider_kind'))
     cat = catalog.load(rt.home)
     entry = catalog.find(cat, name, provider)
     if entry is None:
@@ -551,6 +563,28 @@ def _sweep_close(rt, r, outcome, state, summary):
         child=r['child'], role=r['role'], model=r['model'], provider=r['provider'], outcome=outcome, state=state,
         spend_usd=spent, allowance_usd=round(r['allowance_usd'] or 0.0, 6),
         cap_usd=r['cap_usd'] or 0.0, summary=summary))
+
+
+def orphan(rt, gid):
+    """Close a child that reached a turn with no brain of its own in this process: True when it was one to stop.
+
+    `delegate_models` is live memory: only the process that ran start() holds the child's brain. A child that
+    reaches a turn without it belongs to a run that ended (the store has one writer), so it cannot run on
+    whatever brain the runtime happens to hold. Its goal is paused as orphaned and its row closed here, the same
+    close `sweep` makes at a restart, so the fence cuts a race rather than leaving a row open for the parent's
+    next start (#382 review, rev-glm P2). A row already closed but whose goal is still runnable is paused all
+    the same: nothing else would ever end a goal no brain may serve."""
+    row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (gid,)).fetchone()
+    runnable = row is not None and row['state'] in ('queued', 'working', 'waiting_model')
+    if runnable:
+        with rt.store.transaction():
+            rt.store.update(gid, state='paused', error='its runtime ended mid-delegation')
+    r = rt.store.delegate(gid)
+    if r and not r.get('outcome'):
+        _sweep_close(rt, r, 'orphaned', 'paused', 'its runtime ended mid-delegation')
+        _sweep_box(rt, gid)
+        return True
+    return runnable
 
 
 def sweep(rt):

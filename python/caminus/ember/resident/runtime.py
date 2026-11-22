@@ -2740,7 +2740,7 @@ class Runtime:
                     # process's memory; the open row is the fact, so a restarted runtime still writes it.
                     self.store.event('delegate_capped', dict(kind='deadline', deadline=g['deadline']), gid)
             return True
-        if gid in self.delegate_caps and delegate.capped(self, gid):
+        if (gid in self.delegate_caps or delegate.open_child(self, gid)) and delegate.capped(self, gid):
             return True                       # its spend (money + plan allowance) reached its cap: the parent hears it
         now = time.time()
         last = self.progress.get(gid)

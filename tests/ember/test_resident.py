@@ -9390,6 +9390,84 @@ for line in sys.stdin:
         self.assertIn('mkdir -p',msg);self.assertIn('chmod 2770',msg)
         self.assertIn('sudo',msg)
 
+    def test_a_child_on_the_parents_own_brain_must_be_priceable_too(self):
+        # the priceability refusal covered only a child named from the catalog; the default child ran on the
+        # parent's own config verbatim, so a priced remote brain with no price priced every call None, its spend
+        # stayed 0 and its dollar cap could never trip (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.model import remember_prices
+        rt=Runtime(self.home)
+        try:
+            # the fixture's own brain is this machine's server: it bills nothing, so it needs no price
+            brain,who=delegate._brain(rt,dict())
+            self.assertFalse(brain.remote);self.assertEqual(who['model'],rt.config['model'])
+            # the same brain moved to a paid provider with no price is refused, the way a named catalog model is
+            rt.config.update(model='someone/unpriced-default',provider='deepinfra',
+                             endpoint='https://api.deepinfra.com/v1/openai',api='openai',
+                             providers={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai')})
+            with self.assertRaises(ValueError) as caught:
+                delegate._brain(rt,dict())
+            self.assertIn('someone/unpriced-default',str(caught.exception))
+            self.assertIn('has a price',str(caught.exception))
+            # its price known (config `prices`, as Runtime registers them), the same call goes on
+            remember_prices('someone/unpriced-default',dict(input=1.0,output=2.0,cache_read=0.5))
+            brain,who=delegate._brain(rt,dict())
+            self.assertTrue(brain.remote);self.assertEqual(who['model'],'someone/unpriced-default')
+            # a plan's brain charges what its reply says, so its price tables are not needed and it is not refused
+            rt.config.update(model='plan-brain',provider='plan',provider_kind='opencode-go',
+                             endpoint='https://opencode.example/v1',providers={})
+            self.assertEqual(delegate._brain(rt,dict())[1]['model'],'plan-brain')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_restarted_runtime_still_trips_the_dollar_cap_of_an_open_child(self):
+        # the deadline and step-limit sites read the open row (`delegate.open_child`) so a restarted runtime still
+        # writes its cap event; the dollar-cap site alone checked only `delegate_caps`, this process's memory, so
+        # a restored child's spend reached its cap and nothing paused it (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            rt.store.delegate_spend(child,usd=.75)          # over the cap, written by an earlier process
+        finally:rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)                              # a restart: a new process, no delegate_caps
+        try:
+            self.assertEqual(rt.delegate_caps,{},'the restarted runtime remembers no child')
+            self.assertTrue(rt._tick(child),'the tick ends the child on its cap')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('delegate spend cap reached',rt.store.goal(child)['error'])
+            self.assertFalse(rt.store.delegate(child)['outcome'],'the pause is the cap\'s; no one closed the row yet')
+            self.assertTrue(delegate._capped(rt,child),'the dollar-cap pause leaves its event')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_with_no_brain_in_this_process_is_orphaned_and_never_runs_on_the_parents(self):
+        # delegate_models is live memory: only the process that ran start() holds the child's brain. A child that
+        # reached a turn without it used to run on whatever brain the runtime held (the parent's), uncapped on the
+        # wrong model. The fence is now in brains.choose, so it holds at every call site (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.model import Model
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            self.assertIs(rt.brains.choose(child),None,'a child with no brain of its own gets none from choose()')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('runtime ended mid-delegation',rt.store.goal(child)['error'])
+            row=rt.store.delegate(child)
+            self.assertEqual(row['outcome'],'orphaned','the row is closed, so it never counts against the parent')
+            # its own brain registered, as start() leaves it, choose() answers with that brain and pauses nothing
+            mine=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(mine,parent,'','','worker',.5)
+            own=Model(dict(rt.config,model='its-own'))
+            rt.delegate_models[mine]=own
+            self.assertIs(rt.brains.choose(mine),own)
+            self.assertIn(rt.store.goal(mine)['state'],('queued','working'),'a child with its brain runs')
+            self.assertFalse(rt.store.delegate(mine)['outcome'])
+        finally:rt.mail.close();rt.store.close()
+
+
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
     def __init__(self,*answers):self.answers=deque(answers);self.requests=[]
@@ -9429,7 +9507,6 @@ def sse(*blocks,stop='end_turn',stop_details=None,complete=True):
         ev.append(dict(type='message_delta',delta=dict(stop_reason=stop,**(dict(stop_details=stop_details) if stop_details else {})),usage=dict(output_tokens=40)))
         ev.append(dict(type='message_stop'))
     return ev
-
 
 class AnthropicTransport(unittest.TestCase):
     """The Messages API path, against recorded wire shapes. No network and no key: a fake opener answers."""
