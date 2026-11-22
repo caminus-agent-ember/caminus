@@ -2810,6 +2810,29 @@ for line in sys.stdin:
         self.assertNotIn('Han', language.units('He said "'+'\u5f00\u5173\u505c\u8d70\u5206\u652f\u5df2\u63a8\u9001'+'" x.')[0],
                          'ten units clears the floor: a quote of that length is a citation, not a label')
 
+    def test_a_typographic_quotation_is_bounded_to_one_line_and_a_short_label_is_kept(self):
+        # review P2-2 (r24): the typographic pair had no line bound, unlike the straight pair, so a quotation opened
+        # in one paragraph and closed in another censused away the prose between them (`“Run summary:\n…\n” done`
+        # was 39 characters in, 6 out) and a reply could never drift inside it. The line bound is the fix; a quoted
+        # sentence on one line is still a citation, and a short curly-quoted label is still the reply's own word.
+        from caminus.ember.resident import language
+        han='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\uff0c\u8bf7\u68c0\u67e5\u65e5\u5fd7\u3002'
+        crossing='\u201cRun summary:\n'+han+'\u201d done'
+        self.assertEqual(language.drift(crossing,('Latin',)),('Han',0.7647058823529411),
+                         'a curly quote that crosses a line does not hide the drift inside it')
+        self.assertEqual(language.units(crossing),({'Latin': 4, 'Han': 13}, 17),
+                         'the prose between the two lines stays in the census')
+        # the line bound must not re-open the citation rule: the same span on one line is a quotation
+        one_line='\u201c'+han.replace('\n',' ')+'\u201d done'
+        self.assertEqual(language.units(one_line),({'Latin': 1}, 1),
+                         'a one-line curly quotation is still a citation')
+        # and the floor is one rule for every form: `“开”` is the same label as `"开"` (#354 review P2, r23)
+        labels='Flags \u201c\u5f00\u201d \u201c\u5173\u201d set.'
+        self.assertEqual(language.units(labels),({'Latin': 2, 'Han': 2}, 4),
+                         'a short curly-quoted label is not a citation')
+        self.assertIsNone(language.drift(labels,('Latin',)),
+                          'nor does a short curly-quoted label make English prose a drift')
+
     def test_the_prompt_op_and_a_live_session_name_the_same_language(self):
         # review P2 (r16): `agent prompt` reads the language through `language.from_home` and a live session
         # through `language.owner`; they agree by construction (config `language`, then the same goal window

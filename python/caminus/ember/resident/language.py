@@ -101,23 +101,28 @@ _TICK = re.compile(r'`[^`\n]*`')
 # a quotation is a citation, not the reply's language: a quoted foreign sentence must not make an English reply a
 # drift. Straight quotes need guards so an apostrophe (`don't`, `it's`) is not read as an opening quote: the opening
 # one follows a non-letter and the closing one precedes a non-letter (#354 review P2).
-_QUOTED = re.compile(r'「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|«[^»]*»|"[^"\n]*"'
+_QUOTED = re.compile(r'「[^」\n]*」|『[^』\n]*』|“[^”\n]*”|‘[^’\n]*’|«[^»\n]*»|"[^"\n]*"'
                      r"|(?<![\w'])'[^'\n]*'(?![\w'])")
 
 
 def _strip_quoted(text):
-    """`text` with each citation removed, but a short straight-quoted span kept: it is a term, not a quotation.
+    """`text` with each citation removed, but a short quoted span kept: it is a term, not a quotation.
 
-    A straight quote carries no signal that its author meant a citation — a markdown attribute, a shell snippet and
-    a label all use it — so the pair alone is not enough. A narration that labels flags (`set the flag "开" and
-    the label "关"`) held a reply's only foreign-script units inside two same-line pairs, and dropping them censused
-    the reply as pure English: a drift that never fired (#390 review P2, r23). The floor is on the span's units, so
-    a one-word label stays in the census and a sentence in quotes is still a citation. The typographic forms are
-    unambiguous, so they are stripped at any length.
+    A quote carries no signal that its author meant a citation — a markdown attribute, a shell snippet and a label
+    all use one — so the pair alone is not enough. A narration that labels flags (`set the flag "开" and the label
+    "关"`) held a reply's only foreign-script units inside two same-line pairs, and dropping them censused the reply
+    as pure English: a drift that never fired (#390 review P2, r23). The floor is on the span's units, so a one-word
+    label stays in the census and a sentence in quotes is still a citation. It applies to every quote form: `“开”`
+    is the same label as `"开"`, and keeping only the straight form's floor censused a curly-quoted label away.
+
+    The pair is bounded to one line in every form, for the reason the straight form already was: the typographic
+    forms used to cross lines, so a quotation opened in one paragraph and closed in another swallowed the prose
+    between them (73 characters in, 6 out, measured) and a reply could never drift there (#390 review P2-2). A
+    quotation that spans lines now stays in the census, the same documented cost as the straight form.
     """
     def one(match):
         span = match.group(0)
-        if span[0] in '"\'' and _census(span[1:-1])[1] < QUOTE_MIN_UNITS:
+        if _census(span[1:-1])[1] < QUOTE_MIN_UNITS:
             return span
         return ' '
     return _QUOTED.sub(one, text)
@@ -134,9 +139,9 @@ def prose(text):
     everything after it, so a genuine drift later in the reply was never detected (#390 review P2). The cost is
     that a quotation spanning lines stays in the census; a term-sized one cannot move the majority on its own.
 
-    And a *short* straight-quoted span is not a citation at all: a label (`set the flag "开"`) is the reply's own
+    And a *short* quoted span is not a citation at all: a label (`set the flag "开"`) is the reply's own
     word, and stripping it censused an otherwise-foreign reply as English and missed the drift (#390 review P2,
-    r23). `_strip_quoted` applies the floor; the typographic forms are unambiguous and have none.
+    r23). `_strip_quoted` applies the floor to every quote form, typographic ones included (#390 review P2-2).
     """
     return _TICK.sub(' ', _strip_quoted(_FENCE.sub(' ', text or '')))
 
