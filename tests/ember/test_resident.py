@@ -3105,6 +3105,46 @@ for line in sys.stdin:
             t.signal_running(signal.SIGTERM)
             self.wait(lambda:not t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'],10)
 
+    def test_a_writing_child_gate_may_run_inside_its_worktree(self):
+        # #384 review P2: `refused()` and `judge.review()` both held a child's gate to the global read-only
+        # allow-list, which knows no worktree grammar, so a writing child could not express its done check as
+        # `cd $WT && pytest -q` (or any check not on that list) and had to leave gate empty. Its gate now goes
+        # through the same worktree grammar as its terminal commands: rooted at the worktree, every path inside,
+        # no nested command, no `$`/`~`, and the git-metadata checks a change owes apply.
+        from caminus.ember.resident import delegate, judge
+        wt=str(self.home/'worktrees'/'gate1234')
+        Path(wt).mkdir(parents=True,exist_ok=True)
+        row=dict(permissions='write',worktree=wt)
+        self.assertEqual(delegate.gate_refusal('cd %s && pytest -q' % wt,row),'')
+        self.assertEqual(delegate.gate_refusal('cd %s && git diff --quiet' % wt,row),'')
+        self.assertEqual(delegate.gate_refusal('grep -q x f.txt',row),'','a read-only gate is still fine unwrapped')
+        self.assertIsNone(delegate.refused('define_done',dict(check='x',gate='cd %s && pytest -q' % wt),row))
+        for gate,word in (('cd %s && cat ../parent.txt' % wt,'climbs out'),
+                          ('cd %s && git -c core.fsmonitor=x status' % wt,'lets git read or run'),
+                          ('pytest -q','must start with')):
+            self.assertIn(word,delegate.gate_refusal(gate,row),gate)
+            self.assertIn('worktree',delegate.refused('define_done',dict(check='x',gate=gate),row))
+        # a read-only child gets none of this: its gate must still be a read-only command
+        self.assertIn('read-only command',delegate.gate_refusal('cd %s && pytest -q' % wt,
+                                                               dict(permissions='read')))
+        # and the finish path runs a stored worktree gate: a gate it ACCEPTS but that fails says "the gate failed"
+        # (so nothing reached the judge), while an escaping one is refused before it ever runs
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5,permissions='write',worktree=wt)
+            rt.store.update(child,gate='cd %s && test -f missing.flag' % wt)
+            out=judge.review(rt,child,dict(summary='x'))
+            self.assertIn('the gate failed',out.get('error') or '','the worktree gate was accepted and ran')
+            gates=[e for e in rt.store.events() if e['kind']=='gate']
+            self.assertTrue(gates and gates[-1]['data']['passed'] is False,'the gate ran and was recorded')
+            rt.store.update(child,gate='cd %s && cat ../secret.txt' % wt)
+            out=judge.review(rt,child,dict(summary='x'))
+            self.assertIn('climbs out',out['error'],'an escaping gate is still refused before it runs')
+            self.assertEqual(len([e for e in rt.store.events() if e['kind']=='gate']),1,'the refused gate did not run')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_child_gate_must_be_a_read_only_command(self):
         # define_done's gate runs any shell command at finish (and after a change turn): a child called
         # define_done(gate='touch gate_pwned && grep -q x f.txt'), finish ran it, and the report said completed

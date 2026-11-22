@@ -267,6 +267,41 @@ def _escaping(cmd, wt, writing=True, base=''):
     return ''
 
 
+def gate_refusal(gate, row=None):
+    """Why a delegate child may not use this done-check gate, or ''. A child's gate runs in a shell when the goal
+    finishes (and after a change turn), so it must not change anything the parent would not review.
+
+    A read-only command is always fine. A writing child's natural gate is rooted in its worktree
+    (`cd $WT && pytest -q`, `cd $WT && git diff --quiet`), which the global read-only allow-list does not know:
+    holding it to that list refused the very check the child can prove its work with, so the child had to leave
+    the gate empty (#384 review P2). Such a gate is held to the same worktree grammar as the child's terminal
+    commands (`_escaping`): it starts with `cd <worktree> && `, every path word stays inside, no nested command,
+    no `$`/`~`, and the git-metadata checks a change owes apply (`writing=True`: a gate may write in the tree).
+    """
+    row = row or {}
+    if not gate:
+        return ''
+    ro = read_only(gate)
+    write = (row.get('permissions') or 'read') == 'write'
+    wt = (row.get('worktree') or '').rstrip('/')
+    if write and wt:
+        # read-only is not enough on its own: the allow-list is text, so `cd <wt> && cat ../parent_secret` is a
+        # "read-only" command that reads what the `read` tool refuses, exactly as in the terminal branch. A
+        # read-only gate is path-checked from the worktree root; a gate that can change something must be rooted
+        # there (`cd <wt> && ...`), like every command of a writing child.
+        why = _escaping(gate, wt, writing=not ro, base=wt if ro else '')
+        if not why:
+            return ''
+        return ('a writing child\'s gate runs in a shell when the goal finishes, so it may change or read only '
+                'its own worktree (%s): %s. Fix the command, or leave gate empty and report what you verified'
+                % (wt, why))
+    if ro:
+        return ''
+    return ('a delegate child\'s gate must be a read-only command, because it runs in a shell when the goal '
+            'finishes. Check with a command that only reads (grep, test -f, ls), or leave gate empty and report '
+            'what you verified')
+
+
 def refused(name, args, row=None):
     """Why a delegate child may not run this call, or None. Checked by the runtime before the tool runs.
     row: the child's delegates row - its permissions ('read' when absent) and its worktree when it may write."""
@@ -279,12 +314,11 @@ def refused(name, args, row=None):
                 'found; your parent acts.' % name)
     if name in WRITE_ONLY and not write:
         return ('a read-only delegate child cannot %s: report what you found; your parent makes the change' % name)
-    if name == 'define_done' and args.get('gate') and not read_only(args['gate']):
+    if name == 'define_done' and args.get('gate') and gate_refusal(args['gate'], row):
         # a gate runs in a shell at finish (and after a change turn): `define_done(gate='touch x && ...')` created
-        # the file and still reported completed (#382 review). A read-only gate proves as much and cannot run one.
-        return ('a delegate child\'s gate must be a read-only command, because it runs in a shell when the goal '
-                'finishes. Check with a command that only reads (grep, test -f, ls), or leave gate empty and report '
-                'what you verified')
+        # the file and still reported completed (#382 review). A read-only gate proves as much and cannot run one;
+        # a writing child may root its gate in its own worktree, under the same grammar as its terminal (#384 review)
+        return gate_refusal(args['gate'], row)
     if name == 'terminal':
         if args.get('stdin') is not None or args.get('signal'):
             # typing into a shell (or signalling one) reaches whatever that session is, possibly another goal's,
