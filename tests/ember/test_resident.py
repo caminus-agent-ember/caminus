@@ -3373,6 +3373,46 @@ for line in sys.stdin:
                          'the op reports the name it wrote, and writes it')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Korean')
 
+    def test_a_borrowed_term_is_not_a_language_drift_whatever_script_it_is_written_in(self):
+        # review P2 (r20): `_without_borrowed` dropped only Latin runs, so a Han reply that quoted a Greek or
+        # Cyrillic name in each clause kept every one of those units, and enough clauses could nudge a correct
+        # reply. The rule is about the clause, not the borrowed script: the clause's non-owner units are terms
+        # when the owner's own script out-measures them together.
+        from caminus.ember.resident import language
+        zh=('\u8bf7\u8fd0\u884c pytest \u03b1\u03b2\u03b3 \u7136\u540e\u63a8\u9001\u3002'
+            '\u7528 gh pr create \u03b4\u03b5\u03b6 \u5f00 PR\u3002'
+            '\u56de\u590d\u5728 \u03b7\u03b8\u03b9 \u8fd9\u4e2a\u7ebf\u7a0b\u3002')
+        self.assertIsNone(language.drift(zh,('Han',)),
+                          'a Greek name inside a Chinese clause is a term, not the reply switching')
+        self.assertIsNone(language.drift(zh.replace('\u03b1\u03b2\u03b3','alpha').replace('\u03b4\u03b5\u03b6','beta')
+                                          .replace('\u03b7\u03b8\u03b9','gamma'),('Han',)),
+                          'the Latin form of the same term was already a term')
+        self.assertEqual(language.drift('\u03b1\u03b2\u03b3\u03b4 \u03b5\u03b6\u03b7\u03b8 \u03b9\u03ba\u03bb\u03bc '
+                                        '\u03bd\u03be\u03bf\u03c0 \u03c1\u03c3\u03c4\u03c5',('Han',)),
+                         ('Greek',1.0),'a reply really in Greek still drifts')
+
+    def test_the_language_cadence_counts_the_reply_being_censused(self):
+        # review P2 (r20): the count of assistant events since the last nudge is only right because
+        # `store.model_reply` writes the reply's `assistant` event before `_tick` calls `check`. Hand-written
+        # events would not show a later move of that write, so this drives `model_reply` itself: nudge at reply
+        # N, then replies N+1 and N+2 are not due and N+3 is.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            reply=dict(role='assistant',content=zh)
+            self.assertIn('Reply in English',language.check(rt,gid,zh),'the first drift of the goal is due')
+            rt.store.model_reply(gid,dict(reply))
+            self.assertEqual(language.check(rt,gid,zh),'','the reply that was nudged is one turn since it')
+            rt.store.model_reply(gid,dict(reply))
+            self.assertEqual(language.check(rt,gid,zh),'','two turns since the nudge is not DRIFT_EVERY')
+            rt.store.model_reply(gid,dict(reply))
+            self.assertIn('Reply in English',language.check(rt,gid,zh),
+                          'the third reply after the nudge is due: the censused reply is in the count')
+        finally:
+            rt.mail.close();rt.store.close()
+
     def test_the_cli_reads_a_home_whose_path_holds_a_uri_metacharacter(self):
         # review P2 (could not be reproduced): `from_home` builds a read-only URI from the store path, and
         # `urllib.parse.quote` escapes `?` and `#` by default, so a home `a?b#c` reads its goals rather than

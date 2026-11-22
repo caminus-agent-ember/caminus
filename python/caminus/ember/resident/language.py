@@ -183,21 +183,29 @@ _CLAUSE = re.compile(r'[.!?;,\u3002\uff01\uff1f\uff1b\uff0c\n]')
 
 
 def _without_borrowed(text, own):
-    """`text` with the Latin runs dropped from clauses the owner's own script out-measures.
+    """`text` with the borrowed runs dropped from clauses the owner's own script out-measures.
 
     A spaceless-script owner (Han, Kana) writes Latin terms inside their own clauses — `git push origin pr-390`,
     `pytest tests/x.py` — and those are terms, not the reply switching language. Dropping every Latin run of
     every clause that has one own-script unit went too far: a Han owner whose reply is mostly English with one
     Han term per clause ("We pushed 分支 the branch. The pull 请求 request is open.") had all its Latin dropped
-    and measured as a Han reply, so the drift was never caught (review P2, r15). The clause decides now: Latin
-    that out-measures the owner's script in that clause is the clause's language, not a term inside it.
+    and measured as a Han reply, so the drift was never caught (review P2, r15). The clause decides now: the
+    scripts the owner does not write are the clause's language only when, together, they out-measure the owner's
+    own units in that clause; otherwise they are terms inside it.
+
+    It was Latin only at first, so a Han reply that quoted Greek or Cyrillic names kept every one of those units
+    and could be nudged on a correct reply (review P2, r20). The rule is about the clause, not about which script
+    the borrowed term happens to be written in, so it now drops every non-owner script the clause's own script
+    out-measures. The cost is the same one the Latin rule already accepted, in the other direction: a reply that
+    really did switch to another script while planting one owner-script term per clause reads as the owner's.
     """
     kept = []
     for clause in _CLAUSE.split(prose(text)):
         if any(script_of(ch) in own for ch in clause):
             per, _ = units(clause)
-            if per.get('Latin', 0) <= sum(per.get(s, 0) for s in own):
-                clause = ''.join(ch for ch in clause if script_of(ch) != 'Latin')
+            borrowed = [s for s in per if s not in own]
+            if sum(per[s] for s in borrowed) <= sum(per.get(s, 0) for s in own):
+                clause = ''.join(ch for ch in clause if script_of(ch) not in borrowed)
         kept.append(clause)
     return ' '.join(kept)
 
@@ -387,6 +395,12 @@ def check(rt, gid, text, cfg=None, due=True):
     # as a goal drifted 32 more times, and the cadence then fired again early (review P2). Ask SQLite for the
     # maximum seq with json_extract, which is how other event data is read here; a runtime attribute would be
     # lost on the daemon's restart, and the log is already the record.
+    #
+    # `since` counts the reply being censused: `store.model_reply` writes the `assistant` event before `_tick`
+    # calls `check` (store.py:480, runtime.py:2424), so a nudge at reply N reads `since == 3` at reply N+3 and
+    # fires there, which is what DRIFT_EVERY means. Recording the reply after the check would silently stretch
+    # the cadence by one reply per nudge, so the count is pinned by `test_the_cadence_counts_the_reply_being_censused`
+    # rather than left to the call order.
     try:
         last = rt.store.db.execute("SELECT MAX(seq) FROM events WHERE goal=? AND kind='language_drift' AND "
                                    "json_extract(data,'$.nudged')=1", (gid,)).fetchone()[0]
