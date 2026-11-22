@@ -2899,6 +2899,15 @@ for line in sys.stdin:
             self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
         self.assertTrue(delegate.refused('terminal',dict(command='cd %s && cat ../x 2>/dev/null'%wt),row),
                         'the stream exception does not excuse a real path outside')
+        # #384 review, P1: a `search` with no path roots at the agent home, so a writing child naming none would
+        # grep the parent's whole tree - the same read `read(path='../x')` is refused for. Its home is its worktree,
+        # so that is search's default here, and the check runs on the path the tool will actually resolve.
+        args=delegate.in_worktree(row,'search',{})
+        self.assertEqual(args.get('path'),wt,args)
+        self.assertIsNone(delegate.refused('search',args,row))
+        self.assertTrue(delegate.refused('read',delegate.in_worktree(row,'read',dict(path='/etc/passwd')),row),
+                        'an absolute read outside is still refused')
+        self.assertIsNone(delegate.refused('read',delegate.in_worktree(row,'read',dict(path='ok.txt')),row))
 
     def test_the_children_limit_counts_running_children_not_every_child_ever_made(self):
         # #384 review, P2: count(*) counted every child the parent ever made, so after 4 finished children it could
@@ -3501,6 +3510,14 @@ for line in sys.stdin:
             self.assertEqual(brain.config['max_tokens'],65536,'the entry output cap, not the parent maximum')
             self.assertEqual(brain.config['efforts'],['low','high'],'the entry effort levels')
             self.assertEqual(brain.config['context'],200000)
+            # #384 review, P2: `efforts` sat in an `elif` under `variants`, so an entry carrying both lost its named
+            # levels whenever it also named server ids; both are facts about the entry and both are written now.
+            both=catalog.apply_entry({},dict(id='both',variants={'low':'id-low','high':'id-high'},
+                                                efforts=['low','high']),dict(kind='openai'))
+            self.assertEqual(both['model_variants']['low'],'id-low')
+            self.assertEqual(both['efforts'],['low','high'],'an entry with variants keeps its effort levels too')
+            anthropic=catalog.apply_entry({},dict(id='a',efforts=['low','high']),dict(kind='anthropic'))
+            self.assertNotIn('efforts',anthropic,'an anthropic entry sets its thinking levels itself')
         finally:rt.mail.close();rt.store.close()
 
     def test_a_batch_of_background_children_starts_before_the_parent_parks(self):

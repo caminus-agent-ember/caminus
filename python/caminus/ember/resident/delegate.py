@@ -360,9 +360,11 @@ def refused(name, args, row=None):
                     'repository, not a file of yours. Change your files and let git update its own metadata' % path)
     if write and wt and name in ('read', 'search'):
         # a writing child's world is its worktree: reading the parent's tree (or a home) from it leaks what the
-        # parent did not hand it, and the module docstring says such a read is refused
+        # parent did not hand it, and the module docstring says such a read is refused. The path checked is the one
+        # the tool will actually resolve (in_worktree's), so a relative path and search's own home default are
+        # covered as well as a caller-supplied absolute (#384 review P1).
         path = str(in_worktree(row, name, args).get('path') or '')
-        if path.startswith('/') and not _inside(wt, path):
+        if path and not _inside(wt, path):
             return ('a writing child reads inside its worktree (%s): name the file relative to it' % wt)
     if write and wt and name == 'checkpoint':
         outside = [str(p) for p in (in_worktree(row, name, args).get('paths') or [])
@@ -386,7 +388,12 @@ def in_worktree(row, name, args):
     args = dict(args or {})
     if name in ('write', 'edit', 'read', 'search'):
         path = str(args.get('path') or '')
-        if path and not os.path.isabs(path):
+        if not path and name == 'search':
+            # search's own default is the agent home (files.search roots at `.`), so a child that names no path
+            # would list and grep the parent's whole tree - exactly the read `read(path='../x')` is refused for
+            # (#384 review P1). The child's home is its worktree, so that is the default here too.
+            args['path'] = wt
+        elif path and not os.path.isabs(path):
             args['path'] = os.path.join(wt, path)
     elif name == 'checkpoint':
         args['paths'] = [p if os.path.isabs(str(p)) else os.path.join(wt, str(p)) for p in (args.get('paths') or [])]
@@ -913,7 +920,13 @@ def run_child(rt, parent, job):
 
 
 def capped(rt, gid):
-    """Pause a child whose spend (money + plan allowance) reached its cap; True when it was paused."""
+    """Pause a child whose spend (money + plan allowance) reached its cap; True when it was paused.
+
+    A pre-check: a turn cannot be priced before it is taken, and `_tick` runs this before the model call (so a cap
+    stops a turn rather than discovering the overspend after paying for it). The ledger is written after the turn
+    (`note_spend`, from `_meter`), so the check can lag by exactly one turn's cost - the smallest lag a pre-check
+    can have. `_tick` checks again at the top of every tick, so the overshoot is seen before the next turn and
+    named in the child's report instead of repeating (#384 review, P2)."""
     row = rt.store.delegate(gid)
     if not row:
         return False

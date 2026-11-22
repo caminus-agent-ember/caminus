@@ -583,8 +583,12 @@ def apply_entry(conf, entry, spec):
         conf['vision'] = True
     if entry.get('variants'):
         conf['model_variants'] = entry['variants']
-    elif spec.get('kind') not in ('local', 'anthropic'):
-        conf['efforts'] = list(entry.get('efforts') or [])
+    if entry.get('efforts') and spec.get('kind') != 'anthropic':
+        # both are facts the catalog states about the entry: an entry may carry its named levels (`efforts`) and its
+        # server ids (`variants`) together, and the `elif` here dropped the levels silently whenever variants came
+        # with them (#384 review P2). effort.line prefers variants when present, so writing both changes nothing
+        # for a brain that has them and fixes one whose levels the `elif` had lost.
+        conf['efforts'] = list(entry['efforts'])
     if spec.get('kind') == 'anthropic' and entry.get('thinking') == 'adaptive':
         conf['thinking'] = 'adaptive'
     if entry.get('max_output') and spec.get('kind') != 'local':
