@@ -866,6 +866,11 @@ def main(argv=None,stdin=None):
             # (review P2: atomic_json failing left it open). A write that dies midway leaves the previous file (it
             # renames), so `--on`/`--off` again is the whole repair and no other key is lost (#383 review P2).
             try:
+                # The caller's own mistake is answered before the file is read: a misuse needs no config at all, and
+                # a reader with an unreadable config.json was being told about the file when the real complaint was
+                # the flags they typed (#383 review P2).
+                if a.on and a.off:
+                    raise ValueError('use --on or --off, not both')
                 try:
                     cfg=json.loads((home/'config.json').read_text())
                 except ValueError as e:
@@ -876,8 +881,6 @@ def main(argv=None,stdin=None):
                                      'switch will not rewrite a file it cannot read' % e)
                 except OSError as e:
                     raise ValueError('cannot read config.json (%s): check the file and its permissions' % e)
-                if a.on and a.off:
-                    raise ValueError('use --on or --off, not both')
                 if a.on or a.off:
                     cfg['reflect']=bool(a.on)
                     atomic_json(home/'config.json',cfg)

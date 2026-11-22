@@ -8283,6 +8283,18 @@ for line in sys.stdin:
         cfg_path.write_text(before)
         self.assertEqual(self.cmd('reflect',[])['reflect'],False,'the restored config still reads')
 
+    def test_a_flag_misuse_is_answered_before_an_unreadable_config(self):
+        # #383 review P2: the `--on --off` check ran after the config read, so a caller with a broken config.json was
+        # told about the file when the complaint was the flags they typed. A misuse needs no config to answer, so it
+        # goes first; the file is still left alone.
+        self.gates_on()
+        cfg_path=self.home/'config.json'
+        cfg_path.write_text('{"model": "fixture", ')
+        r=self.cmd('reflect',['--on','--off'],code=1)
+        self.assertIn('use --on or --off, not both',r['error'])
+        self.assertNotIn('config.json is not valid JSON',r['error'],'the file’s problem hid the caller’s')
+        self.assertEqual(cfg_path.read_text(),'{"model": "fixture", ','a misuse rewrote the file')
+
     def test_a_reflection_call_that_never_answers_is_a_skip_not_a_failure(self):
         # #383 review P2-2: a slow endpoint makes _bounded raise TimeoutError, and the outer handler recorded that
         # as `reflection_failed` - a row the person scanning the event log reads as a harness defect. The endpoint
@@ -8489,6 +8501,35 @@ for line in sys.stdin:
             self.assertIn('allowance is spent before the retry',skipped[0]['data']['reason'])
         finally:rt.mail.close();rt.store.close()
 
+
+    def test_the_brief_says_which_of_its_counters_span_every_episode(self):
+        # #383 review P2: every block of the brief is bounded by _episode_start except the counts sentence, and that
+        # sentence drew its steers from store.steers, which is keyed by goal: a goal steered twice in each of two
+        # episodes reflected "4 steer(s)" for one episode. The numbers stay whole-goal on purpose -- `steps` and
+        # `approach_changes` are goal-row counters a resume does not reset, so scoping only the steers would leave
+        # the rest of the same sentence still claiming one episode -- so the sentence says what it counts.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.update(gid,steps=7,approach_changes=1)
+            rt.store.add_steer(gid,'first episode one');rt.store.add_steer(gid,'first episode two')
+            rt.store.event('tool_result',dict(name='early_tool',call_id='c1',result=dict(output='before')),gid)
+            with rt.store.transaction():rt.store.update(gid,state='paused',error='stop')
+            resume_goal(rt.store,gid)
+            rt.store.add_steer(gid,'this episode one');rt.store.add_steer(gid,'this episode two')
+            rt.store.event('tool_result',dict(name='late_tool',call_id='c2',result=dict(output='after')),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('ACROSS ITS EPISODES',text,'the whole-goal numbers are not labelled as such')
+            self.assertIn('7 MODEL TURNS',text)
+            self.assertIn('1 times',text)
+            self.assertIn('4 steer(s)',text,'all four steers are counted, both episodes’')
+            self.assertNotIn('early_tool',text,'the calls stay this episode’s even though the counts do not')
+            self.assertIn('late_tool',text)
+        finally:rt.mail.close();rt.store.close()
 
     def test_a_reopened_goals_reflection_reads_only_this_episodes_judge(self):
         # #383 review P2: the brief and the record's eval_context took the newest `judged` event for the goal. A

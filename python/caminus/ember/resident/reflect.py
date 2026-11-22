@@ -282,8 +282,13 @@ def brief(rt, gid, summary, open_work):
     parts.append('HOW IT ENDED:\n' + ((summary or '(no summary)')[:2000]))
     if open_work:
         parts.append('LEFT OPEN (the agent says):\n' + open_work[:1000])
-    parts.append('THE GOAL TOOK %s MODEL TURNS, the agent changed approach %s times, and %d steer(s) arrived.' % (
-        g.get('steps') or 0, g.get('approach_changes') or 0, len(rt.store.steers(gid))))
+    # Whole-goal on purpose, and said so: `steps` and `approach_changes` are goal-row counters a resume does not
+    # reset, and `store.steers` is keyed by goal. Every other block in this brief is bounded by _episode_start, so
+    # without the words a reopened goal's "4 steer(s)" read as this episode's when it was two here and two before
+    # (#383 review P2). A per-episode count of all three would mean a new high-water field on the resume marker.
+    parts.append('ACROSS ITS EPISODES THE GOAL TOOK %s MODEL TURNS, the agent changed approach %s times, and '
+                 '%d steer(s) arrived.' % (
+                     g.get('steps') or 0, g.get('approach_changes') or 0, len(rt.store.steers(gid))))
     verd, reason = _judge(rt, gid, since)
     if verd:
         parts.append('THE FINISH JUDGE: %s — %s' % (verd, reason))
