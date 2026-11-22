@@ -3457,8 +3457,10 @@ for line in sys.stdin:
 
     def test_the_resident_keeps_its_own_brain_after_a_childs_run(self):
         # #384 review: a child's turn put its own brain in rt.model and nothing put the resident's back; with one
-        # brain configured Brains.choose returned rt.model, so the parent's next turn - and every later goal - ran
-        # on the child's model. choose answers with the resident's brain, and run_child restores rt.model.
+        # brain configured Brains.choose returns rt.model, so the parent's next turn - and every later goal - ran on
+        # the child's model. `run_child` restores rt.model, which is the whole fix: `choose` must keep answering
+        # rt.model, because a caller that sets a model after Runtime() does so on purpose, and answering with
+        # `self.primary` there instead broke the resident's own `test_unexpected_error...` on CI.
         from caminus.ember.resident import delegate
         from caminus.ember.resident.model import Model
         rt=Runtime(self.home)
@@ -3468,15 +3470,12 @@ for line in sys.stdin:
             child=rt.store._enqueue('c',kind='delegate')
             rt.store.delegate_add(child,parent,'','','worker',0.5)
             child_brain=Model(dict(rt.config,model='other'))
-            # choose reads the resident brain, whatever a side run left in rt.model
-            rt.model=child_brain
             self.assertIsNone(rt.brains.fallback,'the fixture has one brain')
-            self.assertIs(rt.brains.choose(parent),resident,'choose answers with the resident brain')
-            rt.model=resident
             def fake_run(**kw):rt.model=child_brain        # what a child's turn does to rt.model
             rt.run=fake_run
             delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
             self.assertIs(rt.model,resident,'the resident got its brain back')
+            self.assertIs(rt.brains.choose(parent),resident,'and the parent\'s next turn chooses it')
         finally:rt.mail.close();rt.store.close()
 
     def test_a_paid_child_must_be_priceable_and_gets_its_entrys_limits(self):

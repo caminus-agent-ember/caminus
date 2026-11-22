@@ -144,10 +144,13 @@ class Brains:
                 self.rt.free.end_off_plan(gid)
                 return None
             if self.fallback is None:
-                return self.primary
+                return self.rt.model
             use = name
         elif self.fallback is None:
-            return self.primary          # one brain: the resident's own, never the brain a side run left in rt.model
+            # one brain: whatever the runtime holds, untouched. A delegate child's turn puts its own brain here and
+            # `run_child` puts the resident's back in `finally`, which is what keeps the leak closed; returning
+            # `self.primary` here instead ignored a model the runtime was given after construction (#384 CI).
+            return self.rt.model
         else:
             use = 'primary' if self._primary_up() or not self._allowed(gid) else 'fallback'
         if self.last.get(gid) != use:
