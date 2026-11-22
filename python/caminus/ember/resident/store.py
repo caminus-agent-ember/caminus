@@ -72,7 +72,11 @@ class Store:
           CREATE TABLE IF NOT EXISTS inbox(
             id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
             text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
-            kind TEXT NOT NULL DEFAULT 'nudge');
+            kind TEXT NOT NULL DEFAULT 'nudge',
+            -- Who wrote the row: '' is the human (or a peer's message, which is data, not approval), 'harness' is
+            -- the runtime's own loop note (a gate result, a drift nudge, a truncation warning). `_answering` must
+            -- not read its own note as the human speaking: the plain-text pause resets otherwise (#390 review P1).
+            source TEXT NOT NULL DEFAULT '');
           CREATE TABLE IF NOT EXISTS peer_deliveries(id TEXT PRIMARY KEY, goal TEXT, error TEXT);
           -- Every steer, verbatim and at goal level: compaction and the finish report must be able to
           -- quote what the human actually said, which a summarised transcript cannot.
@@ -215,6 +219,7 @@ class Store:
             self.db.execute('ALTER TABLE goals ADD COLUMN position REAL')
             self.db.execute('UPDATE goals SET position=created WHERE position IS NULL')
         for table, name, decl in (('inbox','kind',"TEXT NOT NULL DEFAULT 'nudge'"),
+                                  ('inbox','source',"TEXT NOT NULL DEFAULT ''"),
                                   ('steers','kind',"TEXT NOT NULL DEFAULT 'steer'")):
             have = {r['name'] for r in self.db.execute('PRAGMA table_info(' + table + ')')}
             if have and name not in have:

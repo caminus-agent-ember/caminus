@@ -494,6 +494,49 @@ class Resident(unittest.TestCase):
         self.assertEqual(pauses[0]['data']['replies'],3)
         self.assertNotIn('finished',[e['kind'] for e in events])
 
+    def test_a_drifting_plain_reply_still_pauses_the_goal_after_three(self):
+        # #390 review P1: the language nudge is a note the runtime writes to the inbox, not the human speaking.
+        # `_answering` read the `steers_applied` batch it arrived in as their answer, and `_plain_reply`'s `asked`
+        # branch popped the streak and queued "carry on"; with DRIFT_EVERY == PLAIN_TEXT_LIMIT == 3 the pause
+        # never fired (the reviewer reproduced 12 plain replies staying `working`). A drifting reply is still a
+        # plain reply: three in a row pause the goal, whatever notes the runtime queued along the way.
+        self.gates_on()
+        chinese=('\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002')
+        drifting=lambda: dict(role='assistant',content=chinese)
+        self.replies(call('define_done',dict(check='the file exists')),drifting(),drifting(),drifting())
+        goal=self.cmd('once',['--goal','Create the file.'],code=22)
+        self.assertEqual(goal['state'],'paused')
+        self.assertIn('plain text',goal['error'])
+        events=self.cmd('events')
+        pauses=[e for e in events if e['kind']=='plain_text_pause']
+        self.assertEqual(len(pauses),1,'the third plain reply pauses it even when it drifted')
+        self.assertEqual(pauses[0]['data']['replies'],3)
+        self.assertNotIn('plain_answer',[e['kind'] for e in events],'no harness note was read as the human')
+        drifts=[e['data'] for e in events if e['kind']=='language_drift']
+        self.assertEqual([d['nudged'] for d in drifts],[True,False,False],
+                         'one nudge, then the cadence, then none for the turn that never comes')
+        applied=[e['data'] for e in events if e['kind']=='steers_applied']
+        self.assertTrue(applied,'the drift nudge was consumed as a nudge')
+        self.assertEqual([a['human'] for a in applied],[False],'the batch is the runtime\'s own note, not theirs')
+
+    def test_a_humans_message_still_answers_a_plain_reply(self):
+        # the other side of #390's P1 fix: a row the human wrote is not marked `harness`, so a plain reply to their
+        # message is still told to carry on and still starts the streak over. Their messages did not get quieter.
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')))
+        goal=self.cmd('once',['--goal','Create the file.'],code=24)
+        self.cmd('send',['Carry on and create it.','--goal-id',goal['id']])
+        self.replies(dict(role='assistant',content='On it.'),
+                     call('verify',dict(evidence='the file is there')),call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal-id',goal['id']])
+        self.assertEqual(out['state'],'completed')
+        events=self.cmd('events')
+        self.assertIn('plain_answer',[e['kind'] for e in events],'their message is still an answer')
+        self.assertNotIn('plain_text_pause',[e['kind'] for e in events])
+        bodies=[b for k,b in Endpoint.seen if k==self.key]
+        self.assertTrue(any('Carry on with the goal' in json.dumps(b) for b in bodies),
+                        'the answer is still told to carry on, not counted')
+
 
     def test_the_same_call_failing_twice_is_refused(self):
         self.gates_on()

@@ -1836,14 +1836,26 @@ class Runtime:
         """How a plain reply relates to the human: 'reopened' when the goal had finished and a message of theirs
         reopened it (tool calls since then are the agent finding the answer), 'asked' when one of their messages
         arrived since the agent's previous reply, else ''. The reply being handled is already stored."""
-        kinds=[r['kind'] for r in self.store.db.execute(
-            "SELECT kind FROM events WHERE goal=? AND kind IN ('finished','goal_continued','steers_applied','assistant') "
-            "ORDER BY seq DESC LIMIT 200",(gid,))]            # newest first; kinds[0] is this reply
+        rows=list(self.store.db.execute(
+            "SELECT kind, CASE kind WHEN 'steers_applied' THEN data ELSE '' END AS data FROM events "
+            "WHERE goal=? AND kind IN ('finished','goal_continued','steers_applied','assistant') "
+            "ORDER BY seq DESC LIMIT 200",(gid,)))            # newest first; rows[0] is this reply
+        kinds=[r['kind'] for r in rows]
         if 'goal_continued' in kinds and 'finished' in kinds and kinds.index('goal_continued')<kinds.index('finished'):
             return 'reopened'
-        for k in kinds[1:]:
-            if k=='steers_applied':return 'asked'
-            if k=='assistant':break
+        for r in rows[1:]:
+            if r['kind']=='steers_applied':
+                # Only the human speaking is an answer. The runtime writes its own notes to the inbox too (a gate
+                # result, a drift nudge, a truncation warning, a scheduled wake-up): read as an answer, each one
+                # popped the plain-text streak and the pause never fired on a stalled goal (#390 review P1). The
+                # writer marks those rows `source='harness'` and `steers_applied` carries `human`; an older event
+                # without the field is a human batch, as it always was. (The CASE keeps the 200-row window cheap:
+                # only the batches' own data is read, not every assistant message's.)
+                try: human=json.loads(r['data']).get('human',True)
+                except ValueError: human=True
+                if human:return 'asked'
+                continue
+            if r['kind']=='assistant':break
         return ''
 
     def _plain_dispatch(self, gid):
@@ -1982,7 +1994,8 @@ class Runtime:
         note = ('[advisor] The watchdog was about to pause this goal (%s). Your advisor (%s) looked at it:\n%s\n'
                 'Change approach; the same loop again pauses the goal.' % (reason, out.get('model'), out['advice']))
         with self.store.transaction():
-            self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
+            self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
+                                  (gid, note, 'nudge', 'harness'))
             self.store.event('watchdog_advised', dict(reason=reason, step=g['steps'], usd=out.get('usd')), gid)
         # the advice gets a full window to land: the idle clock starts over (without this a 'no progress' trip paused
         # the goal on the very next tick, before the model had read the nudge it was just sent)
@@ -2068,10 +2081,10 @@ class Runtime:
         if not ok and out.startswith('the gate did not finish'):
             self._gate_slow[gid] = 'off'
             self.store.event('gate', dict(command=gate, passed=False, output=out, when='turn', disabled=True), gid)
-            self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid,
+            self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)', (gid,
                 f'[gate] the gate took over {GATE_TURN_TIMEOUT} s, so it no longer runs after each step; it still runs '
                 'when you finish. A quicker check (one test file, not the whole suite) would give you earlier feedback.',
-                'nudge'))
+                'nudge', 'harness'))
             return
         if took > GATE_SLOW:
             self._gate_slow[gid] = time.time()
@@ -2087,7 +2100,7 @@ class Runtime:
             note = '[gate] the gate passes again. If the goal is done, verify it and finish.'
         else:
             note = '[gate] the done check\'s gate fails now:\n' + out[-3000:]
-        self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
+        self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)', (gid, note, 'nudge', 'harness'))
 
     def _reply_limit(self):
         """A reply's token limit for the brain in force (effort.reply_limit: config max_tokens, else a local brain's
@@ -2305,7 +2318,7 @@ class Runtime:
         try:
             with self.store.transaction():
                 rows = list(self.store.db.execute(
-                    'SELECT id,text,kind FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
+                    'SELECT id,text,kind,source FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
                 # Steers are ordinary user text in the transcript, so they carry the latest-wins rule with
                 # them: history length differs turn to turn and a terse prefix is what makes a mid-goal
                 # redirect win over the older instructions it contradicts. Each one is also filed verbatim
@@ -2332,8 +2345,11 @@ class Runtime:
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])
                     # redirect: whether a steer (not only nudges / questions) was among them; only a steer asks for a
                     # fresh verify (a question on a finished goal made the agent think it had to redo its proof)
+                    # human: whether any row came from the human; `_answering` reads a batch of the runtime's own
+                    # notes (source 'harness') as no answer, so its nudges cannot reset the plain-text pause
                     self.store.event('steers_applied', dict(ids=[r['id'] for r in rows],
-                                                            redirect=any((r['kind'] or 'nudge') == 'steer' for r in rows)), gid)
+                                                            redirect=any((r['kind'] or 'nudge') == 'steer' for r in rows),
+                                                            human=any((r['source'] or '') != 'harness' for r in rows)), gid)
                 if not g['steps'] and not self.store.db.execute(
                         "SELECT 1 FROM events WHERE goal=? AND kind='startup_discovery' LIMIT 1",(gid,)).fetchone():
                     snapshot=discovery.discover(self.home)
@@ -2427,7 +2443,8 @@ class Runtime:
                     follows = dispatch[1]
             if (note := language.check(self, gid, reply.get('content') or '', due=follows)):
                 with self.store.transaction():
-                    self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
+                    self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
+                                          (gid, note, 'nudge', 'harness'))
             self.progress[gid] = time.time()
             if plain:
                 # A goal ends only through the finish tool, which runs the done check. Plain text is not
@@ -2488,11 +2505,11 @@ class Runtime:
                     self.truncations[gid]=count
                     if count<TRUNCATION_LIMIT:
                         limit=self._reply_limit()
-                        self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,
+                        self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',(gid,
                             f'[harness] Your last reply hit the output limit ({limit} tokens) and was cut off, so '
                             'nothing in it ran. Keep each reply under the limit: write a big file in parts (write '
                             'the first part, then add the rest with edit or further writes), and split long '
-                            'commands or text across steps.','nudge'))
+                            'commands or text across steps.','nudge','harness'))
                         self.store.update(gid,state='working',error='')
                         self.store.event('model_truncated',dict(error=str(e),recovered=True,streak=count,
                                                                 partial=e.partial),gid)
