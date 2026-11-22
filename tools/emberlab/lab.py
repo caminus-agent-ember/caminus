@@ -182,7 +182,8 @@ def main(argv=None):
                                              "sim.observe treats a non-empty value as the record's final answer on "
                                              'why the prediction missed and the log is append-only, so a typo is '
                                              'permanent')
-    p.add_argument('--goal', help="the goal id the observation lives in (default: the record's)")
+    p.add_argument('--goal', help="the goal id the observation lives in: the record's own (a different one is "
+                                  'refused, since an observation is appended to the record\'s goal)')
 
     p = sub.add_parser('open')
     p.add_argument('name')

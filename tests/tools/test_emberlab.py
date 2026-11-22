@@ -288,6 +288,26 @@ p = lab('propose', '--sim-home', str(ph), '--record', 'nostore', '--brain', 'scr
         '--config', '{"sim": false}', '--out', str(po))
 check(p.returncode != 0 and 'no SIM record' in (p.stderr + p.stdout),
       'propose: a record the log does not hold is refused before anything runs')
+# `--goal` names the goal the observation lives in, and an observation always lands in the record's own goal
+# (`sim.observe` passes `prior.get('goal') or gid`): an id that is not that goal was accepted and then silently
+# ignored, so the help promised a move the log cannot make (#385 review P2). A different goal is refused before a
+# run; the record's own id, or a prefix of it as `say --goal` resolves one, is accepted.
+r_goal = sim_record(ph, status='proposed')
+wrong_goal = S / 'propose-wrong-goal'
+p = lab('propose', '--sim-home', str(ph), '--record', r_goal['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--goal', 'g-other', '--out', str(wrong_goal))
+check(p.returncode != 0 and 'lives in goal' in (p.stderr + p.stdout) and 'not g-other' in (p.stderr + p.stdout)
+      and 'g-other' not in proposal.load_record(ph, r_goal['id'])['goal']
+      and not (wrong_goal / 'results.jsonl').exists()
+      and proposal.load_record(ph, r_goal['id'])['status'] == 'proposed',
+      f"propose: a --goal other than the record's own is refused before anything runs ({p.returncode}; "
+      f'{(p.stderr + p.stdout)[-300:]})')
+own_goal = S / 'propose-own-goal'
+p = lab('propose', '--sim-home', str(ph), '--record', r_goal['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--goal', 'g-prop', '--out', str(own_goal), '--dry-run')
+check(p.returncode == 0 and f"proposal {r_goal['id']}" in p.stdout and not own_goal.exists(),
+      f"propose: the record's own goal (a short id, as `say --goal` resolves one) is accepted ({p.returncode}; "
+      f'{(p.stderr + p.stdout)[-300:]})')
 # a second experiment in the same --out would reuse the first one's rows by id (task.brain.arm.rN)
 shared = S / 'propose-shared'
 r2 = sim_record(ph, status='proposed')

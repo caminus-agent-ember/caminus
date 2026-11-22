@@ -193,7 +193,9 @@ python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
   `--unsafe-local` or `--unsafe-free`, and `--dry-run` stops after the plan.
 - **The record carries the numbers.** `sim.observe` appends the verdict and each brain's pass rate, false
   completions and median steps, plus the suite and the tasks that ran; the observer is `emberlab`, and the
-  predictor's brain stays named.
+  predictor's brain stays named. The observation lands in the record's own goal, so `--goal` naming a different
+  goal is refused before a run rather than accepted and ignored (a short id, a prefix of the record's goal, is
+  accepted, as `say --goal` resolves one).
 - **A closed record stays closed.** An `observed` record is not measured again; a `proposed` one is the input
   (`recorded` is refused: its change is already in the tree, so the A/B would measure nothing). A verdict of
   `incomplete` (a brain with no run of one arm) leaves the record open.

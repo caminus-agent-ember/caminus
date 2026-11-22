@@ -342,6 +342,15 @@ def cmd_propose(a, run):
         raise SystemExit(f"SIM record {a.record} is {rec.get('status') or 'unstated'}, not proposed: only a "
                          "`proposed` record (a change nobody has made yet) is measured; a `recorded` one's change is "
                          'already in the tree, so an A/B of it measures nothing')
+    # an observation lives in the record's own goal (`sim.observe` attaches it there whatever goal its observer is
+    # in), so a --goal naming a different goal is refused before the runs rather than accepted and then ignored
+    # (#385 review P2). A short id is a prefix, as `say --goal` resolves one; a record with no goal takes the one
+    # given, since that is the id `sim.observe` falls back to.
+    rec_goal = rec.get('goal') or ''
+    if a.goal and rec_goal and not (rec_goal == a.goal or rec_goal.startswith(a.goal)):
+        raise SystemExit(f'SIM record {a.record} lives in goal {rec_goal[:8]}, not {a.goal[:8]}: an observation is '
+                         'appended to the record\'s own goal, so --goal cannot move it (drop --goal to record the '
+                         'observation where the prediction lives)')
     try:
         prop = dict(rec, config=_json_arg(a.config, 'config'), env=_json_arg(a.env, 'env'),
                     base_config=_json_arg(a.base_config, 'base-config'), base_env=_json_arg(a.base_env, 'base-env'))
