@@ -483,3 +483,47 @@ func TestAnExpansionOnABlankPromptStillBelongsToItsGoal(t *testing.T) {
 		t.Fatal("no selected goal still has an id")
 	}
 }
+
+// TestCopyingTheHeaderPastTheGoalTakesTheHintAsItself: the goal under the title occupies rows 1..rows, and the row
+// after them is the cut hint (collapsed) or the scroll footer (open). A selection that reaches that row copies it as
+// what it is — the header's goal substitution stops at the goal's own rows instead of running to the rule (#370 review).
+func TestCopyingTheHeaderPastTheGoalTakesTheHintAsItself(t *testing.T) {
+	t.Run("collapsed", func(t *testing.T) {
+		m := longGoalChat(t, 100, 30)
+		_ = m.render() // (the frame the selection maps onto)
+		w := max(20, m.width)
+		rows := len(headGoalRowsUnderTitle(strings.Join(strings.Fields(m.headGoalText()), " "), w))
+		if rows != headLines {
+			t.Fatalf("fixture: the cut goal fills %d lines, want %d", rows, headLines)
+		}
+		if !strings.Contains(ansi.Strip(m.chatHead(w)), "Alt+G expands") {
+			t.Fatalf("fixture: the collapsed header has no cut hint:\n%s", ansi.Strip(m.chatHead(w)))
+		}
+		m.chat.sel = m.selectionAt(2, 1)
+		m.chat.sel.b = [2]int{1 + rows, w} // the goal's last row on through the hint
+		m.chat.sel.moved, m.chat.sel.dragging = true, false
+		got := m.selectedText()
+		if !strings.Contains(got, "Alt+G expands") {
+			t.Fatalf("a selection through the cut hint copied the goal over it:\n%s", got)
+		}
+	})
+	t.Run("expanded", func(t *testing.T) {
+		m := openHead(t, longGoalChat(t, 100, 30))
+		_ = m.render()
+		w := max(20, m.width)
+		rows := len(m.headGoalRowsExpanded(w))
+		if rows != m.headRows() {
+			t.Fatalf("fixture: the open goal fills %d of %d rows", rows, m.headRows())
+		}
+		if !strings.Contains(ansi.Strip(m.chatHead(w)), "PgUp/PgDn scrolls") {
+			t.Fatalf("fixture: the open goal has no scroll footer:\n%s", ansi.Strip(m.chatHead(w)))
+		}
+		m.chat.sel = m.selectionAt(2, 1)
+		m.chat.sel.b = [2]int{1 + rows, w} // the goal's last shown row on through the footer
+		m.chat.sel.moved, m.chat.sel.dragging = true, false
+		got := m.selectedText()
+		if !strings.Contains(got, "PgUp/PgDn scrolls") {
+			t.Fatalf("a selection through the scroll footer copied the goal over it:\n%s", got)
+		}
+	})
+}

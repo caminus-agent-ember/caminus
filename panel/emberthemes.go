@@ -255,7 +255,7 @@ func (m *emberModel) previewTheme(name string) {
 		m.chat.themes.dirty = true
 		return
 	}
-	m.chat.markdown = nil
+	m.forgetMarkdown()
 	m.chat.content, m.chat.rendered = "", 0
 	m.syncChat()
 }
@@ -264,7 +264,7 @@ func (m *emberModel) previewTheme(name string) {
 // old one keeps the colours it was built with).
 func (m emberModel) closeThemes() (tea.Model, tea.Cmd) {
 	m.chat.themes = themeScreen{}
-	m.chat.markdown = nil
+	m.forgetMarkdown()
 	m.chat.content, m.chat.rendered = "", 0
 	m.chatStyles()
 	m.syncChat()

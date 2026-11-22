@@ -471,6 +471,17 @@ func (m *emberModel) targetSelectedGoal() {
 	}
 }
 
+// forgetMarkdown drops every drawing and renderer made with the theme that was in force: syncChat builds them again
+// from the theme now set. A cache keyed by width (headR) or by width and text (headMD) cannot know the theme changed,
+// so each theme path drops them where the change happens rather than relying on syncChat running before the next
+// frame is drawn (#370 review).
+func (m *emberModel) forgetMarkdown() {
+	m.chat.markdown = nil
+	clear(m.chat.mdCache)
+	clear(m.chat.headMD)
+	clear(m.chat.headR)
+}
+
 func (m *emberModel) syncChat() {
 	m.initChat()
 	w, h := max(20, m.width), max(12, m.height)
@@ -651,6 +662,29 @@ func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
 	return text, redirected
 }
 
+// headGoalRowsUnderTitle is the goal's wrapped lines the collapsed header draws under its title: cut to headLines.
+// chatHead draws these rows and selectedText copies the goal over exactly the rows they occupy.
+func headGoalRowsUnderTitle(goalText string, w int) []string {
+	shown := headWrappedLines(goalText, w)
+	if len(shown) > headLines {
+		shown = shown[:headLines]
+	}
+	return shown
+}
+
+// headGoalRowsExpanded is the expanded header's visible goal rows at width w: what headExpanded draws under the title
+// (headTop applied, capped at headRows). The scroll footer comes after them and is not part of the goal.
+func (m emberModel) headGoalRowsExpanded(w int) []string {
+	body := strings.Split(m.headExpandedBody(w), "\n")
+	rows := m.headRows()
+	top := max(0, min(m.chat.headTop, len(body)-rows))
+	shown := body[top:]
+	if len(shown) > rows {
+		shown = shown[:rows]
+	}
+	return shown
+}
+
 func (m emberModel) chatHead(w int) string {
 	state, steps, goalText := m.headParts()
 	agent := residentText(m.agentName)
@@ -669,10 +703,7 @@ func (m emberModel) chatHead(w int) string {
 	// Wrap breaks a long path too (Wordwrap left it to be cut at the edge with no marker)
 	wrapped := headWrappedLines(goalText, w)
 	goalSt := lipgloss.NewStyle().Foreground(cBlue)
-	shown := wrapped
-	if len(shown) > headLines {
-		shown = shown[:headLines]
-	}
+	shown := headGoalRowsUnderTitle(goalText, w)
 	for i, ln := range shown {
 		shown[i] = "  " + goalSt.Render(ln)
 	}
@@ -800,10 +831,10 @@ func (m emberModel) headExpanded(agent, state string, steps, w int) string {
 	lines := strings.Split(body, "\n")
 	rows := m.headRows()
 	top := max(0, min(m.chat.headTop, len(lines)-rows))
-	shown := lines[top:]
+	shown := m.headGoalRowsExpanded(w)
 	more := 0
-	if len(shown) > rows {
-		more, shown = len(shown)-rows, shown[:rows]
+	if len(lines)-top > len(shown) {
+		more = len(lines) - top - len(shown)
 	}
 	for i, ln := range shown {
 		shown[i] = "  " + ln
@@ -3361,7 +3392,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "no such theme: " + name + " · /theme lists"
 			return m, nil
 		}
-		m.chat.markdown = nil
+		m.forgetMarkdown()
 		m.chatStyles() // the composer's prompt and hint keep the palette's colours
 		m.msg = "theme: " + name
 		m.syncChat()
