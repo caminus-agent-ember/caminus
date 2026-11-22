@@ -163,6 +163,12 @@ def drift(text, scripts):
     One floor for both shapes let an English owner's short Chinese confirmations pass unheld forever, however
     many arrived (review P2); keying the mixed floor on the total let a reply like "文件在 ok" (three Han units
     and one borrowed `ok`) pass both (review P2).
+
+    A citation is not the reply's language, and `prose()` strips it in every quoted or code form, so the same
+    foreign sentence in quotes is not censused. Bare, it is: a two-word English preamble followed by an unquoted
+    Han phrase ("Good point — 谢谢你不错不错不错.") is 82 % Han by units and fires (review P2, r21). No floor can
+    separate that from a real switch, since by units it is one, and the replies the floors were tuned on (ten or
+    more English units around a few CJK terms) stay far under it; the phrase has to be quoted to read as cited.
     """
     if any(s in SPACELESS for s in (scripts or ())):
         text = _without_borrowed(text, scripts)

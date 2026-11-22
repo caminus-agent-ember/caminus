@@ -3413,6 +3413,22 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_a_foreign_phrase_that_an_english_language_reply_quotes_is_stripped(self):
+        # review P2 (r21): "Good point — 谢谢你不错不错不错." is 82 % Han by units and fires. No floor can separate
+        # it from a real switch, and neither remedy the review suggested binds on it: own=2 already reaches the
+        # mixed branch (so "some minimum of the owner's units before the whole-reply rule" is what `own >= 2` is),
+        # and other=9 clears WHOLE_MIN_UNITS by six either way. The separable part is that the phrase is a
+        # citation, which `prose()` already strips in every quoted or code form; the bare shape stays counted as
+        # the documented cost, so this test would have to change if a floor ever does separate it.
+        from caminus.ember.resident import language
+        han = '\u8c22\u8c22\u4f60\u4e0d\u9519\u4e0d\u9519\u4e0d\u9519'
+        self.assertEqual(language.drift('Good point \u2014 %s.' % han, ('Latin',)),
+                         ('Han', 9 / 11), 'bare, the phrase is the reply by units: the cost this rule cannot remove')
+        for why, quoted in (('straight', '"%s"'), ('typographic', '\u201c%s\u201d'), ('corner', '\u300c%s\u300d'),
+                            ('guillemet', '\u00ab%s\u00bb'), ('code', '`%s`')):
+            self.assertIsNone(language.drift('Good point \u2014 %s.' % (quoted % han), ('Latin',)),
+                              'a quoted phrase is a citation, not the reply switching (%s)' % why)
+
     def test_the_cli_reads_a_home_whose_path_holds_a_uri_metacharacter(self):
         # review P2 (could not be reproduced): `from_home` builds a read-only URI from the store path, and
         # `urllib.parse.quote` escapes `?` and `#` by default, so a home `a?b#c` reads its goals rather than
