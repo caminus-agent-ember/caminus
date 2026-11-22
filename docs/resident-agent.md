@@ -264,6 +264,14 @@ A tool result past about 8K tokens has its large text saved under `~/outputs/`;
 the model gets the head, the tail and the path. Web pages, search results and MCP
 results are marked as data, never instructions.
 
+What counts as a failed call is fixed here because it feeds the repeat-failure
+watchdog (three repeats of the same failure pause the goal): a result carrying
+`error`, a non-zero `exit_code`, or `ok: False`. So `ok: False` means the call
+FAILED. A tool whose normal answer is a neutral no-op (nothing to cancel, already
+answered) must answer `ok: True` or carry no `ok` key at all — `ok: False` is not
+a way to say "nothing to do" (#383 review). A tool that adds a result shape
+outside this table should say which arm it belongs to.
+
 ## Memory
 
 `STATE.md`, `MEMORY.md` and `notes/` are in [the Ember guide](ember.md#its-memory).

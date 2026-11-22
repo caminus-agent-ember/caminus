@@ -899,7 +899,8 @@ class Runtime:
         no `ok` key at all, because this same classifier feeds the repeat-failure watchdog that pauses a goal after
         three repeats. No tool in the tree answers `ok: False` today - the only `ok=False` dict is
         `catalog.refresh`'s per-provider status, which is not a tool result - so narrowing the arm to a name list
-        would only re-split the one rule this class exists to keep whole."""
+        would only re-split the one rule this class exists to keep whole. The same contract is stated for tool
+        authors in docs/resident-agent.md (## Tools), next to the tool table."""
         if not isinstance(result, dict):
             return ''
         if result.get('error'):
