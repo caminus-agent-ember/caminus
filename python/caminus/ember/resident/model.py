@@ -368,6 +368,10 @@ class Model:
         return headers
 
     def request(self, url, body=None, session=None, timeout=None):
+        """One JSON request. `timeout` is the socket timeout for THIS read - the same per-read rule complete() states,
+        falling back to the config's `timeout` (900 s) when a caller passes none: it bounds each blocked read, not
+        the whole call, so a stream that trickles holds its caller until the whole-call bound in reflect._bounded
+        closes it (#383 review P2)."""
         req = urllib.request.Request(url, None if body is None else json.dumps(body).encode(), self.headers(session=session))
         try:
             with self.opener(req, timeout=float(timeout or self.config.get('timeout', 900))) as r:

@@ -892,7 +892,14 @@ class Runtime:
     def _failure_text(result):
         """What made this call a failure, or '' when it was not one. A command exiting non-zero failed even
         though the tool itself answered; the model needs to see it as a repeated failure too. A tool that answers
-        only {'ok': False} failed as well: one classifier for the model and the reflection (#383 review)."""
+        only {'ok': False} failed as well: one classifier for the model and the reflection (#383 review).
+
+        The `ok: False` arm is a contract, not a guess (#383 review P2): `ok: False` means the call FAILED. A tool
+        whose normal answer is a neutral no-op (nothing to cancel, already answered) must answer `ok: True` or carry
+        no `ok` key at all, because this same classifier feeds the repeat-failure watchdog that pauses a goal after
+        three repeats. No tool in the tree answers `ok: False` today - the only `ok=False` dict is
+        `catalog.refresh`'s per-provider status, which is not a tool result - so narrowing the arm to a name list
+        would only re-split the one rule this class exists to keep whole."""
         if not isinstance(result, dict):
             return ''
         if result.get('error'):
