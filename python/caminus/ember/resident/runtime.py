@@ -1796,7 +1796,7 @@ class Runtime:
             # A delegate call's brain may come from the catalog, and a catalog refresh is a network call: resolving
             # it inside the write transaction would hold the store's single writer for the length of a request
             # (#382 review). Everything the call needs is resolved before BEGIN; start() below only writes.
-            prepared = delegate.prepare(self, args) if name == 'delegate' else None
+            prepared = delegate.prepare(self, args, action['goal']) if name == 'delegate' else None
             # Serialize action preparation with cancel. Polling stays outside
             # the transaction so a long command cannot block a human decision.
             with self.store.transaction():
@@ -2226,6 +2226,9 @@ class Runtime:
                     raise ModelContextError('working memory cannot fit the model context')
                 take = max(1,take//2)
             summary_options = dict(model=self.config['compaction_model']) if self.config.get('compaction_model') else {}
+            # (a summary call is a turn of this brain too: charged to a delegate child's cap in the finally below,
+            # with the usage from before it so a call that raised charges nothing - #382 review)
+            before = getattr(self.model, 'last_usage', None)
             try:
                 try:
                     summary = self.model.complete(request,max_tokens=summary_limit,**summary_options)['content']
@@ -2247,6 +2250,10 @@ class Runtime:
                     raise
                 summary = part.rstrip() + '\n[this summary was cut off at its length limit]'
                 self.store.event('summary_cut',dict(limit=summary_limit,chars=len(part)),gid)
+            finally:
+                # a summary call is a turn of this brain too, and on a delegate child it must reach its dollar cap
+                # (#382 review); it is charged here, before the next call overwrites the model's usage
+                delegate.note_aux(self, gid, (summary_options or {}).get('model'), since=before)
             pos += take
         compacted = [messages[0], dict(role='assistant', content='Earlier working memory:\n'+summary), *messages[start:]]
         after_tokens = self.model.tokens([system,*compacted,*tail],self.tools)
@@ -2434,23 +2441,33 @@ class Runtime:
         n = speed.get('tokens') if isinstance(speed, dict) and speed.get('source') == 'engine' else None
         return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
 
+    def _call_cost(self, model=None):
+        """The newest call's (usd, allowance), read from the model's own usage, and nothing written: the one pricing
+        both spend.json and a delegate child's cap ledger use (#382 review).
+
+        `model` names the model the call asked for when that is not the brain's own (a compaction model); usd is
+        None when the model has no price, as price() says, and the caller decides what an unknown price means."""
+        usage = getattr(self.model, 'last_usage', None) or {}
+        usd = price(model or (getattr(self.model, 'config', None) or {}).get('model') or self.config.get('model'),
+                    usage, (getattr(self.model, 'last_call', None) or {}).get('served'))
+        # an OpenCode plan's turn: price() is what it charged (0 inside the Go allowance); the allowance it used, in
+        # dollars of the plan's monthly limit, is kept apart (allowance)
+        allowance = (usage.get('opencode') or {}).get('allowance') if isinstance(usage.get('opencode'), dict) else None
+        allowance = float(allowance) if isinstance(allowance, (int, float)) and not isinstance(allowance, bool) else 0.0
+        return usd, allowance
+
     def _meter(self, gid):
         """Every priced turn, whichever brain served it, into spend.json (per day and per goal): what the status line
         shows. The budgets (free time, the fallback, the advisor) keep their own ledgers; this one only reports.
         Returns (usd, allowance) so a delegate child's own ledger (#342) can count both against its cap."""
         usage = getattr(self.model, 'last_usage', None) or {}
-        usd = price((getattr(self.model, 'config', None) or {}).get('model') or self.config.get('model'), usage,
-                    (getattr(self.model, 'last_call', None) or {}).get('served'))
+        usd, allowance = self._call_cost()
         # the prompt cache's share of the input, for the status line's cache bubble (both reporting styles: Anthropic's
         # cache_read / cache_creation beside input_tokens, OpenAI-style cached_tokens inside prompt_tokens)
         read = usage.get('cache_read_input_tokens') or (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0
         wrote = usage.get('cache_creation_input_tokens') or 0
         total_in = usage.get('prompt_tokens') if isinstance(usage.get('prompt_tokens'), int) else \
             (usage.get('input_tokens') or 0) + read + wrote
-        # an OpenCode plan's turn: price() is what it charged (0 inside the Go allowance); the allowance it used, in
-        # dollars of the plan's monthly limit, is kept apart (allowance)
-        allowance = (usage.get('opencode') or {}).get('allowance') if isinstance(usage.get('opencode'), dict) else None
-        allowance = float(allowance) if isinstance(allowance, (int, float)) and not isinstance(allowance, bool) else 0.0
         if not usd and not total_in:
             return 0.0, 0.0
         import datetime

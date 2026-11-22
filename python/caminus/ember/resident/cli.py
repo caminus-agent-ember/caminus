@@ -220,31 +220,13 @@ def model_ops(a,home):
         endpoint,api=catalog.transport(spec,entry)   # (an OpenCode model: its own API under the plan's root)
         cfg['providers']=catalog.providers(cfg)      # the brain being left stays one /model can go back to
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=endpoint,api=api)
-        for k in ('relay','prices','context','context_cap','thinking','model_variants','efforts','vision'):
-            cfg.pop(k,None)                   # (an owner's cap belongs to the brain it was set for)
-        if cfg.pop('max_tokens_auto',None):
-            cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
         # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
         if cfg.get('compaction_model') and catalog.find(cat,cfg['compaction_model'],entry['provider']) is None:
             cfg.pop('compaction_model')
-        if spec.get('relay'):cfg['relay']=True
-        if entry.get('prices'):cfg['prices']=entry['prices']
-        from .model import LOOPBACK
-        live=spec['kind']=='local' and not spec.get('relay') and urllib.parse.urlsplit(spec['endpoint']).hostname in LOOPBACK
-        if entry.get('context') and not live:
-            cfg['context']=int(entry['context'])  # (a local server's window is asked live: catalog.window)
-        if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
-        if entry.get('variants'):
-            cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
-        elif spec['kind']=='local':
+        # the entry's own facts, by the one normalization a delegate child's brain takes too (Growth: one copy)
+        catalog.apply_entry(cfg,entry,spec)
+        if spec['kind']=='local' and not entry.get('variants'):
             _local_effort(cfg)                        # (an entry from a catalog written before the ids were grouped)
-        elif spec['kind']!='anthropic':
-            cfg['efforts']=list(entry.get('efforts') or [])   # whether this model takes reasoning_effort at all
-        if entry.get('max_output') and spec['kind']!='local':
-            # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
-            cfg['max_tokens'],cfg['max_tokens_auto']=min(int(entry['max_output']),65536),True
-        if spec['kind']=='anthropic' and entry.get('thinking')=='adaptive':
-            cfg['thinking']='adaptive'        # current Opus and Sonnet refuse thinking off; the store keeps none anyway
         # the effort level stays when the new brain has effort control (every level runs as its nearest); with none it
         # goes back to the default
         from . import effort as eff

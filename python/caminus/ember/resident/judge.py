@@ -300,6 +300,12 @@ def review(rt, gid, result):
             rt.brains.account(gid)
         except Exception:
             pass
+        try:
+            # a graded finish is a turn of the child's brain too: it counts against the child's dollar cap (#382 review)
+            from . import delegate
+            delegate.note_aux(rt, gid)
+        except Exception:
+            pass
         cfg = getattr(rt.model, 'config', None) or {}
         from . import effort
         # the id sent (a short call runs with thinking off: the -nothink variant), not the base name
@@ -368,6 +374,11 @@ def review(rt, gid, result):
                     text = (reply.get('content') if isinstance(reply, dict) else '') or ''
                     try:
                         rt.brains.account(gid)
+                    except Exception:
+                        pass
+                    try:
+                        from . import delegate
+                        delegate.note_aux(rt, gid)      # (a child's second opinion counts against its cap too)
                     except Exception:
                         pass
                     if text.strip():

@@ -3329,6 +3329,193 @@ for line in sys.stdin:
             self.assertTrue(delegate.is_child(rt.store,other),'a leftover row fails closed')
         finally:rt.mail.close();rt.store.close()
 
+    # ---- #382 review (Codex P1s): the delegate's brain, caps, spend and boxes --------------------------------
+
+    def test_a_delegate_child_does_not_leave_its_brain_on_the_parent(self):
+        # single-brain choose() returns rt.model as it stands, and start() hands the child's model to rt.run: after
+        # the child's run the parent's next call ran on the child's brain, model and provider (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            mine=rt.model
+            sentinel=object()
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            def fake_run(target=None,stop=None,**kw):
+                rt.model=sentinel                       # (what run() does with the child's brain)
+                rt.store.update(target,state='completed',summary='the child finished')
+            with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
+                report=delegate.run_child(rt,parent,dict(child=child,role='worker'))
+            self.assertEqual(report['outcome'],'completed')
+            self.assertIs(rt.model,mine,'the parent keeps its own brain after the child ran')
+            child2=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(child2,parent,'','','worker',.5)
+            with unittest.mock.patch.object(rt,'run',side_effect=RuntimeError('boom')):
+                with self.assertRaises(RuntimeError):delegate.run_child(rt,parent,dict(child=child2,role='worker'))
+            self.assertIs(rt.model,mine,'a run that died restores it too')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_free_time_goal_cannot_delegate(self):
+        # a child is kind='delegate', so FreeTime.is_free(child) is false and its spend never reaches the free-time
+        # ledger, while its registered brain bypasses Brains.choose() and the plan rules: a free or dream goal that
+        # delegated spent outside its allowance (#382 review).
+        from caminus.ember.resident import delegate, freetime
+        rt=Runtime(self.home)
+        try:
+            for kind in freetime.KINDS:
+                gid=rt.store._enqueue('rest',kind=kind)
+                with self.assertRaises(ValueError) as caught:
+                    delegate.prepare(rt,dict(task='t',done_check='d'),gid)
+                self.assertIn('cannot delegate',str(caught.exception));self.assertIn(kind,str(caught.exception))
+            self.assertEqual(delegate.prepare(rt,dict(task='t',done_check='d'),rt.store.enqueue('w'))['task'],'t')
+            # a parent row that is gone is not free time: it reads as work and the call goes on
+            self.assertEqual(delegate.prepare(rt,dict(task='t',done_check='d'),'no-such-goal')['task'],'t')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_remote_child_with_no_price_is_refused(self):
+        # a paid child whose catalog entry has no prices priced every turn None, _meter booked 0 and its dollar cap
+        # never tripped: an unbounded child on a remote provider (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        def catalog_of(id):
+            return dict(updated=1,providers={},models=[dict(id=id,name=id,provider='deepinfra',context=32000,
+                        max_output=None,efforts=[],thinking='',vision=False,prices=None)])
+        try:
+            rt.config['providers']={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai')}
+            (self.home/'models.json').write_text(json.dumps(catalog_of('someone/unpriced')))
+            with self.assertRaises(ValueError) as caught:
+                delegate._brain(rt,dict(model='someone/unpriced'))
+            self.assertIn('has a price',str(caught.exception))
+            # the catalog's own prices make the same child priceable
+            busy=catalog_of('someone/priced');busy['models'][0]['prices']=dict(input=1.0,output=2.0,cache_read=0.5)
+            (self.home/'models.json').write_text(json.dumps(busy))
+            brain,who=delegate._brain(rt,dict(model='someone/priced'))
+            self.assertTrue(brain.remote);self.assertEqual(who,dict(model='someone/priced',provider='deepinfra'))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_aux_call_is_charged_to_the_childs_cap(self):
+        # _meter prices a turn after the main generation only, and every auxiliary call (a summary, a graded finish,
+        # the judge's second opinion) overwrote the model's last usage before the child's ledger could read it: the
+        # one limit that stops a child never saw those turns (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'claude-haiku-5-5','anthropic','worker',.5)
+            rt.delegate_caps[child]=.5
+            # 200k tokens is past Haiku's 100k long-prompt line, so it prices at the high input rate: $0.10
+            rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+            rt.model.last_call={}
+            delegate.note_aux(rt,child,'claude-haiku-5-5')          # (the model: a compaction model's own id)
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.10,places=6)
+            # a call that raised before it reported leaves the previous usage in place: nothing is charged twice
+            before=rt.model.last_usage
+            delegate.note_aux(rt,child,'claude-haiku-5-5',since=before)
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.10,places=6)
+            rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+            delegate.note_aux(rt,child,'claude-haiku-5-5',since=before)
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.20,places=6)
+            # a goal with no ledger (not a child) is left alone
+            delegate.note_aux(rt,rt.store.enqueue('not a child'),'claude-haiku-5-5')
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.20,places=6)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_compaction_summary_is_charged_to_the_childs_cap(self):
+        # the call site: a summary call is a turn of the child's brain, and a few of them at a 1M-token prompt are
+        # its whole dollar cap. A call that raised must not charge the previous turn again (#382 review).
+        from caminus.ember.resident import delegate
+        class BoundedModel:
+            remote=False
+            def __init__(self):self.fail,self.last_call,self.last_usage,self.calls=False,{},{},0
+            def context_size(self):return 20000
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None,**k):
+                self.calls+=1
+                if self.fail:raise RuntimeError('the endpoint dropped the summary call')
+                self.last_usage=dict(input_tokens=200_000,output_tokens=0)   # (past Haiku's 100k line: $0.10)
+                return dict(role='assistant',content='summary of the work')
+        model=BoundedModel()
+        rt=Runtime(self.home,model=model)
+        try:
+            rt.config['model']='claude-haiku-5-5'
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'claude-haiku-5-5','anthropic','worker',.5)
+                rt.delegate_caps[gid]=.5
+                return gid
+            gid=child()
+            history=rt.store.goal(gid)['messages']+[dict(role='assistant',content='thinking '*2000) for _ in range(12)]
+            out,done=rt._compact(gid,history)
+            self.assertTrue(done);self.assertGreaterEqual(model.calls,1)
+            pieces=max(e['data']['parts'] for e in rt.store.events() if e['kind']=='compacting' and e['goal']==gid)
+            self.assertEqual(model.calls,pieces,'one call per summary piece')
+            self.assertAlmostEqual(rt.store.delegate(gid)['spend_usd'],.10*pieces,places=6,
+                                   msg="every summary call reaches the child's cap")
+            # a summary call that raised charged nothing: its usage never replaced the previous turn's
+            bad=child();model.fail=True
+            history=rt.store.goal(bad)['messages']+[dict(role='assistant',content='thinking '*2000) for _ in range(12)]
+            with self.assertRaises(RuntimeError):rt._compact(bad,history)
+            self.assertEqual(rt.store.delegate(bad)['spend_usd'],0.0)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_that_did_not_complete_has_its_box_removed(self):
+        # sandbox.sweep keeps a paused goal's box because a paused goal can resume; a delegate child never resumes
+        # (its brain and caps lived in the process that ran it), so its box is garbage that run_child used to leave
+        # for good (#382 review). A completed child keeps its box: the runtime ends it as for any finished goal.
+        from caminus.ember.resident import delegate, sandbox
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                box=sandbox.box_dir(self.home,gid);box.mkdir(parents=True)
+                return gid,box
+            gid,box=child()
+            def failed(target=None,stop=None,**kw):rt.store.update(target,state='failed',error='the model gave up')
+            with unittest.mock.patch.object(rt,'run',side_effect=failed):
+                report=delegate.run_child(rt,parent,dict(child=gid,role='worker'))
+            self.assertEqual(report['outcome'],'failed')
+            self.assertFalse(box.exists(),'an unfinished child is not resumable: its box goes at its close')
+            gid,box=child()
+            def ok(target=None,stop=None,**kw):rt.store.update(target,state='completed',summary='done')
+            with unittest.mock.patch.object(rt,'run',side_effect=ok):
+                delegate.run_child(rt,parent,dict(child=gid,role='worker'))
+            self.assertTrue(box.exists(),'a completed child keeps its box')
+            # at a start: a child left runnable, and one whose goal already ended, are closed with their boxes
+            live,box_live=child()
+            crash,box_crash=child()
+            rt.store.db.execute("UPDATE goals SET state='cancelled' WHERE id=?",(crash,))
+            delegate.sweep(rt)
+            self.assertFalse(box_live.exists(),'a child paused at sweep is closed and its box goes')
+            self.assertFalse(box_crash.exists(),'so does the box of a child whose goal already ended')
+            self.assertTrue(box.exists())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_catalog_normalization_is_one_function_for_a_pick_and_a_child(self):
+        # delegate._brain kept a second copy of /model's normalization that dropped max_tokens_auto and the entry's
+        # effort levels, so a child asked its provider for its parent's maximum (#382 review, Growth).
+        from caminus.ember.resident import catalog
+        from caminus.ember.resident.model import price
+        stale=dict(model='old',relay=True,prices=dict(input=9.0,output=9.0),context=1000,context_cap=500,
+                   thinking='adaptive',model_variants={'low':'old-low'},efforts=['high'],vision=True,
+                   max_tokens=4096,max_tokens_auto=True)
+        entry=dict(id='vendor/new',provider='p',context=32000,max_output=128000,efforts=['low','high'],
+                   thinking='',vision=False,prices=dict(input=1.0,output=2.0,cache_read=0.5))
+        conf=catalog.apply_entry(stale,entry,dict(kind='openai',endpoint='https://api.example/v1'))
+        self.assertEqual((conf['context'],conf['max_tokens'],conf['max_tokens_auto']),(32000,65536,True))
+        self.assertEqual(conf['efforts'],['low','high'],"the entry's own effort scale, not the old brain's")
+        for k in ('relay','model_variants','vision','thinking','context_cap'):
+            self.assertNotIn(k,conf,"the previous brain's %s is not this one's" % k)
+        self.assertAlmostEqual(price('vendor/new',dict(prompt_tokens=1_000_000)),1.0)
+        # a local server on this machine: its window is asked live and its reply limit comes from its card
+        local=catalog.apply_entry(dict(model='old',context=1000),dict(id='m',provider='local',context=262144,
+            max_output=8192,efforts=[],thinking='',vision=False),dict(kind='local',endpoint='http://127.0.0.1:8092/v1'))
+        self.assertNotIn('context',local);self.assertNotIn('max_tokens',local)
+
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
         rt=Runtime(self.home)

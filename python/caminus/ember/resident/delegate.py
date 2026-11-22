@@ -40,6 +40,7 @@ children, a worktree per writing child and a card per child are the full version
 """
 import time
 
+_UNSET = object()            # (note_aux's "no snapshot given", distinct from a snapshot of None)
 ROLES = ('worker', 'reviewer')
 DEFAULTS = dict(cap_usd=0.50, max_steps=12, max_seconds=600, max_children=4)
 REFUSED = ('write', 'edit', 'checkpoint', 'rollback', 'ask_user', 'ask_root', 'github_handoff', 'send_message',
@@ -156,7 +157,7 @@ def _caps(rt, args):
 def _brain(rt, args):
     """(Model, {model, provider}) the child runs: a call's model/provider from the catalog, the role's
     configured delegate.<role>_model, or the parent's own brain (the default)."""
-    from .model import Model, remember_prices
+    from .model import Model, price
     from . import catalog
     role = args.get('role') or 'worker'
     name = str(args.get('model') or '').strip()
@@ -178,26 +179,32 @@ def _brain(rt, args):
     endpoint, api = catalog.transport(spec, entry)
     conf = dict(rt.config)
     conf.update(model=entry['id'], provider=entry['provider'], provider_kind=spec['kind'], endpoint=endpoint, api=api)
-    for k in ('relay', 'prices', 'context', 'context_cap', 'thinking', 'model_variants', 'efforts', 'vision'):
-        conf.pop(k, None)                 # (the parent's brain's facts, not this one's)
-    if spec.get('relay'):
-        conf['relay'] = True
-    if entry.get('prices'):
-        conf['prices'] = entry['prices']
-        remember_prices(entry['id'], entry['prices'])
-    if entry.get('context'):
-        conf['context'] = int(entry['context'])
-    if entry.get('vision'):
-        conf['vision'] = True
-    if entry.get('variants'):
-        conf['model_variants'] = entry['variants']
-    return Model(conf), dict(model=entry['id'], provider=entry['provider'])
+    # the entry's own facts, by the same normalization /model uses (an OpenCode plan charges what its reply says, so
+    # its price tables are not needed; any other paid brain must be priceable or its cap can never be read)
+    catalog.apply_entry(conf, entry, spec)
+    brain = Model(conf)
+    if (brain.remote and spec['kind'] not in catalog.OPENCODE and price(entry['id'], {}) is None):
+        raise ValueError('no model %s has a price: a paid remote child must be priceable, or its dollar cap can '
+                         'never trip (the catalog has no prices for it)' % entry['id'])
+    return brain, dict(model=entry['id'], provider=entry['provider'])
 
 
-def prepare(rt, args):
+def prepare(rt, args, parent=None):
     """What start() needs that may wait or reach the network, resolved before the runtime opens its write
     transaction: the caps, the role and the child's brain (a model from the catalog may need a refresh, which is
-    a network call, and the store has one writer: #382 review)."""
+    a network call, and the store has one writer: #382 review).
+
+    A free-time goal cannot delegate: its child is kind='delegate', so FreeTime.is_free() is false for it and the
+    delegated spend never reaches the free-time ledger, while the child's registered brain bypasses
+    Brains.choose() and its plan restrictions (#382 review). Refusing here beats propagating a second policy."""
+    from .freetime import KINDS as FREE_KINDS
+    if parent:
+        r = rt.store.db.execute('SELECT kind FROM goals WHERE id=?', (parent,)).fetchone()
+        kind = (r['kind'] if r else '') or 'work'
+        if kind in FREE_KINDS:
+            raise ValueError('a %s goal cannot delegate: the child would spend outside the free-time allowance and '
+                             'its provider rules (the child is not a %s goal, and its model is registered, not '
+                             'chosen); do this work yourself' % (kind, kind))
     task = str(args.get('task') or '').strip()
     done = str(args.get('done_check') or '').strip()
     if not task:
@@ -269,6 +276,9 @@ def run_child(rt, parent, job):
     check (#382 review: _stop alone is only the daemon's stop, so a cancelled parent's child ran on)."""
     child = job['child']
     daemon_stop = getattr(rt, '_stop', None)
+    # the child's brain was put in the runtime for its run (start() takes the registered model); the parent's next
+    # turn must not run on it, and single-brain choose() returns rt.model as it stands (#382 review)
+    parent_model = getattr(rt, 'model', None)
 
     def parent_gone():
         """True when the daemon is stopping, or the parent was cancelled, paused or failed while the child ran."""
@@ -316,6 +326,8 @@ def run_child(rt, parent, job):
         return report
     finally:
         rt._stop = daemon_stop
+        if parent_model is not None:
+            rt.model = parent_model
         rt.delegate_models.pop(child, None)
         rt.delegate_caps.pop(child, None)
         # A run that died before it reported (an exception out of rt.run, a kill) must not leave a row `outcome=''`
@@ -358,6 +370,21 @@ def run_child(rt, parent, job):
                         rt.store.event('delegate_close_failed', dict(child=child, error=str(e)[:300]), parent)
                     except Exception:
                         pass              # (and the trace itself must not mask the error that ended the run)
+        # A child that did not complete is not resumable (its brain and caps lived in this process), so its sandbox
+        # is garbage: sandbox.sweep keeps a paused goal's box because a paused goal can resume, which a delegate
+        # child never does (#382 review). `completed` keeps its box as an ordinary finished goal does (the runtime
+        # ends it), so only the other outcomes tear it down here.
+        try:
+            row = rt.store.delegate(child) or {}
+            if row.get('outcome') and row['outcome'] != 'completed':
+                from . import sandbox
+                sandbox.end(rt.home, child, rt.store)
+        except Exception as e:
+            try:
+                rt.store.event('box_not_removed', dict(child=child, error='%s: %s' % (type(e).__name__, e)[:300]),
+                               parent)
+            except Exception:
+                pass
 
 
 def capped(rt, gid):
@@ -398,6 +425,38 @@ def note_spend(rt, gid, usd, allowance):
     rt.store.delegate_spend(gid, usd or 0.0, allowance or 0.0)
 
 
+def note_aux(rt, gid, model=None, since=_UNSET):
+    """A child's auxiliary turn - a compaction summary, a graded finish, the judge's second opinion - to its ledger.
+
+    The runtime meters a turn into spend.json after the main generation only, so these calls were priced nowhere:
+    each overwrites the model's last usage before the next one reads it, and the child's dollar cap, the one limit
+    that stops it, never saw them (#382 review). Charged here right after the call, from the same pricing, so the
+    cap and the report count every turn the child's brain ran. A goal that is not a child has no ledger (note_spend
+    says so), and its calls stay in spend.json's turn totals as they were.
+
+    `since` is the usage object from before the call: the same object after it means the call raised before it
+    reported anything, and the previous turn's usage must not be charged a second time."""
+    if since is not _UNSET and getattr(rt.model, 'last_usage', None) is since:
+        return
+    usd, allowance = rt._call_cost(model)
+    note_spend(rt, gid, usd, allowance)
+
+
+def _sweep_box(rt, child):
+    """The box of a child closed at sweep goes too: a child is not resumable, so a kept box is only garbage.
+
+    Wrapped: sweep runs bare in the runtime loop, and one box that will not go must not end the daemon (the same
+    reason sandbox.sweep keeps its own try) (#382 review)."""
+    try:
+        from . import sandbox
+        sandbox.end(rt.home, child, rt.store)
+    except Exception as e:
+        try:
+            rt.store.event('box_not_removed', dict(child=child, error='%s: %s' % (type(e).__name__, e)[:300]))
+        except Exception:
+            pass
+
+
 def _sweep_close(rt, r, outcome, state, summary):
     """Close a child's row at sweep in the same shape run_child reports.
 
@@ -415,7 +474,10 @@ def sweep(rt):
 
     A child left open whose goal has already ended is closed too: a process killed between the child's final
     state write and its report leaves that row open forever, and start()'s child limit counts it against the
-    parent on every later start (#382 review)."""
+    parent on every later start (#382 review).
+
+    The box of every child closed here goes too: a child is not resumable, so `sandbox.sweep` keeping a paused
+    goal's box keeps only garbage (#382 review)."""
     for r in rt.store.db.execute("SELECT child,role,model,provider,cap_usd,spend_usd,allowance_usd,started "
                                  "FROM delegates WHERE outcome=''").fetchall():
         # a direct read, not store.goal(): that raises on an unknown id, and this runs bare in the runtime loop,
@@ -424,13 +486,17 @@ def sweep(rt):
         row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (r['child'],)).fetchone()
         if row is None:
             _sweep_close(rt, r, 'orphaned', 'error', 'this child\'s goal row is gone')
+            _sweep_box(rt, r['child'])
             continue
         if row['state'] in ('queued', 'working', 'waiting_model'):
             with rt.store.transaction():
                 rt.store.update(r['child'], state='paused', error='its runtime ended mid-delegation')
             _sweep_close(rt, r, 'orphaned', 'paused', 'its runtime ended mid-delegation')
+            _sweep_box(rt, r['child'])
             continue
         # The goal already ended (completed / cancelled / error): the crash window run_child's fall-back close
         # cannot reach, because that process is gone. The goal's own state names the outcome.
         outcome = dict(completed='completed', cancelled='incomplete').get(row['state'], 'failed')
         _sweep_close(rt, r, outcome, row['state'], 'this child\'s goal ended without a report')
+        if outcome != 'completed':
+            _sweep_box(rt, r['child'])
