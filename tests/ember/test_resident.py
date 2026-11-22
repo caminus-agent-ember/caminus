@@ -3734,6 +3734,37 @@ for line in sys.stdin:
             self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.20,places=6)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_judge_call_that_reported_nothing_does_not_charge_the_last_turn_again(self):
+        # #382 review P2-1: both of the judge's aux sites called `note_aux(rt,gid)` with no `since=`, while the
+        # compaction site passes `since=before`. `since` is what stops a call that raised before reporting usage
+        # from charging the previous turn's tokens a second time, so a failed judge call billed the child's cap for
+        # a turn it never ran. A judge that fails this way is the common case (the brain is down or refused).
+        from caminus.ember.resident import judge
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'claude-haiku-5-5','anthropic','worker',.5)
+            rt.delegate_caps[child]=.5
+            rt.store.update(child,done_check='the file exists')
+            rt.model.config=dict(rt.model.config,model='claude-haiku-5-5')
+            rt.model.last_call={}
+            # the turn before the judge ran: 200k input is past Haiku's 100k long-prompt line, so $0.10
+            rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+            # a judge call that raised before reporting leaves last_usage exactly as it was
+            rt.model.complete=lambda *a,**k:dict(content='{"verdict": "not_yet", "reason": "not yet"}')
+            self.assertIn('not done yet',judge.review(rt,child,dict(summary='x'))['error'])
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],0.0,places=6,
+                                   msg='a judge call that reported nothing must not re-charge the turn before it')
+            # and one that does report its usage is still charged, once
+            def reports(*a,**k):
+                rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+                return dict(content='{"verdict": "met", "reason": "it is there"}')
+            rt.model.complete=reports
+            self.assertIn('met: it is there',judge.review(rt,child,dict(summary='x'))['judge'])
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.10,places=6)
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_compaction_summary_is_charged_to_the_childs_cap(self):
         # the call site: a summary call is a turn of the child's brain, and a few of them at a 1M-token prompt are
         # its whole dollar cap. A call that raised must not charge the previous turn again (#382 review).

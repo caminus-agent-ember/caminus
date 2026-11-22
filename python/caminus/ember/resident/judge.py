@@ -295,6 +295,7 @@ def review(rt, gid, result):
             except Exception:
                 pass
         msgs = brief(bool((getattr(rt.model, 'config', None) or {}).get('vision'))) + extra
+        before = getattr(rt.model, 'last_usage', None)   # a call that reports nothing must not re-charge the last one
         reply = rt.model.complete(msgs, tools=None, max_tokens=600)
         try:
             rt.brains.account(gid)
@@ -303,7 +304,7 @@ def review(rt, gid, result):
         try:
             # a graded finish is a turn of the child's brain too: it counts against the child's dollar cap (#382 review)
             from . import delegate
-            delegate.note_aux(rt, gid)
+            delegate.note_aux(rt, gid, since=before)
         except Exception:
             pass
         cfg = getattr(rt.model, 'config', None) or {}
@@ -368,6 +369,7 @@ def review(rt, gid, result):
                 # no advisor (or past its limits): the agent's own model in a fresh context, with the evidence but
                 # not the agent's reasoning, the way the judge itself runs
                 try:
+                    before = getattr(rt.model, 'last_usage', None)   # (a call that reported nothing charges nothing twice)
                     reply = rt.model.complete([dict(role='system', content=FRESH_EYES), dict(
                         role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', '')) +
                         '\n\n' + question)], tools=None, max_tokens=1500)
@@ -378,7 +380,7 @@ def review(rt, gid, result):
                         pass
                     try:
                         from . import delegate
-                        delegate.note_aux(rt, gid)      # (a child's second opinion counts against its cap too)
+                        delegate.note_aux(rt, gid, since=before)   # (a child's second opinion counts against its cap too)
                     except Exception:
                         pass
                     if text.strip():
