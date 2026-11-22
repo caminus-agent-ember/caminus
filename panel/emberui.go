@@ -175,15 +175,12 @@ type sshOutMsg struct {
 	err  error
 }
 
-// emberSetting is one setting with the one precedence this command has: an explicit flag, else the value -demo
-// gives it, else the environment. `caminus ember ui` execs this panel with no flags at all, so that a terminal
-// showing the foreground command line shows `caminus ember`, never the ssh key and bridge paths (issue #317).
-// -demo is deliberately above the environment, not below it: docs/ember.md tells a real setup to export
-// CAMINUS_ENV_USER, and a demo started from that shell must not be pointed at the real agent account (the demo
-// opens the `demo` agent and never SSHes, so an inherited name would only mislabel its card). A flag still beats
-// both, which is what every old caller passes.
-func emberSetting(flagValue, demoValue, env string) string {
-	if flagValue != "" {
+// emberSetting is one setting with the one precedence this command has: a flag the caller gave, else the value
+// -demo gives it, else the environment. `given` is whether the flag was on the command line at all, not whether
+// its value is non-empty: an explicitly empty `--user ""` is a value too, so the required check below reports it
+// instead of the panel quietly opening the environment's (possibly different) agent account.
+func emberSetting(given bool, flagValue, demoValue, env string) string {
+	if given {
 		return flagValue
 	}
 	if demoValue != "" {
@@ -192,54 +189,88 @@ func emberSetting(flagValue, demoValue, env string) string {
 	return os.Getenv(env)
 }
 
-func emberMain(args []string) {
+// emberConfig is one `caminus ember` run's platform state, resolved at one point: an explicitly given flag, else
+// what -demo gives that setting, else the environment. `caminus ember ui` execs this panel with no flags at all,
+// so that a terminal showing the foreground command line shows `caminus ember`, never the ssh key and bridge
+// paths (issue #317). -demo's values are deliberately above the environment: docs/ember.md tells a real setup to
+// export CAMINUS_ENV_USER, and a demo started from that shell must not be pointed at the real agent account (the
+// demo opens the `demo` agent and never SSHes, so an inherited name would only mislabel its card).
+type emberConfig struct {
+	user, bridge, audit, key, cli, agent, draft string
+	demo                                        bool
+}
+
+// emberConfigOf defines and parses the flags of one `caminus ember` run and resolves every setting in one place,
+// -demo included: no later code reads a flag before it was resolved, and the given-set comes from the set itself.
+func emberConfigOf(args []string) emberConfig {
 	fs := flag.NewFlagSet("ember", flag.ExitOnError)
-	user := fs.String("user", "", "the agent user (default: $CAMINUS_ENV_USER)")
-	bridge := fs.String("bridge", "", "the bridge directory (default: $CAMINUS_ENV_BRIDGE)")
-	audit := fs.String("audit", "", "the audit log path (default: $CAMINUS_ENV_AUDIT)")
-	key := fs.String("key", "", "the harness ssh key (default: $CAMINUS_ENV_KEY)")
-	cli := fs.String("cli", "", "JSON argv of the caminus CLI (for starting server jobs; default: $CAMINUS_EMBER_CLI)")
-	agent := fs.String("agent", "resident", "resident agent name")
-	draft := fs.String("draft", "", "text the composer starts with (a new goal, sent on Enter)")
-	demo := fs.Bool("demo", false, "the demo (tools/ember_demo.py): no SSH, and an approved root command is recorded, never run")
+	var c emberConfig
+	fs.StringVar(&c.user, "user", "", "the agent user (default: $CAMINUS_ENV_USER)")
+	fs.StringVar(&c.bridge, "bridge", "", "the bridge directory (default: $CAMINUS_ENV_BRIDGE)")
+	fs.StringVar(&c.audit, "audit", "", "the audit log path (default: $CAMINUS_ENV_AUDIT)")
+	fs.StringVar(&c.key, "key", "", "the harness ssh key (default: $CAMINUS_ENV_KEY)")
+	fs.StringVar(&c.cli, "cli", "", "JSON argv of the caminus CLI (for starting server jobs; default: $CAMINUS_EMBER_CLI)")
+	fs.StringVar(&c.agent, "agent", "resident", "resident agent name")
+	fs.StringVar(&c.draft, "draft", "", "text the composer starts with (a new goal, sent on Enter)")
+	fs.BoolVar(&c.demo, "demo", false, "the demo (tools/ember_demo.py): no SSH, and an approved root command is recorded, never run")
 	fs.Parse(args)
-	demoMode = *demo
-	// The environment fills only what neither a flag nor -demo gave, and -demo's own value sits above the
-	// environment for the two settings it has an opinion about (user, key): see emberSetting.
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	demoUser, demoKey := "", ""
-	if *demo {
+	if c.demo {
 		demoUser, demoKey = "demo", "none"
 	}
-	*user = emberSetting(*user, demoUser, "CAMINUS_ENV_USER")
-	*bridge = emberSetting(*bridge, "", "CAMINUS_ENV_BRIDGE")
-	*audit = emberSetting(*audit, "", "CAMINUS_ENV_AUDIT")
-	*key = emberSetting(*key, demoKey, "CAMINUS_ENV_KEY")
-	*cli = emberSetting(*cli, "", "CAMINUS_EMBER_CLI")
-	if *user == "" || *bridge == "" || *audit == "" || *key == "" {
-		fmt.Fprintln(os.Stderr, "caminus-panel ember: --user --bridge --audit --key are all required")
+	c.user = emberSetting(given["user"], c.user, demoUser, "CAMINUS_ENV_USER")
+	c.bridge = emberSetting(given["bridge"], c.bridge, "", "CAMINUS_ENV_BRIDGE")
+	c.audit = emberSetting(given["audit"], c.audit, "", "CAMINUS_ENV_AUDIT")
+	c.key = emberSetting(given["key"], c.key, demoKey, "CAMINUS_ENV_KEY")
+	c.cli = emberSetting(given["cli"], c.cli, "", "CAMINUS_EMBER_CLI")
+	return c
+}
+
+// emberMissing names the settings neither a flag, -demo nor the environment gave: the four the panel cannot run
+// without. It reads the resolved config, so an explicitly empty flag (a value, per emberSetting) is reported here
+// instead of being replaced by the environment's.
+func emberMissing(c emberConfig) []string {
+	var miss []string
+	for _, s := range []struct{ name, value string }{
+		{"--user", c.user}, {"--bridge", c.bridge}, {"--audit", c.audit}, {"--key", c.key},
+	} {
+		if s.value == "" {
+			miss = append(miss, s.name)
+		}
+	}
+	return miss
+}
+
+func emberMain(args []string) {
+	c := emberConfigOf(args)
+	if miss := emberMissing(c); len(miss) > 0 {
+		fmt.Fprintln(os.Stderr, "caminus-panel ember: "+strings.Join(miss, " ")+" are all required (a flag, -demo, or the environment)")
 		os.Exit(2)
 	}
+	demoMode = c.demo
 	var cliArgv []string
-	if *cli != "" {
-		if err := json.Unmarshal([]byte(*cli), &cliArgv); err != nil {
+	if c.cli != "" {
+		if err := json.Unmarshal([]byte(c.cli), &cliArgv); err != nil {
 			fmt.Fprintln(os.Stderr, "caminus-panel ember: bad --cli JSON:", err)
 			os.Exit(2)
 		}
 	}
-	m := emberModel{user: *user, bridge: *bridge, auditPath: *audit, key: *key, cli: cliArgv,
-		agentName: *agent, defaultAgent: *agent, tab: 6, seen: map[string]bool{}, mode: "normal",
+	m := emberModel{user: c.user, bridge: c.bridge, auditPath: c.audit, key: c.key, cli: cliArgv,
+		agentName: c.agent, defaultAgent: c.agent, tab: 6, seen: map[string]bool{}, mode: "normal",
 		width: 110, height: 32}
 	m.initChat()
 	// Open directly into the last conversation; the first session list decides
 	// whether that session still exists (residentSessionsMsg below).
 	if demoMode { // straight into the demo agent; the real last session is neither read nor replaced
-		m.openResident(*agent)
-		m.pendingLast = *agent
+		m.openResident(c.agent)
+		m.pendingLast = c.agent
 	} else {
 		openLastSession(&m)
 	}
-	if *draft != "" {
-		m.chat.compose.SetValue(*draft)
+	if c.draft != "" {
+		m.chat.compose.SetValue(c.draft)
 		m.chat.newGoal = true
 	}
 	if m.pendingLast == "" {
