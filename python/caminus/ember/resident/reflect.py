@@ -118,6 +118,12 @@ def maybe(rt, gid, summary='', open_work=''):
                 # That is a cut-short reflection, not a failing one: a `reflection_failed` row in the event log
                 # reads as a defect of the harness to the person scanning it (#383 review P2-1).
                 rt.store.event('reflection_skipped', dict(reason='stopping: the reflection was cut short'), gid)
+            elif isinstance(e, TimeoutError):
+                # The endpoint did not answer within the attempt's own bound. Same kind of nothing as a stop-cut
+                # call: the harness was not at fault and the next goal may try again, so it is a skip, not a
+                # `reflection_failed` a person would read as a defect (#383 review P2-2).
+                rt.store.event('reflection_skipped',
+                               dict(reason='the endpoint did not answer in time', detail=str(e)[:200]), gid)
             else:
                 rt.store.event('reflection_failed', dict(reason='%s: %s' % (type(e).__name__, str(e)[:300])), gid)
         except Exception:

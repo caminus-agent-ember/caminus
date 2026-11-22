@@ -8263,6 +8263,59 @@ for line in sys.stdin:
         self.assertFalse(json.loads((self.home/'config.json').read_text())['reflect'])
         self.assertEqual(self.cmd('reflect',['--on','--off'],code=1)['error'],'use --on or --off, not both')
 
+    def test_the_reflect_switch_names_a_config_it_cannot_read(self):
+        # #383 review P2-1: with config.json unreadable, `agent reflect --on` answered with the decoder's own
+        # "Expecting value: line 1 column 12" and, on a missing file, a FileNotFoundError trace. The person needs
+        # the file and the repair, and a refused read must not be written over: atomic_json replaces the whole
+        # file, so a write after it would take every other key with it.
+        self.gates_on()
+        cfg_path=self.home/'config.json'
+        before=cfg_path.read_text()
+        cfg_path.write_text('{"model": "fixture", ')
+        r=self.cmd('reflect',['--on'],code=1)
+        self.assertIn('config.json is not valid JSON',r['error'])
+        self.assertIn('will not rewrite a file it cannot read',r['error'])
+        self.assertEqual(cfg_path.read_text(),'{"model": "fixture", ','a refused read rewrote the file')
+        # a missing file never reaches the handler: the guard above answers it with the init instruction
+        cfg_path.unlink()
+        r=self.cmd('reflect',['--on'],code=1)
+        self.assertEqual(r['error'],'agent not initialized; run agent init first')
+        cfg_path.write_text(before)
+        self.assertEqual(self.cmd('reflect',[])['reflect'],False,'the restored config still reads')
+
+    def test_a_reflection_call_that_never_answers_is_a_skip_not_a_failure(self):
+        # #383 review P2-2: a slow endpoint makes _bounded raise TimeoutError, and the outer handler recorded that
+        # as `reflection_failed` - a row the person scanning the event log reads as a harness defect. The endpoint
+        # not answering is the same kind of nothing as a stop-cut call: a skip.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        import threading as _threading
+        aborted=_threading.Event()
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def abort(self):aborted.set()
+            def complete(self,*a,**k):
+                Model.calls+=1
+                aborted.wait(10)                # never answers: only the attempt's own deadline ends it
+                raise OSError('the socket was closed')
+        rt=Runtime(self.home)
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            with unittest.mock.patch.object(reflect,'TIMEOUT',.2):
+                self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1,'the retry ran after a timed-out first call')
+            events=rt.store.events()
+            self.assertEqual([e for e in events if e['kind']=='reflection_failed'],[],'a slow endpoint is not a defect')
+            skipped=[e for e in events if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1)
+            self.assertIn('the endpoint did not answer in time',skipped[0]['data']['reason'])
+        finally:rt.mail.close();rt.store.close()
+
     def test_an_off_sim_log_or_a_free_stretch_asks_for_no_reflection(self):
         # the reflection writes into the SIM log, so an off arm records nothing (an A/B's off arm must not learn
         # here) even when the session turned reflection on; free time is not graded work and is not reflected on.

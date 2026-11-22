@@ -864,7 +864,16 @@ def main(argv=None,stdin=None):
             # (review P2: atomic_json failing left it open). A write that dies midway leaves the previous file (it
             # renames), so `--on`/`--off` again is the whole repair and no other key is lost (#383 review P2).
             try:
-                cfg=json.loads((home/'config.json').read_text())
+                try:
+                    cfg=json.loads((home/'config.json').read_text())
+                except ValueError as e:
+                    # A read that fails is answered, never overwritten: atomic_json writes the whole file, so a write
+                    # after a refused read would take every other key with it. The decoder's own message names a line
+                    # and a column; the person needs the file and the repair (#383 review P2-1).
+                    raise ValueError('config.json is not valid JSON (%s): fix it by hand or restore a copy; this '
+                                     'switch will not rewrite a file it cannot read' % e)
+                except OSError as e:
+                    raise ValueError('cannot read config.json (%s): check the file and its permissions' % e)
                 if a.on and a.off:
                     raise ValueError('use --on or --off, not both')
                 if a.on or a.off:
