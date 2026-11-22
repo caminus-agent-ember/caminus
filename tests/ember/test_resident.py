@@ -3600,6 +3600,41 @@ for line in sys.stdin:
         try:self.assertEqual(store.goal(child)['state'],'completed','the refused continue must not revive the child')
         finally:store.close()
 
+    def test_a_delegate_goal_with_no_delegates_row_is_paused_not_served_as_a_top_goal(self):
+        # #384 review P1: every child check reads the delegates row (`if child_row and ...`), so a goals row with
+        # kind='delegate' and no row ran as an ordinary goal: write, terminal and ask_user came back, and capped()
+        # read no row and returned False, so the dollar cap stopped applying with no error anywhere. A delete path
+        # that skips the pair (hand-cleaned store, a future migration) must fail closed: pause, say why, refuse the
+        # call. This is the diff between "silently unpoliced child" and "a paused goal a human can see".
+        target=self.home/'leak.txt'
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.db.execute('DELETE FROM delegates WHERE child=?',(child,))
+            # the tool gate: a write a read-only child could never make is refused, and nothing runs
+            rt.store.model_reply(child,call('write',dict(path=str(target),content='x')))
+            rt._action(rt.store.actions(child)[0])
+            events=[e for e in rt.store.events() if e['goal']==child and e['kind']=='tool_result']
+            errs=[e['data']['result'].get('error') for e in events if e['data'].get('name')=='write']
+            self.assertTrue(errs and errs[-1],events)
+            self.assertIn('delegates row is missing',errs[-1])
+            self.assertFalse(target.exists(),'the refused call did not run')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('delegates row is missing',rt.store.goal(child)['error'])
+            self.assertTrue([e for e in rt.store.events() if e['kind']=='delegate_row_missing'])
+            # the tick path pauses before a model turn, so the child cannot spend uncapped either
+            again=rt.store._enqueue('c2',kind='delegate')
+            self.assertTrue(rt._tick(again))
+            self.assertEqual(rt.store.goal(again)['state'],'paused')
+            # an ordinary goal with no delegates row is not a child: the new check must not touch it
+            top=rt.store.enqueue('an ordinary goal')
+            self.assertFalse(rt._pause_orphan_child(top))
+            self.assertEqual(rt.store.goal(top)['state'],'queued')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_wait_is_clipped_to_the_goals_time_budget(self):
         # one wait could block for its full 30 minutes against a 600 s child cap; the deadline was read only at the
         # next tick (#382 review). A goal 2 s from its deadline waits about 2 s, not 1800.

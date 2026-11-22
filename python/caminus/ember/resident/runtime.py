@@ -1308,6 +1308,39 @@ class Runtime:
         return name + ':' + hashlib.sha1(json.dumps(args, sort_keys=True, ensure_ascii=False)
                                          .encode()).hexdigest()[:12]
 
+    # A goal row that says kind='delegate' with no delegates row: fail closed (see _pause_orphan_child).
+    ORPHAN_CHILD = ('delegate: this goal is a child (kind=delegate) but its delegates row is missing, so the rules '
+                    'that keep a child read-only, inside its worktree and under its dollar cap cannot be checked. '
+                    'It is paused rather than run as a top-level goal (#384 review).')
+
+    def _pause_orphan_child(self, gid, goal=None):
+        """Pause a goal that says kind='delegate' while its delegates row is gone; True when this goal is such a
+        child, else False.
+
+        Delegation is a permission boundary, and every child check reads that row (read-only, the worktree, the
+        dollar cap). `if child_row and ...` treated a missing row as "an ordinary goal", so a hand-cleaned store, a
+        future migration or a delete path that skipped the pair would run the child with every capability and no
+        cap, silently (#384 review P1). A missing row is not a licence: pause where a human will see the reason."""
+        goal = goal or self.store.goal(gid)
+        if (goal.get('kind') or 'work') != 'delegate' or self.store.delegate(gid):
+            return False
+        with self.store.transaction():
+            if self.store.goal(gid)['state'] in ('completed', 'cancelled', 'paused', 'error'):
+                return True
+            self.store.update(gid, state='paused', error=self.ORPHAN_CHILD)
+            self.store.event('delegate_row_missing', dict(goal=gid), gid)
+        return True
+
+    def _delegate_row(self, gid):
+        """The goal's delegates row, or None for an ordinary goal. A delegate-kind goal whose row is gone is paused
+        and refused here, so no caller has to remember to check for it (#384 review P1)."""
+        row = self.store.delegate(gid)
+        if row:
+            return row
+        if self._pause_orphan_child(gid):
+            raise ValueError(self.ORPHAN_CHILD)
+        return None
+
     def _define_done(self, gid, check, gate=''):
         check, gate = (check or '').strip(), (gate or '').strip()
         if not check:
@@ -1582,7 +1615,7 @@ class Runtime:
                 continue
             name = d.get('name') or ''
             res = d.get('result') if isinstance(d.get('result'), dict) else {}
-            child_row = self.store.delegate(gid)
+            child_row = self._delegate_row(gid)
             if child_row and delegate.refused(name, args, child_row):
                 # a delegate child's policy refusal is not a change attempt: nothing ran and nothing changed, so
                 # it must not make the child read a path it never touched before it can finish (#342)
@@ -1710,7 +1743,7 @@ class Runtime:
             gid_now = action['goal']
             refused = False
             # a delegate child's terminal may use only the sessions its own goal opened (#382 review)
-            child_goal = bool(self.store.delegate(gid_now))
+            child_goal = bool(self._delegate_row(gid_now))
             signature = self._signature(name, args)
             if name == 'browser' and args.get('action') in browser.CHANGES and \
                     action['id'] in self.__dict__.get('_browser_skip', {}).get(gid_now, ()):
@@ -1735,7 +1768,7 @@ class Runtime:
             # github_handoff, a further delegate, a terminal command that changes anything and any terminal input
             # or signal are refused here, before the tool runs, whatever the model asks for (delegate.py holds
             # the list and the reason). A child's terminal also cannot use another goal's session (Terminal.call).
-            child_row = self.store.delegate(gid_now)
+            child_row = self._delegate_row(gid_now)
             if child_row and (why := delegate.refused(name, args, child_row)):
                 raise ValueError(why)
             if child_row:
@@ -2685,6 +2718,10 @@ class Runtime:
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return False
                 self.store.update(gid,state='paused',error='oneshot time budget reached')
+            return True
+        if self._pause_orphan_child(gid, g):
+            # a child whose delegates row is gone has no permission, worktree or cap to check: paused before a model
+            # turn is paid for, not served as a top-level goal (#384 review P1)
             return True
         if gid in self.delegate_caps and delegate.capped(self, gid):
             return True                       # its spend (money + plan allowance) reached its cap: the parent hears it
