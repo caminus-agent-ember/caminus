@@ -343,6 +343,34 @@ except SystemExit as e:
     err = str(e)
 check('incomplete' in err and proposal.load_record(ph, r8['id'])['status'] == 'proposed',
       f'propose: an incomplete verdict leaves the record open ({err[:200]})')
+# `incomplete` only asks that every brain has both arms. A rerun into a folder whose first pass errored on half its
+# runs can hold ONE valid row where the plan asked for two, and report.compare's "fewer than 3 repeats" is advisory:
+# the record would close (permanent) on a 1-sample A/B (#385 review P2)
+part = S / 'propose-partial'
+r13 = sim_record(ph, status='proposed')
+nsp = argparse.Namespace(sim_home=str(ph), record=r13['id'], suite='basic', brain=['scripted:solve'], repeats=2,
+                         only='read', host=None, jobs=1, parallel=None, out=str(part),
+                         config='{"sim": false}', env=None, base_config=None, base_env=None,
+                         arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
+                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+
+
+def part_run(runs):
+    """`lab.py run` after a first pass errored out: both arms have rows, but arm r2 has none."""
+    rows = [dict(id='read.scripted-solve.base.r1', brain='scripted:solve', arm='base', task='read', repeat=1, check=True),
+            dict(id='read.scripted-solve.base.r2', brain='scripted:solve', arm='base', task='read', repeat=2, check=True),
+            dict(id='read.scripted-solve.arm.r1', brain='scripted:solve', arm='arm', task='read', repeat=1, check=True)]
+    (part / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    return 0
+
+
+try:
+    proposal.cmd_propose(nsp, part_run)
+    err13 = 'closed instead of refusing'
+except SystemExit as e:
+    err13 = str(e)
+check('planned runs have no valid row' in err13 and proposal.load_record(ph, r13['id'])['status'] == 'proposed',
+      f'propose: a cell short of the plan\'s repeats leaves the record open ({err13[:200]})')
 # a checkout that MOVED (a commit, a rebase) is a different arm even at the same path: `lab.py run` skips every id
 # already in results.jsonl, so without this a new record would be closed with the previous rows (#385 review P1)
 moved = json.loads((shared / 'arms.json').read_text())

@@ -406,6 +406,18 @@ def cmd_propose(a, run):
         # a brain with no run of one arm cannot judge the proposal, and `observe` is permanent: leave it open
         raise SystemExit(f"the runs do not judge the proposal ({verdict['verdict']}): the record stays open "
                          f'(rerun the same command into the same folder; {measured})')
+    # `incomplete` only asks that every brain has both arms. A folder whose first pass errored on half its runs and
+    # was then rerun can hold one valid row where the plan asked for three, and report.compare's "fewer than 3
+    # repeats" is advisory: the record would close (permanent, append-only) on a 1-sample A/B (#385 review P2). The
+    # plan is deterministic, so require every planned run to have a row that did not end in error - the same test
+    # `lab.py run` uses to decide a run is done - rather than re-deriving a per-cell count rule.
+    planned = [r['id'] for r in runner.plan(suite, brains, arms, max(1, a.repeats), only or None)]
+    have = {r['id'] for r in report_mod.load(out) if r.get('state') != 'error'}
+    lacking = [i for i in planned if i not in have]
+    if lacking:
+        raise SystemExit(f'the runs do not judge the proposal ({len(lacking)} of {len(planned)} planned runs have no '
+                         f'valid row, e.g. {", ".join(lacking[:3])}): the record stays open (rerun the same command '
+                         f'into the same folder; {measured})')
     # sim.observe overwrites eval_context, so the proposing turn's own context is carried forward, then the run's
     prior_ctx = (rec.get('eval_context') or '').strip()
     write_observation(home, a.record, observed_text(verdict),
