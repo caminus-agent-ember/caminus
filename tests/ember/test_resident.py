@@ -2743,6 +2743,49 @@ for line in sys.stdin:
             self.assertEqual(delegate._caps(rt,dict(cap_usd=0.25))[0],0.25)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_cap_a_call_passes_is_a_number_or_a_refusal_naming_it(self):
+        # The tool schema says number, but a model can send "0.9x" or true as plain text: float()/int() raised a
+        # bare ValueError/TypeError naming nothing, where the config side already refuses with the key (#382
+        # review, rev-glm P2). A bool is an int in Python, so `max_steps: true` would silently mean one step.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for args,key in ((dict(cap_usd='0.9x'),'cap_usd'),(dict(max_steps=True),'max_steps'),
+                             (dict(max_seconds='60'),'max_seconds'),(dict(cap_usd=float('inf')),'cap_usd'),
+                             (dict(max_steps=float('nan')),'max_steps')):
+                with self.assertRaises(ValueError) as caught:
+                    delegate._caps(rt,args)
+                self.assertIn(key,str(caught.exception),'the refusal names the key the caller sent: %s'%args)
+            cap,steps,secs=delegate._caps(rt,dict(cap_usd=0.25,max_steps=4.0,max_seconds=60.0))
+            self.assertEqual((cap,steps,secs),(0.25,4,60),'a JSON number still reads as one')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_childs_spend_is_charged_from_its_row_not_only_from_this_process(self):
+        # note_spend was keyed on rt.delegate_caps, this process's memory of the children it started: a child whose
+        # start() happened in a previous process (a crash, the same parent path re-run) never had its turns
+        # charged, so its dollar cap could not trip until sweep() paused it (#382 review, rev-glm P2). The row is
+        # the fact; the set is the fast path, as open_child already says for the cap sites.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            self.assertNotIn(child,rt.delegate_caps,'this process did not run its start()')
+            delegate.note_spend(rt,child,.2,.05)
+            row=rt.store.delegate(child)
+            self.assertEqual((round(row['spend_usd'],6),round(row['allowance_usd'],6)),(.2,.05),
+                             'an open child out of this process\'s set still has its ledger written')
+            # a closed row is not a runnable child: a late note must not charge it after its report was written
+            rt.store.delegate_done(child,'completed')
+            delegate.note_spend(rt,child,.1,0.0)
+            self.assertEqual(round(rt.store.delegate(child)['spend_usd'],6),.2)
+            # a top-level goal has no ledger and no row: nothing is written, and nothing raises
+            plain=rt.store.enqueue('plain')
+            delegate.note_spend(rt,plain,.3,0.0)
+            self.assertIsNone(rt.store.delegate(plain))
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_workers_window_keeps_every_running_child(self):
         # `... ORDER BY outcome='' DESC, started DESC LIMIT 20` sorted a running child (outcome NULL, and SQLite's
         # NULL is smallest) after every finished one, so a long-lived session's twenty finished children pushed it
@@ -3017,7 +3060,8 @@ for line in sys.stdin:
 
     def test_a_wait_is_clipped_to_the_goals_time_budget(self):
         # one wait could block for its full 30 minutes against a 600 s child cap; the deadline was read only at the
-        # next tick (#382 review). A goal 2 s from its deadline waits about 2 s, not 1800.
+        # next tick (#382 review). A goal 2 s from its deadline waits about 2 s, not 1800, and the loop re-reads the
+        # deadline, so what ends it is the budget itself, said as such (#382 review, rev-glm P2), not a bare timeout.
         from caminus.ember.resident import housemate
         rt=Runtime(self.home)
         try:
@@ -3025,8 +3069,39 @@ for line in sys.stdin:
             t0=time.monotonic()
             r=housemate.wait(rt,gid,'message',timeout=1800)
             self.assertLess(time.monotonic()-t0,6)
-            self.assertEqual(r['happened'],'timeout')
+            self.assertIn('time budget is used up',r['happened'])
         finally:rt.mail.close();rt.store.close()
+
+    def test_a_wait_re_reads_the_deadline_while_it_blocks(self):
+        # the deadline was read once before the wait loop, so a budget the runtime extended or shortened mid-wait
+        # went unseen until the (now stale) clipped wait returned (#382 review, rev-glm P2). A shortened one ends
+        # the wait at once; an extended one keeps it waiting past the old deadline.
+        import sqlite3
+        from caminus.ember.resident import housemate
+        housemate.POLL=0.05
+        rt=Runtime(self.home)
+        try:
+            short=rt.store.enqueue('Wait.',max_seconds=30)
+            def shorten():
+                # its own connection: the store's is bound to this thread, and a Timer runs in another
+                db=sqlite3.connect(self.home/'agent.sqlite3')
+                db.execute('UPDATE goals SET deadline=? WHERE id=?',(time.time(),short));db.commit();db.close()
+            threading.Timer(0.2,shorten).start()
+            t0=time.monotonic()
+            r=housemate.wait(rt,short,'message',timeout=1800)
+            self.assertLess(time.monotonic()-t0,5,'a spent budget does not wait 30 s for its stale clip')
+            self.assertIn('time budget is used up',r['happened'])
+            long=rt.store.enqueue('Wait.',max_seconds=2)
+            def extend():
+                db=sqlite3.connect(self.home/'agent.sqlite3')
+                db.execute('UPDATE goals SET deadline=? WHERE id=?',(time.time()+6,long));db.commit();db.close()
+            threading.Timer(0.2,extend).start()
+            t0=time.monotonic()
+            r=housemate.wait(rt,long,'message',timeout=3)
+            "The 2 s budget clipped the 3 s timeout; once the deadline moves out, the wait runs to the caller's 3 s."
+            self.assertGreater(time.monotonic()-t0,2.5,'an extended budget is not clipped to the old deadline')
+            self.assertEqual(r['happened'],'timeout')
+        finally:housemate.POLL=1.0;rt.mail.close();rt.store.close()
 
     def test_a_wait_with_less_than_a_second_left_reports_the_budget(self):
         # `min(timeout, int(left) + 1)` rounded a fraction of a second up to a whole one and returned a stale

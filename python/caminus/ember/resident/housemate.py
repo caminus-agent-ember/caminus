@@ -83,21 +83,29 @@ def wait(rt, gid, until, target='', timeout=300):
     # until == 'message' has no condition of its own: the interruptions below are what it waits for.
     # A goal's own time budget bounds the wait too: one wait blocked for its full 30 minutes against a 600 s child
     # cap, and the deadline was checked only at the next tick (#382 review).
-    g = rt.store.goal(gid)
-    if g.get('deadline'):
-        left = g['deadline'] - time.time()
-        if left <= 0:
-            return dict(happened='the goal\'s time budget is used up', waited_s=0,
-                        note='the goal pauses at its next step; do not wait again')
-        # Round down, not up (#382 review): `min(timeout, int(left) + 1)` could wait a second past the deadline
-        # and hand back a stale wait. Below a second there is no wait to make.
-        if left < 1:
-            return dict(happened="the goal's time budget is used up", waited_s=0,
-                        note='the goal pauses at its next step; do not wait again')
-        timeout = min(timeout, int(left))
+    g = rt.store.goal(gid) or {}
+    deadline = g.get('deadline') or None
+    if deadline and deadline - time.time() < 1:
+        return dict(happened="the goal's time budget is used up", waited_s=0,
+                    note='the goal pauses at its next step; do not wait again')
     seen_inbox = _inbox_count(rt, gid)
     queued = _queued(rt, gid)
     while True:
+        # The wait lasts at most the caller's timeout AND the goal's time budget, and the budget is re-read every
+        # pass: a deadline extended or shortened mid-wait is the one that counts (#382 review, rev-glm P2). A
+        # direct read, because a goal row going away must end the wait, not raise out of it.
+        limit = timeout
+        row = rt.store.db.execute('SELECT deadline FROM goals WHERE id=?', (gid,)).fetchone()
+        if row is not None:
+            deadline = row['deadline'] or None
+        if deadline is not None:
+            left = deadline - time.time()
+            if left < 1:
+                return dict(happened="the goal's time budget is used up",
+                            waited_s=round(time.monotonic() - start, 1),
+                            note='the goal pauses at its next step; do not wait again')
+            # round down: the clip may not run past the deadline (`int(left) + 1` did)
+            limit = min(timeout, int(left))
         if hasattr(rt, 'poll_requests'):
             rt.poll_requests(gid)             # an answer to a pending request is a message: it wakes this wait
         if check and (why := check()):
@@ -117,7 +125,13 @@ def wait(rt, gid, until, target='', timeout=300):
             return dict(happened='your human paused or interrupted this goal', waited_s=round(time.monotonic() - start, 1))
         if _queued(rt, gid) > queued:
             return dict(happened='new work was queued', waited_s=round(time.monotonic() - start, 1))
-        if time.monotonic() - start >= timeout:
+        if time.monotonic() - start >= limit:
+            # A wait clipped by the budget ends at the budget, not on a bare timeout: say so, so the goal pauses
+            # instead of waiting again (#382 review, rev-glm P2).
+            if limit < timeout:
+                return dict(happened="the goal's time budget is used up",
+                            waited_s=round(time.monotonic() - start, 1),
+                            note='the goal pauses at its next step; do not wait again')
             return dict(happened='timeout', waited_s=round(time.monotonic() - start, 1),
                         note='nothing happened in time; check why before waiting again')
         time.sleep(POLL)

@@ -135,6 +135,22 @@ def refused(name, args):
     return None
 
 
+def _call_number(args, key):
+    """A cap a delegate call passed, or a refusal naming the key.
+
+    The tool schema says number, but a model can send `"0.9x"` or `true` as plain text: `float(...)` and `int(...)`
+    then raised a bare ValueError/TypeError naming nothing from every delegate call, where the config side already
+    refuses with the key and the fix (#382 review, rev-glm P2). A bool is an int in Python, so `max_steps: true`
+    would silently mean one step; it is refused like any other non-number."""
+    value = args[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError('%s is %r: it must be a number, not %s (send a JSON number, or omit it)'
+                         % (key, value, type(value).__name__))
+    if not math.isfinite(value):
+        raise ValueError('%s is %s: it must be a finite number (send a number, or omit it)' % (key, value))
+    return value
+
+
 def _caps(rt, args):
     """(cap_usd, max_steps, max_seconds): the config's defaults, lowered by the call, never raised.
 
@@ -157,23 +173,23 @@ def _caps(rt, args):
                          'number, so no child can run under it. Set a positive cap (the default is %s)'
                          % (cfg.get('delegate_usd'), DEFAULTS['cap_usd']))
     if args.get('cap_usd') is not None:
-        their = float(args['cap_usd'])
-        if not math.isfinite(their) or their <= 0:
-            raise ValueError('cap_usd must be more than 0, and a finite number: it is what the child may spend, '
+        their = _call_number(args, 'cap_usd')
+        if their <= 0:
+            raise ValueError('cap_usd must be more than 0 and finite: it is what the child may spend, '
                              'and 0 used to mean "uncapped". Omit it to use delegate_usd ($%s)' % cap)
         cap = min(cap, their)
     steps = int(_limit(rt, 'delegate_max_steps'))
     if args.get('max_steps') is not None:
-        their = int(args['max_steps'])
+        their = _call_number(args, 'max_steps')
         if their <= 0:
             raise ValueError('max_steps must be at least 1: a child that may take no step cannot do anything')
-        steps = min(steps, their)
+        steps = min(steps, int(their))
     secs = int(_limit(rt, 'delegate_max_seconds'))
     if args.get('max_seconds') is not None:
-        their = int(args['max_seconds'])
+        their = _call_number(args, 'max_seconds')
         if their <= 0:
             raise ValueError('max_seconds must be at least 1: a child with no time cannot do anything')
-        secs = min(secs, their)
+        secs = min(secs, int(their))
     return cap, max(1, steps), max(1, secs)
 
 
@@ -462,8 +478,12 @@ def open_child(rt, gid):
 
 
 def note_spend(rt, gid, usd, allowance):
-    """A child's turn: the per-subagent ledger (delegates.spend_usd / allowance_usd), the metric the cap reads."""
-    if gid not in (getattr(rt, 'delegate_caps', None) or ()):
+    """A child's turn: the per-subagent ledger (delegates.spend_usd / allowance_usd), the metric the cap reads.
+
+    Keyed on the row, not only on `rt.delegate_caps`: a child whose start() ran in a previous process (a crash and
+    the same parent path re-run) is in no set, so its turns went uncharged and its dollar cap could not trip
+    (#382 review, rev-glm P2). open_child is the same fast-path-or-fact test the cap sites already use."""
+    if gid not in (getattr(rt, 'delegate_caps', None) or ()) and not open_child(rt, gid):
         return
     rt.store.delegate_spend(gid, usd or 0.0, allowance or 0.0)
 
