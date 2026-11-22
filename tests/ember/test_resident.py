@@ -8489,6 +8489,34 @@ for line in sys.stdin:
             self.assertNotIn('fine_tool: ',text,'a successful call is not reported as failed')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_nonzero_exit_reaches_the_reflection(self):
+        # #383 review P1: brief() kept its own copy of the failure rule ('error' or ok is False), so a `terminal` or
+        # `sandbox` result that answered with exit_code=1 and output (no 'error' key) read as a success and never
+        # reached the reflection, while the model's repeat-failure watchdog did see it. One classifier now.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('tool_result',dict(name='terminal',call_id='c1',
+                result=dict(command='pytest -q',exit_code=1,output='2 failed, 4 passed\n')),gid)
+            rt.store.event('tool_result',dict(name='sandbox',call_id='c2',
+                result=dict(command='make',exit_code=2,output='error: no target\n')),gid)
+            rt.store.event('tool_result',dict(name='terminal',call_id='c3',
+                result=dict(command='ls',exit_code=0,output='f.txt\n')),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('2 of those calls failed',text,'a non-zero exit was invisible to the reflection')
+            self.assertIn('terminal: exit 1: 2 failed, 4 passed',text)
+            self.assertIn('sandbox: exit 2: error: no target',text)
+            self.assertNotIn('terminal: exit 0',text,'a successful command is not reported as failed')
+            # the same classifier the watchdog uses, so the two cannot drift: the model sees the exit too
+            self.assertEqual(rt._failure_text(dict(exit_code=1,output='2 failed\n')),'exit 1: 2 failed')
+            self.assertEqual(rt._failure_text(dict(ok=False)),'ok=False')
+            self.assertEqual(rt._failure_text(dict(exit_code=0,output='ok\n')),'')
+            self.assertEqual(rt._failure_text(dict(ok=True,output='ok\n')),'')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_reflection_stops_before_the_retry_when_the_daemon_is_going(self):
         # #383 review P2: stopping() was read once before the first call; a SIGTERM while an unreadable reply was in
         # flight let the retry spend another 60 s timeout — the wait stopping()'s docstring warns about. It is read

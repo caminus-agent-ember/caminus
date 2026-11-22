@@ -277,11 +277,13 @@ def brief(rt, gid, summary, open_work):
         name = d.get('name') or '?'
         names[name] = names.get(name, 0) + 1
         res = d.get('result')
-        # A tool's failure shape: the runtime's own tools put the reason under 'error'; a tool that only says
-        # {'ok': False} (no 'error') is a failure too, or the reflection never sees it (#383 review P2).
-        if isinstance(res, dict) and (res.get('error') or res.get('ok') is False):
+        # The runtime's one failure classifier, so a command that exited non-zero (a `terminal`/`sandbox` result
+        # carries exit_code and output, not 'error') and a tool that only says {'ok': False} both reach the
+        # reflection, exactly as they reach the model's repeat-failure watchdog (#383 review P1).
+        why = rt._failure_text(res)
+        if why:
             failed += 1
-            errors.append('%s: %s' % (name, str(res.get('error') or 'ok=False')[:200]))
+            errors.append('%s: %s' % (name, why[:200]))
     parts.append('ITS TOOL CALLS (newest first, at most 200): ' +
                  (', '.join('%s×%d' % (k, v) for k, v in names.items()) or '(none)'))
     if failed:

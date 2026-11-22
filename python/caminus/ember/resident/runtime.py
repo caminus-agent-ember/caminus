@@ -891,7 +891,8 @@ class Runtime:
     @staticmethod
     def _failure_text(result):
         """What made this call a failure, or '' when it was not one. A command exiting non-zero failed even
-        though the tool itself answered; the model needs to see it as a repeated failure too."""
+        though the tool itself answered; the model needs to see it as a repeated failure too. A tool that answers
+        only {'ok': False} failed as well: one classifier for the model and the reflection (#383 review)."""
         if not isinstance(result, dict):
             return ''
         if result.get('error'):
@@ -900,6 +901,8 @@ class Runtime:
         if isinstance(code, int) and code != 0:
             tail = (result.get('output') or '')[-300:]
             return 'exit %d: %s' % (code, tail.strip())
+        if result.get('ok') is False:
+            return 'ok=False'
         return ''
 
     @staticmethod
