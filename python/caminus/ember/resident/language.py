@@ -335,6 +335,12 @@ def from_home(home):
     return derive(prompts) or named(DEFAULT, 'default')
 
 
+def _reply_in(name, script):
+    """The nudge's text: one line, naming the owner's language and the script the reply slid into."""
+    return ("Reply in %s, the owner's language: your last reply came out mostly in another script (%s)."
+            % (name, script))
+
+
 def check(rt, gid, text, cfg=None, due=True):
     """Record a drift in `text` and, when the goal is due for one, return the nudge for its next turn.
 
@@ -395,8 +401,11 @@ def check(rt, gid, text, cfg=None, due=True):
                                                      script=script, language=who['name']), gid)
         except sqlite3.Error:
             pass
-        return ''
+        # The cadence is unknown now, but the drift is not: a turn that is due gets the nudge anyway. The caller
+        # writes the inbox row in its own transaction, so one failed read or insert need not cost the nudge too,
+        # and an unnudged real drift is the silent failure this check exists to prevent (review P2 r18). A failure
+        # that repeats nudges again: a repeated correct nudge is visible and costs a turn, a lost one costs none.
+        return _reply_in(who['name'], script) if due else ''
     if not nudge:
         return ''
-    return ("Reply in %s, the owner's language: your last reply came out mostly in another script (%s)."
-            % (who['name'], script))
+    return _reply_in(who['name'], script)

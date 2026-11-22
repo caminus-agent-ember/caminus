@@ -2692,6 +2692,33 @@ for line in sys.stdin:
         self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
         self.assertEqual(self.steers(goal['id']),[])
 
+    def test_every_derived_language_name_has_a_script_table(self):
+        # review P2 (r18): `check`'s "no script table" event only fires for `source == 'config'`, so a name that
+        # is DERIVED (`derive` -> `_LANG_OF`) and has no table would leave the drift check switched off with
+        # nothing in the log saying why. That branch is unreachable only while every `_LANG_OF` value has a table;
+        # this is that invariant, so adding a script to `_LANG_OF` without a table fails here rather than
+        # silently disabling the check on a derived session.
+        from caminus.ember.resident import language
+        derived=sorted(set(language._LANG_OF.values()))
+        self.assertEqual([n for n in derived if not language.named(n,'derived')['scripts']],[],'each derived name censuses')
+        # and the guard's premise holds the other way too: a made-up name is config-only and has no table
+        self.assertEqual(language.named('Pali','config')['scripts'],())
+        self.assertEqual(language.named('Pali','derived')['scripts'],())
+
+    def test_a_multiline_straight_quote_stays_in_the_census_and_a_typographic_one_does_not(self):
+        # review P2 (r18): bounding a straight-quote pair to one line (r16) buys the stray-quote fix at a cost: a
+        # genuine quotation that spans lines is no longer read as a citation. The cost is accepted and this is the
+        # boundary, measured: the same paragraph cited with typographic quotes is dropped and no drift; with
+        # straight quotes it stays in the census and a short English reply around it measures as Han. A miss would
+        # be the silent failure this feature exists to prevent, a nudge is visible and cheap, so the bound stays.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002'
+        body='\n'.join([zh]*3)
+        straight='The log said:\n"'+body+'"\nand then the PR was opened.'
+        typographic='The log said:\n\u201c'+body+'\u201d\nand then the PR was opened.'
+        self.assertEqual(language.drift(straight,('Latin',))[0],'Han','a multi-line straight citation stays in the census')
+        self.assertIsNone(language.drift(typographic,('Latin',)),'the same text in typographic quotes is a citation')
+
     def test_a_stray_straight_quote_does_not_blind_the_rest_of_the_reply(self):
         # review P2 (r16): `_QUOTED` paired two strays across a newline and dropped everything between them, so a
         # genuine drift after a markdown attribute (`href="x`) was never censused. The straight-quote pair is now
@@ -3062,9 +3089,11 @@ for line in sys.stdin:
         try:
             gid=real.enqueue('Open the pull request against ember-next.')
             rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=boom)
-            self.assertEqual(language.check(rt,gid,zh),'','a locked store is no nudge, not an exception')
+            # a failed read or insert is still no exception, and since r18 it is no lost nudge either: the cadence
+            # is unknowable, but the drift is real and the caller writes the inbox row itself
+            self.assertIn('Reply in English',language.check(rt,gid,zh),'a locked store is still a nudge')
             rt.store=types.SimpleNamespace(db=real.db,event=boom)   # (the queries read, the insert is refused)
-            self.assertEqual(language.check(rt,gid,zh),'','a refused insert is no nudge either')
+            self.assertIn('Reply in English',language.check(rt,gid,zh),'a refused insert is still a nudge')
             rt.store=real
             self.assertEqual([r[0] for r in real.db.execute(
                 "SELECT COUNT(*) FROM events WHERE goal=? AND kind='language_drift'",(gid,))],[0],
@@ -3080,6 +3109,10 @@ for line in sys.stdin:
         # locked store lost the event with no trace and the per-brain drift rate -- the number this check is
         # measured by -- under-reported silently. The failure is now its own event, best effort: when the store is
         # what failed, the record fails the same way and is lost, and that is still no second exception.
+        # review P2 (r18): `return ''` also lost the NUDGE the turn was due for, and the retry path only comes
+        # back after another DRIFT_EVERY assistant turns. The cadence read is the thing that failed; the drift
+        # itself was already measured, so a due turn gets the nudge anyway and the caller writes the inbox row in
+        # its own transaction. The event is still lost (no store), which is the r6 record's own best effort.
         import sqlite3
         import types
         from caminus.ember.resident import language
@@ -3091,7 +3124,8 @@ for line in sys.stdin:
         try:
             gid=real.enqueue('Open the pull request against ember-next.')
             rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=real.event)
-            self.assertEqual(language.check(rt,gid,zh),'','a locked store is no nudge, not an exception')
+            self.assertIn('Reply in English',language.check(rt,gid,zh),
+                          'a locked store is still no exception, and no lost nudge either')
             errs=[json.loads(r[0]) for r in real.db.execute(
                 "SELECT data FROM events WHERE goal=? AND kind='drift_check_error'",(gid,))]
             self.assertEqual(len(errs),1,'the lost drift is recorded, not only swallowed')

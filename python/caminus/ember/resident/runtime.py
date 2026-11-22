@@ -2409,7 +2409,7 @@ class Runtime:
             # drift there is recorded and never nudged, and only the plain branch below honoured it — a tool-call
             # reply on a free goal was nudged anyway (review P2). `kind` is read for every reply now, not just a
             # plain one, so the tool-call branch can honour the same rule.
-            kind = self.store.goal(gid).get('kind', 'work')
+            kind = g.get('kind', 'work')      # (the row read at the top of the tick; `update` cannot change `kind`)
             follows = not _calls_finish(reply.get('tool_calls')) and kind not in FREE_KINDS
             dispatch = None
             if plain:
