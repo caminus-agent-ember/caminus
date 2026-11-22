@@ -2689,6 +2689,50 @@ for line in sys.stdin:
         self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
         self.assertEqual(self.steers(goal['id']),[])
 
+    def test_a_stray_straight_quote_does_not_blind_the_rest_of_the_reply(self):
+        # review P2 (r16): `_QUOTED` paired two strays across a newline and dropped everything between them, so a
+        # genuine drift after a markdown attribute (`href="x`) was never censused. The straight-quote pair is now
+        # bounded to one line: two strays on different lines no longer pair, and a real one-line citation is still
+        # dropped as before. The first assertion is the defect (old census was {'Latin': 4}, no drift); the second
+        # is the guard that the fix did not stop quotations being citations.
+        from caminus.ember.resident import language
+        han=('\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002'
+             '\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002')
+        reply='The template is href="x and it works.\n'+han+'\nDone, see the log."'
+        self.assertEqual(language.drift(reply,('Latin',)),('Han',0.5333333333333333),
+                         'a stray quote above the reply does not hide the drift below it')
+        self.assertEqual(language.units(language.prose('He said "'+han+'" and opened it.'))[0]['Latin'],5,
+                         'a one-line quotation is still a citation and stays out of the census')
+
+    def test_the_prompt_op_and_a_live_session_name_the_same_language(self):
+        # review P2 (r16): `agent prompt` reads the language through `language.from_home` and a live session
+        # through `language.owner`; they agree by construction (config `language`, then the same goal window
+        # through `derive`) but nothing bound them. This reads ONE home through both for the three sources -
+        # derived goals, a named config, and a config the session cannot read - so a change to either path alone
+        # fails here rather than shipping a prompt that disagrees with the session.
+        from caminus.ember.resident import language
+        from caminus.ember.resident.store import atomic_json
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'],language.from_home(self.home)['name'],
+                             'a derived name is the same through both paths')
+        finally:
+            rt.mail.close();rt.store.close()
+        cfg=json.loads((self.home/'config.json').read_text())
+        cfg['language']='French';atomic_json(self.home/'config.json',cfg)
+        rt=Runtime(self.home)
+        try:
+            self.assertEqual((language.owner(rt)['name'],language.from_home(self.home)['name']),
+                             ('French','French'),'a named language is the same through both paths')
+        finally:
+            rt.mail.close();rt.store.close()
+        cfg.pop('language',None);cfg['sim']=True;atomic_json(self.home/'config.json',cfg)
+        (self.home/'config.json').write_text('{"language": ')
+        self.assertIn('config.json',self.cmd('prompt',[],code=1)['error'],
+                      'a corrupt config is refused by the prompt op, as by `agent language`')
+
     def test_an_unbalanced_fence_is_blinded_like_a_closed_one(self):
         # a reply cut off mid-block (or a ```markdown that never closes) has no closing fence; the code body is not
         # the reply's language, so the narration must be censused alone. With the body left in, its CJK literals

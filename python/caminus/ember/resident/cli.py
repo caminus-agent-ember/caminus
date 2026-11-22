@@ -729,6 +729,9 @@ def main(argv=None,stdin=None):
             # same home: a corrupt config is refused by both (before, this op fell back to the defaults and
             # printed English while `language` reported the error — #390 review P2). A home with no config yet
             # still prints the defaults, which is what `prompt` is for before `init`.
+            # `from_home` is `language.owner` for a caller with no runtime; the two must name one language for one
+            # home (both read config `language`, then the same `_GOALS` window through `derive`), and
+            # `test_the_prompt_op_and_a_live_session_name_the_same_language` reads one home through both (#390 review P2).
             from . import language
             sim_on=bool(_read_config(home,missing_ok=True).get('sim',True))
             value=render_prompt(home,sim=sim_on,language=language.from_home(home)['name'])

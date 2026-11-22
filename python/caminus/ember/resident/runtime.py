@@ -566,6 +566,8 @@ class Runtime:
         agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, and the measured
         budget - therefore rides after the history instead (see :meth:`context_message`). A memory write used
         to invalidate the cache at the first token and force a full re-read of the whole transcript."""
+        # `owner` is also what `language.from_home` reads for the CLI's `agent prompt`; the two must name one
+        # language for one home, and the equality test reads a single home through both (#390 review P2).
         return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self),
                                                          language=language.owner(self)['name']))
 

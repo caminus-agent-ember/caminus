@@ -11,7 +11,8 @@ enough for every turn:
   and the session keeps English until `--to` names it.
   `prompt.py` names it, so the brain is told which language to keep to in replies, notes, files, commit
   messages and GitHub text.
-- after every stored assistant reply, `check` censuses the prose's letters by script. When a majority of the
+- after every stored assistant reply, `check` censuses the prose's units by script (a unit, not a letter: the
+  definition below is the one the floors are in). When a majority of the
   reply's units is in a script other than the owner's, the drift is an event (kind `language_drift`, with the
   brain that wrote it, so a drift rate per brain is visible in the event log) and, at most once every
   DRIFT_EVERY assistant turns, one short nudge goes into the goal's inbox: the next turn reads
@@ -99,8 +100,8 @@ _TICK = re.compile(r'`[^`\n]*`')
 # a quotation is a citation, not the reply's language: a quoted foreign sentence must not make an English reply a
 # drift. Straight quotes need guards so an apostrophe (`don't`, `it's`) is not read as an opening quote: the opening
 # one follows a non-letter and the closing one precedes a non-letter (#354 review P2).
-_QUOTED = re.compile(r'「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|«[^»]*»|"[^"]*"'
-                     r"|(?<![\w'])'[^']*'(?![\w'])")
+_QUOTED = re.compile(r'「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|«[^»]*»|"[^"\n]*"'
+                     r"|(?<![\w'])'[^'\n]*'(?![\w'])")
 
 
 def prose(text):
@@ -108,6 +109,11 @@ def prose(text):
 
     An unterminated fence (a reply cut off mid-block, or a ` ```markdown ` that never closes) truncates the rest:
     leaving its body in the census let a code block's CJK literals outweigh the narration around it (#354 review P2).
+
+    A straight-quote pair is bounded to one line, for the opposite reason: a single unpaired `"` (a markdown
+    attribute such as `href="x`, a mis-escaped snippet) used to pair with the next quote or with nothing and drop
+    everything after it, so a genuine drift later in the reply was never detected (#390 review P2). The cost is
+    that a quotation spanning lines stays in the census; a term-sized one cannot move the majority on its own.
     """
     return _TICK.sub(' ', _QUOTED.sub(' ', _FENCE.sub(' ', text or '')))
 
