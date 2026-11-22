@@ -3124,6 +3124,49 @@ for line in sys.stdin:
         self.assertIsNone(delegate.refused('terminal',dict(command="cd %s && awk 'BEGIN{system(\"ls\")}'"%wt),row),
                           'a run-time program is not claimed to be caught (the docstring says best effort)')
 
+    def test_a_writing_child_cannot_hand_a_program_to_an_interpreter(self):
+        # #384 review P2: NESTED refuses `sh -c` but not `python3 -c`, so `cd W && python3 -c
+        # "open('../p/secret','w').write(1)"` wrote in the parent's tree while `_escaping` saw no nested program and
+        # no `..` word (the path was inside one quoted string). The interpreter is not refused - a writing child's
+        # own `python3 -m pytest -q` and `perl Makefile.PL` are pinned as allowed below - only the flag that hands
+        # it a program from the command line, so the child writes the program into the worktree instead.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'abcd1234')
+        row=dict(permissions='write',worktree=wt)
+        for cmd in ("cd %s && python3 -c 'open(\"../p/secret\",\"w\").write(1)'"%wt,
+                    'cd %s && python3 -c "print(1)"'%wt,
+                    'cd %s && python -c x'%wt, 'cd %s && python3.12 -c x'%wt,
+                    'cd %s && python3 -uc x'%wt, 'cd %s && python3 -O -c x'%wt,
+                    # an option value before the flag must not swallow it: `-W ignore` is python's warning flag
+                    'cd %s && python3 -W ignore -c x'%wt, 'cd %s && python3 -Wignore -c x'%wt,
+                    'cd %s && python3 -X dev -c x'%wt,
+                    # stdin (`-`) and a here-doc are the same program from nowhere: no path check reads them
+                    'cd %s && python3 - < script.txt'%wt, "cd %s && python3 - <<'EOF'\nprint(1)\nEOF"%wt,
+                    # another interpreter between the shell and the flag (`timeout` is a wrapper, not a program)
+                    'cd %s && timeout 20 nice -n 10 python3 -c x'%wt,
+                    'cd %s && perl -e x'%wt, 'cd %s && perl -I lib -e x'%wt, 'cd %s && perl -e x'%wt,
+                    'cd %s && perl -Mstrict -e x'%wt, 'cd %s && ruby -e x'%wt, 'cd %s && node -e x'%wt,
+                    'cd %s && node --eval=x'%wt, 'cd %s && node --inspect -e x'%wt, 'cd %s && php -r x'%wt,
+                    'cd %s && lua -e x'%wt, 'cd %s && Rscript -e x'%wt, 'cd %s && pypy3 -c x'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'command line' in why,(cmd,why))
+        # the interpreter itself stays allowed: a writing child's build and test commands are its real work, and
+        # the pinned allowed list above runs `python3 -m pytest -q`; `-m` hands python a MODULE, so a later `-c`
+        # means something else (pytest's own config file)
+        for cmd in ('cd %s && python3 -m pytest -q'%wt, 'cd %s && python3 -m pytest -c cfg'%wt,
+                    'cd %s && python3 build.py'%wt, 'cd %s && python3 -u build.py'%wt,
+                    'cd %s && perl Makefile.PL'%wt, 'cd %s && ruby test.rb'%wt, 'cd %s && node script.js'%wt,
+                    'cd %s && python3 < /dev/null'%wt, 'cd %s && gcc -c x.c'%wt,
+                    'cd %s && make test'%wt):
+            self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
+        # the word is refused wherever it stands, like NESTED: a command that only READS the same words is a false
+        # positive, and the direction a tripwire should err in (`grep -c -e python3 f` is the spelling that reads)
+        why=delegate.refused('terminal',dict(command='cd %s && grep python3 -c f'%wt),row)
+        self.assertTrue(why and 'command line' in why,why)
+        # a read-only child never had this command (it is not a read-only command at all), so nothing changes there
+        ro=dict(permissions='read')
+        self.assertTrue(delegate.refused('terminal',dict(command='python3 -c "print(1)"'),ro))
+
     def test_a_child_delegate_cannot_delegate_again_or_ask_the_human(self):
         # depth 1 and no human: both refusals are the runtime's, whatever the model asks for
         self.gates_on()

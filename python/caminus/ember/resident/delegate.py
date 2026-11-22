@@ -10,11 +10,13 @@ inside another goal:
   merges or discards. A parent in plan mode may not grant write: a child never gets more than its parent has. The
   sandbox stays available to both: the folder it sees is a read-only bind at /work and /box dies with the box.
   Residual risk, stated plainly: a writing child is trusted the way the parent is - the worktree keeps its changes
-  apart from the parent's tree, it is not a jail for a hostile process. A command that computes a path at run time
-  (`python3 -c`, `awk 'BEGIN{system(...)}'`, a `make` recipe) can still write anywhere; `delegate._escaping` is a
-  best-effort tripwire that stops the obvious spellings and the worktree's shared git metadata (`git config`,
-  `git -c`, `.git`), not a boundary. The worktree cannot be moved into a sandbox box as it stands: its `.git` is a
-  file naming `<parent>/.git/worktrees/<name>`, so a box binding only the worktree cannot run git at all;
+  apart from the parent's tree, it is not a jail for a hostile process. A program that computes a path at run time
+  can still write anywhere: `delegate._escaping` refuses the spellings that hand a program to a shell or an
+  interpreter on the command line (`sh -c`, `python3 -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`, `lua -e`,
+  `Rscript -e`, a here-doc), but a script file in the worktree, `awk 'BEGIN{system(...)}'` and a `make` recipe are
+  not seen. It is a best-effort tripwire that stops the obvious spellings and the worktree's shared git metadata
+  (`git config`, `git -c`, `.git`), not a boundary. The worktree cannot be moved into a sandbox box as it stands:
+  its `.git` is a file naming `<parent>/.git/worktrees/<name>`, so a box binding only the worktree cannot run git;
 - depth 1: a child cannot delegate, so the tree is one level deep by construction. The human-facing and outward
   tools (ask_user, ask_root, github_handoff, send_message, report, remember, sim, schedule, lease, browser,
   propose_plan, advisor) and MCP tools belong to the parent: a child reports what it found and the parent acts;
@@ -75,9 +77,12 @@ your parent's to change, and a read of it is refused the same way. A terminal co
 The worktree keeps your changes apart from your parent's tree; it is not a jail, so treat it as your own checkout and
 do not try to reach past it. Two things are off limits because your worktree shares them with the parent's
 repository: `git config`, `git -c`, `--config-env`, `--exec-path`, and any path naming `.git` - they are refused.
-The checks above read the command text, so a program that computes a path at run time (`python3 -c`, `awk`, a `make`
-recipe) is not seen: your parent reviews the worktree's diff, and a write outside it is a change your parent would
-not review. Keep every write where you were told to.'''
+The checks above read the command text, so a program that computes a path at run time is not seen: a script file
+running `python3 script.py`, `awk`, a `make` recipe, or a here-doc body. Handing a program to a shell or an
+interpreter on the command line is refused (`sh -c`, `python3 -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`,
+`lua -e`, `Rscript -e`, and `python3 - <<EOF`): write the program to a file in your worktree and run that, so your
+parent's diff shows it. Your parent reviews the worktree's diff, and a write outside it is a change your parent
+would not review. Keep every write where you were told to.'''
 
 
 def read_only(cmd):
@@ -103,10 +108,78 @@ def _inside(wt, path):
 # Programs that run another command from a string, or start a shell of their own: a text check cannot see what
 # their argument does (a nested `sh -c "echo x > /tmp/evil"` hides its path inside one word), so a writing child
 # may not call them. This is a name deny-list and it cannot hold on its own: `awk
-# 'BEGIN{system(...)}'`, `make`, `python3 -c` and `git -c alias.x='!cmd' x` all run a command without naming one
-# of these, and the module docstring says so. It narrows the obvious spellings; the worktree is not a jail.
+# 'BEGIN{system(...)}'`, `make` and `git -c alias.x='!cmd' x` all run a command without naming one of these, and
+# the module docstring says so. It narrows the obvious spellings; the worktree is not a jail.
 NESTED = frozenset('sh bash dash zsh ksh csh tcsh fish eval exec source xargs env sudo doas su chroot '
                    'unshare nsenter script'.split())
+
+# An interpreter handed its program on the command line is the same spelling with a different name: `python3 -c
+# 'open("../p/secret","w").write(1)'` hides the path inside one quoted word, exactly as `sh -c` does. The
+# interpreters themselves are not refused, because a writing child's real work needs them (`python3 -m pytest -q`
+# and `perl Makefile.PL` are pinned as allowed), so only the flag that hands one its program is refused, and the
+# child writes the program to a file in its worktree instead - where the parent's diff shows it. Each entry is
+# (inline flag letters, letters that take a value, letters that end the scan, inline long options): a value
+# letter may be attached (`-Wignore`) or the next word, and it must be listed or that word would look like a
+# script and end the scan before a later `-e` (#384 review P2). `-m` (python) ends the scan because the program
+# is the module, so `python3 -m pytest -c cfg` keeps its meaning for pytest. A word shaped like an invocation is
+# refused wherever it stands, like NESTED: `grep python3 -c f` is a false positive (write `grep -c -e python3 f`),
+# the direction a tripwire should err in.
+INLINE = {'python': ('c', 'WX', 'm', ()), 'python3': ('c', 'WX', 'm', ()),
+          'pypy': ('c', 'WX', 'm', ()), 'pypy3': ('c', 'WX', 'm', ()),
+          'perl': ('eE', 'IMm', '', ()),
+          'ruby': ('e', 'ErI', '', ()),
+          'node': ('ep', 'r', '', ('--eval', '--print')), 'nodejs': ('ep', 'r', '', ('--eval', '--print')),
+          'php': ('r', 'fcdz', '', ()),
+          'lua': ('e', 'l', '', ()),
+          'Rscript': ('e', '', '', ()), 'R': ('e', '', '', ())}
+
+
+def _inline_program(prog, args):
+    """The word that hands `prog` a program on its command line, or ''. args: the words after the program.
+
+    A python minor version (`python3.12`) is python. The scan stops at `--`, at an operand (the script) and at a
+    stop letter (`-m`), which is where the program stops coming from the command line."""
+    spec = INLINE.get(prog)
+    if spec is None and prog.startswith('python') and all(c.isdigit() or c == '.' for c in prog[6:]):
+        spec = INLINE['python']
+    if spec is None:
+        return ''
+    inline, valued, stop, long = spec
+    i = 0
+    while i < len(args):
+        w = args[i]
+        if w == '--' or not w:
+            return ''
+        if w == '-':
+            return w                           # `python3 -` reads the program from stdin
+        if not w.startswith('-'):
+            # a redirect word ends the scan, not the command: its target is still a path word this walk checks, so
+            # `python3 < /dev/null` stays allowed and `python3 < ../evil.py` is refused by the `..` rule. A
+            # here-doc is the exception: `python3 <<'EOF'` supplies the program in a body no path check reads,
+            # which is `-c` by another spelling
+            return w if '<<' in w else ''
+        if w.startswith('--'):
+            head = w.split('=', 1)[0]
+            if head in long:
+                return head
+            # an option this file does not know: keep scanning so a later `-e`/`-c` is still seen (`node --inspect
+            # -e x`). The cost is a miss for a long option that takes its value as the next word and is followed by
+            # a program flag (`--check-hash-based-pycs always -c x`); the check errs toward catching the flag,
+            # which is the spelling a child would use on purpose, and the module docstring calls it best effort.
+            i += 1
+            continue
+        cluster = w[1:]
+        for k, c in enumerate(cluster):
+            if c in inline:
+                return w
+            if c in stop:
+                return ''                      # `-m pytest`: the program is the module, not the command line
+            if c in valued:
+                if k == len(cluster) - 1:
+                    i += 1                     # the value is the next word: `-W ignore`, `-I lib`
+                break                          # `-Wignore`: the rest of this word is the value
+        i += 1
+    return ''
 
 # Redirect targets that are streams, not files: a command may write its errors to one of these and change nothing
 # outside the worktree, so they are not "climbs out of the worktree" (#384 review: `ls 2>/dev/null` was refused).
@@ -153,8 +226,11 @@ def _escaping(cmd, wt, writing=True, base=''):
     naming `.git`); a read-only command may read that metadata and changes nothing.
 
     A best-effort tripwire on the command text, not a boundary (see the module docstring): a program that computes
-    a path at run time (`python3 -c "open(...)"`, `awk 'BEGIN{system(...)}'`, a `make` recipe) can still write
-    anywhere, and no text check can see it. What holds exactly is the file tools' path check (`_inside`).
+    a path at run time (`python3 script.py`, `awk 'BEGIN{system(...)}'`, a `make` recipe) can still write
+    anywhere, and no text check can see it. What is refused is the spelling that hands a program over the command
+    line - `sh -c`, `python3 -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`, `lua -e`, `Rscript -e`, `python3 -`,
+    a here-doc - because the path it writes then lives inside one quoted word. What holds exactly is the file
+    tools' path check (`_inside`).
 
     The command must start with `cd <worktree> &&` unless `base` names a directory inside the worktree the command
     already starts in (a read-only command with a `cwd`); every path word is then resolved against that directory,
@@ -259,6 +335,13 @@ def _escaping(cmd, wt, writing=True, base=''):
                         'git command there would run what it names')
         if prog in NESTED or prog.lstrip('-') in NESTED:
             return '%s runs another command, which this check cannot see' % w
+        inline = _inline_program(prog, words[j + 1:])
+        if inline:
+            # `python3 -c '<program>'` is `sh -c` by another name: the path lives inside one quoted word, so no
+            # path check can see it. The interpreter stays allowed (`-m pytest`, `script.py`), only the flag that
+            # hands it a program from the command line is refused, wherever the word stands (like NESTED).
+            return ('%s hands %s a program on its command line, and a program this check cannot read can write '
+                    'anywhere. Write it to a file in the worktree and run that instead' % (inline, prog))
         if w.startswith('~') or '$' in w:
             return '%s could resolve outside the worktree' % w
         if w in DEVICES:
