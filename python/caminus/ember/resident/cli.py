@@ -839,7 +839,10 @@ def main(argv=None,stdin=None):
                     raise ValueError('the SIM log is off in this session (config sim=false): its records are not '
                                      'listed or exported. Turn it on with `--on` to read them')
                 if a.export:
-                    p,n,nbytes=sim.export(rt,gid,a.out)
+                    # the same filter the list applies: `--export --status proposed` is the reflection queue a
+                    # person hands on, and an export that silently ignored it would disagree with `list` (#383
+                    # review P2)
+                    p,n,nbytes=sim.export(rt,gid,a.out,statuses)
                     if a.json:emit(dict(name=a.name,path=str(p),records=n,bytes=nbytes),True)
                     else:print('%s: %d records, %d bytes' % (p,n,nbytes),flush=True)
                     return 0

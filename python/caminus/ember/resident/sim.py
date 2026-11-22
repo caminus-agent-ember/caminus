@@ -236,15 +236,18 @@ def path_for(home):
     return Path(home) / 'sim.jsonl'
 
 
-def export(rt, gid=None, path=None):
+def export(rt, gid=None, path=None, statuses=None):
     """Write the records as JSONL (one record per line, newest version only) and return (path, count, bytes).
 
     Reached by the CLI alone (`caminus ember agent sim NAME --export`), which a human runs. The agent's tool has
     no export, so the model never names a file and no export can overwrite one, in plan mode or anywhere else.
+    `statuses` filters like `list` does: `--export --status proposed` is the queue a person hands on, and a filter
+    the list applies silently dropped by the export would make the two views disagree about the same log (#383
+    review P2).
     """
     from pathlib import Path
     from .store import atomic_write
-    recs = _load(rt, gid, limit=100000)
+    recs = _load(rt, gid, limit=100000, statuses=statuses)
     p = Path(path).expanduser() if path else path_for(rt.home)
     if not p.is_absolute():
         p = rt.home / p

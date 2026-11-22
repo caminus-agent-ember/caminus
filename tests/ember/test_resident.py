@@ -2510,6 +2510,12 @@ for line in sys.stdin:
         self.assertEqual(out['record']['status'],'proposed')
         both=self.cmd('sim',[])
         self.assertEqual({r['status'] for r in both['records']},{'observed','proposed'})
+        # --status filters the export exactly as it filters the list: `--status proposed` is the queue a person
+        # hands on, and an export that silently dropped the filter would disagree with `list` about one log
+        # (#383 review P2)
+        queued=self.cmd('sim',['--export','--status','proposed','--out',str(self.home/'queue.jsonl')])
+        self.assertEqual(queued['records'],1)
+        self.assertEqual(json.loads((self.home/'queue.jsonl').read_text().strip())['status'],'proposed')
         # a record without a prediction is refused: there is nothing CI could contradict
         self.cmd('sim',['--record','--change','no prediction'],code=1)
         # a prediction is append-only: naming an existing id cannot rewrite it (only observe adds a version)
