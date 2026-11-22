@@ -583,6 +583,15 @@ def _survey(row):
     except ValueError as e:
         out['files'], out['diffstat'] = [], str(e)[:200]
     out['merge'] = 'git -C %s merge %s' % (repo, branch)
+    try:
+        # `merge` runs in the parent's own tree, so a parent with uncommitted work can stop the merge half-applied
+        # on a file the child also changed. The report says so next to the command rather than leaving the parent to
+        # find out mid-merge (#384 review F3).
+        if _git(['-C', repo, 'status', '--porcelain']).strip():
+            out['merge_note'] = ('the parent tree has uncommitted changes: commit or stash them first, or the merge '
+                                 'can stop half-applied on a file the child also changed')
+    except ValueError:
+        pass        # no repo to read (already gone): the merge command is best-effort advice, as the docstring says
     out['discard'] = ('git -C %s worktree remove --force %s && git -C %s branch -D %s'
                       % (repo, wt, repo, branch))
     return out
@@ -747,7 +756,7 @@ def _close(rt, parent, report):
         # to keep, so both go now and the report says so; a child that did change something keeps its checkout
         # and its merge/discard commands.
         _remove_worktree(row.get('repo') or '', row['worktree'], row.get('branch') or '')
-        for k in ('merge', 'discard', 'files', 'diffstat', 'commit_failed'):
+        for k in ('merge', 'merge_note', 'discard', 'files', 'diffstat', 'commit_failed'):
             report.pop(k, None)
         report['worktree_removed'] = ('the child changed nothing, so its checkout and branch are gone: there is '
                                       'nothing to merge or discard')

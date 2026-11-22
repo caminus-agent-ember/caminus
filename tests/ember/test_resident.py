@@ -2809,6 +2809,34 @@ for line in sys.stdin:
         self.assertEqual(rep['base'],subprocess.run(['git','-C',str(repo),'rev-parse','HEAD'],
                                                      capture_output=True,text=True).stdout.strip())
 
+    def test_a_dirty_parent_tree_is_named_next_to_the_merge_command(self):
+        # #384 review F3: the merge command runs in the parent's own tree, so uncommitted work there can stop the
+        # merge half-applied on a file the child also changed. The report says so next to the command - and stops
+        # saying it once the tree is clean again, so the note is about this tree, not a blanket warning.
+        from caminus.ember.resident import delegate
+        repo,wt=self.home/'repo-dirty',self.home/'wt-dirty'
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A',*args],
+                                  check=True,capture_output=True,text=True).stdout.strip()
+        git('init','-q')
+        (repo/'a.txt').write_text('base\n')
+        git('add','-A')
+        git('commit','-q','-m','base')
+        git('worktree','add','-q','-b','delegate/x',str(wt),'HEAD')
+        (wt/'a.txt').write_text('child\n')
+        row=dict(child='x',worktree=str(wt),repo=str(repo),branch='delegate/x',base=git('rev-parse','HEAD'))
+        clean=delegate._survey(dict(row))
+        self.assertNotIn('merge_note',clean,'a clean parent tree gets no warning')
+        self.assertIn('git -C',clean['merge'])
+        self.assertIn('a.txt',clean['files'])
+        (repo/'a.txt').write_text('an uncommitted parent edit\n')
+        dirty=delegate._survey(dict(row))
+        self.assertIn('uncommitted',dirty.get('merge_note') or '',dirty)
+        self.assertIn('git -C',dirty['merge'],'the note sits next to the command, not in place of it')
+        git('checkout','--','a.txt')
+        self.assertNotIn('merge_note',delegate._survey(dict(row)))
+
     def test_a_writing_child_cannot_leave_its_worktree_with_a_command(self):
         # a writing child's terminal command must start inside its worktree and stay there: `cd ..` and an absolute
         # path out of it are refused before anything runs
@@ -8823,6 +8851,54 @@ for line in sys.stdin:
         goals={g['id']:g for g in self.cmd('status')['goals']}
         self.assertEqual(goals[plain['id']]['plan'],0)
         self.assertEqual(goals[g['id']]['plan'],1)
+
+    def test_a_plan_first_goal_waits_for_approval_before_it_grants_a_child_write(self):
+        # #384 review F1: `delegate` is not in planning.PLAN_REFUSED (a read-only child explores, which plan mode
+        # allows), so a writing child rests on the plan check in delegate.start() rather than on the tool gate. Pin
+        # the order with both halves: before approval the call is refused by that check and leaves no child goal,
+        # no delegates row and no worktree behind; the same call after approval runs and its report arrives.
+        repo=self.home/'repo'
+        repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        self.gates_on()
+        gid=self.cmd('send',['writing child','--plan'])['id']
+        dargs=dict(task='Add NOTES.md with one line.',done_check='NOTES.md has one line',
+                   permissions='write',repo=str(repo),wait=True)
+        self.replies(
+            call('define_done',dict(check='the goal waits for approval before it grants a child write')),
+            call('delegate',dargs),
+            call('propose_plan',dict(plan='1. wait for approval\n2. have a writing child add NOTES.md')))
+        out=self.cmd('once',['--goal-id',gid],code=25)
+        self.assertEqual(out['state'],'waiting_plan')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        res=[e['data']['result'] for e in events if e['data'].get('name')=='delegate']
+        self.assertEqual(len(res),1)
+        self.assertIn('plan-first goal has no approved plan',res[0]['error'])
+        self.assertEqual(self.cmd('status')['workers'],[],'no child ran before the plan was approved')
+        self.assertFalse((self.home/'worktrees').exists() and list((self.home/'worktrees').iterdir()),
+                         'the refusal came before a worktree was made')
+        self.assertEqual([g for g in self.cmd('status')['goals'] if g['id']!=gid],[],
+                         'no child goal was created')
+        # the same call (a fresh tool-call id, the same arguments) is what runs once the plan is approved: the
+        # refusal was the plan check, not the arguments
+        self.cmd('plan',[gid,'approve'])
+        self.replies(call('delegate',dargs),
+                     call('define_done',dict(check='NOTES.md has one line')),
+                     call('write',dict(path='NOTES.md',content='one line\n')),
+                     call('read',dict(path='NOTES.md')),
+                     call('verify',dict(evidence='read printed "one line" from the worktree')),
+                     call('finish',dict(summary='Wrote NOTES.md in the worktree.')),
+                     call('verify',dict(evidence='the report names NOTES.md')),
+                     call('finish',dict(summary='The child wrote NOTES.md on its branch.')))
+        goal=self.cmd('once',['--goal-id',gid])
+        self.assertEqual(goal['state'],'completed')
+        reports=[e['data']['result'] for e in self.cmd('events')
+                 if e['kind']=='tool_result' and e['data'].get('name')=='delegate']
+        self.assertEqual(len(reports),2)
+        self.assertEqual(reports[-1]['outcome'],'completed',reports[-1])
+        self.assertIn('NOTES.md',reports[-1]['files'])
 
     def test_interrupt_drops_the_turn_being_generated(self):
         gid=self.cmd('send',['stream goal'])['id']
