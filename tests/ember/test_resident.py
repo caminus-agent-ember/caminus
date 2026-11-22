@@ -2701,9 +2701,14 @@ for line in sys.stdin:
         from caminus.ember.resident import language
         derived=sorted(set(language._LANG_OF.values()))
         self.assertEqual([n for n in derived if not language.named(n,'derived')['scripts']],[],'each derived name censuses')
-        # and the guard's premise holds the other way too: a made-up name is config-only and has no table
-        self.assertEqual(language.named('Pali','config')['scripts'],())
+        # and the guard's premise holds the other way too: a DERIVED name is never read from its own spelling, so
+        # a table-less one stays `()`. A *configured* name is (r24), which is the P2's safer shape: `--to Pali`
+        # used to switch the whole check off and left a session unheld with one log line as evidence.
         self.assertEqual(language.named('Pali','derived')['scripts'],())
+        self.assertEqual(language.named('Pali','config')['scripts'],('Latin',),'a configured name censuses its own script')
+        self.assertEqual(language.named('\u092a\u093e\u0932\u0940','config')['scripts'],('Devanagari',))
+        self.assertEqual(language.named('\u16a0\u16a2\u16a6\u16a8','config')['scripts'],(),
+                         'a name whose letters are in no known script is still off')
 
     def test_a_multiline_straight_quote_stays_in_the_census_and_a_typographic_one_does_not(self):
         # review P2 (r18): bounding a straight-quote pair to one line (r16) buys the stray-quote fix at a cost: a
@@ -3252,10 +3257,13 @@ for line in sys.stdin:
             rt.mail.close();rt.store.close()
 
     def test_a_language_setting_with_no_script_table_says_so_in_the_log_once(self):
-        # review P2 (r13): `--to Pali` leaves the drift check switched off, and the CLI's `check: false` note
-        # was the only place that said so: a session started elsewhere had nothing in its log to say why no
-        # drift was ever detected. One `language_setting_unchecked` event per process per name, not per turn.
-        conf=json.loads((self.home/'config.json').read_text());conf['language']='Pali'
+        # review P2 (r13): `--to` a name with no script table leaves the drift check switched off, and the CLI's
+        # `check: false` note was the only place that said so: a session started elsewhere had nothing in its log
+        # to say why no drift was ever detected. One `language_setting_unchecked` event per process per name, not
+        # per turn. Since the r24 review, a name written in letters the census knows is read as its script, so the
+        # branch is left for a name whose own letters are in no table at all (Runic here).
+        name='\u16a0\u16a2\u16a6\u16a8\u16b1\u16b2'
+        conf=json.loads((self.home/'config.json').read_text());conf['language']=name
         (self.home/'config.json').write_text(json.dumps(conf))
         rt=Runtime(self.home)
         try:
@@ -3265,7 +3273,7 @@ for line in sys.stdin:
             rows=[json.loads(r[0]) for r in rt.store.db.execute(
                 "SELECT data FROM events WHERE goal=? AND kind='language_setting_unchecked'",(gid,))]
             self.assertEqual(len(rows),1,'the unchecked setting is in the log')
-            self.assertEqual(rows[0]['language'],'Pali')
+            self.assertEqual(rows[0]['language'],name)
             g2=rt.store.enqueue('A second goal in the same session.')
             self.replies(dict(role='assistant',content='ok'))
             self.assertTrue(rt._tick(g2))
@@ -3521,14 +3529,18 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
-    def test_an_unlisted_language_says_the_drift_check_is_off(self):
-        # `--to Esperanto` has no script table: the prompt still asks for it, but nothing can judge a drift.
-        # `check` says so instead of printing `scripts: []` and letting the owner believe a reply is held.
+    def test_an_unlisted_language_names_its_census_and_only_a_letterless_one_is_off(self):
+        # `--to Esperanto` has no script table, but its own letters are Latin, so since r24 the check censuses
+        # Latin (the reviewer's safer shape) and the note says where that came from. A name whose letters are in
+        # no script the census knows (Runic) is the only remaining `check: false`, and it says so.
         out=self.cmd('language',['--to','Esperanto'])
-        self.assertEqual((out['language'],out['scripts'],out['check']),('Esperanto',[],False))
-        self.assertIn('not detected',out['note'])
-        self.assertEqual(self.cmd('language',[]),dict(language='Esperanto',scripts=[],source='config',check=False,
+        self.assertEqual((out['language'],out['scripts'],out['check']),('Esperanto',['Latin'],True))
+        self.assertIn('the script its name is written in',out['note'])
+        self.assertEqual(self.cmd('language',[]),dict(language='Esperanto',scripts=['Latin'],source='config',check=True,
                                                       note=out['note']))
+        out=self.cmd('language',['--to','\u16a0\u16a2\u16a6\u16a8'])
+        self.assertEqual((out['language'],out['scripts'],out['check']),('\u16a0\u16a2\u16a6\u16a8',[],False))
+        self.assertIn('not detected',out['note'])
 
     def test_reading_the_language_creates_no_store_and_no_home(self):
         # review P2: `language` sat under `store=Store(home)`, so a typo'd `--home` was handed a directory and an

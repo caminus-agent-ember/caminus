@@ -861,12 +861,19 @@ def main(argv=None,stdin=None):
             # the write and a re-read would otherwise be reported as the name this op just set (#390 review P2).
             # On a read-only call (`language`, no flags) `cfg` is the same read, so one path serves both.
             who=language.from_home(home,cfg)
-            # A name with no script table (`--to Esperanto`) leaves the drift check switched off: say so here
-            # rather than print `scripts: []` and let the owner believe a drifting reply would be held.
+            # A name the table does not know is read as the script its own letters are written in (`--to पाली`),
+            # so the check is only off when the name has no letter in any script the census knows
+            # (`--to ᚠᚢᚦ`). Say which of the two happened rather than print `scripts: []` and let the owner
+            # believe a drifting reply would be held (#390 review P2, r24).
             out=dict(language=who['name'],scripts=list(who['scripts']),source=who['source'],check=bool(who['scripts']))
             if not who['scripts']:
-                out['note']=('no script table for %s: the prompt asks for it, but a reply that drifts into another '
-                             'script is not detected' % who['name'])
+                out['note']=('no script table for %s, and its own letters are in no script this census knows: the '
+                             'prompt asks for it, but a reply that drifts into another script is not detected'
+                             % who['name'])
+            elif language.census_of(who['name'])=='name':
+                out['note']=('no script table for %s: the check censuses %s, the script its name is written in, so '
+                             'a reply that leaves that script is held and one that stays is not'
+                             % (who['name'],', '.join(who['scripts'])))
             elif who['source']=='default':
                 # One Latin script is English, Spanish, French and German alike, so goals written in it cannot
                 # name a language: say that the answer is the default and how to name one.

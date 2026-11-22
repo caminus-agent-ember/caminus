@@ -259,9 +259,39 @@ def _without_borrowed(text, own):
 
 
 def named(name, source):
-    """The owner's language as the prompt and the check use it: its name, its scripts, where it came from."""
+    """The owner's language as the prompt and the check use it: its name, its scripts, where it came from.
+
+    The table knows the languages people usually name. For one it does not, a configured name (`--to पाली`) is
+    read as the script it is written in, when its own letters are in one: leaving the drift check off for such
+    a name let a session run for days unheld with one log line as the only sign of it (#390 review P2). A name
+    written in Latin letters (`Esperanto`, `Pali`) therefore censuses Latin, which still holds a reply that
+    leaves Latin script altogether; the cost is the other direction, a Pali session in Devanagari that is
+    nudged for it, which is why the CLI says where the scripts came from.
+
+    Only config names fall back: a derived name is ours to keep in the table (`_LANG_OF`), and a derived name
+    with no table must stay visible as `scripts == ()` so the test that guards `_LANG_OF` keeps its teeth.
+    """
     name = str(name or '').strip() or DEFAULT
-    return dict(name=name, scripts=_SCRIPTS_FOR.get(name.lower(), ()), source=source)
+    scripts = _SCRIPTS_FOR.get(name.lower(), ())
+    if not scripts and source == 'config' and census_of(name) == 'name':
+        per, _total = letters(name)
+        scripts = (max(per, key=per.get),)
+    return dict(name=name, scripts=scripts, source=source)
+
+
+def census_of(name):
+    """Where a configured name's scripts come from: `table`, its own spelling (`name`), or nothing (``).
+
+    Split out of `named` so that dict keeps its three keys: `named`'s shape is read by the prompt, the CLI and
+    a dozen assertions, and the one caller that must tell the owner which case it got is the CLI.
+    """
+    name = str(name or '').strip() or DEFAULT
+    if _SCRIPTS_FOR.get(name.lower()):
+        return 'table'
+    per, total = letters(name)
+    if per and per[max(per, key=per.get)] * 2 > total:
+        return 'name'
+    return ''
 
 
 def letters(text):
