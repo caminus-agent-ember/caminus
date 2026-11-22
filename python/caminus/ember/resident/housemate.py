@@ -84,11 +84,24 @@ def wait(rt, gid, until, target='', timeout=300):
     # A goal's own time budget bounds the wait too: one wait blocked for its full 30 minutes against a 600 s child
     # cap, and the deadline was checked only at the next tick (#382 review).
     g = rt.store.goal(gid)
-    if g.get('deadline'):
-        left = g['deadline'] - time.time()
+    # A wait also ends at the nearest deadline it waits on: the goal's own, or a running child's. A wait=false
+    # parent whose config gives no max_seconds has no deadline of its own, so a wait against a stalled child used
+    # to block for its full timeout; the child pauses at its deadline and settle wakes the parent (#384 review).
+    own = g.get('deadline') or None
+    kids = [r[0] for r in rt.store.db.execute(
+        "SELECT g.deadline FROM delegates d JOIN goals g ON g.id=d.child "
+        "WHERE d.parent=? AND d.outcome='' AND g.deadline IS NOT NULL", (gid,)) if r[0]]
+    deadline, whose = own, 'the goal'
+    if kids and (own is None or min(kids) < own):
+        deadline, whose = min(kids), 'a child'
+    if deadline:
+        left = deadline - time.time()
         if left <= 0:
-            return dict(happened='the goal\'s time budget is used up', waited_s=0,
-                        note='the goal pauses at its next step; do not wait again')
+            if whose == 'the goal':
+                return dict(happened='the goal\'s time budget is used up', waited_s=0,
+                            note='the goal pauses at its next step; do not wait again')
+            return dict(happened='a child\'s time budget is used up', waited_s=0,
+                        note='settle closes it and wakes this goal with its report; do not wait again')
         timeout = max(1, min(timeout, int(left) + 1))
     seen_inbox = _inbox_count(rt, gid)
     queued = _queued(rt, gid)

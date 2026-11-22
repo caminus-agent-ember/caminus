@@ -1025,6 +1025,53 @@ class Resident(unittest.TestCase):
             self.assertIn('ended (exit 0)',housemate.wait(rt,gid,'session',sid,timeout=20)['happened'])
         finally:housemate.POLL=1.0;rt.mail.close();rt.store.close()
 
+    def test_wait_also_ends_at_a_running_childs_deadline(self):
+        # #384 review: the clamp fired only for the goal's own deadline, so a wait=false parent with no max_seconds
+        # blocked the loop for its full timeout against a stalled child whose own deadline was about to pass.
+        from caminus.ember.resident import housemate
+        housemate.POLL=0.05
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',max_seconds=3,kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            self.assertIsNone(rt.store.goal(parent)['deadline'],'the parent has no time budget of its own')
+            started=time.monotonic()
+            r=housemate.wait(rt,parent,'message',timeout=20)
+            elapsed=time.monotonic()-started
+            self.assertEqual(r['happened'],'timeout',r)
+            self.assertLess(elapsed,10,'the wait ended at the child\'s 3 s deadline, not its 20 s timeout')
+            self.assertGreaterEqual(elapsed,2.5,'the wait did not return before the child could finish')
+            with rt.store.transaction():rt.store.update(child,state='completed',deadline=time.time()-5)
+            r=housemate.wait(rt,parent,'message',timeout=20)
+            self.assertEqual(r['happened'],'a child\'s time budget is used up',r)
+            self.assertIn('settle closes it',r['note']);self.assertLess(r['waited_s'],1)
+        finally:housemate.POLL=1.0;rt.mail.close();rt.store.close()
+
+    def test_two_settles_of_one_child_report_it_once(self):
+        # #384 review: settle reads the open delegates outside the transaction and closes each inside it, and two
+        # settles (run_child's end and the loop's pass) can arrive at the same child. _close is idempotent on the
+        # row's outcome, so the second one must change nothing: one delegate_done, one report, one wake.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.update(parent,state='waiting_children')
+                rt.store.update(child,state='completed',summary='did it')
+            self.assertTrue(delegate.settle(rt))
+            self.assertFalse(delegate.settle(rt),'the second settle closed nothing new')
+            done=[e for e in rt.store.events() if e['kind']=='delegate_done']
+            wakes=[e for e in rt.store.events() if e['kind']=='delegate_reports']
+            self.assertEqual(len(done),1)
+            self.assertEqual(len(wakes),1)
+            self.assertEqual(wakes[0]['data']['children'],[child])
+            nudges=rt.store.db.execute("SELECT count(*) FROM inbox WHERE goal=? AND kind='nudge'",(parent,)).fetchone()[0]
+            self.assertEqual(nudges,1,'the parent was woken once')
+        finally:rt.mail.close();rt.store.close()
+
     def test_machine_snapshot_through_the_loop(self):
         self.replies(call('machine',{}),call('finish',dict(summary='Looked.')))
         out=self.cmd('once',['--goal','Look at the machine.'])
