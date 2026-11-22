@@ -127,15 +127,17 @@ def cmd_compare(a):
     return 0 if c['verdict'].startswith(('better', 'no difference')) else 1
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    sub = ap.add_subparsers(dest='cmd', required=True)
-    p = sub.add_parser('run')
-    p.add_argument('--suite', required=True, help='a suite name under benchmarks/ember/suites, or a folder')
-    p.add_argument('--brain', action='append', required=True)
+def add_run_args(p, required=True):
+    """`run`'s flags, in one place: `main` and `run_defaults` (which `propose` starts runs with) read the same list.
+
+    A flag added here reaches every caller; before, `propose` built the run namespace by hand and a flag added to
+    `run` silently did not reach a propose-started run (the `--unsafe-free` omission, #385 review P2).
+    """
+    p.add_argument('--suite', required=required, help='a suite name under benchmarks/ember/suites, or a folder')
+    p.add_argument('--brain', action='append', required=required)
     p.add_argument('--arm', action='append', help='NAME[=CHECKOUT] (default: base = this checkout)')
     p.add_argument('--arms', help='JSON {NAME: {checkout, config, env}}, or the arms.json `propose` writes')
-    p.add_argument('--out', required=True)
+    p.add_argument('--out', required=required)
     p.add_argument('--repeats', type=int, default=1)
     p.add_argument('--only', help='comma-separated task keys')
     p.add_argument('--host', choices=('local', 'agent'))
@@ -146,6 +148,23 @@ def main(argv=None):
     p.add_argument('--parallel', type=int, help="override every brain's parallel cap")
     p.add_argument('--timeout', type=int, help='seconds per goal (default: the suite\'s)')
     p.add_argument('--rerun', action='store_true', help='run every id again, even those already in results.jsonl')
+    return p
+
+
+def run_defaults():
+    """Every field `cmd_run` reads, at its parser default; `propose` sets the ones its record pins.
+
+    The defaults come from `add_run_args` itself (not a copy of them), so a flag added to `run` is present with its
+    own default and `propose` cannot drift from `run`'s parser.
+    """
+    ap = argparse.ArgumentParser(add_help=False)
+    return add_run_args(ap, required=False).parse_args([])
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    p = add_run_args(sub.add_parser('run'))
     p = sub.add_parser('report')
     p.add_argument('dir')
     p.add_argument('--md')
@@ -231,7 +250,7 @@ def main(argv=None):
         brains_mod.serve_driven(a.ctl, a.judge, a.ttl, a.caminus)
         return 0
     return dict(run=cmd_run, report=cmd_report, compare=cmd_compare,
-                propose=lambda a: proposal_mod.cmd_propose(a, cmd_run),
+                propose=lambda a: proposal_mod.cmd_propose(a, cmd_run, run_defaults),
                 open=sessions.open_session, say=sessions.say,
                 turn=sessions.turn, reply=sessions.reply, events=sessions.events, status=sessions.status,
                 close=sessions.close)[a.cmd](a)

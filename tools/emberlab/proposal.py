@@ -366,8 +366,13 @@ def _json_arg(text, what):
     return value
 
 
-def cmd_propose(a, run):
-    """`lab.py propose ...`: the plan first, the runs only with the owner's flags, and the record closed by numbers."""
+def cmd_propose(a, run, run_defaults=None):
+    """`lab.py propose ...`: the plan first, the runs only with the owner's flags, and the record closed by numbers.
+
+    `run` is `lab.cmd_run` and `run_defaults` is `lab.run_defaults`: the run's own parser supplies the namespace the
+    runs start from, so a flag added to `lab.py run` reaches a propose-started run with its own default. A direct
+    caller may pass only a stub `run`, which reads no field of the namespace.
+    """
     home = Path(a.sim_home).expanduser().resolve()
     rec = load_record(home, a.record)
     if rec is None:
@@ -408,11 +413,11 @@ def cmd_propose(a, run):
     # one read of the suite's bytes, used for the printed plan and for the folder's identity: hashing twice could
     # name a digest the printed plan does not show if the suite changed in between (it is the identity, not a label)
     suite_digest = runner.suite_sha(suite)
-    print(plan_md(prop, suite, brains, arms, a.repeats, out, len(tasks),
-                  host=hosts_mod.kind(a.host, brains), timeout=suite.get('timeout', 1500),
-                  unlocked=' or '.join(f for f in approvals or () if f != '--approve-paid'), approvals=approvals,
-                  suite_digest=suite_digest),
-          flush=True)
+    plan_text = plan_md(prop, suite, brains, arms, a.repeats, out, len(tasks),
+                        host=hosts_mod.kind(a.host, brains), timeout=suite.get('timeout', 1500),
+                        unlocked=' or '.join(f for f in approvals or () if f != '--approve-paid'),
+                        approvals=approvals, suite_digest=suite_digest)
+    print(plan_text, flush=True)
     missing = approval_missing(a, brains)
     if missing:
         raise SystemExit('not started: ' + '; '.join(missing))
@@ -441,13 +446,24 @@ def cmd_propose(a, run):
         what = 'gone from the log' if again is None else repr(again.get('status') or 'unstated')
         raise SystemExit(f'SIM record {a.record} is no longer proposed ({what}): nothing was run (it changed '
                          'while the plan printed)')
+    # the printed plan is the owner's own record of what they approved; arms.json and plan.json carry the machine
+    # identity, and a reader of the folder should not have to reconstruct the human-facing text (#385 review P2).
+    # Written after the claim, so two concurrent commands over one folder cannot race for it.
+    (out / 'plan.md').write_text(plan_text)
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
+    # the run namespace starts from `lab.py run`'s own parser defaults (lab.run_defaults) instead of a hand-built
+    # field list: a flag added to `run` is then present here at its default, and the `--unsafe-free` omission that
+    # had to be caught per flag cannot recur (#385 review P2). The import is late because lab imports this module.
+    if run_defaults is None:
+        import lab as lab_mod
+        run_defaults = lab_mod.run_defaults
+    runs = run_defaults()
     # both flags are carried as given: cmd_run asks hosts.local_refusal about the resolved host, and that rule
-    # reads either name. Folding --unsafe-free into unsafe_local here would hide which flag allowed the run.
-    runs = type('Run', (), dict(suite=a.suite, brain=list(a.brain), arm=None, arms=str(arms_file), out=str(out),
-                                repeats=a.repeats, only=a.only, host=a.host,
-                                unsafe_local=a.unsafe_local, unsafe_free=a.unsafe_free,
-                                jobs=a.jobs, parallel=a.parallel, timeout=None, rerun=False))()
+    # reads either name. Folding --unsafe-free into unsafe_local would hide which flag allowed the run.
+    runs.suite, runs.brain, runs.arms, runs.out = a.suite, list(a.brain), str(arms_file), str(out)
+    runs.repeats, runs.only, runs.host = a.repeats, a.only, a.host
+    runs.unsafe_local, runs.unsafe_free = a.unsafe_local, a.unsafe_free
+    runs.jobs, runs.parallel = a.jobs, a.parallel
     if run(runs):
         raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')
     # the digest the folder claimed is the digest the runs must have used, and `lab.py run` re-reads the suite: an edit

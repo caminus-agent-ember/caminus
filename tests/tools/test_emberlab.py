@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -277,6 +278,27 @@ check(spec['arms'] == {x['name']: x for x in plan_j['arms']} and spec['plan']['s
       and 'approvals' in spec['plan'] and plan_j.get('approvals') is None,
       f'propose: arms.json is plan.json\'s arms and the plan that reads them ({sorted(spec.get("arms", {}))}, '
       f'{spec.get("plan")})')
+# the printed plan is the owner's record of what they approved; arms.json and plan.json hold the machine identity,
+# so a reader of the folder should not have to reconstruct the human-facing text (#385 review P2). The file is
+# written after the claim, and its text is the text that was printed, digest and all.
+check((po / 'plan.md').exists() and (po / 'plan.md').read_text() in p.stdout
+      and f"proposal {r1['id']}" in (po / 'plan.md').read_text()
+      and spec['plan']['suite_sha'][:12] in (po / 'plan.md').read_text(),
+      f'propose: the printed plan is written into the folder, digest included ({p.stdout[:200]!r}; '
+      f'{(po / "plan.md").read_text()[:200] if (po / "plan.md").exists() else "no plan.md"!r})')
+# `propose` starts its runs from `lab.py run`'s own parser defaults, not a hand-built field list: a flag added to the
+# run parser is then present with its own default, so the `--unsafe-free` omission cannot recur per flag (#385 P2).
+# A field `cmd_run` reads that the defaults lack is the same drift, so read cmd_run's own source and compare.
+import inspect  # noqa: E402
+import lab as lab_mod  # noqa: E402
+_defaults = vars(lab_mod.run_defaults())
+_reads = set(re.findall(r'(?<![\w.])a\.([a-z_]+)', inspect.getsource(lab_mod.cmd_run)))
+check(not (_reads - set(_defaults)) and {'suite', 'brain', 'arms', 'out', 'repeats', 'host', 'unsafe_local',
+                                         'unsafe_free', 'jobs', 'parallel', 'timeout', 'rerun', 'only'} <= set(_defaults),
+      f'propose: run_defaults answers every field cmd_run reads, so a propose-started run cannot miss a new flag '
+      f'({sorted(_reads - set(_defaults))}; {sorted(_defaults)})')
+check('--unsafe-free' in lab('run', '--help').stdout and 'required' not in lab('run', '--help').stderr,
+      'propose: `run` still parses its own flags from the shared list')
 check(closed['observed_by']['model'] == 'emberlab' and closed['brain']['model'] == 'm',
       'propose: the observation names emberlab, the predictor keeps the brain that made the prediction')
 check(arm_home and base_home and all(c.get('sim') is False for c in arm_home) and all('sim' not in c for c in base_home),
