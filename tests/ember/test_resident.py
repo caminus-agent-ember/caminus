@@ -3362,6 +3362,35 @@ for line in sys.stdin:
             self.assertEqual(delegate._caps(rt,dict())[1],5,'a configured limit still applies')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_quoted_or_bool_delegate_limit_is_refused_by_name_not_a_traceback(self):
+        # config.json is json.loads'd, so `"delegate_max_steps": "12"` is a str: it reached math.isfinite and raised
+        # TypeError from every delegate call, and "abc" a bare ValueError, instead of the refusal naming the key
+        # (#382 review, rev-glm P2). A bool is an int in Python, so `true` silently meant one step; it is refused too.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for key in ('delegate_max_steps','delegate_max_seconds','delegate_max_children'):
+                for bad,word in (('12','str'),(True,'bool'),([12],'list')):
+                    rt.config[key]=bad
+                    with self.assertRaises(ValueError) as caught:
+                        delegate._limit(rt,key)
+                    said=str(caught.exception)
+                    self.assertIn(key,said,'the refusal names the key to fix')
+                    self.assertIn(word,said,'and what it found there')
+                    self.assertIn('default is',said,'and what leaving it out would give')
+                rt.config[key]=None
+            for bad,word in (('0.50','str'),(True,'bool'),({},'dict')):
+                rt.config['delegate_usd']=bad
+                with self.assertRaises(ValueError) as caught:
+                    delegate._caps(rt,dict())
+                said=str(caught.exception)
+                self.assertIn('delegate_usd',said)
+                self.assertIn(word,said)
+            rt.config.pop('delegate_usd',None)
+            rt.config['delegate_usd']=0.25
+            self.assertEqual(delegate._caps(rt,dict())[0],0.25,'a numeric cap still applies')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_child_whose_delegates_row_is_gone_is_still_a_child(self):
         # the policy (refusals, the resume fence, no gate) was keyed on the delegates row, so a goal whose row was
         # restored without - a hand edit, a partial backup, a sweep - was not a child any more and could write,

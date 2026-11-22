@@ -74,6 +74,14 @@ def _limit(rt, key):
     default = DEFAULTS[key.replace('delegate_', '')]
     if value is None:
         return default
+    # `delegate_max_steps: "12"` (a JSON-quoted number) reached `math.isfinite` and raised `TypeError: must be real
+    # number` from every delegate call, and `"abc"` a bare ValueError with no hint (#382 review, rev-glm P2): one
+    # typo in the owner's config bricked the tool with a traceback instead of a refusal naming the key. A bool is an
+    # int here, so `delegate_max_steps: true` would silently mean one step; it is refused like any other non-number.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError('%s is %r: a limit must be a number of steps or seconds, not %s. Set it to at least 1, or '
+                         'remove the key (the default is %s)'
+                         % (key, value, type(value).__name__, default))
     if not math.isfinite(value):
         raise ValueError('%s is %s: a limit must be a finite number of steps or seconds, not something no child '
                          'can reach (%s by default). Set it to at least 1, or remove the key'
@@ -135,6 +143,11 @@ def _caps(rt, args):
     nobody can reach is not a cap."""
     cfg = rt.config
     cap = cfg.get('delegate_usd', DEFAULTS['cap_usd'])
+    # the same typo as `_limit`'s ("0.5" quoted, or "abc"): `float` raised a bare ValueError or a TypeError from
+    # every delegate call instead of a refusal naming the key (#382 review, rev-glm P2)
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, (int, float))):
+        raise ValueError('delegate_usd is %r: a cap must be a number of dollars, not %s. Set a positive cap (the '
+                         'default is %s)' % (cap, type(cap).__name__, DEFAULTS['cap_usd']))
     cap = DEFAULTS['cap_usd'] if cap is None else float(cap)
     # (a NaN passed `cap <= 0` as False and `min(cap, nan)` carried it on, and a stored NaN is an IntegrityError the
     # owner reads as a crash; an infinite cap is stored and `spend < inf` never trips: a non-finite cap is no cap -
