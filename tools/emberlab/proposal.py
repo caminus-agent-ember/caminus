@@ -450,6 +450,12 @@ def cmd_propose(a, run):
                                 jobs=a.jobs, parallel=a.parallel, timeout=None, rerun=False))()
     if run(runs):
         raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')
+    # the digest the folder claimed is the digest the runs must have used, and `lab.py run` re-reads the suite: an edit
+    # made between the plan and the rows (a fixture tweaked while the A/B runs) leaves arms.json naming bytes nothing
+    # ran, and the record would close on a mix of both. Re-read the bytes, and keep the record open if they moved.
+    if runner.suite_sha(suite) != suite_digest:
+        raise SystemExit(f'the suite {a.suite} changed while the arms ran: the rows measured other bytes than '
+                         f'{out}/arms.json names, so the record stays open (use a fresh --out for the edited suite)')
     verdict = report_mod.compare(report_mod.load(out), 'base', 'arm')
     print(report_mod.compare_md(verdict), flush=True)
     measured = (f"tools/emberlab propose: suite {suite['name']}, brains "

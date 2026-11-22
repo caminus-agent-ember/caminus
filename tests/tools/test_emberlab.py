@@ -392,6 +392,36 @@ except SystemExit as e:
     err13 = str(e)
 check('planned runs have no valid row' in err13 and proposal.load_record(ph, r13['id'])['status'] == 'proposed',
       f'propose: a cell short of the plan\'s repeats leaves the record open ({err13[:200]})')
+# the digest arms.json claims is the digest the rows must have used, and `lab.py run` re-reads the suite when it runs:
+# a fixture edited while the A/B ran leaves the folder naming bytes nothing measured, and the record would close on a
+# mix of both. The re-read after the runs keeps the record open (#385 review P1, the same family as suite_sha).
+mid = S / 'suite-mid'
+shutil.copytree(runner.load_suite('basic')['dir'], mid)
+rmid = sim_record(ph, status='proposed')
+nsm = argparse.Namespace(sim_home=str(ph), record=rmid['id'], suite=str(mid), brain=['scripted:solve'], repeats=1,
+                         only='read', host=None, jobs=1, parallel=None, out=str(S / 'propose-mid'),
+                         config='{"sim": false}', env=None, base_config=None, base_env=None,
+                         arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
+                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+
+
+def mid_run(runs):
+    """`lab.py run` while the suite is edited under it: the rows are complete, but for other bytes."""
+    rows = [dict(id='read.scripted-solve.base.r1', brain='scripted:solve', arm='base', task='read', repeat=1, check=True),
+            dict(id='read.scripted-solve.arm.r1', brain='scripted:solve', arm='arm', task='read', repeat=1, check=True)]
+    (S / 'propose-mid').mkdir(parents=True, exist_ok=True)
+    ((S / 'propose-mid') / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    (mid / 'fixture' / 'inventory.py').write_text((mid / 'fixture' / 'inventory.py').read_text() + '\n# mid-run\n')
+    return 0
+
+
+try:
+    proposal.cmd_propose(nsm, mid_run)
+    errm = 'closed instead of refusing'
+except SystemExit as e:
+    errm = str(e)
+check('changed while the arms ran' in errm and proposal.load_record(ph, rmid['id'])['status'] == 'proposed',
+      f'propose: a suite edited while the arms ran leaves the record open ({errm[:200]})')
 # a checkout that MOVED (a commit, a rebase) is a different arm even at the same path: `lab.py run` skips every id
 # already in results.jsonl, so without this a new record would be closed with the previous rows (#385 review P1)
 moved = json.loads((shared / 'arms.json').read_text())
