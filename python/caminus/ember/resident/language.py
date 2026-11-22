@@ -305,18 +305,24 @@ def owner(rt):
     return who
 
 
-def from_home(home):
+def from_home(home, config=None):
     """`owner` for a caller with no runtime (the CLI): read config.json and, if it exists, the store read-only.
 
     It must not create either: `agent prompt --home NOT-INITIALIZED` prints a prompt before `init` and leaves
     the directory absent.
+
+    `config` is for an op that has already read config.json and must not read it again: `agent language --to`
+    writes the setting and then asks this function what it set, and a second read in between would let another
+    writer's value be reported as the one this op just wrote (#390 review P2). Passing it changes only where the
+    `language` key comes from; the store read below still happens when the config names no language.
     """
     home = Path(home)
-    config = {}
-    try:
-        config = json.loads((home / 'config.json').read_text())
-    except (OSError, ValueError):
-        pass
+    if config is None:
+        config = {}
+        try:
+            config = json.loads((home / 'config.json').read_text())
+        except (OSError, ValueError):
+            pass
     name = str(config.get('language') or '').strip() if isinstance(config, dict) else ''
     if name:
         return named(name, 'config')

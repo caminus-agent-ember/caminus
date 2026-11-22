@@ -857,7 +857,10 @@ def main(argv=None,stdin=None):
             elif a.auto:
                 cfg.pop('language',None)
                 atomic_json(home/'config.json',cfg)
-            who=language.from_home(home)
+            # The config this op already read and wrote, not a second read of the file: another writer between
+            # the write and a re-read would otherwise be reported as the name this op just set (#390 review P2).
+            # On a read-only call (`language`, no flags) `cfg` is the same read, so one path serves both.
+            who=language.from_home(home,cfg)
             # A name with no script table (`--to Esperanto`) leaves the drift check switched off: say so here
             # rather than print `scripts: []` and let the owner believe a drifting reply would be held.
             out=dict(language=who['name'],scripts=list(who['scripts']),source=who['source'],check=bool(who['scripts']))

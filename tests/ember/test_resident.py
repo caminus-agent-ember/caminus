@@ -3324,6 +3324,55 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
+    def test_a_language_set_after_the_derived_one_is_cached_still_wins(self):
+        # review P2 (called fragile, not a bug): `owner` checks config before the `_language_owner` cache and
+        # returns early on a name, so a setting applied to the running runtime (`_follow_config`) outranks a
+        # derivation cached on a previous turn. The risk is a later edit that moves the cache read above the
+        # config read: the session would keep the derived language while `agent prompt` named the setting. This
+        # walks the cycle on one runtime - derive and cache, set, drop - so that edit fails here.
+        from caminus.ember.resident import language
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'],'Chinese','the goal names Chinese')
+            cached=getattr(rt,'_language_owner')
+            self.assertIsNotNone(cached,'the derivation is cached for the next turn')
+            rt.config['language']='French'
+            self.assertEqual(language.owner(rt),dict(name='French',scripts=('Latin',),source='config'),
+                             'a setting applied after the cache was filled still wins')
+            self.assertEqual(getattr(rt,'_language_owner'),cached,'the derivation is untouched by the setting')
+            rt.config.pop('language',None)                   # `--auto`: back to the same goals, uncached or cached
+            self.assertEqual(language.owner(rt)['name'],'Chinese',
+                             'dropping the setting falls back to the derivation, not the default')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_the_language_op_uses_the_config_it_wrote_instead_of_reading_it_again(self):
+        # review P2: `agent language --to NAME` wrote config.json and then called `from_home(home)`, which read
+        # the file again - a second writer in between would be reported as the name this op just set. The op now
+        # passes the config it read and wrote; this pins that the argument is used and that omitting it still
+        # reads the file, so `agent prompt` (which has no config in hand) keeps its behaviour.
+        from caminus.ember.resident import language
+        from caminus.ember.resident.store import atomic_json
+        cfg=json.loads((self.home/'config.json').read_text())
+        cfg['language']='French';atomic_json(self.home/'config.json',cfg)
+        self.assertEqual(language.from_home(self.home)['name'],'French','no argument: the file, as before')
+        self.assertEqual(language.from_home(self.home,{'language':'Chinese'})['name'],'Chinese',
+                         'the argument wins over a file that says otherwise')
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+        finally:
+            rt.mail.close();rt.store.close()
+        self.assertEqual(language.from_home(self.home,{})['name'],'Chinese',
+                         'a config with no language still falls through to the goals')
+        out=self.cmd('language',['--to','Korean'])
+        self.assertEqual((out['language'],out['source'],out['scripts']),('Korean','config',['Hangul']),
+                         'the op reports the name it wrote, and writes it')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Korean')
+
     def test_the_cli_reads_a_home_whose_path_holds_a_uri_metacharacter(self):
         # review P2 (could not be reproduced): `from_home` builds a read-only URI from the store path, and
         # `urllib.parse.quote` escapes `?` and `#` by default, so a home `a?b#c` reads its goals rather than
