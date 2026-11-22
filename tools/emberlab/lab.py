@@ -73,7 +73,10 @@ def cmd_run(a):
     for b in bs:
         b.start()
     host.prepare(arms)
-    (out / 'plan.json').write_text(json.dumps(dict(suite=suite['name'], host=host_kind, repeats=a.repeats,
+    # the suite digest is part of the plan a reader must be able to reproduce: an in-place edit of a fixture or a
+    # task keeps `suite`'s name and every task key, so the name alone does not say which bytes ran (#385 review P1)
+    (out / 'plan.json').write_text(json.dumps(dict(suite=suite['name'], suite_sha=runner.suite_sha(suite),
+                                                   host=host_kind, repeats=a.repeats,
                                                    brains=[b.label() for b in bs], arms=[x.describe() for x in arms],
                                                    # the flag that unlocked the host, as given: --unsafe-free is the
                                                    # same gate as --unsafe-local, and a record naming only one of them

@@ -203,6 +203,7 @@ ph.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(ROOT / 'python'))
 sys.path.insert(0, str(ROOT / 'tools/emberlab'))
 import proposal  # noqa: E402
+import runner  # noqa: E402
 
 
 def sim_record(home, **fields):
@@ -477,6 +478,73 @@ finally:
 check(why7 and 'cannot be created exclusively' in why7 and not (cf / 'nope.json').exists(),
       f'propose: a folder that holds neither a hard link nor an exclusive create is refused, not a traceback '
       f'({why7!r})')
+# what a run measured is the content, not the commit: an arm checkout is usually dirty (that is what a harness A/B
+# runs), so editing the dirty tree between two runs into one --out left commit and dirty=True identical and the
+# second run skipped every id as done, closing the record on the previous numbers (#385 review P1). The fingerprint
+# covers <checkout>/python, the runtime an arm runs, and ignores __pycache__/.pyc, which a run writes itself.
+fake = S / 'fingerprint-co'
+(fake / 'python/caminus/ember/resident').mkdir(parents=True, exist_ok=True)
+(fake / 'python/caminus/ember/resident/cli.py').write_text('print(1)\n')
+(fake / 'python/other.py').write_text('X = 1\n')
+fa = runner.Arm('base', fake)
+sha1 = fa.tree_sha
+check(sha1 == runner._tree_sha(fake / 'python') and len(sha1) == 64,
+      f'propose: an arm fingerprints the bytes under its python/ tree ({sha1[:12]})')
+(fake / 'python/__pycache__').mkdir(exist_ok=True)
+(fake / 'python/__pycache__/other.cpython-311.pyc').write_bytes(b'\x00\x01')
+(fake / 'python/other.pyc').write_bytes(b'\x00\x02')
+check(runner.Arm('base', fake).tree_sha == sha1,
+      'propose: a __pycache__ or .pyc a run writes itself does not change the fingerprint')
+(fake / 'python/other.py').write_text('X = 2\n')
+sha2 = runner.Arm('base', fake).tree_sha
+plug = dict(suite='basic', suite_sha='s', brains=[], only=[], repeats=1, approvals=None)
+moved2 = proposal.arms_spec([fa], plug)
+same = proposal.arms_spec([runner.Arm('base', fake)], plug)
+check(sha2 != sha1 and 'tree_sha' in proposal.arms_mismatch(moved2, same)
+      and proposal.arms_mismatch(same, same) == '',
+      f'propose: an edit to a dirty tree is another arm ({proposal.arms_mismatch(moved2, same)!r})')
+# a suite's name is not its content: editing a fixture or a task's check in place kept the name and the task keys, so
+# a folder filled before the edit looked like this experiment's and the record closed on a verdict the edited suite
+# never measured (#385 review P1). The digest covers suite.json and every file under fixture/.
+suite_copy = S / 'suite-copy'
+shutil.copytree(runner.load_suite('basic')['dir'], suite_copy)
+digest0 = runner.suite_sha(runner.load_suite(suite_copy))
+fix = suite_copy / 'fixture' / 'inventory.py'
+fix.write_text(fix.read_text() + '\n# edited\n')
+digest1 = runner.suite_sha(runner.load_suite(suite_copy))
+sj = json.loads((suite_copy / 'suite.json').read_text())
+sj['tasks'][0]['check'] += ' and True'
+(suite_copy / 'suite.json').write_text(json.dumps(sj))
+digest2 = runner.suite_sha(runner.load_suite(suite_copy))
+before = proposal.arms_spec([fa], dict(plug, suite_sha=digest0))
+after = proposal.arms_spec([fa], dict(plug, suite_sha=digest1))
+check(digest0 == runner.suite_sha(runner.load_suite('basic')) and digest1 != digest0 and digest2 != digest1
+      and 'suite_sha' in proposal.arms_mismatch(before, after),
+      f'propose: an edited fixture or task is another suite, and a copy of the installed one has its digest '
+      f'({proposal.arms_mismatch(before, after)!r})')
+# an --out written by another command has no arms.json to compare: `lab.py run` skips every id already in
+# results.jsonl, so `propose` into a folder a previous experiment left answered 0 to do and closed THIS record on
+# that experiment's rows (#385 review P1). It is refused, and the files that make it foreign are named.
+foreign = S / 'propose-foreign-out'
+foreign.mkdir(parents=True, exist_ok=True)
+(foreign / 'results.jsonl').write_text(json.dumps(dict(id='read.scripted-solve.base.r1')) + '\n')
+(foreign / 'plan.json').write_text('{}')
+r14 = sim_record(ph, status='proposed')
+p = lab('propose', '--sim-home', str(ph), '--record', r14['id'], '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(foreign))
+check(p.returncode != 0 and 'arms.json' in (p.stderr + p.stdout) and 'fresh --out' in (p.stderr + p.stdout)
+      and proposal.load_record(ph, r14['id'])['status'] == 'proposed'
+      and json.loads((foreign / 'results.jsonl').read_text())['id'] == 'read.scripted-solve.base.r1',
+      f'propose: an --out holding another experiment without arms.json is refused ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
+empty = S / 'propose-empty-out'
+empty.mkdir(parents=True, exist_ok=True)
+check(proposal.provenance_refusal(empty, empty / 'arms.json') == ''
+      and proposal.provenance_refusal(foreign, foreign / 'arms.json') != '',
+      "propose: only a folder holding someone else's rows is refused, an empty one is not")
+(empty / 'arms.json').write_text('{}')
+check(proposal.provenance_refusal(empty, empty / 'arms.json') == '',
+      'propose: a folder carrying arms.json is left to claim_folder to compare')
 # the approval flags granted are part of the plan record and of the folder's identity: --unsafe-free is the same gate
 # as --unsafe-local, and a log that names only the latter misses a run authorised under the alias; a folder written
 # before approvals were recorded has no such key and still resumes (#385 review P2)

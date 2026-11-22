@@ -100,8 +100,8 @@ def arms_from_proposal(prop, base_checkout=None, arm_checkout=None):
     return [base, arm]
 
 
-ARM_KEYS = ('checkout', 'commit', 'dirty', 'config', 'env')
-PLAN_KEYS = ('suite', 'brains', 'only', 'repeats', 'approvals')
+ARM_KEYS = ('checkout', 'commit', 'dirty', 'tree_sha', 'config', 'env')
+PLAN_KEYS = ('suite', 'suite_sha', 'brains', 'only', 'repeats', 'approvals')
 APPROVAL_FLAGS = ('--approve-paid', '--unsafe-local', '--unsafe-free')
 
 
@@ -163,6 +163,32 @@ def arms_mismatch(prior, spec):
             if pp.get(k) != sp.get(k):
                 return f'plan: {k} was {pp.get(k)!r}, this run is {sp.get(k)!r}'
     return ''
+
+
+def provenance_refusal(out, arms_file):
+    """Why `out` already holds results this command did not write, or '' when it is fresh or its own.
+
+    `lab.py run` skips every run id already in results.jsonl, and a run id is task.brain.arm.rN: it names no
+    experiment, no suite digest and no provenance. So an `--out` left by an earlier run (a `lab.py run`, or a
+    `propose` that lost its arms.json) answers `0 to do` here, and `cmd_propose` then reads that earlier experiment's
+    rows, prints its verdict and closes *this* record with it — permanently, since an observed record is append-only
+    (Codex P1, #385).
+
+    `arms.json` is the folder's provenance: only a folder that carries one can be compared, and `claim_folder`
+    refuses a different one. A folder without it but with results, a plan or per-run records is not this
+    experiment's, and adopting it is the bug: refuse, and name the files so the owner can look before choosing.
+    An empty folder, or one holding only this command's own `arms.json`, is not refused (the old behaviour).
+    """
+    if arms_file.exists():
+        return ''                     # claim_folder compares it with this spec
+    found = [p.name for p in (out / 'results.jsonl', out / 'plan.json') if p.exists()]
+    if not found and (out / 'runs').is_dir() and any((out / 'runs').iterdir()):
+        found.append('runs/')
+    if not found:
+        return ''
+    return (f'{out} already holds an experiment without arms.json ({", ".join(found)}), so its run ids would be '
+            'skipped and its rows read as this experiment\'s: use a fresh --out (or remove those files if they are '
+            'not wanted)')
 
 
 def claim_folder(arms_file, spec):
@@ -255,7 +281,18 @@ def arm_mechanism(prop, arms):
     return ', '.join(named) or '(none: the two arms are identical)'
 
 
-def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=None, unlocked='', approvals=None):
+def suite_line(suite, tasks, repeats, suite_digest=None):
+    """The plan's `- suite:` line: name, tasks, repeats and (when known) the content digest.
+
+    The digest is printed because the name is not the content: a suite edited in place keeps its name and task keys,
+    so a reader of a plan from an earlier version cannot tell it apart without the digest (#385 review P1).
+    """
+    line = f"- suite: {suite['name']} ({tasks} tasks), {repeats} repeat(s)"
+    return line + (f", content {suite_digest[:12]}" if suite_digest else '')
+
+
+def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=None, unlocked='', approvals=None,
+            suite_digest=None):
     """The plan the owner reads before anything runs, and the one thing that names everything that will run.
 
     The host decides where a real model runs (as the user, or on the agent account) and the timeout is how long one
@@ -272,7 +309,7 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
     lines = [f"proposal {prop['id']} · {prop.get('problem_group') or 'unclassified'}", '',
              f"- change: {(prop.get('change') or '').strip()[:400]}",
              f"- predicted: {(prop.get('predicted') or '').strip()[:400]}",
-             f"- suite: {suite['name']} ({tasks} tasks), {repeats} repeat(s)",
+             suite_line(suite, tasks, repeats, suite_digest),
              f"- host: {host}" + (' (a real model runs as you here: '
                                     + (unlocked or '--unsafe-local or --unsafe-free') + ')'
                                     if host == 'local' and real else ''),
@@ -368,9 +405,13 @@ def cmd_propose(a, run):
     if only and len(tasks) != len(only):
         raise SystemExit(f'unknown task in --only: {sorted(set(only) - {t["key"] for t in tasks})}')
     approvals = approvals_granted(a)
+    # one read of the suite's bytes, used for the printed plan and for the folder's identity: hashing twice could
+    # name a digest the printed plan does not show if the suite changed in between (it is the identity, not a label)
+    suite_digest = runner.suite_sha(suite)
     print(plan_md(prop, suite, brains, arms, a.repeats, out, len(tasks),
                   host=hosts_mod.kind(a.host, brains), timeout=suite.get('timeout', 1500),
-                  unlocked=' or '.join(f for f in approvals or () if f != '--approve-paid'), approvals=approvals),
+                  unlocked=' or '.join(f for f in approvals or () if f != '--approve-paid'), approvals=approvals,
+                  suite_digest=suite_digest),
           flush=True)
     missing = approval_missing(a, brains)
     if missing:
@@ -379,10 +420,14 @@ def cmd_propose(a, run):
         return 0
     out.mkdir(parents=True, exist_ok=True)
     arms_file = out / 'arms.json'
+    foreign = provenance_refusal(out, arms_file)
+    if foreign:
+        raise SystemExit(foreign)
     # the folder holds one experiment: the arms AND the plan that reads their rows (suite, brains, tasks, repeats),
     # and the first of two concurrent commands to create arms.json owns it (a run id is task.brain.arm.rN, so a
     # shared folder would reuse the other experiment's rows by id)
-    spec = arms_spec(arms, dict(suite=suite['name'], brains=sorted(b.label() for b in brains), only=sorted(only),
+    spec = arms_spec(arms, dict(suite=suite['name'], suite_sha=suite_digest,
+                                brains=sorted(b.label() for b in brains), only=sorted(only),
                                 repeats=a.repeats, approvals=approvals))
     why = claim_folder(arms_file, spec)
     if why:

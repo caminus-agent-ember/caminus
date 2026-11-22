@@ -11,6 +11,7 @@ beside it, so a goal that finished with a failing check counts as a false comple
 An arm is a version of the harness: a checkout (its resident runtime) plus config.json keys and environment variables.
 A/B over arms alternates their order every repeat, so neither arm always runs first.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,52 @@ def load_suite(name_or_path):
     return s
 
 
+def _tree_sha(root):
+    """A content digest of a checkout's runtime tree: the files' paths and bytes, not the commit.
+
+    `commit` and `dirty` do not identify what a run measured: an arm checkout is usually dirty (that is what a
+    harness A/B runs), so editing the dirty tree between two runs into one `--out` leaves `commit` and `dirty=True`
+    identical and `lab.py run` skips every run id as already done, closing the record on the previous numbers
+    (Codex P1, #385). A digest of the bytes changes when the bytes change, whether git can see it or not.
+
+    Over `<root>/python` only: that is the resident runtime an arm runs (`hosts.py` bundles the same directory), and
+    including the rest of a checkout would make the identity change for reasons a run cannot observe. `__pycache__`
+    and `.pyc` are skipped because a run writes them itself: a digest that changes when the tree is merely imported
+    would refuse the second run of the same code.
+    """
+    h = hashlib.sha256()
+    files = sorted(p for p in Path(root).rglob('*')
+                   if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc')
+    for p in files:
+        rel = p.relative_to(root).as_posix()
+        data = p.read_bytes()
+        h.update(rel.encode() + b'\0' + str(len(data)).encode() + b'\0' + data)
+    return h.hexdigest()
+
+
+def suite_sha(suite):
+    """A content digest of a suite's definition and fixtures: suite.json plus every file under fixture/.
+
+    A suite's name is not its content. Editing a task's check, a prompt or a fixture file in place keeps the name and
+    the task keys, so a folder filled before the edit looks like this experiment's and `lab.py run` skips its ids;
+    the record then closes on a verdict the edited suite never measured (Codex P1, #385). The digest covers the
+    definition and the fixture bytes, which together are what a run gives the goal and what the check reads.
+
+    `dirs`/`pristine` entries are paths inside the fixture tree, so the fixture hashing covers them; an empty or
+    missing fixture directory contributes nothing, as before.
+    """
+    d = Path(suite['dir'])
+    h = hashlib.sha256(b'suite.json\0' + (d / 'suite.json').read_bytes())
+    fixture = d / 'fixture'
+    if fixture.is_dir():
+        for p in sorted(x for x in fixture.rglob('*')
+                        if x.is_file() and '__pycache__' not in x.parts and x.suffix != '.pyc'):
+            rel = p.relative_to(fixture).as_posix()
+            data = p.read_bytes()
+            h.update(b'\0fixture/' + rel.encode() + b'\0' + str(len(data)).encode() + b'\0' + data)
+    return h.hexdigest()
+
+
 class Arm:
     def __init__(self, name, checkout, config=None, env=None):
         if not name.replace('-', '').replace('_', '').isalnum():
@@ -49,7 +96,10 @@ class Arm:
         self.commit = git('rev-parse', '--short=12', 'HEAD') or 'unknown'
         # a dirty tree is what a harness A/B usually runs: say so in every record
         self.dirty = bool(git('status', '--porcelain', '--untracked-files=no', '--', 'python'))
-        self.runtime_sha = None
+        # the content the commit and the dirty flag cannot name: a dirty tree edited between two runs keeps both
+        # identical, and `lab.py run` then skips every id and reads the previous rows (#385 review P1)
+        self.tree_sha = _tree_sha(self.checkout / 'python')
+        self.runtime_sha = None           # the agent host's uploaded zipapp name, known only after prepare()
 
     def describe(self):
         """One arm in the shape both plan.json and an `--arms` file read: everything that makes it this arm.
@@ -59,7 +109,8 @@ class Arm:
         id, so a folder whose checkout moved would reuse the previous rows by id.
         """
         return dict(name=self.name, checkout=str(self.checkout), commit=self.commit, dirty=self.dirty,
-                    config=dict(self.config), env=dict(self.env), runtime_sha=self.runtime_sha)
+                    tree_sha=self.tree_sha, config=dict(self.config), env=dict(self.env),
+                    runtime_sha=self.runtime_sha)
 
 
 def load_arms(specs, arms_file):
@@ -127,8 +178,8 @@ def execute(run, host, suite, timeout, out):
     local_rec = Path(out) / 'runs' / run['id']
     local_rec.mkdir(parents=True, exist_ok=True)
     rec = dict(id=run['id'], suite=suite['name'], task=t['key'], kind=t.get('kind'), brain=b.label(), brain_kind=b.kind,
-               arm=a.name, commit=a.commit, dirty=a.dirty, runtime_sha=a.runtime_sha, repeat=run['repeat'],
-               host=host.name, ts=time.time())
+               arm=a.name, commit=a.commit, dirty=a.dirty, tree_sha=a.tree_sha, runtime_sha=a.runtime_sha,
+               repeat=run['repeat'], host=host.name, ts=time.time())
     rt = host.runtime(a)
     env_prefix = ['env', *[f'{k}={v}' for k, v in a.env.items()]] if a.env else []
 
