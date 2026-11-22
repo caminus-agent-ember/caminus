@@ -313,9 +313,16 @@ class ListPrices:
             try:
                 table, rows = self._fetch()
                 err = None
-            except (OSError, ValueError, AttributeError, http.client.HTTPException) as e:
-                # http.client.HTTPException too: BadStatusLine and IncompleteRead are not OSErrors, and one
-                # escaping here dropped the client's connection (the price list was simply never loaded)
+            except Exception as e:
+                # Exception, not the four classes that were listed before (OSError, ValueError, AttributeError,
+                # http.client.HTTPException): each of those was added after one escaped and dropped the client's
+                # connection, and the next class a fetch raises (`TypeError` from a refactored `rates()`, a TLS
+                # error class that is not an OSError) would do the same - `get()` propagates it from the request
+                # path, where nothing catches it, so the client is dropped with no refusal, the exact symptom this
+                # retrying load exists to fix (#389 review P2). The cost is that a bug in the fetch's own body is
+                # also read as a failed load; it is logged with its class and retried on the backoff, so it stays
+                # diagnosable, and a wrong price table served from a half-failed fetch is the worse outcome.
+                # (BaseException is not caught: a KeyboardInterrupt or SystemExit still ends the process.)
                 err = e
             with self.lock:
                 # the clock starts when the fetch ENDS, not when it began: a provider that accepted and stalled for

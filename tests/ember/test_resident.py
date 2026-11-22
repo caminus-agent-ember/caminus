@@ -4809,6 +4809,33 @@ for line in sys.stdin:
             self.assertEqual(bad.refusal('zai-org/GLM-5.2')[0], 503)
             self.assertIn('price list unavailable (1 in a row)', lines[-1], lines[-1])
 
+    def test_any_error_class_from_a_price_fetch_is_a_failed_load_not_a_dropped_request(self):
+        """#389 review P2: `_load` caught four classes (OSError, ValueError, AttributeError, HTTPException) around the
+        fetch, and each one was added after it escaped and dropped the client's connection. The next class a fetch
+        raises (`TypeError` from a refactored `rates()`, a TLS error class that is not an OSError) would do the same:
+        it escaped `_load` with `loading` cleared but `tries`/`next` never advanced, then propagated out of `get()` on
+        the request path, where nothing catches it - a dropped connection with no refusal, the exact symptom this
+        retrying load exists to fix. `except Exception` records it as any other failed load."""
+        from caminus.ember import relay
+        good = dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2)))])
+        class WeirdError(Exception):
+            pass                                                       # (neither an OSError nor a ValueError)
+        for boom in (TypeError('bad rates()'), WeirdError('tls-ish'), RuntimeError('refactor')):
+            tries, lines = [], []
+            def fetch():
+                tries.append(1)
+                if len(tries) == 1:
+                    raise boom
+                return good
+            prices = relay.ListPrices(lines.append, fetch, backoff=(0.3,))
+            self.assertIsNone(prices.get('zai-org/GLM-5.2'))            # (no exception out of get())
+            self.assertEqual(prices.tries, 1, 'a failed load advances the backoff')
+            self.assertTrue(any('price list unavailable (1 in a row)' in l and type(boom).__name__ in l
+                                for l in lines), lines)
+            self.assertEqual(prices.refusal('zai-org/GLM-5.2')[0], 503, 'a failed load is the waitable refusal')
+            time.sleep(0.4)                                           # (the retry window the refusal named)
+            self.assertEqual(prices.get('zai-org/GLM-5.2'), (0.6, 2.2, 0.6), 'the retry loads it, no restart')
+
     def test_a_first_price_load_in_flight_answers_at_once_instead_of_blocking_the_request(self):
         """The lock was held across the fetch, and prime() starts the first load exactly when the
         relay's port starts answering, so a provider that accepted and stalled kept the first POST blocked for the
