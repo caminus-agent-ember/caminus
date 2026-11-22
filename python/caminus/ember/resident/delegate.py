@@ -163,6 +163,15 @@ def _escaping(cmd, wt, writing=True, base=''):
     `--opt=path` is checked as a path too. Words are split with punctuation, so a redirect glued to its target
     (`echo x >../out`) yields `../out` as a word. A redirect to /dev/null (or /dev/stdout, /dev/stderr) changes
     nothing and is allowed.
+
+    That punctuation split is load-bearing, not a convenience (#384 review P2): a separator glued to the next word
+    (`cd W &&git config core.fsmonitor x`, `echo hi&&git -c ...`) is only seen as a separator because shlex has
+    `punctuation_chars` and `whitespace_split`. Without it the word is the single token `&&git`, which is neither a
+    separator nor a program this file knows, so the path walk would pass it and the git guard would never run -
+    the tests pin both the glued spellings and the spaced ones so that edit cannot pass quietly. Wrappers do not
+    launder the program word either: `command`, `builtin`, `nohup`, `time`, `nice`, `timeout`, `setsid`, `stdbuf`,
+    `if`/`while`/`for`/`{ }`/`!` all leave `git` in command position for this walk, and `env`/`exec` are refused
+    by name as nested commands.
     """
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=';&|()<>`')

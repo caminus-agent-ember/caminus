@@ -3050,6 +3050,27 @@ for line in sys.stdin:
                     'cd %s && echo hi > .git/config'%wt):
             why=delegate.refused('terminal',dict(command=cmd),row)
             self.assertTrue(why and 'worktree' in why,(cmd,why))
+        # #384 review, P2: a separator GLUED to the next word (`&&git config ...` with no space) is a separator
+        # only because the word split has `punctuation_chars`; without it the token is `&&git`, neither a separator
+        # nor a program, and the git guard never runs. The review read `_git_words`'s all-punctuation test as the
+        # thing that splits, and believed the glued spelling passed - it does not, because shlex split it first.
+        # Pinned here so that dropping `punctuation_chars` fails a test instead of quietly re-opening the bypass.
+        for cmd in ('cd %s &&git config core.fsmonitor x'%wt,'cd %s&&git config core.pager x'%wt,
+                    'cd %s && echo hi&&git -c core.pager=ls log'%wt,'cd %s && echo hi;git config a b'%wt,
+                    'cd %s && echo hi|git config a b'%wt,'cd %s && (git config a b)'%wt,
+                    'cd %s && `git config a b`'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'worktree' in why,(cmd,why))
+        # the words the review's class is about keep the program in command position, so the same guard sees it;
+        # `env`/`exec`/`sh -c` are refused by name instead (their message says why, not always the word worktree)
+        for cmd in ('cd %s && command git config a b'%wt,'cd %s && builtin git config a b'%wt,
+                    'cd %s && nohup git config a b'%wt,'cd %s && time git config a b'%wt,
+                    'cd %s && nice git config a b'%wt,'cd %s && timeout 5 git config a b'%wt,
+                    'cd %s && if true; then git config a b; fi'%wt,
+                    'cd %s && { git config a b; }'%wt,'cd %s && ! git config a b'%wt):
+            self.assertTrue(delegate.refused('terminal',dict(command=cmd),row),cmd)
+        # a QUOTED `&&git` is a literal program name, which no shell can find: allowed, and nothing runs
+        self.assertIsNone(delegate.refused('terminal',dict(command='cd %s && "&&git" config a b'%wt),row))
         # the work a writing child exists for still runs: build, test, commit, log - and `-c` AFTER the
         # subcommand means something else (`git switch -c x` creates a branch, `git commit -c HEAD` re-edits a
         # message), so it is not refused (#384: my guard refused both until I probed it)
