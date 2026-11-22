@@ -143,7 +143,7 @@ func (m emberModel) selectedText() string {
 	// The header's goal is drawn cut, or rendered (its Markdown reflowed): a copy that touches it takes the goal
 	// whole, as the agent wrote it, the way an open card's body copies its source (markdownBodies) (#316).
 	// The rows substituted are the ones the goal occupies under the title — headGoalRowsUnderTitle (cut) and
-	// headGoalRowsExpanded (open) are what chatHead draws — so a selection reaching the cut hint or the expansion's
+	// headExpansion (open) are what chatHead draws — so a selection reaching the cut hint or the expansion's
 	// scroll footer copies those as what they are, never as goal text (#370 review).
 	goalAt, goalTo, goal := -1, -1, ""
 	if s.screen && b[0] >= 1 {
@@ -151,7 +151,7 @@ func (m emberModel) selectedText() string {
 			w := max(20, m.width)
 			rows := len(headGoalRowsUnderTitle(strings.Join(strings.Fields(g), " "), w))
 			if m.headShown() {
-				rows = len(m.headGoalRowsExpanded(w))
+				rows = len(m.headExpansion(w).rows)
 			}
 			if rows > 0 && a[0] < 1+rows {
 				goalAt, goalTo, goal = max(1, a[0]), 1+rows, ansi.Strip(g)

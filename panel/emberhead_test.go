@@ -402,6 +402,49 @@ func TestTheScrollRowFollowsTheGoalOnTheScreen(t *testing.T) {
 	}
 }
 
+// TestTheExpansionDrawnIsTheExpansionScrolled: the drawing (headExpanded), the copy (emberselect) and PgUp/PgDn
+// each used to work out the rows, the start row and the goal's length on their own, and a stale headTop against a
+// shorter body could put the scroll footer under rows the copy did not call the goal. headExpansion is one
+// computation now, and this walks a row past both ends and far past the goal to hold it to what it says (#370
+// review).
+func TestTheExpansionDrawnIsTheExpansionScrolled(t *testing.T) {
+	m := openHead(t, longGoalChat(t, 100, 30))
+	w := max(20, m.width)
+	body := strings.Split(m.headExpandedBody(w), "\n")
+	for _, headTop := range []int{-5, 0, 3, 1000} {
+		m.chat.headTop = headTop
+		e := m.headExpansion(w)
+		if e.lines != len(body) {
+			t.Fatalf("headTop %d: the expansion says %d rows, the body has %d", headTop, e.lines, len(body))
+		}
+		if e.top < 0 || e.top > e.maxTop() {
+			t.Fatalf("headTop %d: the goal starts at row %d (last row %d)", headTop, e.top, e.maxTop())
+		}
+		if len(e.rows) > m.headRows() {
+			t.Fatalf("headTop %d: %d rows drawn, the header has %d", headTop, len(e.rows), m.headRows())
+		}
+		if e.top+len(e.rows) > e.lines {
+			t.Fatalf("headTop %d: rows %d–%d of a %d-row goal", headTop, e.top+1, e.top+len(e.rows), e.lines)
+		}
+		if e.top < e.maxTop() && len(e.rows) != m.headRows() {
+			t.Fatalf("headTop %d: %d rows before the last row, want a screenful of %d", headTop, len(e.rows), m.headRows())
+		}
+		for i, ln := range e.rows { // the rows are the body's, from the row the expansion says
+			if ln != body[e.top+i] {
+				t.Fatalf("headTop %d: row %d is not body row %d\ngot  %q\nwant %q", headTop, i, e.top+i, ln, body[e.top+i])
+			}
+		}
+		// The footer names exactly the rows drawn and the goal's length, and is there exactly when the goal does
+		// not fit whole.
+		foot := fmt.Sprintf("lines %d–%d of %d", e.top+1, e.top+len(e.rows), e.lines)
+		head := ansi.Strip(m.chatHead(w))
+		overflow := len(e.rows) > 0 && (e.top > 0 || e.lines > e.top+len(e.rows))
+		if got := strings.Contains(head, foot); got != overflow {
+			t.Fatalf("headTop %d: footer %q present=%v, want %v:\n%s", headTop, foot, got, overflow, head)
+		}
+	}
+}
+
 // TestTheExpandedGoalKeepsThreeRowsOnATinyScreen: headRows() had a max(3, …) around max(12, height)/2-3 that could
 // never be reached, because the 12-row floor already keeps the result at three or more. The floor is the thing that
 // matters at a small height, so it is written down here rather than left implicit in an unreachable bound (#370
@@ -425,8 +468,8 @@ func TestTheExpandedGoalKeepsThreeRowsOnATinyScreen(t *testing.T) {
 }
 
 // TestTheGoalDrawingsStayBounded: headMD is keyed by width and goal text and syncChat clears it only on a resize, so
-// a long run that shows many goals would keep every drawing. Past the bound the cache starts over and the goal on
-// the screen is drawn again.
+// a long run that shows many goals would keep every drawing. Past the bound one other drawing is evicted per insert:
+// the cache stays bounded and the goal on the screen keeps the drawing the next frame asks for (#370 review).
 func TestTheGoalDrawingsStayBounded(t *testing.T) {
 	m := openHead(t, longGoalChat(t, 100, 30))
 	m.syncChat()
@@ -445,6 +488,11 @@ func TestTheGoalDrawingsStayBounded(t *testing.T) {
 	_ = m.chatHead(100)
 	if got := len(m.chat.headMD); got != n {
 		t.Fatalf("drawing the same goal twice added an entry (%d then %d)", n, got)
+	}
+	// The goal on the screen is the one the cache keeps: clearing the whole map with every insert dropped its
+	// drawing too, and the very next frame (chatHead runs on every frame) rendered it again (#370 review).
+	if _, ok := m.chat.headMD[headKey{width: 100, text: m.headGoalText()}]; !ok {
+		t.Fatalf("the goal on the screen is not in headMD after %d goals (%d entries)", headMDMax+4, len(m.chat.headMD))
 	}
 }
 
@@ -511,7 +559,7 @@ func TestCopyingTheHeaderPastTheGoalTakesTheHintAsItself(t *testing.T) {
 		m := openHead(t, longGoalChat(t, 100, 30))
 		_ = m.render()
 		w := max(20, m.width)
-		rows := len(m.headGoalRowsExpanded(w))
+		rows := len(m.headExpansion(w).rows)
 		if rows != m.headRows() {
 			t.Fatalf("fixture: the open goal fills %d of %d rows", rows, m.headRows())
 		}

@@ -672,17 +672,35 @@ func headGoalRowsUnderTitle(goalText string, w int) []string {
 	return shown
 }
 
-// headGoalRowsExpanded is the expanded header's visible goal rows at width w: what headExpanded draws under the title
-// (headTop applied, capped at headRows). The scroll footer comes after them and is not part of the goal.
-func (m emberModel) headGoalRowsExpanded(w int) []string {
-	body := strings.Split(m.headExpandedBody(w), "\n")
+// headExpansion is what the expanded header shows of the goal: the rows drawn under the title, the goal row the
+// first of them is, and how many rows the goal has. One computation, read by the drawing, the copy (emberselect)
+// and scrollHead alike: computed twice, a stale headTop against a shorter body could put the scroll footer under
+// rows the copy does not call the goal (#370 review).
+type headExpansion struct {
+	rows  []string // the goal rows under the title (headTop applied, capped at headRows)
+	top   int      // the goal row rows[0] is
+	lines int      // how many rows the whole goal has
+}
+
+// maxTop is the last row the expansion can start at: the last screenful of the goal. len(rows) is the screenful
+// itself — headRows when the goal is longer, every row when it is not — so this is 0 for a goal that fits.
+func (e headExpansion) maxTop() int { return max(0, e.lines-len(e.rows)) }
+
+// headExpansion computes the expansion at width w. A body with no rows falls back to the collapsed rows, so the
+// footer is never drawn over rows that are not the goal.
+func (m emberModel) headExpansion(w int) headExpansion {
+	body := m.headExpandedBody(w)
+	if body == "" {
+		return headExpansion{rows: headGoalRowsUnderTitle(m.headGoalText(), w), lines: 1}
+	}
+	lines := strings.Split(body, "\n")
 	rows := m.headRows()
-	top := max(0, min(m.chat.headTop, len(body)-rows))
-	shown := body[top:]
+	top := min(max(0, m.chat.headTop), max(0, len(lines)-rows))
+	shown := lines[top:]
 	if len(shown) > rows {
 		shown = shown[:rows]
 	}
-	return shown
+	return headExpansion{rows: shown, top: top, lines: len(lines)}
 }
 
 func (m emberModel) chatHead(w int) string {
@@ -835,24 +853,18 @@ func (m emberModel) headRows() int { return max(12, m.height)/2 - 3 }
 func (m emberModel) headExpanded(agent, state string, steps, w int) string {
 	head := shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
-	body := m.headExpandedBody(w)
-	lines := strings.Split(body, "\n")
-	rows := m.headRows()
-	top := max(0, min(m.chat.headTop, len(lines)-rows))
-	shown := m.headGoalRowsExpanded(w)
-	more := 0
-	if len(lines)-top > len(shown) {
-		more = len(lines) - top - len(shown)
+	// The rows, the row they start at and the goal's length all come from one computation, the same one the copy
+	// reads (#370 review).
+	e := m.headExpansion(w)
+	out := title
+	for _, ln := range e.rows {
+		out += "\n  " + ln
 	}
-	for i, ln := range shown {
-		shown[i] = "  " + ln
-	}
-	out := title + "\n" + strings.Join(shown, "\n")
-	if top > 0 || more > 0 {
+	if len(e.rows) > 0 && (e.top > 0 || e.lines > e.top+len(e.rows)) {
 		// cut to the width as renderChat's clip does: the hint is ~66 columns, and at 40 or 60 the terminal wrapped it,
 		// leaving the frame one row taller than the screen (the title scrolled off the top)
 		out += "\n" + emberDim.Render(ansi.Truncate(fmt.Sprintf("  … lines %d–%d of %d · PgUp/PgDn scrolls · Alt+G or Esc collapses",
-			top+1, top+len(shown), len(lines)), max(10, w-4), ""))
+			e.top+1, e.top+len(e.rows), e.lines), max(10, w-4), ""))
 	}
 	return out + "\n" + rule
 }
@@ -860,14 +872,15 @@ func (m emberModel) headExpanded(agent, state string, steps, w int) string {
 // scrollHead moves the expanded goal's first row by n, and reports whether it moved: a goal that fits its half of
 // the screen has nowhere to go, and PgUp/PgDn must then page the transcript as they always did.
 func (m *emberModel) scrollHead(n int) bool {
-	lines := lipgloss.Height(m.headExpandedBody(max(20, m.width)))
-	maxTop := max(0, lines-m.headRows())
+	// The rows, the row the display is on and the last row all come from the same computation the drawing uses
+	// (#370 review).
+	e := m.headExpansion(max(20, m.width))
 	// The row the display is on, not the one the state holds: the goal under the title can change while the
-	// expansion stays open (a re-aim keeps headFor, so headShown stays true), and headExpanded clamps the stale
+	// expansion stays open (a re-aim keeps headFor, so headShown stays true), and headExpansion clamps the stale
 	// row for drawing. Clamped here too, a press moves from what is on the screen instead of being eaten by rows
 	// the display never showed. The clamp is written back, so the state does not keep the stale row either.
-	was := max(0, min(m.chat.headTop, maxTop))
-	top := max(0, min(was+n, maxTop))
+	was := e.top
+	top := max(0, min(was+n, e.maxTop()))
 	m.chat.headTop = top
 	return top != was
 }
@@ -880,8 +893,8 @@ type headKey struct {
 
 // headMDMax bounds headMD. It is keyed by width and goal text, and syncChat clears it only when the width changes,
 // so a long run that shows many goals (each re-aim is a new text) would keep every drawing for the life of the
-// process. Past the bound the cache starts over: only the goal on the screen is ever asked for, and drawing it again
-// costs one glamour render.
+// process. Past the bound one other drawing is evicted per insert: only the goal on the screen is ever asked for,
+// and dropping that one too would re-render it on the very next frame (#370 review).
 const headMDMax = 8
 
 // headExpandedBody is the goal drawn as Markdown, as the expanded header shows it. chatHead runs on every frame (and
@@ -909,19 +922,31 @@ func (m emberModel) headExpandedBody(w int) string {
 	body := renderWith(r, max(10, w-4), text)
 	if m.chat.headMD != nil {
 		if len(m.chat.headMD) >= headMDMax {
-			clear(m.chat.headMD)
+			// One other drawing goes, not the whole cache: the goal on the screen is asked for every frame, and a
+			// clear dropped its drawing with the rest, so the next frame rendered it again (#370 review). Any one
+			// key will do — map order is the eviction order this cache never promised.
+			for k := range m.chat.headMD {
+				if k != key {
+					delete(m.chat.headMD, k)
+					break
+				}
+			}
 		}
 		m.chat.headMD[key] = body
 	}
 	return body
 }
 
+// collapseHead closes the goal under the title and forgets the row it was scrolled to. Every way out (Alt+G, Esc)
+// goes through here, so a new expansion always opens at its first line (#370 review).
+func (m *emberModel) collapseHead() { m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0 }
+
 // toggleHead expands the goal under the title, or collapses it back to its three lines. Only a goal with rows the
 // collapsed header does not draw opens (headWrapsPastLines, not headCut: a goal cut off the title line that wraps into
 // the three rows is already shown whole) — headParts is walked here, once per key press, rather than on every frame.
 func (m emberModel) toggleHead() (tea.Model, tea.Cmd) {
 	if m.headShown() {
-		m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0
+		m.collapseHead()
 		return m, nil
 	}
 	_, _, goalText := m.headParts()
@@ -3022,7 +3047,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.toggleHead()
 	case "esc":
 		if m.headShown() { // the goal opened under the title closes first: it was the last thing opened
-			m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0
+			m.collapseHead()
 			return m, nil
 		}
 		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode
