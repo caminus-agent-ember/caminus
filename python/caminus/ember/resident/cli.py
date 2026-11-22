@@ -1242,7 +1242,8 @@ def main(argv=None,stdin=None):
                 note=('[advisor review, asked for by your human] %s read your goal and says:\n%s\n'
                       'Weigh this before your next step; say what you change, or why not.' % (out.get('model'),out['advice']))
                 with rt.store.transaction():
-                    rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,note,'nudge'))
+                    rt.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
+                                        (gid,note,'nudge','harness'))
                     rt.store.request(gid,'interrupt')
                     rt.store.event('advisor_review',dict(model=out.get('model'),usd=out.get('usd'),
                                                          focus=(a.text or '')[:300],advice=(out.get('advice') or '')[:4000]),gid)

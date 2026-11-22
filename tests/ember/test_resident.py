@@ -1770,6 +1770,12 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
             inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
             self.assertTrue(any('read its first error' in t and 'asked for by your human' in t for t in inbox))
             self.assertTrue(rt.store.pending_request(gid,'interrupt'),'the reply being written is dropped')
+            # #390 review P1: the note is the runtime's own, not the human speaking. Inserted with three columns,
+            # `source` took its '' default (the human), so `_answering` read the advisor's note as their answer
+            # and the plain-text pause reset on a stalled goal, the very behaviour this PR fixes elsewhere.
+            rows=list(rt.store.db.execute("SELECT text,source FROM inbox WHERE goal=? AND text LIKE '%read its "
+                                          "first error%'",(gid,)))
+            self.assertEqual(rows[0]['source'],'harness','the advisor review is a harness note, not the human')
         finally:rt.mail.close();rt.store.close()
 
     def test_the_status_line_shows_a_speed_only_while_it_is_current(self):
