@@ -821,6 +821,13 @@ def _report(rt, row, g, outcome=None):
     return report
 
 
+def _report_gone(rt, row):
+    """The report for a row whose child goal is gone: the row still records the brain, the role, what the child
+    may do and what it spent, so its parent reads that much instead of the child vanishing from its list. `state`
+    is `gone` because there is no goal left to read a state from, and the outcome is orphaned (#384 review)."""
+    return _report(rt, row, dict(state='gone'), 'orphaned')
+
+
 def _unchanged(row):
     """True when a writing child's checkout holds nothing of its own: a clean status and HEAD still at the base.
 
@@ -928,7 +935,15 @@ def settle(rt):
     for row in rt.store.delegates(open_only=True):
         parent = row['parent']
         pstate = _parent_state(rt, parent)
-        g = rt.store.goal(row['child'])
+        try:
+            g = rt.store.goal(row['child'])
+        except ValueError:
+            # The child's own goal is gone (a hand edit, or a restore that kept the delegates row): this read raised
+            # `unknown goal` out of the loop on every pass and the row stayed open forever. Nothing can run for a
+            # goal that is not there, so the row closes from what it records itself (#384 review).
+            _close(rt, parent, _report_gone(rt, row))
+            moved = True
+            continue
         if pstate is None:
             # The parent's goal is gone: nothing will read this child's report, and a child still runnable must
             # not run on this process's registrations. Close the row as orphaned, the way sweep closes a

@@ -3815,6 +3815,35 @@ for line in sys.stdin:
             self.assertFalse(delegate.settle(rt),'the closed row is not closed again on the next pass')
         finally:rt.mail.close();rt.store.close()
 
+    def test_settle_closes_a_child_whose_goal_row_is_gone(self):
+        # #384 review P2: settle guarded the parent's goal read (`_parent_state`) but read the child's unguarded, so
+        # a delegates row whose goal was deleted (a hand edit, or a restore that kept the row; the schema has no
+        # foreign key) raised `unknown goal` out of every settle pass and the row stayed open forever. The row now
+        # closes as orphaned from what it records itself, and nothing is filed into a goal that is not there.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            rt.delegate_caps[child]=0.5
+            rt.delegate_models[child]=rt.model
+            with rt.store.transaction():rt.store.db.execute('DELETE FROM goals WHERE id=?',(child,))
+            with self.assertRaises(ValueError):
+                rt.store.goal(child)
+            self.assertTrue(delegate.settle(rt),'the orphaned row closes rather than raising out of the pass')
+            row=rt.store.delegate(child)
+            self.assertEqual(row['outcome'],'orphaned')
+            report=json.loads(row['report'])
+            self.assertEqual(report['state'],'gone')
+            self.assertEqual(report['child'],child)
+            self.assertFalse(report['verified'])
+            self.assertNotIn(child,rt.delegate_caps,'the brain registration must not outlive the child')
+            self.assertNotIn(child,rt.delegate_models)
+            self.assertEqual(rt.store.goal(parent)['state'],'queued','the parent is not touched by its child\'s loss')
+            self.assertFalse(delegate.settle(rt),'the closed row is not closed again on the next pass')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_finished_delegate_child_cannot_be_continued(self):
         # `send --continue` on a completed goal revived it with no delegate check, so a child ran again on the
         # default brain with no cap (#382 review, and resume_goal refuses the same move). Same answer on both paths.
