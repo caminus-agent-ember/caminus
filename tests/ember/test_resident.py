@@ -8463,6 +8463,48 @@ for line in sys.stdin:
             self.assertFalse(brains._allowed(gid),'still unpriced: the budget does not make it refusable-but-callable')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_gate_that_raises_is_recorded_as_a_defect_not_a_spent_allowance(self):
+        # #383 review P2: when the fallback is in force and _allowed itself raises, the fail-closed skip said only
+        # "allowance is spent", so a defect in the gate read as a spent budget and nobody went looking for it. The
+        # skip carries the gate's own reason now: a raised gate and a spent allowance are told apart where the
+        # queue is read, and the failure is not sticky (a gate that can be read again lets the same goal reflect).
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                return {'content':json.dumps(dict(problem_group='x',change='y',predicted='z'))}
+        class FakeBrains:
+            def __init__(self,model):
+                self.fallback=model;self.cfg=dict(budget_usd=0.5);self.spent=0.0;self.raises=True
+            def spent_today(self):return self.spent
+            def _allowed(self,gid):
+                if self.raises:
+                    raise RuntimeError('the cap ledger is unreadable')
+                return True
+        rt=Runtime(self.home)
+        try:
+            model=Model();rt.model=model;rt.brains=FakeBrains(model)
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            self.assertFalse(reflect._may_spend(rt,gid),'fail closed: a gate that raises does not spend')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,0,'the gate could not be read: no call')
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1,'the skip is on the record')
+            reason=skipped[0]['data']['reason']
+            self.assertIn('gate raised',reason)
+            self.assertIn('RuntimeError',reason)
+            self.assertNotIn('allowance is spent',reason,'a raised gate must not read as a spent budget')
+            rt.brains.raises=False
+            self.assertIsNotNone(reflect.maybe(rt,gid,'Done.',''),'a readable gate lets the reflection run again')
+            self.assertEqual(Model.calls,1)
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_reflection_stops_before_the_retry_once_the_first_call_spent_the_allowance(self):
         # #383 review P1: the first call's own cost is priced into spent_today (brains.account in _ask), so the retry
         # could start out over the allowance the runtime refuses the goal's next turn on. The gate is read again

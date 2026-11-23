@@ -75,10 +75,13 @@ def maybe(rt, gid, summary='', open_work=''):
             return None
         if not callable(getattr(getattr(rt, 'model', None), 'complete', None)):
             return None           # a stubbed runtime (some tests drop a plain namespace in for the model)
-        if not _may_spend(rt, gid):
-            # the brain in force is the fallback and its daily allowance is spent (or it is unpriced): the turn
-            # after this one would not go there either, so the reflection does not spend past it (brains._allowed)
-            rt.store.event('reflection_skipped', dict(reason="the fallback's allowance is spent"), gid)
+        why = _spend_refusal(rt, gid)
+        if why:
+            # the brain in force is the fallback and its daily allowance is spent (or it is unpriced, or the gate
+            # itself raised): the turn after this one would not go there either, so the reflection does not spend
+            # past it (brains._allowed). The reason is the gate's own (see _spend_refusal): a raised gate is a
+            # harness defect, and the queue should not read it as a spent budget (#383 review P2).
+            rt.store.event('reflection_skipped', dict(reason=why), gid)
             return None
         msgs = [dict(role='system', content=SYSTEM),
                 dict(role='user', content=brief(rt, gid, summary, open_work))]
@@ -90,12 +93,13 @@ def maybe(rt, gid, summary='', open_work=''):
             if rt.stopping():
                 rt.store.event('reflection_failed', dict(reason='stopping before the retry', reply=text[:500]), gid)
                 return None
-            if not _may_spend(rt, gid):
+            why = _spend_refusal(rt, gid)
+            if why:
                 # The first call's own cost is priced into spent_today (brains.account in _ask), so a retry can
                 # start out over the allowance the runtime just refuses the goal's next turn on: the gate is read
                 # again here, and crossing it ends the reflection instead of billing past it (#383 review P1).
-                rt.store.event('reflection_skipped',
-                               dict(reason="the fallback's allowance is spent before the retry"), gid)
+                # The gate's own reason travels, with the retry named: a raised gate is not a spent budget.
+                rt.store.event('reflection_skipped', dict(reason=why + ' before the retry'), gid)
                 return None
             text = _ask(rt, gid, msgs + [dict(role='assistant', content=text[:2000]),
                                          dict(role='user', content=STRICT)])
@@ -181,7 +185,12 @@ def _ask(rt, gid, msgs):
     """One short call, priced into the goal's spend like any other turn, on its own timeout: the goal is already
     complete, so a hung endpoint must not hold the loop for a turn's 900 s. It runs on the loop thread (one call per
     completed goal, and the loop is idle between goals), so the bound that matters is TIMEOUT per attempt, whole
-    (_bounded): two at most, when the first reply could not be read, and never one past a stop request."""
+    (_bounded): two at most, when the first reply could not be read, and never one past a stop request.
+
+    The same thread is why the spend reads around this call are sound: `spent_today` is written by `account()` here
+    and re-read by the gate in `_spend_refusal`, with no other writer in between. Move this call to a worker thread
+    (the fix for the hung-endpoint bound above) and those reads must move with it, re-reading `spent_today` and
+    `probe` there rather than trusting a value read on the loop thread."""
     reply = _bounded(rt, lambda: rt.model.complete(msgs, tools=None, max_tokens=MAX_TOKENS, timeout=TIMEOUT))
     try:
         rt.brains.account(gid)
@@ -224,25 +233,38 @@ def _episode_start(rt, gid):
     return row['seq'] if row else 0
 
 
-def _may_spend(rt, gid):
-    """Whether the brain in force may take this call: the primary is the model the user chose, so it always may; the
-    fallback is gated by the runtime's own rule, not a copy of it (brain.Brains._allowed).
+def _spend_refusal(rt, gid):
+    """Why the brain in force may not take this call, or None when it may: the primary is the model the user chose,
+    so it always may; the fallback is gated by the runtime's own rule, not a copy of it (brain.Brains._allowed).
+
+    The reason is returned rather than a bool so a skip event says WHAT refused: a spent allowance and a gate that
+    raised are different facts about the harness, and the reviewer reading the queue could not tell them apart while
+    both wrote "the fallback's allowance is spent" (#383 review P2: a defect in _allowed read as a spent budget).
     """
     brains = getattr(rt, 'brains', None)
     try:
         if brains is None or not brains.cfg or getattr(rt, 'model', None) is not brains.fallback:
-            return True
+            return None
         # Reuse the runtime's gate rather than restating it. A copy drifted once already: this guard checked only
         # spent_today() < budget_usd, so an unpriced remote fallback (brain._allowed refuses it: "cannot be
         # limited") still served a billed reflection past the cap the runtime enforces on the goal's own turns
         # (review P1). _allowed is the one rule now: unpriced remote is refused, a spent allowance is refused,
         # and a free-time goal follows _free_choice exactly as a work turn does.
-        return bool(brains._allowed(gid))
-    except Exception:
+        if brains._allowed(gid):
+            return None
+        return "the fallback's allowance is spent"
+    except Exception as e:
         # fail closed when the fallback is in force and the gate cannot be evaluated at all: skipping a
         # reflection costs a proposal, a call past an unreadable cap costs money (a stub runtime never reaches
-        # here - `not brains.cfg` above is the stub case).
-        return False
+        # here - `not brains.cfg` above is the stub case). The type name travels with the skip: an exception
+        # from _allowed itself is a defect, not a budget, and the queue should say which it was.
+        return "the fallback's gate raised %s: %s" % (type(e).__name__, e)
+
+
+def _may_spend(rt, gid):
+    """Whether the brain in force may take this call: `_spend_refusal` as the bool its callers had before the
+    reason was kept, so a caller that only branches does not have to unpick a sentence."""
+    return _spend_refusal(rt, gid) is None
 
 
 def _judge(rt, gid, since=0):
