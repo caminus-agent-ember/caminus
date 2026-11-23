@@ -2952,6 +2952,32 @@ for line in sys.stdin:
         self.assertTrue(drifts[0]['nudged'] and not drifts[1]['nudged'],'the turn after a nudge is detected, not nudged')
         self.assertTrue(any(d['nudged'] for d in drifts[language.DRIFT_EVERY:]),'the interval brings the nudge back')
 
+    def test_calls_finish_reads_every_shape_the_normalizer_emits(self):
+        # #390 review P2: `_calls_finish` reads a call's name over the OpenAI and flat shapes, so an adapter shape
+        # neither covers would read as "not a finish" and the drift nudge it queued would defer the `_finish` on the
+        # same tick. Every adapter reply passes through `Model._message` before `_tick` sees it (`complete` returns
+        # its output for OpenAI, the streamed reply, and the Anthropic tool_use blocks): it validates each call and
+        # emits one shape, so the flat read is the fallback for hand-built replies, not a guess about adapters.
+        from caminus.ember.resident import model as mod
+        from caminus.ember.resident.runtime import _calls_finish
+        m=mod.Model(dict(endpoint='http://127.0.0.1:9/v1'))
+        call=dict(id='c1',type='function',function=dict(name='finish',arguments='{}'))
+        for raw in (dict(content='',tool_calls=[call]),                                  # OpenAI, content empty
+                    dict(content=[dict(type='text',text='done')],tool_calls=[call])):    # typed blocks
+            out=m._message(raw)
+            self.assertTrue(_calls_finish(out['tool_calls']),raw)
+            self.assertEqual([c['function']['name'] for c in out['tool_calls']],['finish'],
+                             'the normalizer emits one shape whatever the adapter sent')
+        # The shapes the review named never reach the tick: the normalizer refuses them instead of storing a reply
+        # whose finish would read as "not a finish".
+        for bad in (['finish'],[dict(id='c3',function='finish')],[dict(id='c4',function=dict(name=7,arguments='{}'))]):
+            with self.assertRaises((ValueError,TypeError)):
+                m._message(dict(content='done',tool_calls=bad))
+        # A reply with no finish call is false in every shape, and the flat shape hand-built replies use still reads.
+        self.assertFalse(_calls_finish([dict(id='c5',type='function',function=dict(name='terminal',arguments='{}'))]))
+        self.assertFalse(_calls_finish(None))
+        self.assertTrue(_calls_finish([dict(name='finish',arguments='{}')]))
+
     def test_the_language_setting_names_the_prompt_and_auto_derives_it_again(self):
         # the owner's language is a session setting (`agent language --to LANGUAGE`), read by `agent prompt`
         # before a turn, so the setting and the prompt cannot disagree; `--auto` drops it and the owner's own
