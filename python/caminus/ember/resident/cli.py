@@ -1342,8 +1342,11 @@ def main(argv=None,stdin=None):
                     if state=='completed':
                         store.update(a.goal_id,state='working',summary='',error='',deadline=None,step_limit=None)
                         store.event('goal_continued',{},a.goal_id)
-                        # a continued goal is a new episode too (reflect._episode_start)
-                        store.event('episode_resumed',dict(state='completed'),a.goal_id)
+                        # a continued goal is a new episode too (reflect._episode_start), and it records the state
+                        # this continue leaves the goal in: the row was set to working just above, so an event
+                        # saying `completed` disagreed with it - the same stale-field class resume_goal fixed
+                        # (#383 review P2)
+                        store.event('episode_resumed',dict(state='working'),a.goal_id)
                     store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',
                                      (a.goal_id,text,'steer' if a.steer else 'nudge'))
                     store.event('user_message',dict(text=text,kind='steer' if a.steer else 'nudge'),a.goal_id)

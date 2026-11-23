@@ -8305,7 +8305,7 @@ for line in sys.stdin:
         import threading as _threading
         aborted=_threading.Event()
         class Model:
-            config={}
+            config={'model':'claude-haiku-5-5'}   # (priced, so the skip's unpriced bound is a figure, not None)
             calls=0
             def context_size(self):return 65536
             def tokens(self,m,t):return 1
@@ -8326,6 +8326,14 @@ for line in sys.stdin:
             skipped=[e for e in events if e['kind']=='reflection_skipped']
             self.assertEqual(len(skipped),1)
             self.assertIn('the endpoint did not answer in time',skipped[0]['data']['reason'])
+            # #383 review P2: an abandoned call cannot be priced by the caller, so the skip carries what the ledger
+            # is missing instead - an upper bound from what was sent, never a charge. It is a real figure on a priced
+            # model (None when the price is unknown), and nothing was added to spend.json for it.
+            bound=skipped[0]['data']['unpriced']
+            self.assertIsInstance(bound,float,'a priced model\'s abandoned call reported no upper bound')
+            self.assertGreater(bound,0)
+            spend=self.home/'spend.json'
+            self.assertFalse(spend.exists() and spend.read_text().strip('{} \n'),'an abandoned call was charged')
         finally:rt.mail.close();rt.store.close()
 
     def test_an_off_sim_log_or_a_free_stretch_asks_for_no_reflection(self):

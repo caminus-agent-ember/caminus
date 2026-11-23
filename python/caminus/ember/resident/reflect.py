@@ -53,6 +53,7 @@ STRICT = ('Answer with only the JSON object (or {"skip": true, "reason": "..."})
 
 def maybe(rt, gid, summary='', open_work=''):
     """One cheap call after a goal completed: a 'proposed' SIM record, or nothing. Never raises."""
+    msgs = []                     # (bound before the try: the TimeoutError arm below prices what was sent)
     try:
         from .freetime import KINDS as FREE_KINDS
         g = rt.store.goal(gid)
@@ -126,8 +127,12 @@ def maybe(rt, gid, summary='', open_work=''):
                 # The endpoint did not answer within the attempt's own bound. Same kind of nothing as a stop-cut
                 # call: the harness was not at fault and the next goal may try again, so it is a skip, not a
                 # `reflection_failed` a person would read as a defect (#383 review P2-2).
+                # The abandoned call may still be generating, and its own usage cannot be priced here (see
+                # _bounded's contract): the event carries what the ledger is missing instead, an upper bound
+                # marked as such, so a spend total that reads low can be reconciled (#383 review P2).
                 rt.store.event('reflection_skipped',
-                               dict(reason='the endpoint did not answer in time', detail=str(e)[:200]), gid)
+                               dict(reason='the endpoint did not answer in time', detail=str(e)[:200],
+                                    unpriced=_unpriced(rt, msgs)), gid)
             else:
                 rt.store.event('reflection_failed', dict(reason='%s: %s' % (type(e).__name__, str(e)[:300])), gid)
         except Exception:
@@ -179,6 +184,28 @@ def _bounded(rt, fn, seconds=None):
     if 'error' in out:
         raise out['error']
     return out.get('value')
+
+
+def _unpriced(rt, msgs):
+    """What an abandoned call may have cost, as an upper bound: never a charge.
+
+    A call `_bounded` abandoned is still running on its daemon thread, and its own last_usage lands only when it
+    finally returns. Pricing `last_usage` here would charge the *previous* call, or the same call twice when the
+    thread lands, which is why the caller does not price it (test_an_abandoned_reflection_call_is_not_priced_by_the
+    _caller). What it can do is say how much is missing from the ledger: the input as sent, counted the way the
+    model's own fallback counter counts it (UTF-8 bytes plus framing), and the whole output cap, priced at the
+    model's rates. An unpriced model says None rather than a guessed dollar figure (#383 review P2)."""
+    if not msgs:
+        return None
+    try:
+        from .model import price
+        model = getattr(rt, 'model', None)
+        config = getattr(model, 'config', None) or {}
+        usage = dict(prompt_tokens=len(json.dumps(msgs, ensure_ascii=False).encode()) + 256 * len(msgs),
+                     completion_tokens=MAX_TOKENS)
+        return price(config.get('model'), usage, (getattr(model, 'last_call', None) or {}).get('served'))
+    except Exception:
+        return None              # an upper bound is a courtesy in the event, never a reason to lose the skip
 
 
 def _ask(rt, gid, msgs):
