@@ -44,6 +44,20 @@ func TestWorkersRowNamesTheNewestFinishedChildAndCountsAllowance(t *testing.T) {
 	if got, want := workersRow(ws), "1 child · $0.0300 of $0.50"; got != want {
 		t.Fatalf("mixed row: %q, want %q", got, want)
 	}
+	// #384 review follow-up: the store returns the newest 20 rows, so with more children the money total is those
+	// 20 and not the session's lifetime spend. A full list says so, or the total reads as the session's and
+	// quietly stops growing at the 20th child.
+	full := make([]residentWorker, 0, 20)
+	for i := 0; i < 20; i++ {
+		full = append(full, residentWorker{Child: "c", SpendUSD: 0.01, CapUSD: 0.5, Outcome: "completed"})
+	}
+	if got, want := workersRow(full), "no children running · $0.2000 spent · last completed · newest 20 listed"; got != want {
+		t.Fatalf("full list: %q, want %q", got, want)
+	}
+	full[0].Running = true
+	if got, want := workersRow(full), "1 child · $0.2000 of $0.50 · newest 20 listed"; got != want {
+		t.Fatalf("full list, running: %q, want %q", got, want)
+	}
 }
 
 func TestResidentGoalCommandUsesStdin(t *testing.T) {

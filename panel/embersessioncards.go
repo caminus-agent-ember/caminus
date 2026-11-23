@@ -45,7 +45,12 @@ func workersRow(ws []residentWorker) string {
 	// store returns at most 20 rows, so summing every row's cap drifted upward over a session with no children
 	// running and named a "$Y" the parent could never spend (#384 review).
 	// The spend is the listed children's, not the session's lifetime: store.workers() keeps the newest 20 rows, so a
-	// session with more children shows its newest 20 and their sum (#384 review follow-up).
+	// session with more children shows its newest 20 and their sum (#384 review follow-up). A full list says so on
+	// the row, because otherwise the total reads as the session's and quietly stops growing at the 20th child.
+	listed := ""
+	if len(ws) >= 20 {
+		listed = " · newest 20 listed"
+	}
 	running, spent, cap := 0, 0.0, 0.0
 	for _, w := range ws {
 		spent += w.SpendUSD + w.AllowanceUSD
@@ -55,7 +60,7 @@ func workersRow(ws []residentWorker) string {
 		}
 	}
 	if running > 0 {
-		return fmt.Sprintf("%s · $%.4f of $%.2f", plural(running, "child", "children"), spent, cap)
+		return fmt.Sprintf("%s · $%.4f of $%.2f%s", plural(running, "child", "children"), spent, cap, listed)
 	}
 	// Running children sort first, then newest first: the first non-running entry is the newest finished child.
 	w := ws[0]
@@ -72,7 +77,7 @@ func workersRow(ws []residentWorker) string {
 	// The money is every listed child's spend, like the running row above, and the label says so: the previous
 	// "last completed $x" printed only the newest finished child's spend inside a phrase that read like a total,
 	// so one label meant two quantities (#384 review).
-	return fmt.Sprintf("no children running · $%.4f spent · last %s", spent, out)
+	return fmt.Sprintf("no children running · $%.4f spent · last %s%s", spent, out, listed)
 }
 
 // workersLines is one line per child for the session card (#342 full): what it may do, the goal it was given, the

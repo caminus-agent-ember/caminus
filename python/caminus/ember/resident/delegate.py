@@ -1065,20 +1065,27 @@ def run_child(rt, parent, job):
         """True when the daemon is stopping, or the parent was cancelled, paused or failed while the child ran."""
         if daemon_stop and daemon_stop():
             return True
-        return rt.store.goal(parent)['state'] in ('cancelled', 'paused', 'error')
+        # _parent_state answers None for a parent goal that is gone (its session was removed): that is gone too,
+        # and reading it directly raised `unknown goal` out of the child's own run, before `_close` could file the
+        # report, leaving the child runnable until the next settle (#384 review P2).
+        return _parent_state(rt, parent) in ('cancelled', 'paused', 'error', None)
 
     try:
         rt.run(target=child, stop=parent_gone)
         g = rt.store.goal(child)
-        pstate = rt.store.goal(parent)['state']
+        # A parent goal that is gone reads like a stopped parent here: `_parent_state` answers None for it, where
+        # the direct read raised `unknown goal` out of this call before `_close` filed anything, so the wait=true
+        # call aborted and left the child runnable until a later settle (#384 review P2).
+        pstate = _parent_state(rt, parent)
         outcome = None
-        if pstate in ('cancelled', 'paused', 'error') and g['state'] in ('working', 'queued', 'waiting_model'):
+        if pstate in (None, 'cancelled', 'paused', 'error') and g['state'] in ('working', 'queued', 'waiting_model'):
             # parent_gone() ended the loop, so the child's own state does not say why it stopped. Named here, and
             # reported incomplete: the report used to read 'capped' off the word 'delegate' in the generic error
             # text below, telling the parent a spend limit ended a child its own pause had ended (#384 review).
             state = 'cancelled' if pstate == 'cancelled' else 'paused'
-            error = ('its parent was cancelled while it ran' if pstate == 'cancelled'
-                     else 'its parent stopped (%s) while it ran' % pstate)
+            error = ('its parent was cancelled while it ran' if pstate == 'cancelled' else
+                     'its parent goal was deleted while it ran' if pstate is None else
+                     'its parent stopped (%s) while it ran' % pstate)
             with rt.store.transaction():
                 rt.store.update(child, state=state, error=error)
             g, outcome = rt.store.goal(child), 'incomplete'
@@ -1138,7 +1145,15 @@ def sweep(rt):
     for row in rt.store.delegates(open_only=True):
         if row['child'] in (getattr(rt, 'delegate_caps', None) or ()):
             continue                      # running in this process now
-        g = rt.store.goal(row['child'])
+        try:
+            g = rt.store.goal(row['child'])
+        except ValueError:
+            # The child's own goal is gone (a hand edit, or a restore that kept the delegates row): this read
+            # raised `unknown goal` out of Runtime.run before any pass, so the daemon failed to start on every
+            # restart and never reached `settle`, which is what closes this row. Close it from the row itself
+            # (#384 review P1).
+            _close(rt, row['parent'], _report_gone(rt, row))
+            continue
         orphaned = False
         if g['state'] in ('queued', 'working', 'waiting_model'):
             with rt.store.transaction():

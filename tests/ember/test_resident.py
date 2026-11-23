@@ -3671,6 +3671,55 @@ for line in sys.stdin:
             self.assertEqual([d['child'] for d in done],[orphan])
         finally:rt.mail.close();rt.store.close()
 
+    def test_sweep_closes_a_row_whose_child_goal_is_gone(self):
+        # #384 review P1: settle guarded the child's goal read but sweep did not, so a delegates row left behind by a
+        # hand edit or a partial restore (the schema has no foreign key) raised `unknown goal` out of Runtime.run
+        # before the first pass: the daemon failed to start on every restart and never reached settle, the one place
+        # that closes this row. sweep now closes it from the row itself, the way settle does.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            gone=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(gone,parent,'','','worker',0.5)
+            with rt.store.transaction():rt.store.db.execute('DELETE FROM goals WHERE id=?',(gone,))
+            with self.assertRaises(ValueError):
+                rt.store.goal(gone)
+            delegate.sweep(rt)              # must not raise: the daemon start reaches the loop
+            row=rt.store.delegate(gone)
+            self.assertEqual(row['outcome'],'orphaned')
+            report=json.loads(row['report'])
+            self.assertEqual(report['state'],'gone')
+            self.assertEqual(report['child'],gone)
+            self.assertEqual(rt.store.goal(parent)['state'],'queued','the parent is not touched by its child\'s loss')
+            delegate.sweep(rt)              # the closed row is not closed again
+            self.assertEqual(rt.store.delegate(gone)['outcome'],'orphaned')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_of_a_deleted_parent_goal_finishes_instead_of_raising(self):
+        # #384 review P2: run_child read the parent's goal unguarded, so a parent goal deleted mid-run raised
+        # `unknown goal` out of the wait=true call before `_close` filed the report; the child sat runnable until a
+        # later settle. parent_gone and the state read both use _parent_state now, which answers None for a goal
+        # that is gone, and the child reports incomplete.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            rt.delegate_caps[child]=0.5
+            def fake_run(**kw):
+                with rt.store.transaction():rt.store.db.execute('DELETE FROM goals WHERE id=?',(parent,))
+                return None
+            rt.run=fake_run
+            report=delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
+            self.assertEqual(report['outcome'],'incomplete')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('parent goal was deleted',rt.store.goal(child)['error'])
+            self.assertEqual(rt.store.delegate(child)['outcome'],'incomplete')
+            self.assertNotIn(child,rt.delegate_caps,'the cap registration must not outlive the child')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_resident_keeps_its_own_brain_after_a_childs_run(self):
         # #384 review: a child's turn put its own brain in rt.model and nothing put the resident's back; with one
         # brain configured Brains.choose returns rt.model, so the parent's next turn - and every later goal - ran on
