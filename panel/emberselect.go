@@ -149,11 +149,18 @@ func (m emberModel) selectedText() string {
 	if s.screen && b[0] >= 1 {
 		if g := strings.TrimSpace(m.headGoalText()); g != "" {
 			w := max(20, m.width)
+			collapsed := !m.headShown()
 			rows := len(headGoalRowsUnderTitle(strings.Join(strings.Fields(g), " "), w))
-			if m.headShown() {
+			if !collapsed {
 				rows = len(m.headExpansion(w).rows)
 			}
-			if rows > 0 && a[0] < 1+rows {
+			// The goal block is rows 1..rows. Collapsed, its rows are a lossy cut of the flattened goal, so a copy
+			// that touches it takes the goal whole (the #316 affordance, as an open card's body copies its source).
+			// Open, the rows are the goal's own lines, and only a selection that spans the block takes the goal
+			// whole (its source, which for a scrolled or longer goal is more than the screen shows); a selection
+			// inside it that stops short copies the drawn rows as themselves — a one-row clip of a twelve-row
+			// expansion is one row, not the whole goal (#370 review P2).
+			if rows > 0 && a[0] < 1+rows && (collapsed || (a[0] <= 1 && b[0] >= rows)) {
 				goalAt, goalTo, goal = max(1, a[0]), 1+rows, ansi.Strip(g)
 			}
 		}

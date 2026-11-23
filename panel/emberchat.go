@@ -722,8 +722,6 @@ func (m emberModel) chatHead(w int) string {
 	}
 	head, _ := shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
-	// Wrap breaks a long path too (Wordwrap left it to be cut at the edge with no marker)
-	wrapped := headWrappedLines(goalText, w)
 	goalSt := lipgloss.NewStyle().Foreground(cBlue)
 	shown := headGoalRowsUnderTitle(goalText, w)
 	for i, ln := range shown {
@@ -731,9 +729,13 @@ func (m emberModel) chatHead(w int) string {
 	}
 	out := title + "\n" + strings.Join(shown, "\n")
 	// A cut goal says so, with the key that shows the rest (it was a bare "…" on the third line: the header looked
-	// like the whole goal, cut short by the terminal).
-	if cut := len(wrapped) - len(shown); cut > 0 {
-		out += "\n" + emberDim.Render("  … ("+plural(cut, "more line", "more lines")+", Alt+G expands)")
+	// like the whole goal, cut short by the terminal). The count is the drawn rows the header hides — the expansion's
+	// own unit, so the hint, its key and the footer's "lines 1–N of M" agree. Counting the flattened wrap instead
+	// said "no more lines" for a list whose rows are short and many (#370 review P1).
+	if m.headExpandableParts(goalText, cutOnTitle, w) {
+		if cut := m.headExpansion(w).lines - len(shown); cut > 0 {
+			out += "\n" + emberDim.Render("  … ("+plural(cut, "more line", "more lines")+", Alt+G expands)")
+		}
 	}
 	return out + "\n" + rule
 }
@@ -816,13 +818,36 @@ func headCutParts(goalText string, cutOnTitle bool, w int) bool {
 	return (goalText != "" && cutOnTitle) || headWrapsPastLines(goalText, w)
 }
 
-// headWrapsPastLines: the goal wraps to more rows than the collapsed header draws (headLines), so some of it is not on
-// the screen. This, not headCut, is the expansion test: the hint, Alt+G and a click on the header all use it, so a goal
-// cut off the title line that wraps into headLines or fewer is drawn whole under the title — the hint stays away and
-// the key does nothing, rather than opening an expansion that would repeat what is shown. It reads only the goal's
-// text, not the model.
+// headWrapsPastLines: the FLATTENED goal wraps to more rows than the collapsed header draws (headLines). It is the
+// layout test only — does the goal go under the title at all — and not the expansion test: it measures the one-line
+// text the title row holds, while the expansion draws the goal's own lines as Markdown, and the two disagree for
+// every goal with short lines and many of them (a list, a fenced block, a hand-written brief). Twelve list items at
+// 100 columns flatten to three wrapped rows and render to thirteen: this returns false while the expansion has ten
+// rows to show, which is the #316 unreachable-goal case in a new disguise (#370 review P1).
 func headWrapsPastLines(goalText string, w int) bool {
 	return goalText != "" && len(headWrappedLines(goalText, w)) > headLines
+}
+
+// headExpandableParts: the expanded form draws more rows than the collapsed header shows of the goal, so opening it
+// reveals rows the header does not. This is the expansion test — the hint, Alt+G and a click on the header all read
+// it through headExpandable, so the key, the hint and the drawing answer one question (#370 review P1). The rows are
+// compared against the block chatHead draws under the title (headGoalRowsUnderTitle), the same rows the copy
+// substitutes; a goal whole on the title row (cutOnTitle false) is never offered an expansion that would repeat it.
+// The drawn rows come from headExpandedBody, the renderer headExpanded draws with, so "more lines" in the hint and
+// "lines 1–N of M" in the expansion's footer count the same text, in the same unit.
+func (m emberModel) headExpandableParts(goalText string, cutOnTitle bool, w int) bool {
+	if goalText == "" || !cutOnTitle {
+		return false
+	}
+	return m.headExpansion(w).lines > len(headGoalRowsUnderTitle(goalText, w))
+}
+
+// headExpandable is headExpandableParts over the header the model builds; toggleHead (a key press, once) uses it, and
+// chatHead passes the header it has already built so no frame pays for a second one.
+func (m emberModel) headExpandable(w int) bool {
+	state, steps, goalText := m.headParts()
+	_, cutOnTitle := shellHeader(residentText(m.agentName), state, goalText, steps, w)
+	return m.headExpandableParts(goalText, cutOnTitle, w)
 }
 
 // headShown: the whole goal is under the title now. Alt+G opened it on one goal, and it stays open only while the chat
@@ -936,15 +961,15 @@ func (m emberModel) headExpandedBody(w int) string {
 func (m *emberModel) collapseHead() { m.chat.headOpen, m.chat.headFor, m.chat.headTop = false, "", 0 }
 
 // toggleHead expands the goal under the title, or collapses it back to its three lines. Only a goal with rows the
-// collapsed header does not draw opens (headWrapsPastLines, not headCut: a goal cut off the title line that wraps into
-// the three rows is already shown whole) — headParts is walked here, once per key press, rather than on every frame.
+// collapsed header does not draw opens (headExpandable, the same question the hint asks: a gate on the flattened
+// wrap refused a short-line list whose expansion draws twelve rows — #370 review P1) — headParts is walked here,
+// once per key press, rather than on every frame.
 func (m emberModel) toggleHead() (tea.Model, tea.Cmd) {
 	if m.headShown() {
 		m.collapseHead()
 		return m, nil
 	}
-	_, _, goalText := m.headParts()
-	if !headWrapsPastLines(goalText, max(20, m.width)) {
+	if !m.headExpandable(max(20, m.width)) {
 		return m, nil
 	}
 	m.chat.headOpen, m.chat.headFor, m.chat.headTop = true, m.headGoalID(), 0

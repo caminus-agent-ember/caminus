@@ -132,17 +132,21 @@ func TestTheLongGoalExpandsByKeyAndClickAtEveryWidth(t *testing.T) {
 	}
 }
 
-// TestTheCutLineCountsWhatTheHeaderHides: the number in the hint is the goal's own wrapped lines, not the rendered
-// Markdown's rows.
+// TestTheCutLineCountsWhatTheHeaderHides: the number in the hint is the rows the expansion draws under the title
+// that the collapsed header does not — the expansion's own unit, so the hint and its footer agree (#370 review P1:
+// counting the flattened wrap said "no more lines" for a goal whose drawn rows were many).
 func TestTheCutLineCountsWhatTheHeaderHides(t *testing.T) {
 	m := longGoalChat(t, 100, 30)
 	_, _, one := m.headParts()
-	total := len(headWrappedLines(one, 100))
+	shown := len(headGoalRowsUnderTitle(one, 100))
 	head := ansi.Strip(m.chatHead(100))
-	cut := total - headLines
+	cut := m.headExpansion(100).lines - shown
+	if cut < 1 {
+		t.Fatalf("fixture: the long goal's expansion draws no hidden rows (%d lines, %d shown)", m.headExpansion(100).lines, shown)
+	}
 	want := "… (" + plural(cut, "more line", "more lines") + ", Alt+G expands)"
 	if !strings.Contains(head, want) {
-		t.Fatalf("the hint counts the hidden goal lines (%q):\n%s", want, head)
+		t.Fatalf("the hint counts the hidden drawn rows (%q):\n%s", want, head)
 	}
 }
 
@@ -160,6 +164,96 @@ func TestAShortGoalHasNoHintAndDoesNotExpand(t *testing.T) {
 	}
 	if strings.Contains(ansi.Strip(m.chatHead(100)), "Alt+G expands") {
 		t.Fatal("a goal that fits does not say it is cut")
+	}
+}
+
+// listGoal is twelve short list items: one flattened line, three wrapped rows at 100 columns, but the expansion
+// draws a row per item (#370 review P1).
+const listGoal = "- item 01 is short\n- item 02 is short\n- item 03 is short\n- item 04 is short\n" +
+	"- item 05 is short\n- item 06 is short\n- item 07 is short\n- item 08 is short\n" +
+	"- item 09 is short\n- item 10 is short\n- item 11 is short\n- item 12 is short\n"
+
+func listGoalChat(t *testing.T, w, h int) emberModel {
+	t.Helper()
+	m := chatFixture(t)
+	m.width, m.height = w, h
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: listGoal}}
+	m.goalSel = 0
+	m.chat.target = "original"
+	return m
+}
+
+// TestAShortLineMarkdownGoalExpands: a goal whose flattened wrap fits the header's three rows but whose Markdown
+// draws more is expandable — the hint says so, Alt+G opens it, and the hint counts the rows the expansion draws
+// (#370 review P1: the gate asked the flattened text and refused the key for a whole class of goals).
+func TestAShortLineMarkdownGoalExpands(t *testing.T) {
+	for _, w := range []int{80, 100, 160} {
+		t.Run(fmt.Sprint(w), func(t *testing.T) {
+			m := listGoalChat(t, w, 30)
+			if !m.headExpandable(w) {
+				t.Fatalf("fixture: the list goal's expansion draws more rows than the header shows at %d columns", w)
+			}
+			collapsed := ansi.Strip(m.chatHead(w))
+			if !strings.Contains(collapsed, "Alt+G expands") {
+				t.Fatalf("a goal whose expansion has more rows says so:\n%s", collapsed)
+			}
+			shown := len(headGoalRowsUnderTitle(strings.Join(strings.Fields(m.headGoalText()), " "), w))
+			cut := m.headExpansion(w).lines - shown
+			if want := plural(cut, "more line", "more lines"); !strings.Contains(collapsed, want) {
+				t.Fatalf("the hint counts the drawn rows the header hides (%q):\n%s", want, collapsed)
+			}
+			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'g', Mod: tea.ModAlt})
+			m = next.(emberModel)
+			if !m.chat.headOpen {
+				t.Fatal("Alt+G did not open a goal whose expansion draws more rows")
+			}
+			open := ansi.Strip(m.chatHead(w))
+			if !strings.Contains(open, "item 01 is short") {
+				t.Fatalf("the open list goal lost its first item at %d columns:\n%s", w, open)
+			}
+			if strings.Contains(open, "Alt+G expands") {
+				t.Fatalf("the hint goes while the goal is open:\n%s", open)
+			}
+			// the expansion is capped at half the screen: the rows past it are reachable with PgDn
+			if !strings.Contains(open, "item 12 is short") {
+				if !strings.Contains(open, "PgUp/PgDn scrolls") {
+					t.Fatalf("the open list goal shows neither its last item nor the scroll footer:\n%s", open)
+				}
+				for i := 0; i < 5 && !strings.Contains(ansi.Strip(m.chatHead(w)), "item 12 is short"); i++ {
+					next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+					m = next.(emberModel)
+				}
+				if end := ansi.Strip(m.chatHead(w)); !strings.Contains(end, "item 12 is short") {
+					t.Fatalf("PgDn did not reach the list goal's last item at %d columns:\n%s", w, end)
+				}
+			}
+		})
+	}
+}
+
+// TestCopyingAFewRowsOfTheOpenGoalIsNotTheWholeGoal: the collapsed header's rows are a lossy cut, so a copy that
+// touches them takes the goal whole; the open header draws the goal's own lines, so a selection inside it that
+// stops short copies what it spans — a one-row clip is one row, not the whole goal (#370 review P2).
+func TestCopyingAFewRowsOfTheOpenGoalIsNotTheWholeGoal(t *testing.T) {
+	m := openHead(t, longGoalChat(t, 100, 30))
+	_ = m.render()
+	m.chat.sel = m.selectionAt(2, 1)
+	m.chat.sel.b = [2]int{1, max(20, m.width) - 1} // one row, all its columns
+	m.chat.sel.moved, m.chat.sel.dragging = true, false
+	got := m.selectedText()
+	if strings.Contains(got, "The last line of the goal") || strings.Contains(got, "func chatHead") {
+		t.Fatalf("a one-row clip of the open goal copied rows the selection does not span:\n%s", got)
+	}
+	if !strings.Contains(got, "Review this PR properly") {
+		t.Fatalf("the one-row clip lost the row it spans:\n%s", got)
+	}
+	// the whole block still copies the goal whole, as the #316 affordance promises
+	w := max(20, m.width)
+	m.chat.sel = m.selectionAt(2, 1)
+	m.chat.sel.b = [2]int{len(m.headExpansion(w).rows), w - 1}
+	m.chat.sel.moved, m.chat.sel.dragging = true, false
+	if got := m.selectedText(); !strings.Contains(got, "The last line of the goal") {
+		t.Fatalf("a selection over the whole open goal lost the goal's own last line:\n%s", got)
 	}
 }
 
