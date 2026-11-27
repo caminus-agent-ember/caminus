@@ -966,14 +966,12 @@ func (m emberModel) headExpandedBody(w int) string {
 			m.chat.headR[wrap] = r
 		}
 	}
-	body := renderWith(r, max(10, w-4), text)
-	if !renderable(text) {
-		// renderWith leaves text it cannot draw in bounded time as it is, and a goal with one pasted line
-		// nested past mdMaxDepth drew rows wider than the terminal (2,003 columns at 100): the terminal clips
-		// them or wraps them, and either way the goal is unreadable again (#316). Wrapped here, in the unit
-		// the footer and headExpansion count (wrap), so every open row fits (#370 review P1).
-		body = wrapRaw(body, wrap)
-	}
+	// renderWith leaves text it cannot draw in bounded time as it is (not renderable, or a drawing past mdMaxOut),
+	// and a goal with one pasted line nested past mdMaxDepth drew rows wider than the terminal (2,003 columns at
+	// 100): the terminal clips them or wraps them, and either way the goal is unreadable again (#316). Wrapping the
+	// drawing leaves glamour's own rows alone (they are already within wrap) and fits the fallback, in the unit the
+	// footer and headExpansion count, so every open row fits (#370 review P1).
+	body := wrapRaw(renderWith(r, max(10, w-4), text), wrap)
 	if m.chat.headMD != nil {
 		if len(m.chat.headMD) >= headMDMax {
 			// One other drawing goes, not the whole cache: the goal on the screen is asked for every frame, and a
