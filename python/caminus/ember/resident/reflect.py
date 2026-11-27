@@ -84,6 +84,7 @@ def maybe(rt, gid, summary='', open_work=''):
             # harness defect, and the queue should not read it as a spent budget (#383 review P2).
             rt.store.event('reflection_skipped', dict(reason=why), gid)
             return None
+        episode = _episode_start(rt, gid)    # (captured before the call: the reply belongs to THIS episode)
         msgs = [dict(role='system', content=SYSTEM),
                 dict(role='user', content=brief(rt, gid, summary, open_work))]
         text = _ask(rt, gid, msgs)
@@ -111,10 +112,19 @@ def maybe(rt, gid, summary='', open_work=''):
         if rec.get('skip'):
             rt.store.event('reflection_skipped', dict(reason=rec['reason'][:300]), gid)
             return None
+        if _episode_start(rt, gid) != episode:
+            # The call took 60-120 s and the goal was continued while it ran (`send --continue` writes
+            # `episode_resumed`): this reply answers the OLD episode, and recording it now would stamp an old
+            # lesson with the new episode's eval_context (judge "not run") and then bill a second reflection for
+            # the same goal at the new episode's own finish. Drop it; the proposal belongs to an episode that has
+            # already ended (#383 review P2).
+            rt.store.event('reflection_skipped',
+                           dict(reason='the goal was continued while the reflection was in flight'), gid)
+            return None
         goal = rt.store.goal(gid) or {}
         rec.update(status='proposed',
                    eval_context='goal %s · %s steps · judge %s' % (
-                       gid[:8], goal.get('steps') or 0, _judge(rt, gid, _episode_start(rt, gid))[0] or 'not run'))
+                       gid[:8], goal.get('steps') or 0, _judge(rt, gid, episode)[0] or 'not run'))
         return sim.record(rt, gid, rec)
     except Exception as e:
         try:

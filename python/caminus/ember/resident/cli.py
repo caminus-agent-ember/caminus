@@ -527,13 +527,18 @@ def resume_goal(store,gid,max_steps=None,max_seconds=None):
         g=store.goal(gid)
         if g['state'] in ('completed','cancelled'):
             raise ValueError('submit a new goal instead of replaying a finished one')
+        was=g['state']
         store.update(gid,state='working',step_limit=g['steps']+max_steps if max_steps else None,
                      deadline=time.time()+max_seconds if max_seconds else None,error='')
         # Where an episode begins (reflect._episode_start): the boundary is written on the resume, not on the
         # stop, because the stop kinds are many and a list of them went stale (#383 review P2). The state recorded
         # is the one this resume leaves the goal in, not `g['state']`, which is the pre-resume value the update
         # above has already replaced: an event that disagrees with the row reads as a stale field (#383 review P2).
-        store.event('episode_resumed', dict(state='working'), gid)
+        # Only a resume that actually starts an episode writes it: `resume` (or `send --goal-id`) on a goal that is
+        # already `working` changes nothing, and a marker there would move the boundary past the live episode's own
+        # judge and tool rows and empty the next reflection's brief (#383 review P2).
+        if was != 'working':
+            store.event('episode_resumed', dict(state='working'), gid)
 
 
 def unit_text(name,home,program=None):

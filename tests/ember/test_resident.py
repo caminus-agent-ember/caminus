@@ -8668,6 +8668,59 @@ for line in sys.stdin:
             self.assertEqual(rt.store.goal(gid)['state'],'working')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_no_op_resume_writes_no_episode_marker(self):
+        # #383 review P2: resume_goal wrote `episode_resumed` on every call, so `resume` (or `send --goal-id`) on a
+        # goal already `working` moved reflect._episode_start past the live episode's own judge and tool rows, and the
+        # next reflection read an empty episode. Only a resume that actually starts an episode writes the marker.
+        from caminus.ember.resident.cli import resume_goal
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.')
+            rt.store.update(gid,state='working')
+            resume_goal(rt.store,gid)                  # (already working: nothing starts over)
+            self.assertEqual(reflect._episode_start(rt,gid),0,'a no-op resume wrote an episode boundary')
+            self.assertEqual(rt.store.goal(gid)['state'],'working')
+            with rt.store.transaction():
+                rt.store.update(gid,state='paused',error='stop')
+            resume_goal(rt.store,gid)                  # (a real resume still writes one)
+            self.assertGreater(reflect._episode_start(rt,gid),0,'a real resume wrote no episode boundary')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_reflection_that_outlived_its_episode_records_nothing(self):
+        # #383 review P2: maybe() read the episode only when it recorded, after a 60-120 s call. A `send --continue`
+        # in that window starts a new episode, so the in-flight reply was stamped with the NEW episode's
+        # eval_context ("judge not run") while it answered the old one, and the new episode proposes again at its own
+        # finish. The episode is captured before the call now, and a move discards the reply as a skip.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        answer=json.dumps(dict(problem_group='g',change='c',rationale='r',predicted='p'))
+        class Model:
+            config={'model':'claude-haiku-5-5'}
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):return dict(content=answer)
+        rt=Runtime(self.home)
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            real=reflect._ask
+            def ask_after_continue(*a,**k):
+                out=real(*a,**k)
+                with rt.store.transaction():
+                    rt.store.event('episode_resumed',dict(state='working'),gid)   # (a `send --continue` lands)
+                return out
+            with unittest.mock.patch.object(reflect,'_ask',ask_after_continue):
+                self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            events=rt.store.events()
+            self.assertEqual([e for e in events if e['kind']=='reflection_failed'],[],'a continued goal is not a defect')
+            skipped=[e for e in events if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1)
+            self.assertIn('continued while the reflection was in flight',skipped[0]['data']['reason'])
+            self.assertEqual(reflect.sim._load(rt,gid),[],'a reply for the old episode was recorded')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_judged_verdict_outside_the_known_set_never_reaches_the_reflection(self):
         # #383 review P2: _judge returned `d.get('verdict')` verbatim, so a foreign or hand-edited `judged` row put
         # a verdict no judge can give into the reflection prompt ("THE FINISH JUDGE: unmet"), where judge.verdict
