@@ -57,7 +57,7 @@ func TestTheLongGoalExpandsByKeyAndClickAtEveryWidth(t *testing.T) {
 		t.Run(fmt.Sprint(w), func(t *testing.T) {
 			m := longGoalChat(t, w, 30)
 			collapsed := ansi.Strip(m.chatHead(w))
-			if !m.headCut(w) {
+			if !m.headUnderTitle(w) {
 				t.Fatalf("fixture: the goal is cut at %d columns:\n%s", w, collapsed)
 			}
 			if !strings.Contains(collapsed, "more line") || !strings.Contains(collapsed, "Alt+G expands") {
@@ -154,7 +154,7 @@ func TestTheCutLineCountsWhatTheHeaderHides(t *testing.T) {
 func TestAShortGoalHasNoHintAndDoesNotExpand(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 100, 30
-	if m.headCut(100) {
+	if m.headUnderTitle(100) {
 		t.Fatal("a goal of one short line is not cut")
 	}
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'g', Mod: tea.ModAlt})
@@ -267,7 +267,7 @@ func TestPgUpAndPgDnPageTheTranscriptUnderAGoalThatFits(t *testing.T) {
 	goal := strings.Repeat("A short brief. ", 20)
 	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: goal}}
 	m.goalSel, m.chat.target = 0, "original"
-	if !m.headCut(100) {
+	if !m.headUnderTitle(100) {
 		t.Fatalf("fixture: the goal is cut in the collapsed header")
 	}
 	// a history long enough to page through
@@ -506,7 +506,7 @@ func TestTheScrollRowFollowsTheGoalOnTheScreen(t *testing.T) {
 func TestTheExpansionDrawnIsTheExpansionScrolled(t *testing.T) {
 	m := openHead(t, longGoalChat(t, 100, 30))
 	w := max(20, m.width)
-	body := strings.Split(m.headExpandedBody(w), "\n")
+	body := trimBlankEdges(strings.Split(m.headExpandedBody(w), "\n")) // (the rows the expansion counts)
 	for _, headTop := range []int{-5, 0, 3, 1000} {
 		m.chat.headTop = headTop
 		e := m.headExpansion(w)
@@ -734,7 +734,7 @@ func TestAGoalWithItsOwnEllipsisIsNotCut(t *testing.T) {
 	const goal = "Fix the parser… then the printer"
 	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: goal}}
 	m.goalSel, m.chat.target = 0, "original"
-	if m.headCut(100) {
+	if m.headUnderTitle(100) {
 		t.Fatalf("a goal whose own text holds a … was taken for a cut one:\n%s", ansi.Strip(m.chatHead(100)))
 	}
 	head := ansi.Strip(m.chatHead(100))
@@ -744,5 +744,87 @@ func TestAGoalWithItsOwnEllipsisIsNotCut(t *testing.T) {
 	}
 	if got := rows(head); got != 2 { // the title and the rule, with no goal rows under the title
 		t.Fatalf("the header drew %d rows: it moved the goal under the title:\n%s", got, head)
+	}
+}
+
+// TestAGoalGlamourCannotRenderIsWrappedToTheTerminal: a goal with one pasted line indented past mdMaxDepth is left as
+// it is by renderWith, and the expansion drew it at its own width — 2,003 columns at 100, which the terminal clips or
+// wraps, either way unreadable again (#316). The raw fallback wraps to the width the footer and headExpansion count
+// (#370 review P1).
+func TestAGoalGlamourCannotRenderIsWrappedToTheTerminal(t *testing.T) {
+	const w, h = 100, 30
+	goal := strings.Repeat("Keep the goal readable while the header is closed, and draw it whole when it opens. ", 18) +
+		"\n" + strings.Repeat(" ", 40) + "pasted line that nests past mdMaxDepth\n" +
+		"The last words are reachable."
+	if renderable(goal) {
+		t.Fatal("fixture: the goal is renderable, so the raw fallback is not what is drawn")
+	}
+	m := chatFixture(t)
+	m.width, m.height = w, h
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: goal}}
+	m.goalSel, m.chat.target = 0, "original"
+	if collapsed := ansi.Strip(m.chatHead(w)); !strings.Contains(collapsed, "Alt+G expands") {
+		t.Fatalf("the collapsed header does not say the goal is cut:\n%s", collapsed)
+	}
+	m = openHead(t, m)
+	for _, c := range []struct{ what, frame string }{{"the open header", m.chatHead(w)}, {"the frame", m.render()}} {
+		for _, row := range strings.Split(ansi.Strip(c.frame), "\n") {
+			if got := ansi.StringWidth(row); got > w {
+				t.Fatalf("%s has a %d-column row at %d: %q", c.what, got, w, row)
+			}
+		}
+	}
+	// the goal's own lines kept their breaks, and PgDn reaches the words past the first screenful of rows
+	for i := 0; i < 10 && !strings.Contains(ansi.Strip(m.chatHead(w)), "The last words are reachable."); i++ {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m = next.(emberModel)
+	}
+	if end := ansi.Strip(m.chatHead(w)); !strings.Contains(end, "The last words are reachable.") {
+		t.Fatalf("PgDn did not reach the goal's last words:\n%s", end)
+	}
+}
+
+// TestCopyingAShortGoalsHeaderKeepsTheRule: a goal whole on the title row has no rows under it, so the copy took the
+// rule row as goal text and put the goal where the rule is (#370 review P2).
+func TestCopyingAShortGoalsHeaderKeepsTheRule(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	const goal = "fix the parser"
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: goal}}
+	m.goalSel, m.chat.target = 0, "original"
+	if m.headUnderTitle(100) {
+		t.Fatalf("fixture: the goal went under the title:\n%s", ansi.Strip(m.chatHead(100)))
+	}
+	_ = m.render()
+	m.chat.sel = m.selectionAt(2, 0)
+	m.chat.sel.b = [2]int{2, max(20, m.width) - 1} // rows 0-2: the title, the rule, the transcript's first row
+	m.chat.sel.moved, m.chat.sel.dragging = true, false
+	copied := m.selectedText()
+	if got := strings.Count(copied, goal); got != 1 {
+		t.Fatalf("the goal is in the copy %d times (the title row draws it once):\n%s", got, copied)
+	}
+	got := strings.Split(copied, "\n")
+	if len(got) < 2 || strings.Trim(strings.TrimSpace(got[1]), "─") != "" {
+		t.Fatalf("row 2 of the copy is not the rule:\n%s", copied)
+	}
+}
+
+// TestNoHintWhenTheGoalFitsTheRowsUnderTheTitle: the words all fit the rows the collapsed header draws, so opening the
+// goal only reflows them; the hint promised a hidden line that was never hidden (#370 review P2).
+func TestNoHintWhenTheGoalFitsTheRowsUnderTheTitle(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 160, 30
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: strings.Repeat("word ", 30)}}
+	m.goalSel, m.chat.target = 0, "original"
+	head := ansi.Strip(m.chatHead(160))
+	if !m.headUnderTitle(160) {
+		t.Fatalf("fixture: the goal did not go under the title:\n%s", head)
+	}
+	if strings.Contains(head, "Alt+G expands") {
+		t.Fatalf("a goal whole on the rows under the title says it is cut:\n%s", head)
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'g', Mod: tea.ModAlt})
+	if m = next.(emberModel); m.chat.headOpen {
+		t.Fatal("Alt+G opened a goal with nothing hidden")
 	}
 }

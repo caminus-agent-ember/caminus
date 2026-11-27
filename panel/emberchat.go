@@ -525,7 +525,7 @@ func (m *emberModel) syncChat() {
 	if m.chat.renderWidth != w || m.chat.markdown == nil {
 		// Prose wraps at a reading width, not the terminal's: a 250-column line is hard to read. Tool lines, the
 		// header and the status line still use the full width.
-		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
+		m.chat.markdown = emberMarkdownRenderer(max(10, min(w-4, readingWidth)))
 		// a command's output keeps its line breaks, and its links are plain text (emberCardStyle)
 		m.chat.cardMarkdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberCardStyle()), glamour.WithPreservedNewLines(),
 			glamour.WithWordWrap(max(10, min(w-8, readingWidth))))
@@ -690,6 +690,18 @@ type headExpansion struct {
 // itself — headRows when the goal is longer, every row when it is not — so this is 0 for a goal that fits.
 func (e headExpansion) maxTop() int { return max(0, e.lines-len(e.rows)) }
 
+// trimBlankEdges is rows without the blank rows at either end: glamour draws one above its text and one below it,
+// and they are not rows of the goal (the expansion's count and the copy both read the goal's own rows).
+func trimBlankEdges(rows []string) []string {
+	for len(rows) > 0 && strings.TrimSpace(rows[0]) == "" {
+		rows = rows[1:]
+	}
+	for len(rows) > 0 && strings.TrimSpace(rows[len(rows)-1]) == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return rows
+}
+
 // headExpansion computes the expansion at width w. A body with no rows falls back to the collapsed rows, so the
 // footer is never drawn over rows that are not the goal.
 func (m emberModel) headExpansion(w int) headExpansion {
@@ -697,7 +709,13 @@ func (m emberModel) headExpansion(w int) headExpansion {
 	if body == "" {
 		return headExpansion{rows: headGoalRowsUnderTitle(m.headGoalText(), w), lines: 1}
 	}
-	lines := strings.Split(body, "\n")
+	lines := trimBlankEdges(strings.Split(body, "\n"))
+	// glamour draws a blank row above its text and one below it; they are not goal rows, and counting them promised
+	// a line the expansion does not show (#370 review P2). Trimmed here, so the drawing, the footer's "of M" and
+	// the copy all count the goal's own rows.
+	if len(lines) == 0 {
+		return headExpansion{rows: headGoalRowsUnderTitle(m.headGoalText(), w), lines: 1}
+	}
 	rows := m.headRows()
 	top := min(max(0, m.chat.headTop), max(0, len(lines)-rows))
 	shown := lines[top:]
@@ -717,7 +735,7 @@ func (m emberModel) chatHead(w int) string {
 	// the uncut header is exactly this string, which chatHead used to build a second time on every frame (and
 	// bodyHeight on every poll).
 	withGoal, cutOnTitle := shellHeader(agent, state, goalText, steps, w)
-	if !headCutParts(goalText, cutOnTitle, w) { // (one test, shared with Alt+G and the click: see headCut)
+	if !headCutParts(goalText, cutOnTitle, w) { // (the layout test: the expansion test is headExpandableParts)
 		return withGoal
 	}
 	head, _ := shellHeader(agent, state, "", steps, w)
@@ -732,7 +750,7 @@ func (m emberModel) chatHead(w int) string {
 	// like the whole goal, cut short by the terminal). The count is the drawn rows the header hides — the expansion's
 	// own unit, so the hint, its key and the footer's "lines 1–N of M" agree. Counting the flattened wrap instead
 	// said "no more lines" for a list whose rows are short and many (#370 review P1).
-	if m.headExpandableParts(goalText, cutOnTitle, w) {
+	if m.headExpandableParts(goalText, m.headGoalText(), cutOnTitle, w) {
 		if cut := m.headExpansion(w).lines - len(shown); cut > 0 {
 			out += "\n" + emberDim.Render("  … ("+plural(cut, "more line", "more lines")+", Alt+G expands)")
 		}
@@ -799,23 +817,22 @@ func headWrappedLines(goal string, w int) []string {
 	return strings.Split(ansi.Wrap(goal, max(10, w-4), " "), "\n")
 }
 
-// headCut: the goal does not fit on the header's title line, beside the agent and its state, so chatHead draws it
-// under the title in up to headLines wrapped lines instead. It is the layout test only — a goal cut off the title
-// line may still wrap into those three lines with nothing left over — so it is not "the goal is expandable": that
-// question is headWrapsPastLines.
-func (m emberModel) headCut(w int) bool {
+// headCutParts is the layout test over a header the caller has already built (chatHead draws that same string), so
+// it costs no second build on a frame: does the goal go under the title at all. cutOnTitle is the header's own
+// report that it cut the goal off the title row beside the agent; the two clauses answer different questions, and
+// neither alone is the expansion test: cutOnTitle is "the goal is not whole on the title line", headWrapsPastLines
+// is "the goal has more rows than the collapsed header draws" — only the second means some of the goal is hidden
+// (headExpandableParts is that question).
+func headCutParts(goalText string, cutOnTitle bool, w int) bool {
+	return (goalText != "" && cutOnTitle) || headWrapsPastLines(goalText, w)
+}
+
+// headUnderTitle is headCutParts over the header the model builds: chatHead drew the goal under the title, so the
+// rows selectedText substitutes over are there (a goal whole on the title row has none).
+func (m emberModel) headUnderTitle(w int) bool {
 	state, steps, goalText := m.headParts()
 	_, cutOnTitle := shellHeader(residentText(m.agentName), state, goalText, steps, w)
 	return headCutParts(goalText, cutOnTitle, w)
-}
-
-// headCutParts is headCut over a header the caller has already built (chatHead draws that same string), so the layout
-// test costs no second build on a frame. cutOnTitle is the header's own report that it cut the goal off the title
-// row beside the agent; the two clauses answer different questions, and neither alone is the expansion test:
-// cutOnTitle is "the goal is not whole on the title line", headWrapsPastLines is "the goal has more rows than the
-// collapsed header draws" — only the second means some of the goal is hidden.
-func headCutParts(goalText string, cutOnTitle bool, w int) bool {
-	return (goalText != "" && cutOnTitle) || headWrapsPastLines(goalText, w)
 }
 
 // headWrapsPastLines: the FLATTENED goal wraps to more rows than the collapsed header draws (headLines). It is the
@@ -835,8 +852,19 @@ func headWrapsPastLines(goalText string, w int) bool {
 // substitutes; a goal whole on the title row (cutOnTitle false) is never offered an expansion that would repeat it.
 // The drawn rows come from headExpandedBody, the renderer headExpanded draws with, so "more lines" in the hint and
 // "lines 1–N of M" in the expansion's footer count the same text, in the same unit.
-func (m emberModel) headExpandableParts(goalText string, cutOnTitle bool, w int) bool {
-	if goalText == "" || !cutOnTitle {
+func (m emberModel) headExpandableParts(goalText, raw string, cutOnTitle bool, w int) bool {
+	if raw == "" {
+		return false
+	}
+	// Nothing is hidden when the goal is one flattened row the header draws whole. A goal the title row holds in
+	// full (no cut) whose words all fit was offered "1 more line" for a reflow, and opening it showed the same
+	// words over two rows (#370 review P2). Its own line breaks are rows the title row cannot show, so those are
+	// hidden whatever the flattened wrap says — headParts flattens the goal for the title, which is why the raw
+	// text is asked too.
+	if !cutOnTitle && !strings.Contains(raw, "\n") {
+		return false
+	}
+	if !headWrapsPastLines(goalText, w) && !strings.Contains(raw, "\n") {
 		return false
 	}
 	return m.headExpansion(w).lines > len(headGoalRowsUnderTitle(goalText, w))
@@ -847,7 +875,7 @@ func (m emberModel) headExpandableParts(goalText string, cutOnTitle bool, w int)
 func (m emberModel) headExpandable(w int) bool {
 	state, steps, goalText := m.headParts()
 	_, cutOnTitle := shellHeader(residentText(m.agentName), state, goalText, steps, w)
-	return m.headExpandableParts(goalText, cutOnTitle, w)
+	return m.headExpandableParts(goalText, m.headGoalText(), cutOnTitle, w)
 }
 
 // headShown: the whole goal is under the title now. Alt+G opened it on one goal, and it stays open only while the chat
@@ -934,11 +962,18 @@ func (m emberModel) headExpandedBody(w int) string {
 		// set is as small as the terminal's; the map is made in initChat and renewed on a resize.
 		r = m.chat.headR[wrap]
 		if r == nil {
-			r, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(wrap))
+			r = emberMarkdownRenderer(wrap)
 			m.chat.headR[wrap] = r
 		}
 	}
 	body := renderWith(r, max(10, w-4), text)
+	if !renderable(text) {
+		// renderWith leaves text it cannot draw in bounded time as it is, and a goal with one pasted line
+		// nested past mdMaxDepth drew rows wider than the terminal (2,003 columns at 100): the terminal clips
+		// them or wraps them, and either way the goal is unreadable again (#316). Wrapped here, in the unit
+		// the footer and headExpansion count (wrap), so every open row fits (#370 review P1).
+		body = wrapRaw(body, wrap)
+	}
 	if m.chat.headMD != nil {
 		if len(m.chat.headMD) >= headMDMax {
 			// One other drawing goes, not the whole cache: the goal on the screen is asked for every frame, and a
@@ -1524,6 +1559,30 @@ func (c *residentChat) stopStream() {
 
 func (c *residentChat) renderMarkdown(text string) string {
 	return renderWith(c.markdown, c.renderWidth-4, text)
+}
+
+// emberMarkdownRenderer is the renderer a reply and the expanded header draw prose with, wrapped at width. One
+// constructor for both: the header kept its own copy of this call for the first frames before syncChat builds
+// chat.markdown (#370 review P2).
+func emberMarkdownRenderer(width int) *glamour.TermRenderer {
+	r, _ := glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(width))
+	return r
+}
+
+// wrapRaw wraps each of raw's lines to width, for text renderWith leaves as it is (not renderable, or a drawing past
+// mdMaxOut). The goal's own lines are kept: a pasted traceback or an indented code line without a fence stays on its
+// row, wrapped rather than cut by the terminal. Blank lines stay blank rows, which the expansion trims at its edges.
+func wrapRaw(raw string, width int) string {
+	if width < 1 {
+		return raw
+	}
+	lines := strings.Split(raw, "\n")
+	for i, ln := range lines {
+		if ansi.StringWidth(ln) > width {
+			lines[i] = ansi.Wrap(ln, width, " ")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderWith renders Markdown with r at most width cells wide (the replies' renderer, or an open card's). Text it
@@ -2500,7 +2559,7 @@ func helpLines(width int) []string {
 		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
 		{"@ path", "names a path (the agent's folders; Tab completes)"},
 		{"+ path", "attaches the file (read as the agent, up to 64 KB)"},
-		{"Esc", "while the agent waits on a reply, interrupt that turn"},
+		{"Esc", "while the agent waits on a reply, interrupt that turn (with the goal open, it collapses first)"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
 		{"Shift+Tab", "sessions: a card per session"},

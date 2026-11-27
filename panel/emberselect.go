@@ -150,7 +150,13 @@ func (m emberModel) selectedText() string {
 		if g := strings.TrimSpace(m.headGoalText()); g != "" {
 			w := max(20, m.width)
 			collapsed := !m.headShown()
-			rows := len(headGoalRowsUnderTitle(strings.Join(strings.Fields(g), " "), w))
+			// The goal has rows under the title only when the header drew it there (headCutParts). A goal whole on
+			// the title row has none: the row under it is the rule, and counting the flattened wrap anyway put the
+			// goal where the rule is in a copy of rows 0-2 (#370 review P2).
+			rows := 0
+			if collapsed && m.headUnderTitle(w) {
+				rows = len(headGoalRowsUnderTitle(strings.Join(strings.Fields(g), " "), w))
+			}
 			if !collapsed {
 				rows = len(m.headExpansion(w).rows)
 			}
