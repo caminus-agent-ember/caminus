@@ -2025,6 +2025,35 @@ class Runtime:
                 goals.pop(k)
         atomic_json(path, state)
 
+    def _meter_estimate(self, gid, usd):
+        """A bound, not a measurement: what an abandoned call may have cost, into spend.json.
+
+        The reflection's abandoned call cannot be priced (reflect._bounded's contract), and a total that reads low
+        is worse than one that says how much of it is a bound: the amount joins the day's `usd` (so the status line
+        is not low by it) and is counted apart in `est_usd`/`goals_est`, so a reader can tell the two apart. No
+        `turns` increment: a bound is not a priced turn. Called on the loop thread only (#383 review P2)."""
+        try:
+            usd = float(usd)
+        except (TypeError, ValueError):
+            return
+        if usd <= 0:
+            return
+        import datetime
+        path = self.home / 'spend.json'
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        day = state.setdefault('days', {}).setdefault(datetime.date.today().isoformat(), dict(usd=0.0, turns=0))
+        day['usd'] = round(day['usd'] + usd, 6)
+        day['est_usd'] = round(day.get('est_usd', 0.0) + usd, 6)
+        goals_est = state.setdefault('goals_est', {})
+        goals_est[gid] = round(goals_est.get(gid, 0.0) + usd, 6)
+        if len(goals_est) > 500:              # bounded, as goals is: the oldest totals go first
+            for k in list(goals_est)[:len(goals_est) - 500]:
+                goals_est.pop(k)
+        atomic_json(path, state)
+
     def _gate_check(self, gid, g):
         """The goal's gate after a turn that changed something (an edit, a write, a terminal command), before the next
         model call. The agent hears only a change: the gate starting to fail (with its output) or passing again. The

@@ -8327,13 +8327,21 @@ for line in sys.stdin:
             self.assertEqual(len(skipped),1)
             self.assertIn('the endpoint did not answer in time',skipped[0]['data']['reason'])
             # #383 review P2: an abandoned call cannot be priced by the caller, so the skip carries what the ledger
-            # is missing instead - an upper bound from what was sent, never a charge. It is a real figure on a priced
-            # model (None when the price is unknown), and nothing was added to spend.json for it.
+            # is missing instead - an upper bound from what was sent, never a measurement. It is a real figure on a
+            # priced model (None when the price is unknown), and the same bound is debited to spend.json ONCE, on
+            # this thread, counted apart as `est_usd`/`goals_est` and with no `turns`: a total that reads low by a
+            # call no metering site saw would let the next turn spend past a budget, and a reader must be able to
+            # tell a bound from a priced turn.
             bound=skipped[0]['data']['unpriced']
             self.assertIsInstance(bound,float,'a priced model\'s abandoned call reported no upper bound')
             self.assertGreater(bound,0)
-            spend=self.home/'spend.json'
-            self.assertFalse(spend.exists() and spend.read_text().strip('{} \n'),'an abandoned call was charged')
+            import datetime
+            day=json.loads((self.home/'spend.json').read_text())['days'][datetime.date.today().isoformat()]
+            self.assertEqual(day['turns'],0,'a bound was counted as a priced turn')
+            self.assertAlmostEqual(day['est_usd'],bound,places=6,msg='the abandoned call\'s bound was not debited')
+            self.assertAlmostEqual(day['usd'],bound,places=6,msg='the bound did not join the day\'s total')
+            goals=json.loads((self.home/'spend.json').read_text())['goals_est']
+            self.assertAlmostEqual(goals[gid],bound,places=6,msg='the bound was not kept with its goal')
         finally:rt.mail.close();rt.store.close()
 
     def test_an_off_sim_log_or_a_free_stretch_asks_for_no_reflection(self):
@@ -8804,7 +8812,9 @@ for line in sys.stdin:
     def test_the_reflection_stops_before_the_retry_when_the_daemon_is_going(self):
         # #383 review P2: stopping() was read once before the first call; a SIGTERM while an unreadable reply was in
         # flight let the retry spend another 60 s timeout — the wait stopping()'s docstring warns about. It is read
-        # again before the retry now.
+        # again before the retry now. The flag flips exactly when _ask returns (not inside complete()), because
+        # _bounded also reads it while the call is in flight: a flip in there ends the FIRST call as a stop-skip,
+        # which is a different arm and would not show whether the retry guard was read.
         self.gates_on()
         self.reflect_on()
         from caminus.ember.resident import reflect
@@ -8817,12 +8827,17 @@ for line in sys.stdin:
                 Model.calls+=1
                 return {'content':'not json'}
         rt=Runtime(self.home)
+        stop=[False]
         try:
             rt.model=Model()
             gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
-            seen=[]
-            rt._stop=lambda:(seen.append(1),len(seen)>1)[1]   # False on entry, True by the time the retry is due
-            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            rt._stop=lambda:stop[0]
+            real=reflect._ask
+            def ask_then_stop(*a,**k):
+                try:return real(*a,**k)
+                finally:stop[0]=True
+            with unittest.mock.patch.object(reflect,'_ask',ask_then_stop):
+                self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
             self.assertEqual(Model.calls,1,'the retry spent another timeout after the stop')
             failed=[e for e in rt.store.events() if e['kind']=='reflection_failed']
             self.assertEqual(len(failed),1)
@@ -8889,6 +8904,61 @@ for line in sys.stdin:
         def boom():raise ValueError('the server said no')
         with self.assertRaises(ValueError):
             reflect._bounded(Rt(),boom,seconds=5)
+
+    def test_an_abandoned_call_debits_its_bound_once_to_both_ledgers(self):
+        # #383 review P2: the abandoned call is never *priced* (the test above), so the caller debits the bound
+        # `_unpriced` computed, at abandonment, on the loop thread: spend.json (`_meter_estimate`) and the fallback's
+        # allowance (`account_estimate`), so neither ledger reads low by a call no metering site ever saw. Both get
+        # the same figure once; a stub runtime with neither method is not an error, and neither is a ledger that
+        # raises (losing a finished goal to a spend bookkeeping failure would be far worse than a low total).
+        from caminus.ember.resident import reflect
+        got=[]
+        class Brains:
+            def account_estimate(self,gid,usd):got.append(('account',gid,usd))
+        class Rt:
+            brains=Brains()
+            def _meter_estimate(self,gid,usd):got.append(('meter',gid,usd))
+        reflect._charge_estimate(Rt(),'g1',0.25)
+        self.assertEqual(got,[('meter','g1',0.25),('account','g1',0.25)])
+        got.clear()
+        class Bare: pass
+        reflect._charge_estimate(Bare(),'g2',0.25)          # (a stubbed runtime: nothing to debit, nothing raised)
+        self.assertEqual(got,[])
+        class Angry:
+            def _meter_estimate(self,gid,usd):raise OSError('disk')
+        reflect._charge_estimate(Angry(),'g3',0.25)         # (never raises)
+
+    def test_the_reflection_aborts_only_its_own_call(self):
+        # #383 review P2: `abort()` closed every tracked socket, so a reflection that missed its deadline could cut
+        # the turn that shares rt.model. Model.abort(thread=...) closes only the sockets that thread opened, and a
+        # stop request (abort() with no thread) still closes everything, as before.
+        from caminus.ember.resident import reflect
+        from caminus.ember.resident.model import Model
+        shut=[]
+        class Sock:
+            def __init__(self,n):self.n=n
+            def fileno(self):return self.n
+            def shutdown(self,how):shut.append(self.n)
+        m=Model.__new__(Model)
+        m._sockets_lock=threading.Lock()
+        m._sockets={Sock(7):11,Sock(8):99}      # (7 was opened by the reflection's worker, 8 by the turn)
+        m.abort(thread=11)
+        self.assertEqual(shut,[7],'abort(thread=) closed another call’s socket')
+        self.assertEqual([s.n for s in m._sockets],[8],'abort(thread=) dropped another call’s socket')
+        m.abort()
+        self.assertEqual(shut,[7,8],'abort() did not close everything')
+        self.assertEqual(m._sockets,{})
+        # a deadline names the worker thread, so only that call's sockets are closed
+        seen,done=[],threading.Event()
+        class M2:
+            def abort(self,thread=None):seen.append(thread);done.set()
+        class Rt:
+            model=M2()
+            def stopping(self):return False
+        with self.assertRaises(TimeoutError):
+            reflect._bounded(Rt(),done.wait,seconds=.2)
+        self.assertEqual(len(seen),1,'_bounded did not abort the call at its deadline')
+        self.assertIsInstance(seen[0],int,'_bounded did not name the worker thread')
 
     def test_an_abandoned_reflection_call_is_not_priced_by_the_caller(self):
         # #383 review P2: _ask() prices its call only after _bounded() RETURNS it, on this thread. A call abandoned

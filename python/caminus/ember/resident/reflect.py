@@ -128,11 +128,15 @@ def maybe(rt, gid, summary='', open_work=''):
                 # call: the harness was not at fault and the next goal may try again, so it is a skip, not a
                 # `reflection_failed` a person would read as a defect (#383 review P2-2).
                 # The abandoned call may still be generating, and its own usage cannot be priced here (see
-                # _bounded's contract): the event carries what the ledger is missing instead, an upper bound
-                # marked as such, so a spend total that reads low can be reconciled (#383 review P2).
+                # _bounded's contract): the event carries an upper bound marked as such, and the same bound is
+                # debited to the ledgers now, on this thread, so a total does not read low by a call no metering
+                # site ever saw (#383 review P2).
+                bound = _unpriced(rt, msgs)
                 rt.store.event('reflection_skipped',
                                dict(reason='the endpoint did not answer in time', detail=str(e)[:200],
-                                    unpriced=_unpriced(rt, msgs)), gid)
+                                    unpriced=bound), gid)
+                if bound:
+                    _charge_estimate(rt, gid, bound)
             else:
                 rt.store.event('reflection_failed', dict(reason='%s: %s' % (type(e).__name__, str(e)[:300])), gid)
         except Exception:
@@ -146,14 +150,16 @@ def _bounded(rt, fn, seconds=None):
     The socket timeout passed to complete() bounds each read, not the call: a stream that trickles one byte just
     under the timeout holds the caller indefinitely, and a call already in flight when SIGTERM arrives still adds
     its read to the shutdown wait. The call runs on a worker thread and this one waits at most `seconds` (TIMEOUT
-    unless a test says otherwise), checking the stop flag on the way, then closes the call's socket with
-    Model.abort() so the blocked read ends now. What fn returned is returned; what it raised is raised again.
+    unless a test says otherwise), checking the stop flag on the way, then closes the call's own sockets with
+    Model.abort(thread=worker) so the blocked read ends now. Only that thread's sockets: a side call that missed its
+    deadline must not cut the turn that shares this Model (#383 review P2). A stop request still closes everything
+    (abort() with no thread): the daemon is going away and no server should keep generating for it.
 
     Accounting contract for the abandoned path (#383 review P2): the caller's own metering (`rt._meter`,
     `rt.brains.account`) runs on THIS thread after this returns, so a call abandoned here is never priced by the
-    caller. The abandoned call keeps running on its daemon thread and may still write model.last_usage/last_call/
-    last_speed when it finally returns; that write cannot be priced either, because every metering site pairs with
-    a complete() that rewrote them first, and it cannot write the store (those calls stay on the loop thread).
+    caller, and pricing `rt.model.last_usage` here would charge the *previous* call. What the caller does instead is
+    debit the bound `_unpriced` computes, at abandonment, on this same thread: the ledgers keep one writer, and a
+    total that would otherwise read low says what part of it is a bound (see `_charge_estimate`).
     """
     out = {}
 
@@ -173,7 +179,13 @@ def _bounded(rt, fn, seconds=None):
             abort = getattr(getattr(rt, 'model', None), 'abort', None)
             if callable(abort):
                 try:
-                    abort()             # (the server stops generating too: an abandoned call keeps it busy)
+                    if stop:
+                        abort()         # (the daemon is going away: nothing should keep a server busy)
+                    else:
+                        try:
+                            abort(thread=worker.ident)   # (only this call's sockets: #383 review P2)
+                        except TypeError:
+                            abort()     # (a model whose abort takes no argument: close everything, as before)
                 except Exception:
                     pass
             worker.join(5)              # (a call that ignores the closed socket is left to daemon exit)
@@ -184,6 +196,26 @@ def _bounded(rt, fn, seconds=None):
     if 'error' in out:
         raise out['error']
     return out.get('value')
+
+
+def _charge_estimate(rt, gid, usd):
+    """Debit an abandoned call's upper bound to the two ledgers that would have priced it.
+
+    The call was abandoned by `_bounded` and the provider may still bill it, but no metering site pairs with it, so
+    both ledgers would read low: spend.json (what the status line shows) and, when the fallback served it, the
+    fallback's allowance (brains.account), which gates the next turn. The bound, never a measurement: spend.json
+    counts it apart (`est_usd`) so a reader can tell a bound from a priced turn. Runs on the loop thread, where both
+    writers live, so this adds no second writer. Never raises: this is a correction to a report, and losing a
+    finished goal to it would be far worse than a ledger reading low."""
+    for owner, name in ((rt, '_meter_estimate'), (getattr(rt, 'brains', None), 'account_estimate')):
+        fn = getattr(owner, name, None)
+        if not callable(fn):
+            continue                    # (a stubbed runtime in a test, or an older brain object)
+        try:
+            fn(gid, usd)
+        except Exception:
+            pass
+
 
 
 def _unpriced(rt, msgs):

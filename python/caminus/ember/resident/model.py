@@ -292,7 +292,7 @@ class Cancelled(Exception):
 class Model:
     def __init__(self, config, opener=urllib.request.urlopen):
         self.config, self.opener = config, opener
-        self._sockets, self._sockets_lock = set(), threading.Lock()
+        self._sockets, self._sockets_lock = {}, threading.Lock()   # (sock -> the thread that opened it)
         if opener is urllib.request.urlopen:
             self.opener = _recording_opener(self._held)   # (abort() can then close an open call: see abort)
 
@@ -324,15 +324,29 @@ class Model:
 
     def _held(self, sock):
         with self._sockets_lock:
-            self._sockets = {s for s in self._sockets if s.fileno() != -1}   # (closed ones out)
-            self._sockets.add(sock)
+            # (closed ones out; the value is the thread that opened it, so abort() can close one call's sockets only)
+            self._sockets = {s: t for s, t in self._sockets.items() if s.fileno() != -1}
+            self._sockets[sock] = threading.get_ident()
 
-    def abort(self):
-        """Close every open call's connection. A cancelled or interrupted turn stops here and on the server: abandoning
-        the call left the server generating the reply (up to the reply limit) and holding its slot; caminus serve stops
-        a job when its client's socket closes, also during prefill."""
+    def abort(self, thread=None):
+        """Close every open call's connection, or only the ones one call's thread opened.
+
+        A cancelled or interrupted turn stops here and on the server: abandoning the call left the server generating
+        the reply (up to the reply limit) and holding its slot; caminus serve stops a job when its client's socket
+        closes, also during prefill. That is why the default closes everything: the turn being interrupted is the
+        whole turn, and a stop request means nothing else should keep a server busy either.
+
+        thread: the ident of the thread that ran the call (`reflect._bounded` runs a side call on its own). Then only
+        the sockets THAT thread opened are closed, so a side call that missed its deadline cannot cut the turn that
+        shares this Model (#383 review P2). A socket whose thread has already exited is not held (`_held` drops the
+        closed ones, and a dead thread's connection is closed by its own frame)."""
         with self._sockets_lock:
-            held, self._sockets = self._sockets, set()
+            if thread is None:
+                held, self._sockets = list(self._sockets), {}
+            else:
+                held = [s for s, t in self._sockets.items() if t == thread]
+                for s in held:
+                    self._sockets.pop(s, None)
         for s in held:
             try:
                 s.shutdown(socket.SHUT_RDWR)
