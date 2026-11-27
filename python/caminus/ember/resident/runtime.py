@@ -1262,7 +1262,9 @@ class Runtime:
             # record; it reads the goal it just closed, and never raises. On this thread it can hold the loop for
             # up to ~120 s (one 60 s attempt, plus a second only when the first reply could not be read): the goal
             # is already committed, and stopping() cuts the wait short. Fine while 'reflect' defaults off; if that
-            # default ever flips, move the call to a worker thread (the store already serializes completions)
+            # default ever flips, the call moves to a worker thread that carries its own store connection and its
+            # own Model: one sqlite connection belongs to this thread (a cross-thread read raises), and last_usage
+            # is single-valued, so two calls sharing one Model would misattribute each other's spend
             # (#383 review P2).
             reflect.maybe(self, gid, summary, open_work)
 
