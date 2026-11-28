@@ -641,6 +641,108 @@ finally:
 check(why7 and 'cannot be created exclusively' in why7 and not (cf / 'nope.json').exists(),
       f'propose: a folder that holds neither a hard link nor an exclusive create is refused, not a traceback '
       f'({why7!r})')
+# two identical `propose` commands into one --out both ran every id: the second claim compared equal, and each run's
+# host.fresh rmtreed the folder the other command's same-id run was using, so the owner was billed twice for one
+# experiment. The folder's identity file now carries an exclusive lock from the claim until the observation (#385
+# review P2); the lock is exclusive and does not wait, since waiting would put a second run behind the first and bill
+# it anyway.
+lk = cf / 'locked.json'
+why8 = proposal.claim_folder(lk, spec_a)
+held, busy8 = proposal.claim_lock(lk)
+check(why8 == '' and held != -1 and busy8 == '',
+      f'propose: a claimed folder is locked by its own command ({why8!r}, {busy8!r})')
+second, busy9 = proposal.claim_lock(lk)
+check(second == -1 and 'locked by another' in busy9 and 'fresh --out' in busy9,
+      f'propose: a second command over a locked folder is refused, not queued ({busy9!r})')
+os.close(held)
+third, busy10 = proposal.claim_lock(lk)
+check(third != -1 and busy10 == '', f'propose: the folder is free again once the first command closes it ({busy10!r})')
+os.close(third)
+# the lock is held for the whole command, not only around the claim: a stub run that asks for it, as a second
+# `propose` would while the first one's arms run, is refused and nothing is observed
+r14 = sim_record(ph, status='proposed')
+locked = S / 'propose-locked'
+ns4 = argparse.Namespace(sim_home=str(ph), record=r14['id'], suite='basic', brain=['scripted:solve'], repeats=1,
+                         only='read', host=None, jobs=1, parallel=None, out=str(locked),
+                         config='{"sim": false}', env=None, base_config=None, base_env=None,
+                         arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
+                         unsafe_local=False, prediction_error=None, goal=None)
+while_running = []
+
+
+def locked_run(runs):
+    """A second `propose` over the same --out, started while this one's arms run."""
+    fd, why = proposal.claim_lock(locked / 'arms.json')
+    while_running.append(why)
+    if fd != -1:
+        os.close(fd)
+    return 1
+
+
+try:
+    proposal.cmd_propose(ns4, locked_run)
+    err14 = 'returned instead of refusing'
+except SystemExit as e:
+    err14 = str(e)
+check('a run ended in error' in err14 and while_running and 'locked by another' in while_running[0]
+      and proposal.load_record(ph, r14['id'])['status'] == 'proposed',
+      f'propose: the folder stays locked while its arms run, so a second command cannot join ({while_running!r})')
+# an `openai:URL` brain with no #MODEL is asked for the model it lists before any identity is built: its label used to
+# be `?@URL`, so a model swapped between an errored run and its rerun passed arms_mismatch and the folder never named
+# the model that answered (#385 review P2). The same resolve runs for `run` and `propose` (brains.resolve_all).
+import brains as brains_mod
+import http.server as http_server
+import threading as threading_mod
+
+
+class _Models(http_server.BaseHTTPRequestHandler):
+    ids = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        raw = json.dumps({'data': [{'id': i} for i in self.ids]}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+srv = http_server.ThreadingHTTPServer(('127.0.0.1', 0), _Models)
+threading_mod.Thread(target=srv.serve_forever, daemon=True).start()
+url = f'http://127.0.0.1:{srv.server_port}/v1'
+try:
+    _Models.ids = ['m-one']
+    b1 = brains_mod.parse('openai:' + url)
+    before = b1.label()
+    brains_mod.resolve_all([b1])
+    _Models.ids = ['m-two']
+    b2 = brains_mod.parse('openai:' + url)
+    brains_mod.resolve_all([b2])
+    spec_one = proposal.arms_spec([runner.Arm('base', ROOT), runner.Arm('arm', ROOT)],
+                                  dict(suite='basic', brains=sorted([b1.label()]), only=[], repeats=1,
+                                       approvals=None))
+    spec_two = proposal.arms_spec([runner.Arm('base', ROOT), runner.Arm('arm', ROOT)],
+                                  dict(suite='basic', brains=sorted([b2.label()]), only=[], repeats=1,
+                                       approvals=None))
+    _Models.ids = []
+    b3 = brains_mod.parse('openai:' + url)
+    try:
+        brains_mod.resolve_all([b3])
+        err15 = ''
+    except SystemExit as e:
+        err15 = str(e)
+finally:
+    srv.shutdown()
+    srv.server_close()
+check(before == f'?@{url}' and b1.label() == f'm-one@{url}' and b2.label() == f'm-two@{url}'
+      and b2.slug() != b1.slug() and 'brains' in proposal.arms_mismatch(spec_one, spec_two),
+      f'propose: an openai brain names the model its endpoint lists, and a swap is another identity '
+      f'({before!r}, {b1.label()!r}, {b2.label()!r})')
+check('lists no model' in err15 and b3.label() == f'?@{url}',
+      f'propose: an endpoint that lists no model is refused, not recorded as ?@URL ({err15[:160]!r})')
 # what a run measured is the content, not the commit: an arm checkout is usually dirty (that is what a harness A/B
 # runs), so editing the dirty tree between two runs into one --out left commit and dirty=True identical and the
 # second run skipped every id as done, closing the record on the previous numbers (#385 review P1). The fingerprint

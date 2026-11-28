@@ -27,6 +27,7 @@ proposal about code names `--arm-checkout DIR`: `base` runs this checkout and `a
 tree plus the change, and the diff between the two arms is then only that change.
 """
 from pathlib import Path
+import fcntl
 import json
 import os
 import sqlite3
@@ -324,6 +325,31 @@ def claim_folder(arms_file, spec):
     return arms_mismatch(prior, spec)
 
 
+def claim_lock(arms_file):
+    """The folder's exclusive lock, held from the claim until the observation is written; or the refusal, and -1.
+
+    `claim_folder` makes a *second identical* command compare equal, and each `lab.py run` reads its `done` set
+    once, so both commands ran every id: each run's `host.fresh` rmtrees the folder the other command's same-id
+    run is using, and the owner is billed twice for one experiment (#385 review P2). An advisory `flock` on
+    `arms.json` turns the second command into a refusal instead: the file exists once the folder is claimed and
+    is never rewritten, so the lock stays on the folder's identity for as long as the first command holds it.
+
+    `LOCK_NB` is the point: waiting would put a second run behind the first and still bill it. A filesystem
+    without advisory locks fails the `flock` call, which is a refusal too, naming it.
+    """
+    try:
+        fd = os.open(str(arms_file), os.O_RDONLY)
+    except OSError as e:
+        return -1, f'{arms_file} cannot be opened to lock it ({e}): use a fresh --out'
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        os.close(fd)
+        return -1, (f'{arms_file} is locked by another `propose` ({e.strerror or e}): one command owns a folder '
+                    'until its record closes, so let it finish (or use a fresh --out)')
+    return fd, ''
+
+
 def approval_missing(a, brains):
     """What the owner still has to allow before this run starts: the plan alone never starts one.
 
@@ -474,7 +500,9 @@ def cmd_propose(a, run, run_defaults=None):
     except ValueError as e:
         raise SystemExit(str(e))
     suite = runner.load_suite(a.suite)
-    brains = [brains_mod.parse(s, a.parallel) for s in a.brain]
+    # before the plan prints and before arms_spec: an `openai:URL` brain with no `#MODEL` labels itself `?@URL`
+    # until its endpoint is asked, and that label is part of the folder's identity (#385 review P2)
+    brains = brains_mod.resolve_all([brains_mod.parse(s, a.parallel) for s in a.brain])
     try:
         arms = arms_from_proposal(prop, a.base_checkout, a.arm_checkout)
     except ValueError as e:
@@ -513,70 +541,80 @@ def cmd_propose(a, run, run_defaults=None):
     if why:
         raise SystemExit(f'{out} holds a different experiment ({why}): use a fresh --out (a shared folder '
                          "would reuse the other experiment's rows by id)")
-    # the status guard above reads one snapshot. A resident that closes the record while the plan prints would
-    # otherwise be caught only by `write_observation`, after every arm has run and been billed (#385 review P1):
-    # re-read it here, before the first run, so a closed record refuses with nothing spent.
-    again = load_record(home, a.record)
-    if again is None or again.get('status') != 'proposed':
-        what = 'gone from the log' if again is None else repr(again.get('status') or 'unstated')
-        raise SystemExit(f'SIM record {a.record} is no longer proposed ({what}): nothing was run (it changed '
-                         'while the plan printed)')
-    # the printed plan is the owner's own record of what they approved; arms.json and plan.json carry the machine
-    # identity, and a reader of the folder should not have to reconstruct the human-facing text (#385 review P2).
-    # Written after the claim, so two concurrent commands over one folder cannot race for it.
-    (out / 'plan.md').write_text(plan_text)
-    print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
-    # the run namespace starts from `lab.py run`'s own parser defaults (lab.run_defaults) instead of a hand-built
-    # field list: a flag added to `run` is then present here at its default, and a flag that had to be copied by
-    # hand cannot be missed per flag (#385 review P2). The import is late because lab imports this module.
-    if run_defaults is None:
-        import lab as lab_mod
-        run_defaults = lab_mod.run_defaults
-    runs = run_defaults()
-    runs.suite, runs.brain, runs.arms, runs.out = a.suite, list(a.brain), str(arms_file), str(out)
-    runs.repeats, runs.only, runs.host = a.repeats, a.only, a.host
-    runs.unsafe_local = a.unsafe_local
-    runs.jobs, runs.parallel = a.jobs, a.parallel
-    if run(runs):
-        raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')
-    # the digest the folder claimed is the digest the runs must have used, and `lab.py run` re-reads the suite: an edit
-    # made between the plan and the rows (a fixture tweaked while the A/B runs) leaves arms.json naming bytes nothing
-    # ran, and the record would close on a mix of both. Re-read the bytes, and keep the record open if they moved.
-    if runner.suite_sha(suite) != suite_digest:
-        raise SystemExit(f'the suite {a.suite} changed while the arms ran: the rows measured other bytes than '
-                         f'{out}/arms.json names, so the record stays open (use a fresh --out for the edited suite)')
-    # the same re-read for the arms: a checkout committed, rebased or edited during the runs measured other bytes
-    # than arms.json/plan.json name, and the record would close on a mix of both (#385 review P1)
-    moved = arms_drift(arms, spec)
-    if moved:
-        raise SystemExit(f'the arms changed while they ran ({moved}): the rows measured other bytes than '
-                         f'{out}/arms.json names, so the record stays open (use a fresh --out for the moved checkout)')
-    verdict = report_mod.compare(report_mod.load(out), 'base', 'arm')
-    print(report_mod.compare_md(verdict), flush=True)
-    measured = (f"tools/emberlab propose: suite {suite['name']}, brains "
-                f"{', '.join(b.label() for b in brains)}, tasks {len(tasks)}/{len(suite['tasks'])}"
-                + (f" ({', '.join(t['key'] for t in tasks)})" if only else '')
-                + f", repeats {a.repeats}, {out}")
-    if verdict['verdict'].startswith('incomplete'):
-        # a brain with no run of one arm cannot judge the proposal, and `observe` is permanent: leave it open
-        raise SystemExit(f"the runs do not judge the proposal ({verdict['verdict']}): the record stays open "
-                         f'(rerun the same command into the same folder; {measured})')
-    # `incomplete` only asks that every brain has both arms. A folder whose first pass errored on half its runs and
-    # was then rerun can hold one valid row where the plan asked for three, and report.compare's "fewer than 3
-    # repeats" is advisory: the record would close (permanent, append-only) on a 1-sample A/B (#385 review P2). The
-    # plan is deterministic, so require every planned run to have a row that did not end in error - the same test
-    # `lab.py run` uses to decide a run is done - rather than re-deriving a per-cell count rule.
-    planned = [r['id'] for r in runner.plan(suite, brains, arms, max(1, a.repeats), only or None)]
-    have = {r['id'] for r in report_mod.load(out) if r.get('state') != 'error'}
-    lacking = [i for i in planned if i not in have]
-    if lacking:
-        raise SystemExit(f'the runs do not judge the proposal ({len(lacking)} of {len(planned)} planned runs have no '
-                         f'valid row, e.g. {", ".join(lacking[:3])}): the record stays open (rerun the same command '
-                         f'into the same folder; {measured})')
-    # sim.observe overwrites eval_context, so the proposing turn's own context is carried forward, then the run's
-    prior_ctx = (rec.get('eval_context') or '').strip()
-    write_observation(home, a.record, observed_text(verdict),
-                      eval_context=f'{prior_ctx} | measured: {measured}' if prior_ctx else measured,
-                      prediction_error=a.prediction_error or '', goal=a.goal)
-    print(f"SIM record {a.record}: observed", flush=True)
-    return 0 if verdict['verdict'].startswith(('better', 'no difference')) else 1
+
+    # a second command over the same folder compares equal and would run every id again: each run's host.fresh
+    # rmtrees the folder the first command's same-id run is using, and both commands are billed for the same runs
+    # (#385 review P2). Lock the folder's identity file from the claim until the observation is written.
+    lock, busy = claim_lock(arms_file)
+    if busy:
+        raise SystemExit(busy)
+    try:
+        # the status guard above reads one snapshot. A resident that closes the record while the plan prints would
+        # otherwise be caught only by `write_observation`, after every arm has run and been billed (#385 review P1):
+        # re-read it here, before the first run, so a closed record refuses with nothing spent.
+        again = load_record(home, a.record)
+        if again is None or again.get('status') != 'proposed':
+            what = 'gone from the log' if again is None else repr(again.get('status') or 'unstated')
+            raise SystemExit(f'SIM record {a.record} is no longer proposed ({what}): nothing was run (it changed '
+                             'while the plan printed)')
+        # the printed plan is the owner's own record of what they approved; arms.json and plan.json carry the machine
+        # identity, and a reader of the folder should not have to reconstruct the human-facing text (#385 review P2).
+        # Written after the claim, so two concurrent commands over one folder cannot race for it.
+        (out / 'plan.md').write_text(plan_text)
+        print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
+        # the run namespace starts from `lab.py run`'s own parser defaults (lab.run_defaults) instead of a hand-built
+        # field list: a flag added to `run` is then present here at its default, and a flag that had to be copied by
+        # hand cannot be missed per flag (#385 review P2). The import is late because lab imports this module.
+        if run_defaults is None:
+            import lab as lab_mod
+            run_defaults = lab_mod.run_defaults
+        runs = run_defaults()
+        runs.suite, runs.brain, runs.arms, runs.out = a.suite, list(a.brain), str(arms_file), str(out)
+        runs.repeats, runs.only, runs.host = a.repeats, a.only, a.host
+        runs.unsafe_local = a.unsafe_local
+        runs.jobs, runs.parallel = a.jobs, a.parallel
+        if run(runs):
+            raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')
+        # the digest the folder claimed is the digest the runs must have used, and `lab.py run` re-reads the suite: an edit
+        # made between the plan and the rows (a fixture tweaked while the A/B runs) leaves arms.json naming bytes nothing
+        # ran, and the record would close on a mix of both. Re-read the bytes, and keep the record open if they moved.
+        if runner.suite_sha(suite) != suite_digest:
+            raise SystemExit(f'the suite {a.suite} changed while the arms ran: the rows measured other bytes than '
+                             f'{out}/arms.json names, so the record stays open (use a fresh --out for the edited suite)')
+        # the same re-read for the arms: a checkout committed, rebased or edited during the runs measured other bytes
+        # than arms.json/plan.json name, and the record would close on a mix of both (#385 review P1)
+        moved = arms_drift(arms, spec)
+        if moved:
+            raise SystemExit(f'the arms changed while they ran ({moved}): the rows measured other bytes than '
+                             f'{out}/arms.json names, so the record stays open (use a fresh --out for the moved checkout)')
+        verdict = report_mod.compare(report_mod.load(out), 'base', 'arm')
+        print(report_mod.compare_md(verdict), flush=True)
+        measured = (f"tools/emberlab propose: suite {suite['name']}, brains "
+                    f"{', '.join(b.label() for b in brains)}, tasks {len(tasks)}/{len(suite['tasks'])}"
+                    + (f" ({', '.join(t['key'] for t in tasks)})" if only else '')
+                    + f", repeats {a.repeats}, {out}")
+        if verdict['verdict'].startswith('incomplete'):
+            # a brain with no run of one arm cannot judge the proposal, and `observe` is permanent: leave it open
+            raise SystemExit(f"the runs do not judge the proposal ({verdict['verdict']}): the record stays open "
+                             f'(rerun the same command into the same folder; {measured})')
+        # `incomplete` only asks that every brain has both arms. A folder whose first pass errored on half its runs and
+        # was then rerun can hold one valid row where the plan asked for three, and report.compare's "fewer than 3
+        # repeats" is advisory: the record would close (permanent, append-only) on a 1-sample A/B (#385 review P2). The
+        # plan is deterministic, so require every planned run to have a row that did not end in error - the same test
+        # `lab.py run` uses to decide a run is done - rather than re-deriving a per-cell count rule.
+        planned = [r['id'] for r in runner.plan(suite, brains, arms, max(1, a.repeats), only or None)]
+        have = {r['id'] for r in report_mod.load(out) if r.get('state') != 'error'}
+        lacking = [i for i in planned if i not in have]
+        if lacking:
+            raise SystemExit(f'the runs do not judge the proposal ({len(lacking)} of {len(planned)} planned runs have no '
+                             f'valid row, e.g. {", ".join(lacking[:3])}): the record stays open (rerun the same command '
+                             f'into the same folder; {measured})')
+        # sim.observe overwrites eval_context, so the proposing turn's own context is carried forward, then the run's
+        prior_ctx = (rec.get('eval_context') or '').strip()
+        write_observation(home, a.record, observed_text(verdict),
+                          eval_context=f'{prior_ctx} | measured: {measured}' if prior_ctx else measured,
+                          prediction_error=a.prediction_error or '', goal=a.goal)
+        print(f"SIM record {a.record}: observed", flush=True)
+        return 0 if verdict['verdict'].startswith(('better', 'no difference')) else 1
+    finally:
+        os.close(lock)

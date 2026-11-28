@@ -51,6 +51,9 @@ def cmd_run(a):
     suite = runner.load_suite(a.suite)
     arms = runner.load_arms(a.arm, a.arms)
     bs = [brains_mod.parse(s, a.parallel) for s in a.brain]
+    # an `openai:URL` brain with no `#MODEL` labels itself `?@URL` until its endpoint is asked, and that label is
+    # in every run id and in plan.json: ask first, so both name the model that answers (#385 review P2)
+    brains_mod.resolve_all(bs)
     host_kind = hosts_mod.kind(a.host, bs)
     # one rule for both commands (hosts.local_refusal), so `run` and `propose` cannot answer the same command line
     # two ways (#385 review)
