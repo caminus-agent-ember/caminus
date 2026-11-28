@@ -52,10 +52,9 @@ def cmd_run(a):
     arms = runner.load_arms(a.arm, a.arms)
     bs = [brains_mod.parse(s, a.parallel) for s in a.brain]
     host_kind = hosts_mod.kind(a.host, bs)
-    # one rule for both commands (hosts.local_refusal): `propose` accepts --unsafe-free as the same permission, so
-    # `run` must too, or the two answer `--unsafe-free` differently (#385 review)
-    why = hosts_mod.local_refusal(a.host, bs, unsafe_local=a.unsafe_local,
-                                  unsafe_free=getattr(a, 'unsafe_free', False))
+    # one rule for both commands (hosts.local_refusal), so `run` and `propose` cannot answer the same command line
+    # two ways (#385 review)
+    why = hosts_mod.local_refusal(a.host, bs, unsafe_local=a.unsafe_local)
     if why:
         raise SystemExit(why)
     out = Path(a.out).resolve()
@@ -78,9 +77,8 @@ def cmd_run(a):
     (out / 'plan.json').write_text(json.dumps(dict(suite=suite['name'], suite_sha=runner.suite_sha(suite),
                                                    host=host_kind, repeats=a.repeats,
                                                    brains=[b.label() for b in bs], arms=[x.describe() for x in arms],
-                                                   # the flag that unlocked the host, as given: --unsafe-free is the
-                                                   # same gate as --unsafe-local, and a record naming only one of them
-                                                   # hides runs authorised under the other (#385 review P2)
+                                                   # the flag that unlocked the host, as given: the record says which
+                                                   # permission a run held, not just that it held one (#385 review P2)
                                                    approvals=proposal_mod.approvals_granted(a),
                                                    runs=[r['id'] for r in runs]), indent=1))
     lock = threading.Lock()
@@ -131,7 +129,7 @@ def add_run_args(p, required=True):
     """`run`'s flags, in one place: `main` and `run_defaults` (which `propose` starts runs with) read the same list.
 
     A flag added here reaches every caller; before, `propose` built the run namespace by hand and a flag added to
-    `run` silently did not reach a propose-started run (the `--unsafe-free` omission, #385 review P2).
+    `run` silently did not reach a propose-started run (#385 review P2).
     """
     p.add_argument('--suite', required=required, help='a suite name under benchmarks/ember/suites, or a folder')
     p.add_argument('--brain', action='append', required=required)
@@ -142,8 +140,6 @@ def add_run_args(p, required=True):
     p.add_argument('--only', help='comma-separated task keys')
     p.add_argument('--host', choices=('local', 'agent'))
     p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
-    p.add_argument('--unsafe-free', action='store_true',
-                   help='the same permission under the name an unattended run uses (hosts.local_refusal reads both)')
     p.add_argument('--jobs', type=int, default=4, help='runs at once (each brain still caps its own: --parallel)')
     p.add_argument('--parallel', type=int, help="override every brain's parallel cap")
     p.add_argument('--timeout', type=int, help='seconds per goal (default: the suite\'s)')
@@ -198,7 +194,6 @@ def main(argv=None):
     p.add_argument('--approve-paid', action='store_true',
                    help="run a brain billed through the owner's relay (the plan names it first)")
     p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
-    p.add_argument('--unsafe-free', action='store_true', help='the same, named for an unattended run')
     p.add_argument('--prediction-error', help='where the prediction was wrong, filled in after the run; a review '
                                              'says whether the miss is understood, so leave it empty unless it is - '
                                              "sim.observe treats a non-empty value as the record's final answer on "

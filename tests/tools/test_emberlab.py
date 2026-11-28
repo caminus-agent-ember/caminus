@@ -237,11 +237,17 @@ p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'anth
 check(p.returncode != 0 and '--unsafe-local' in (p.stderr + p.stdout) and not po.exists(),
       f'propose: a paid real brain on the local host needs --unsafe-local too, like lab.py run ({p.returncode}; '
       f'{(p.stderr + p.stdout)[-300:]})')
-# the refusal names both names the rule honours: `--unsafe-free` is the same permission, and a message that names
-# only the other one sends an owner adding a flag the docs do not pair with unattended runs (#385 review P2)
-check('--unsafe-free' in (p.stderr + p.stdout),
-      f'propose: the local-host refusal names --unsafe-free as well, since hosts.local_refusal accepts it '
-      f'({(p.stderr + p.stdout)[-300:]})')
+# the flag that unlocks the local host is one name only: `--unsafe-local`. The alias this branch once carried
+# (`--unsafe-free`) is gone, so `run --help` must not list it and `propose` must not accept it (#385 P1-1)
+for cmd in ('run', 'propose'):
+    h = lab(cmd, '--help')
+    check('--unsafe-free' not in h.stdout and '--unsafe-free' not in h.stderr,
+          f'{cmd}: --unsafe-free is not a flag (the local-host permission has one name, --unsafe-local)')
+p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve', '--out', str(po),
+        '--unsafe-free')
+check(p.returncode != 0 and 'unrecognized arguments' in (p.stderr + p.stdout) and not po.exists(),
+      f'propose: --unsafe-free is refused as an unknown flag, not silently honoured ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-200:]})')
 p = lab('propose', '--sim-home', str(ph), '--record', r1['id'], '--brain', 'scripted:solve', '--out', str(po))
 check(p.returncode != 0 and 'measure nothing' in (p.stderr + p.stdout),
       'propose: two identical arms are refused (the proposal names no change)')
@@ -287,17 +293,17 @@ check((po / 'plan.md').exists() and (po / 'plan.md').read_text() in p.stdout
       f'propose: the printed plan is written into the folder, digest included ({p.stdout[:200]!r}; '
       f'{(po / "plan.md").read_text()[:200] if (po / "plan.md").exists() else "no plan.md"!r})')
 # `propose` starts its runs from `lab.py run`'s own parser defaults, not a hand-built field list: a flag added to the
-# run parser is then present with its own default, so the `--unsafe-free` omission cannot recur per flag (#385 P2).
+# run parser is then present with its own default, so a per-flag copy cannot go stale (#385 P2).
 # A field `cmd_run` reads that the defaults lack is the same drift, so read cmd_run's own source and compare.
 import inspect  # noqa: E402
 import lab as lab_mod  # noqa: E402
 _defaults = vars(lab_mod.run_defaults())
 _reads = set(re.findall(r'(?<![\w.])a\.([a-z_]+)', inspect.getsource(lab_mod.cmd_run)))
 check(not (_reads - set(_defaults)) and {'suite', 'brain', 'arms', 'out', 'repeats', 'host', 'unsafe_local',
-                                         'unsafe_free', 'jobs', 'parallel', 'timeout', 'rerun', 'only'} <= set(_defaults),
+                                         'jobs', 'parallel', 'timeout', 'rerun', 'only'} <= set(_defaults),
       f'propose: run_defaults answers every field cmd_run reads, so a propose-started run cannot miss a new flag '
       f'({sorted(_reads - set(_defaults))}; {sorted(_defaults)})')
-check('--unsafe-free' in lab('run', '--help').stdout and 'required' not in lab('run', '--help').stderr,
+check('--unsafe-local' in lab('run', '--help').stdout and 'required' not in lab('run', '--help').stderr,
       'propose: `run` still parses its own flags from the shared list')
 check(closed['observed_by']['model'] == 'emberlab' and closed['brain']['model'] == 'm',
       'propose: the observation names emberlab, the predictor keeps the brain that made the prediction')
@@ -369,7 +375,7 @@ ns = argparse.Namespace(sim_home=str(ph), record=r8['id'], suite='basic', brain=
                         only='read', host=None, jobs=1, parallel=None, out=str(inc),
                         config='{"sim": false}', env=None, base_config=None, base_env=None,
                         arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
-                        unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+                        unsafe_local=False, prediction_error=None, goal=None)
 
 
 def half_run(runs):
@@ -395,7 +401,7 @@ nsp = argparse.Namespace(sim_home=str(ph), record=r13['id'], suite='basic', brai
                          only='read', host=None, jobs=1, parallel=None, out=str(part),
                          config='{"sim": false}', env=None, base_config=None, base_env=None,
                          arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
-                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+                         unsafe_local=False, prediction_error=None, goal=None)
 
 
 def part_run(runs):
@@ -424,7 +430,7 @@ nsm = argparse.Namespace(sim_home=str(ph), record=rmid['id'], suite=str(mid), br
                          only='read', host=None, jobs=1, parallel=None, out=str(S / 'propose-mid'),
                          config='{"sim": false}', env=None, base_config=None, base_env=None,
                          arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
-                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+                         unsafe_local=False, prediction_error=None, goal=None)
 
 
 def mid_run(runs):
@@ -597,19 +603,18 @@ check(proposal.provenance_refusal(empty, empty / 'arms.json') == ''
 (empty / 'arms.json').write_text('{}')
 check(proposal.provenance_refusal(empty, empty / 'arms.json') == '',
       'propose: a folder carrying arms.json is left to claim_folder to compare')
-# the approval flags granted are part of the plan record and of the folder's identity: --unsafe-free is the same gate
-# as --unsafe-local, and a log that names only the latter misses a run authorised under the alias; a folder written
+# the approval flags granted are part of the plan record and of the folder's identity; a folder written
 # before approvals were recorded has no such key and still resumes (#385 review P2)
-check(proposal.approvals_granted(argparse.Namespace(unsafe_local=False, unsafe_free=True, approve_paid=True))
-      == ['--approve-paid', '--unsafe-free'] and proposal.approvals_granted(argparse.Namespace()) is None,
+check(proposal.approvals_granted(argparse.Namespace(unsafe_local=True, approve_paid=True))
+      == ['--approve-paid', '--unsafe-local'] and proposal.approvals_granted(argparse.Namespace()) is None,
       'propose: the approval flags are recorded as given, and none is None so an older folder still resumes')
 sp = proposal.arms_spec([argparse.Namespace(name='base', describe=lambda: {'checkout': 'a', 'commit': '1'}),
                          argparse.Namespace(name='arm', describe=lambda: {'checkout': 'b', 'commit': '2'})],
                         dict(suite='basic', brains=['scripted:solve'], only=[], repeats=1,
-                             approvals=['--unsafe-free']))
+                             approvals=['--unsafe-local']))
 old = dict(sp, plan={k: v for k, v in sp['plan'].items() if k != 'approvals'})
-check(sp['plan']['approvals'] == ['--unsafe-free']
-      and 'approvals' in proposal.arms_mismatch(sp, dict(sp, plan=dict(sp['plan'], approvals=['--unsafe-local'])))
+check(sp['plan']['approvals'] == ['--unsafe-local']
+      and 'approvals' in proposal.arms_mismatch(sp, dict(sp, plan=dict(sp['plan'], approvals=['--approve-paid'])))
       and proposal.arms_mismatch(sp, dict(sp, plan=dict(sp['plan'], approvals=None)))
       and proposal.arms_mismatch(old, dict(sp, plan=dict(sp['plan'], approvals=None))) == '',
       f'propose: another approval is another experiment, and a folder from before approvals resumes a run that '
@@ -621,27 +626,24 @@ txt = proposal.observed_text(dict(verdict='no difference', errored=[], brains=[
          arm=dict(passed=1, runs=1, false_completions=0, median_steps=None))]))
 check('median steps: scripted:solve 7 -> not measured' in txt,
       f'propose: a cell without median steps is recorded as not measured, not a KeyError ({txt!r})')
-# one rule for both commands: a real model on the local host needs --unsafe-local OR --unsafe-free, and `run` accepts
-# both names, so `propose --unsafe-free` cannot start what `run --unsafe-free` refuses (#385 review P2)
+# one rule for both commands: a real model on the local host needs --unsafe-local, and there is one name for it
 import brains as brains_mod
 import hosts as hosts_mod
 real = [brains_mod.parse('anthropic:8091#claude-haiku-5-5')]
 scripted = [brains_mod.parse('scripted:solve')]
 check(hosts_mod.local_refusal('local', real) and not hosts_mod.local_refusal(None, real)  # no --host: agent
       and not hosts_mod.local_refusal('local', real, unsafe_local=True)
-      and not hosts_mod.local_refusal('local', real, unsafe_free=True)
       and not hosts_mod.local_refusal('agent', real) and not hosts_mod.local_refusal('local', scripted),
-      'propose: local_refusal is one rule (real + local host + neither flag), read by run and propose')
-check('--unsafe-free' in lab('run', '--help').stdout, 'propose: `run` accepts --unsafe-free, as `propose` does')
+      'propose: local_refusal is one rule (real + local host + no --unsafe-local), read by run and propose')
 r11 = sim_record(ph, status='proposed')
 free = S / 'propose-free'
 p = lab('propose', '--sim-home', str(ph), '--record', r11['id'], '--brain', 'anthropic:8091#claude-haiku-5-5',
-        '--host', 'local', '--approve-paid', '--unsafe-free', '--config', '{"sim": false}', '--only', 'read',
+        '--host', 'local', '--approve-paid', '--unsafe-local', '--config', '{"sim": false}', '--only', 'read',
         '--out', str(free), '--dry-run')
-check(p.returncode == 0 and '- host: local' in p.stdout and '--unsafe-free' in p.stdout
-      and '- approvals: --approve-paid, --unsafe-free' in p.stdout
+check(p.returncode == 0 and '- host: local' in p.stdout
+      and '- approvals: --approve-paid, --unsafe-local' in p.stdout
       and '- timeout: 1500s per goal' in p.stdout and not free.exists(),
-      f'propose: --unsafe-free unlocks the local host as it does for run, and the plan names the host, the approval '
+      f'propose: --unsafe-local unlocks the local host as it does for run, and the plan names the host, the approval '
       f'flags granted as given, and the timeout ({p.returncode}; {(p.stderr or p.stdout)[-300:]})')
 # the documented exit code: 1 on a `worse` verdict, and the record is still observed (docs/dev/ember.md)
 worse = S / 'propose-worse'
@@ -650,7 +652,7 @@ ns2 = argparse.Namespace(sim_home=str(ph), record=r10['id'], suite='basic', brai
                          only='read', host=None, jobs=1, parallel=None, out=str(worse),
                          config='{"sim": false}', env=None, base_config=None, base_env=None,
                          arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
-                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+                         unsafe_local=False, prediction_error=None, goal=None)
 
 
 def worse_run(runs):
@@ -678,7 +680,7 @@ ns3 = argparse.Namespace(sim_home=str(ph), record=r12['id'], suite='basic', brai
                          only='read', host=None, jobs=1, parallel=None, out=str(raced),
                          config='{"sim": false}', env=None, base_config=None, base_env=None,
                          arm_checkout=None, base_checkout=None, dry_run=False, approve_paid=False,
-                         unsafe_local=False, unsafe_free=False, prediction_error=None, goal=None)
+                         unsafe_local=False, prediction_error=None, goal=None)
 claimed = []
 real_claim = proposal.claim_folder
 

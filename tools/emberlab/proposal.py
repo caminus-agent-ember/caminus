@@ -16,8 +16,8 @@ own brain stays named in `brain`.
 
 What runs is the owner's decision, not this command's default. The plan (suite, arms, brains, number of runs, which
 brains bill) is printed first, and nothing starts until `--approve-paid` for a brain billed through the owner's relay
-(a `anthropic:` or `openai+relay:` brain; the tool A/B brain is Haiku there), and `--unsafe-local` or `--unsafe-free`
-for a real model on the local host. `--dry-run` stops after the plan.
+(a `anthropic:` or `openai+relay:` brain; the tool A/B brain is Haiku there), and `--unsafe-local` for a real model
+on the local host. `--dry-run` stops after the plan.
 
   python -I tools/emberlab/lab.py propose --sim-home HOME --record ID --suite basic \\
       --brain anthropic:8091#claude-haiku-5-5 --repeats 3 --config '{"sim": false}'
@@ -102,16 +102,15 @@ def arms_from_proposal(prop, base_checkout=None, arm_checkout=None):
 
 ARM_KEYS = ('checkout', 'commit', 'dirty', 'tree_sha', 'config', 'env')
 PLAN_KEYS = ('suite', 'suite_sha', 'brains', 'only', 'repeats', 'approvals')
-APPROVAL_FLAGS = ('--approve-paid', '--unsafe-local', '--unsafe-free')
+APPROVAL_FLAGS = ('--approve-paid', '--unsafe-local')
 
 
 def approvals_granted(a):
     """The approval flags this command line actually carries, as given, or None when it carries none.
 
-    The flag that unlocked a run is part of what a folder records: `--unsafe-free` is the same permission as
-    `--unsafe-local`, and a log that names only the latter misses a run authorised under the alias (the review asked
-    for plan.json/the record to name it). None, not [], when nothing was granted: a folder written before approvals
-    were recorded has no such key, and a run that grants nothing must still resume it.
+    The flag that unlocked a run is part of what a folder records: a log that names none of them hid the permission a
+    run held (the review asked for plan.json/the record to name it). None, not [], when nothing was granted: a folder
+    written before approvals were recorded has no such key, and a run that grants nothing must still resume it.
 
     A flag that is not on the command line is read with getattr, so a namespace built by hand (`lab.py run`, a test)
     does not have to add every name.
@@ -247,24 +246,19 @@ def claim_folder(arms_file, spec):
 def approval_missing(a, brains):
     """What the owner still has to allow before this run starts: the plan alone never starts one.
 
-    The local-host rule is `hosts.local_refusal`, the same function `lab.py run` calls, and its own `--unsafe-free`
-    is the same permission there: this command used to accept either flag and then set `unsafe_local` on the run
-    namespace, so `propose --unsafe-free` started a paid real brain as the user where `run --unsafe-free` was
-    refused (#385 review). A flag that is not on the command line is read with getattr, so a caller building the
-    namespace by hand (a test, `lab.py run`) does not have to add it.
+    The local-host rule is `hosts.local_refusal`, the same function `lab.py run` calls: a second copy of the rule here
+    answered the same command line differently (#385 review), so both commands call it and neither can drift. A flag
+    that is not on the command line is read with getattr, so a caller building the namespace by hand (a test,
+    `lab.py run`) does not have to add it.
     """
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
     missing = []
     if paid and not a.approve_paid:
         missing.append("--approve-paid (billed through the owner's relay: " + ', '.join(paid) + ')')
-    why = hosts_mod.local_refusal(a.host, brains, unsafe_local=getattr(a, 'unsafe_local', False),
-                                  unsafe_free=getattr(a, 'unsafe_free', False))
+    why = hosts_mod.local_refusal(a.host, brains, unsafe_local=getattr(a, 'unsafe_local', False))
     if why:
         real = [b.label() for b in brains if getattr(b, 'real', False)]
-        # both names, as plan_md's `unlocked` joins them: the rule honours either, and a refusal that names one
-        # sends an owner adding a flag the docs do not pair with unattended runs (#385 review P2)
-        missing.append('--unsafe-local or --unsafe-free (a real model runs as you on the local host: '
-                       + ', '.join(real) + ')')
+        missing.append('--unsafe-local (a real model runs as you on the local host: ' + ', '.join(real) + ')')
     return missing
 
 
@@ -298,8 +292,8 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
     The host decides where a real model runs (as the user, or on the agent account) and the timeout is how long one
     goal may take, so a plan without them did not name everything (#385 review). `host` is the resolved kind
     (`hosts.kind`), not the flag: `--host local` and a real brain with no flag resolve to the same place. The
-    approval flags are printed as given: `--unsafe-free` is the same permission as `--unsafe-local`, and a plan that
-    names only the latter hides which flag unlocked the run (#385 review P2).
+    approval flags are printed as given, so a plan names the permission a run holds rather than just that it holds
+    one (#385 review P2).
     """
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
     real = [b.label() for b in brains if getattr(b, 'real', False)]
@@ -311,7 +305,7 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
              f"- predicted: {(prop.get('predicted') or '').strip()[:400]}",
              suite_line(suite, tasks, repeats, suite_digest),
              f"- host: {host}" + (' (a real model runs as you here: '
-                                    + (unlocked or '--unsafe-local or --unsafe-free') + ')'
+                                    + (unlocked or '--unsafe-local') + ')'
                                     if host == 'local' and real else ''),
              f"- timeout: {timeout}s per goal",
              '- approvals: ' + (', '.join(approvals) if approvals else
@@ -452,17 +446,15 @@ def cmd_propose(a, run, run_defaults=None):
     (out / 'plan.md').write_text(plan_text)
     print(f'lab.py run --suite {a.suite} --arms {arms_file} --out {out}', flush=True)
     # the run namespace starts from `lab.py run`'s own parser defaults (lab.run_defaults) instead of a hand-built
-    # field list: a flag added to `run` is then present here at its default, and the `--unsafe-free` omission that
-    # had to be caught per flag cannot recur (#385 review P2). The import is late because lab imports this module.
+    # field list: a flag added to `run` is then present here at its default, and a flag that had to be copied by
+    # hand cannot be missed per flag (#385 review P2). The import is late because lab imports this module.
     if run_defaults is None:
         import lab as lab_mod
         run_defaults = lab_mod.run_defaults
     runs = run_defaults()
-    # both flags are carried as given: cmd_run asks hosts.local_refusal about the resolved host, and that rule
-    # reads either name. Folding --unsafe-free into unsafe_local would hide which flag allowed the run.
     runs.suite, runs.brain, runs.arms, runs.out = a.suite, list(a.brain), str(arms_file), str(out)
     runs.repeats, runs.only, runs.host = a.repeats, a.only, a.host
-    runs.unsafe_local, runs.unsafe_free = a.unsafe_local, a.unsafe_free
+    runs.unsafe_local = a.unsafe_local
     runs.jobs, runs.parallel = a.jobs, a.parallel
     if run(runs):
         raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')

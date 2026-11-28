@@ -190,7 +190,7 @@ python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
   (`--config` / `--env`, or `--arm-checkout` for a code change). Two identical arms are refused: nothing differs.
 - **The plan comes first.** Suite, arms, brains, the number of runs and every brain billed through the relay are
   printed before anything starts. A paid brain needs `--approve-paid`, a real model on the local host needs
-  `--unsafe-local` or `--unsafe-free`, and `--dry-run` stops after the plan.
+  `--unsafe-local`, and `--dry-run` stops after the plan.
 - **The record carries the numbers.** `sim.observe` appends the verdict and each brain's pass rate, false
   completions and median steps, plus the suite and the tasks that ran; the observer is `emberlab`, and the
   predictor's brain stays named. The observation lands in the record's own goal, so `--goal` naming a different
