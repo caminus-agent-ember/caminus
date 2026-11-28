@@ -9565,8 +9565,16 @@ for line in sys.stdin:
         # review made `read` refuse. Both are refused now; a folder inside the worktree, or none, still runs.
         from caminus.ember.resident import delegate
         wt=str(self.home/'worktrees'/'br')
-        why=delegate._escaping('cd %s && touch .{.,}/evil' % wt,wt)
-        self.assertIn('brace expansion',why)
+        self.assertIn('brace expansion',delegate._escaping('cd %s && touch .{.,}/evil' % wt,wt))
+        # a brace inside quotes is literal, where the shell never expands it: CI caught the first version of this
+        # check refusing every awk program (`awk '{print $1}'`), because shlex had already dropped the quotes
+        self.assertEqual(delegate._escaping('cd %s && awk \'BEGIN{system("ls")}\'' % wt,wt),'',
+                         'a run-time program is not claimed to be caught (the docstring says best effort)')
+        self.assertNotIn('brace',delegate._escaping('cd %s && awk \'{print $1}\' f.txt' % wt,wt),
+                         'a quoted awk program is not brace expansion (its `$` is refused by the $ check)')
+        self.assertEqual(delegate._escaping('cd %s && touch \\{a,b\\}' % wt,wt),'','an escaped brace is literal')
+        self.assertTrue(delegate._escaping('cd %s && cat "$(echo .{.,})/x"' % wt,wt),
+                        'a brace inside a substitution is expansion, and `$` refuses the word first')
         row=dict(permissions='write',worktree=wt)
         self.assertIn('worktree',delegate.refused('sandbox',dict(folder='work'),row))
         self.assertIn('worktree',delegate.refused('sandbox',dict(folder=str(self.home/'work')),row))

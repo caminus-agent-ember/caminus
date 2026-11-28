@@ -249,6 +249,30 @@ def _git_words(rest):
     return rest[:i], rest[i:]
 
 
+def _unquoted_brace(text):
+    """True when a `{` or `}` stands outside quotes in `text`, where the shell expands it.
+
+    Brace expansion makes a word this check cannot read: `cd W && touch .{.,}/evil` runs as `touch ../evil
+    ./evil`, two paths nobody wrote down, and each `.` passes every path check (#384 review P2). Inside any
+    quote the character is literal, so `awk 'BEGIN{print $1}'` is not this case - a first version of this check
+    looked at the parsed words, where shlex has already dropped the quotes, and refused every awk program (CI
+    caught it). A backslash outside quotes escapes the next character: `\\{` is literal too.
+    """
+    quote, i = '', 0
+    while i < len(text):
+        c = text[i]
+        if quote == "'":
+            quote = '' if c == "'" else quote
+        elif c == '\\':
+            i += 1                        # the next character is literal, `\{` and (in double quotes) `\"`
+        elif c in '\'"':
+            quote = '' if quote == c else (quote or c)
+        elif not quote and c in '{}':
+            return True
+        i += 1
+    return False
+
+
 def _escaping(cmd, wt, writing=True, base=''):
     """Why a writing child's command could reach outside its worktree, or ''.
 
@@ -288,6 +312,12 @@ def _escaping(cmd, wt, writing=True, base=''):
         words = list(lex)
     except ValueError:
         return 'it cannot be parsed'
+    if _unquoted_brace(cmd):
+        # checked on the raw text, where the quotes still are: shlex drops them, so a word test refused every awk
+        # program (`awk '{print $1}'`) as well as the real case below. `cd W && touch .{.,}/evil` runs as
+        # `touch ../evil ./evil`, two paths nobody wrote down, and each `.` passes every path check.
+        return ('brace expansion makes paths this check cannot read (`.{.,}/evil` is `../evil ./evil`): quote the '
+                'word or write every path out')
     if base:
         if not _inside(wt, base):
             return '%s climbs out of the worktree' % base
@@ -377,11 +407,6 @@ def _escaping(cmd, wt, writing=True, base=''):
                     'anywhere. Write it to a file in the worktree and run that instead' % (inline, prog))
         if w.startswith('~') or '$' in w:
             return '%s could resolve outside the worktree' % w
-        if '{' in w or '}' in w:
-            # brace expansion makes a word this check cannot read: `cd W && touch .{.,}/evil` expands to `touch
-            # ../evil ./evil`, two paths nobody wrote down, and the `.` in `.` passes every path check (#384
-            # review P2). Refused like `$` and `~`, wherever the word stands.
-            return '%s could expand to a path this check cannot read (brace expansion)' % w
         if w in DEVICES:
             j += 1
             continue                               # a redirect to a stream writes nothing: `ls 2>/dev/null`
