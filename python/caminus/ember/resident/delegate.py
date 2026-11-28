@@ -85,6 +85,31 @@ parent's diff shows it. Your parent reviews the worktree's diff, and a write out
 would not review. Keep every write where you were told to.'''
 
 
+def switched_on(rt):
+    """Whether the delegate tool is offered at all: config `delegate` is not `false`.
+
+    The key is the off switch *and* the role-model dict, and it used to be read as neither where it matters:
+    `tools()` listed the tool under `false` (a spending tool the prompt says is off), and `true` reached
+    `True.get(...)` in _brain - an AttributeError `_action` does not catch, so `tick()` marked the *parent* goal
+    `error` (#382 review, Opus 5.5 P1-2)."""
+    return rt.config.get('delegate', True) is not False
+
+
+def role_models(rt):
+    """The role models: the `delegate` key when it is a dict, {} when the key is absent or null.
+
+    Anything else is a typo - `true`, a string, a list - and is refused here naming the key, rather than
+    crashing later with an AttributeError from a call on a bool (#382 review, Opus 5.5 P1-2)."""
+    cfg = rt.config.get('delegate')
+    if cfg is None:
+        return {}
+    if not isinstance(cfg, dict):
+        raise ValueError('delegate is %r: it is either false (no delegate tool at all) or an object naming the '
+                         'role models, e.g. {"worker_model": "..."}. Set it to one of those, or remove the key'
+                         % (cfg,))
+    return cfg
+
+
 def read_only(cmd):
     """runtime.read_only_command without the circular import (runtime imports this module)."""
     from .runtime import read_only_command
@@ -352,6 +377,11 @@ def _escaping(cmd, wt, writing=True, base=''):
                     'anywhere. Write it to a file in the worktree and run that instead' % (inline, prog))
         if w.startswith('~') or '$' in w:
             return '%s could resolve outside the worktree' % w
+        if '{' in w or '}' in w:
+            # brace expansion makes a word this check cannot read: `cd W && touch .{.,}/evil` expands to `touch
+            # ../evil ./evil`, two paths nobody wrote down, and the `.` in `.` passes every path check (#384
+            # review P2). Refused like `$` and `~`, wherever the word stands.
+            return '%s could expand to a path this check cannot read (brace expansion)' % w
         if w in DEVICES:
             j += 1
             continue                               # a redirect to a stream writes nothing: `ls 2>/dev/null`
@@ -472,6 +502,15 @@ def refused(name, args, row=None):
         if outside:
             return ('a writing child checkpoints paths inside its worktree (%s): %s is outside it'
                     % (wt, ', '.join(outside[:3])))
+    if write and wt and name == 'sandbox':
+        # the box mounts `folder` read-only at /work, and a named folder is resolved against the agent home (a
+        # writing child's world is its worktree): `sandbox(folder='work')` read the parent's tree, the same read
+        # `read` refuses, and the box's own /box (no folder named) is the child's scratch, so only a named folder
+        # outside the worktree is refused (#384 review P2).
+        folder = str(args.get('folder') or '')
+        if folder and not (os.path.isabs(folder) and _inside(wt, folder)):
+            return ('a writing child sandboxes in its worktree (%s): name the folder inside it, or omit the '
+                    'folder and use the box\'s own /box' % wt)
     return None
 
 
@@ -542,7 +581,7 @@ def _brain(rt, args):
     name = str(args.get('model') or '').strip()
     provider = str(args.get('provider') or '').strip() or None
     if not name:
-        name = str((rt.config.get('delegate') or {}).get(role + '_model') or '').strip()
+        name = str(role_models(rt).get(role + '_model') or '').strip()
     if not name:
         return Model(dict(rt.config)), dict(model=rt.config.get('model'),
                                             provider=rt.config.get('provider') or rt.config.get('provider_kind'))
@@ -573,6 +612,11 @@ def prepare(rt, args):
     """What start() needs that may wait or reach the network, resolved before the runtime opens its write
     transaction: the caps, the role, the permissions, the repository and the child's brain (a model from the
     catalog may need a refresh, which is a network call, and the store has one writer: #382 review)."""
+    if not switched_on(rt):
+        # the off switch, checked where the call lands as well as in tools(): a model replaying an old action, or a
+        # goal whose tool list was built before the owner flipped the key, must not spend through it (#382 review).
+        raise ValueError('delegate is off in config (delegate: false): this goal cannot start a child. Ask your '
+                         'human to set delegate to a role-model object or remove the key')
     task = str(args.get('task') or '').strip()
     done = str(args.get('done_check') or '').strip()
     if not task:
@@ -704,7 +748,7 @@ def start(rt, parent, args, prepared=None):
     if used >= limit:
         raise ValueError('this goal has %d delegate children still running (delegate_max_children): their '
                          'reports arrive first; do the rest yourself, or delegate again once one finishes' % limit)
-    child = rt.store._enqueue('', max_steps=p['max_steps'], max_seconds=p['max_seconds'], kind='delegate')
+    child = rt.store._enqueue('', max_steps=p['max_steps'], max_seconds=None, kind='delegate')
     top = base = worktree = branch = ''
     try:
         if p['permissions'] == 'write':
@@ -719,7 +763,7 @@ def start(rt, parent, args, prepared=None):
         rt.store.db.execute('UPDATE goals SET prompt=? WHERE id=?', (prompt, child))
         rt.store.delegate_add(child, parent, p['who'].get('model') or '', p['who'].get('provider') or '',
                               p['role'], p['cap_usd'], permissions=p['permissions'], worktree=worktree,
-                              branch=branch, base=base, repo=top)
+                              branch=branch, base=base, repo=top, max_seconds=p['max_seconds'])
         rid = ''
         try:
             from . import sim
@@ -1101,6 +1145,31 @@ def run_child(rt, parent, job):
     finally:
         rt._stop = daemon_stop
         rt.model = resident_model
+
+
+def clock(rt, gid, g):
+    """Start a child's time cap at its first turn, and return the goal row to read on.
+
+    The enqueue sets no deadline for a child: a child queued behind another goal may wait minutes before it first
+    runs, and a deadline counted from the enqueue would pause it before its first turn and report `capped` - a
+    spend cap its parent never set (#384 review, P1). The cap the parent asked for lives on the delegates row
+    (max_seconds); here, at the first tick, the child's deadline becomes now + max_seconds, lowered to its
+    parent's own remaining deadline (a child never outlives its parent's budget)."""
+    row = rt.store.delegate(gid) or {}
+    secs, deadline = row.get('max_seconds'), g.get('deadline')
+    if not secs or deadline is not None:
+        return g
+    with rt.store.transaction():
+        now = rt.store.goal(gid)               # re-read inside the transaction: another writer settled it first?
+        if now['deadline'] is not None:
+            return now
+        parent = rt.store.goal(row['parent']) if row.get('parent') else None
+        end = time.time() + float(secs)
+        if parent and parent.get('deadline'):
+            end = min(end, parent['deadline'])
+        rt.store.update(gid, deadline=end)
+    rt.store.event('delegate_clock', dict(max_seconds=float(secs), deadline=end), gid)
+    return rt.store.goal(gid)
 
 
 def capped(rt, gid):

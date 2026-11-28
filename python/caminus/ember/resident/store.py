@@ -126,7 +126,7 @@ class Store:
             report TEXT, started REAL NOT NULL, ended REAL,
             permissions TEXT NOT NULL DEFAULT 'read', worktree TEXT NOT NULL DEFAULT '',
             branch TEXT NOT NULL DEFAULT '', base TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '',
-            sim TEXT NOT NULL DEFAULT '');
+            sim TEXT NOT NULL DEFAULT '', max_seconds REAL);
           CREATE INDEX IF NOT EXISTS delegates_parent ON delegates(parent,started);
         ''')
         self._migrate()
@@ -237,7 +237,8 @@ class Store:
         have = {r['name'] for r in self.db.execute('PRAGMA table_info(delegates)')}
         for name, decl in (('permissions', "TEXT NOT NULL DEFAULT 'read'"), ('worktree', "TEXT NOT NULL DEFAULT ''"),
                            ('branch', "TEXT NOT NULL DEFAULT ''"), ('base', "TEXT NOT NULL DEFAULT ''"),
-                           ('repo', "TEXT NOT NULL DEFAULT ''"), ('sim', "TEXT NOT NULL DEFAULT ''")):
+                           ('repo', "TEXT NOT NULL DEFAULT ''"), ('sim', "TEXT NOT NULL DEFAULT ''"),
+                           ('max_seconds', 'REAL')):
             if have and name not in have:
                 self.db.execute('ALTER TABLE delegates ADD COLUMN ' + name + ' ' + decl)
         # history_search: a full-text index over the events that are history. A database from before it is indexed
@@ -303,14 +304,17 @@ class Store:
             (gid, 'verified', gid, 'steers_applied', '%"redirect": false%')).fetchone())
 
     def delegate_add(self, child, parent, model, provider, role, cap_usd, permissions='read', worktree='', branch='',
-                     base='', repo='', sim=''):
+                     base='', repo='', sim='', max_seconds=None):
         """Register a delegate child: its brain, its role, the permissions it may use and its dollar cap (the metric
         the cap reads is this row's spend_usd + allowance_usd, kept by delegate_spend). A writing child's repo,
-        worktree, branch and base commit are recorded so its report and the parent's merge/discard can name them."""
+        worktree, branch and base commit are recorded so its report and the parent's merge/discard can name them.
+        max_seconds is the child's time cap, which starts at its first turn - not at the enqueue that may wait
+        behind another goal (delegate.clock reads it)."""
         self.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,permissions,worktree,branch,base,'
-                        'repo,sim,started) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        'repo,sim,max_seconds,started) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                         (child, parent, model or '', provider or '', role, float(cap_usd or 0.0), permissions or 'read',
-                         worktree or '', branch or '', base or '', repo or '', sim or '', time.time()))
+                         worktree or '', branch or '', base or '', repo or '', sim or '',
+                         float(max_seconds) if max_seconds else None, time.time()))
 
     def delegate(self, child):
         r = self.db.execute('SELECT * FROM delegates WHERE child=?', (child,)).fetchone()

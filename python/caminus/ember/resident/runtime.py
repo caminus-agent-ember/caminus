@@ -937,6 +937,10 @@ class Runtime:
             own = [t for t in TOOLS if t['function']['name'] != 'browser' or not browser.available()]
             if not sim.enabled(self):
                 own = [t for t in own if t['function']['name'] != 'sim']
+            if not delegate.switched_on(self):
+                # config `delegate: false` is the off switch, and the prompt hid only the section: the tool stayed in
+                # the list, so a spending call was reachable with the switch off (#382 review, Opus 5.5 P1-2).
+                own = [t for t in own if t['function']['name'] != 'delegate']
             self._tools = own + (self.mcp.tools() if self.mcp.servers else [])
         return self._tools
 
@@ -1859,9 +1863,13 @@ class Runtime:
                     box = sandbox.spec(self.home, action['goal'], args, self.config) if args.get('command') else {}
                     result = self.terminal.call(action['id'], {**args, 'yield_ms': 0, '_prepare': True}, box=box,
                                                 goal=action['goal'], child=child_goal)
-                elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch', 'browser', 'search') \
+                elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch', 'browser', 'search',
+                              'collect') \
                         or name.startswith('mcp__'):
-                    result = None         # catalog queries, network calls, waits and searches stay outside the write transaction
+                    # catalog queries, network calls, waits and searches stay outside the write transaction; collect
+                    # settles the children first, and settle writes a child's own goal row (#384 review: the nested
+                    # BEGIN inside this one raised, so every collect failed).
+                    result = None
                 elif name == 'peers':
                     result = dict(peers=self.mail.peers())
                 elif name == 'propose_plan':
@@ -1873,8 +1881,6 @@ class Runtime:
                     result = planning.propose(gid_now, plan)
                 elif name == 'send_message':
                     result = self.mail.send(sender_goal=action['goal'], message_id=action['id'], **args)
-                elif name == 'collect':
-                    result = delegate.collect(self, action['goal'], args)
                 elif name == 'delegate':
                     # The child goal is created here, inside the parent's transaction (atomic with its action); it
                     # runs after the transaction commits, below: a nested loop inside BEGIN would deadlock.
@@ -1950,6 +1956,8 @@ class Runtime:
                 # an image the brain can't see: the eyes model describes it, once, outside the write transaction (past
                 # read's caps there is no sha256 and nothing to send)
                 result = self.eyes.see(action['goal'], result, args.get('question'))
+            elif name == 'collect':
+                result = delegate.collect(self, action['goal'], args)
             elif name == 'discover':
                 result = discovery.discover(self.home, **args)
             elif name == 'advisor':
@@ -2603,7 +2611,7 @@ class Runtime:
                 continue
             with self.store.transaction():
                 g = self.store.goal(gid)
-                if g['state'] in ('queued', 'working', 'waiting_model', 'waiting_user', 'waiting_root'):
+                if g['state'] in ('queued', 'working', 'waiting_model', 'waiting_user', 'waiting_root', 'waiting_children'):
                     self.store.update(gid, state='paused', error='paused by your human')
                     self.store.event('paused', dict(by='owner'), gid)
                     self.store.settle_request(req['id'], 'done')
@@ -2705,6 +2713,18 @@ class Runtime:
                                                 effort=self.config.get('effort'), changed=changed))
 
     def _tick(self, gid):
+        # A child ticks on the brain its parent gave it (delegate_models). It is one brain per turn, but the
+        # resident's own next turn must run on the resident's brain: `self.model` is what Brains.choose returns
+        # when there is one brain, so a wait=false child left the resident on the child's (cheaper) brain, uncapped.
+        if gid not in self.delegate_models:
+            return self._tick_body(gid)
+        resident = self.model
+        try:
+            return self._tick_body(gid)
+        finally:
+            self.model = resident
+
+    def _tick_body(self, gid):
         self._follow_config()
         g = self.store.goal(gid)
         leases.sweep(self)                    # a lease ends with its goal, wherever the goal stopped
@@ -2714,6 +2734,8 @@ class Runtime:
             return False
         if agenda.wake_due(self, gid, g):     # scheduled for later: other goals run meanwhile
             return False
+        if g['kind'] == 'delegate' and not g['deadline']:
+            g = delegate.clock(self, gid, g)  # a child's time cap starts at its first turn, not at its enqueue
         if g['deadline'] and time.time() >= g['deadline']:
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return False

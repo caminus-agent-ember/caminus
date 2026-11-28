@@ -9536,6 +9536,125 @@ for line in sys.stdin:
         self.assertIn('mkdir -p',msg);self.assertIn('chmod 2770',msg)
         self.assertIn('sudo',msg)
 
+    def test_delegate_off_hides_the_tool_and_a_typo_names_the_key(self):
+        # #384 review P2: config `delegate` is both the off switch and the role-model dict, and it was read as
+        # neither where it matters: `false` left the spending tool in the list the model sees, and `true` reached
+        # True.get(...) in _brain - an AttributeError _action does not catch, so the tick marked the *parent* error.
+        # switched_on / role_models read it, and prepare refuses it where the call lands.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt._tools=None;rt.config['delegate']=False
+            self.assertNotIn('delegate',[t['function']['name'] for t in rt.tools])
+            self.assertFalse(delegate.switched_on(rt))
+            with self.assertRaises(ValueError) as c:
+                delegate.prepare(rt,dict(task='t',done_check='d'))
+            self.assertIn('delegate is off',str(c.exception))
+            rt.config['delegate']={}
+            self.assertTrue(delegate.switched_on(rt));self.assertEqual(delegate.role_models(rt),{})
+            self.assertEqual(delegate.prepare(rt,dict(task='t',done_check='d'))['role'],'worker')
+            rt.config['delegate']=True
+            with self.assertRaises(ValueError) as c:delegate.role_models(rt)
+            self.assertIn('delegate is True',str(c.exception))
+            with self.assertRaises(ValueError):delegate.prepare(rt,dict(task='t',done_check='d'))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_writing_childs_brace_word_and_sandbox_folder_are_checked(self):
+        # #384 review P2s: brace expansion made a word no path check can read (`.{.,}/evil` runs as `touch ../evil
+        # ./evil`), and sandbox(folder='work') resolved against the agent home - the parent's tree - which the same
+        # review made `read` refuse. Both are refused now; a folder inside the worktree, or none, still runs.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'br')
+        why=delegate._escaping('cd %s && touch .{.,}/evil' % wt,wt)
+        self.assertIn('brace expansion',why)
+        row=dict(permissions='write',worktree=wt)
+        self.assertIn('worktree',delegate.refused('sandbox',dict(folder='work'),row))
+        self.assertIn('worktree',delegate.refused('sandbox',dict(folder=str(self.home/'work')),row))
+        self.assertIsNone(delegate.refused('sandbox',dict(folder=wt+'/box'),row))
+        self.assertIsNone(delegate.refused('sandbox',dict(),row),"no folder is the box's own /box")
+        self.assertIsNone(delegate.refused('sandbox',dict(folder='work')),'a read-only child may name the home')
+
+    def test_a_childs_time_cap_starts_at_its_first_turn(self):
+        # #384 review P1: the enqueue set no deadline, so a child queued behind another goal counted its cap from
+        # the enqueue and paused before its first turn; delegate.clock starts it at the first tick, lowers it to the
+        # parent's own remaining budget, and never re-starts it.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5,max_seconds=30)
+            g=rt.store.goal(child)
+            self.assertIsNone(g['deadline'],'the enqueue sets no deadline')
+            g=delegate.clock(rt,child,g)
+            self.assertAlmostEqual(g['deadline']-time.time(),30,delta=5)
+            first=g['deadline']
+            self.assertEqual(delegate.clock(rt,child,g)['deadline'],first,'a second tick does not restart the cap')
+            self.assertEqual([e['kind'] for e in rt.store.events()].count('delegate_clock'),1)
+            late=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(late,parent,'','','worker',0.5,max_seconds=600)
+            with rt.store.transaction():rt.store.update(parent,deadline=time.time()+5)
+            self.assertAlmostEqual(delegate.clock(rt,late,rt.store.goal(late))['deadline']-time.time(),5,delta=3,
+                                   msg='a child never outlives its parent')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_pause_lands_on_a_parent_parked_on_its_children(self):
+        # #384 review P1: /pause listed queued/working/waiting_model/waiting_user/waiting_root, so a parent parked
+        # on a wait=false child (waiting_children) ignored the human's pause until the child settled.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('p')
+            with rt.store.transaction():rt.store.update(gid,state='waiting_children')
+            rt.store.request(gid,'pause')
+            rt._apply_pauses()
+            self.assertEqual(rt.store.goal(gid)['state'],'paused')
+            self.assertIn('paused by your human',rt.store.goal(gid)['error'])
+            self.assertEqual(rt.store.pending_requests('pause'),[])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_childs_brain_does_not_stay_on_the_resident(self):
+        # #384 review P1: Brains.choose returns self.model when there is one brain, so a wait=false child on its own
+        # model left the resident on it - the resident's next turn ran on the child's cheaper brain, uncapped.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.delegate_models[child]='child-brain'
+            resident=object();rt.model=resident
+            calls=[]
+            def body(cid):
+                calls.append(cid);rt.model='child-brain'
+                return True
+            rt._tick_body=body
+            self.assertTrue(rt._tick(child))
+            self.assertIs(rt.model,resident,'the resident is back on its own brain')
+            self.assertTrue(rt._tick(gid))
+            self.assertEqual(calls,[child,gid],'a parent\'s tick is not wrapped')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_collect_settles_a_child_outside_the_write_transaction(self):
+        # #384 review P2: collect ran inside _action's write transaction, and settle writes the child's own goal
+        # row, so the nested BEGIN raised and every collect failed. It is dispatched after the transaction now.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            rt.store.model_reply(parent,call('define_done',dict(check='the child reported')))
+            rt._action(rt.store.actions(parent)[0])
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.update(parent,state='waiting_children')
+                rt.store.update(child,state='completed',summary='did it')
+            rt.store.model_reply(parent,call('collect',{}))
+            rt._action(rt.store.actions(parent)[0])
+            result=[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result'
+                    and e['data'].get('name')=='collect'][-1]
+            self.assertNotIn('error',result,result)
+            self.assertEqual([c['outcome'] for c in result['children']],['completed'])
+            self.assertEqual(result['children'][0]['child'],child)
+            self.assertEqual(result['running'],[])
+        finally:rt.mail.close();rt.store.close()
+
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
     def __init__(self,*answers):self.answers=deque(answers);self.requests=[]
