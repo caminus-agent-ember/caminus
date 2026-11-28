@@ -486,12 +486,14 @@ def check(rt, gid, text, cfg=None, due=True):
     who = owner(rt)
     scripts = who['scripts']
     if not scripts:
-        # A configured name whose own letters are in no script the census knows (`--to ᚠᚢᚦ`) leaves the drift
-        # check switched off: the CLI prints a `check: false` note, but a session started before or elsewhere had
-        # nothing in its log to say why no drift was ever detected (#390 review P2). A name the table does not
-        # know but that is written in a known script (`--to Pali`, Latin letters) censuses that script and is
-        # NOT this case. One event per process per resolved name, not per turn: this runs on every reply, and the
-        # answer cannot change while the process holds the same config.
+        # A configured name whose letters name no single script leaves the drift check switched off, in one of
+        # two shapes: its own letters are in no script the census knows (`--to ᚠᚢᚦ`), or they are split between
+        # known scripts with no one in the majority (`--to ab 中文`). Either way the CLI prints a `check: false`
+        # note, but a session started before or elsewhere had nothing in its log to say why no drift was ever
+        # detected (#390 review P2). A name the table does not know but that is written in a known script
+        # (`--to Pali`, Latin letters) censuses that script and is NOT this case. One event per process per
+        # resolved name, not per turn: this runs on every reply, and the answer cannot change while the process
+        # holds the same config.
         seen = rt.__dict__.setdefault('_language_unchecked', set())
         if who['source'] == 'config' and who['name'] not in seen:
             seen.add(who['name'])

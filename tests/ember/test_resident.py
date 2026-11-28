@@ -3747,10 +3747,12 @@ for line in sys.stdin:
         finally:
             rt.mail.close();rt.store.close()
 
-    def test_an_unlisted_language_names_its_census_and_only_a_letterless_one_is_off(self):
+    def test_an_unlisted_language_names_its_census_and_which_off_case_it_got(self):
         # `--to Esperanto` has no script table, but its own letters are Latin, so since r24 the check censuses
-        # Latin (the reviewer's safer shape) and the note says where that came from. A name whose letters are in
-        # no script the census knows (Runic) is the only remaining `check: false`, and it says so.
+        # Latin (the reviewer's safer shape) and the note says where that came from. Two shapes stay
+        # `check: false`, and each says which it is: a name whose letters are in no script the census knows
+        # (Runic), and a name whose letters are split between known scripts with no majority (`ab 中文`, found
+        # by my own adversarial pass on `fa45f81`: the note used to claim its letters were in no known script).
         out=self.cmd('language',['--to','Esperanto'])
         self.assertEqual((out['language'],out['scripts'],out['check']),('Esperanto',['Latin'],True))
         self.assertIn('the script its name is written in',out['note'])
@@ -3758,7 +3760,12 @@ for line in sys.stdin:
                                                       note=out['note']))
         out=self.cmd('language',['--to','\u16a0\u16a2\u16a6\u16a8'])
         self.assertEqual((out['language'],out['scripts'],out['check']),('\u16a0\u16a2\u16a6\u16a8',[],False))
-        self.assertIn('not detected',out['note'])
+        self.assertIn('in no script this census knows',out['note'])
+        self.assertNotIn('split between',out['note'])
+        out=self.cmd('language',['--to','ab \u4e2d\u6587'])
+        self.assertEqual((out['language'],out['scripts'],out['check']),('ab \u4e2d\u6587',[],False))
+        self.assertIn('split between Han, Latin',out['note'],'the note names the scripts its letters are in')
+        self.assertNotIn('in no script this census knows',out['note'],'its letters ARE in known scripts')
 
     def test_reading_the_language_creates_no_store_and_no_home(self):
         # review P2: `language` sat under `store=Store(home)`, so a typo'd `--home` was handed a directory and an

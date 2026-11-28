@@ -866,14 +866,23 @@ def main(argv=None,stdin=None):
             # On a read-only call (`language`, no flags) `cfg` is the same read, so one path serves both.
             who=language.from_home(home,cfg)
             # A name the table does not know is read as the script its own letters are written in (`--to पाली`),
-            # so the check is only off when the name has no letter in any script the census knows
-            # (`--to ᚠᚢᚦ`). Say which of the two happened rather than print `scripts: []` and let the owner
-            # believe a drifting reply would be held (#390 review P2, r24).
+            # so the check is off in two cases, not one: the name has no letter in any script the census knows
+            # (`--to ᚠᚢᚦ`), or its letters are split between known scripts with no one in the majority
+            # (`--to ab 中文`), which has letters here but no single script to census. Say which of the two
+            # happened rather than print `scripts: []` and let the owner believe a drifting reply would be held
+            # (#390 review P2, r24; the second case found by my own adversarial pass on `fa45f81`).
             out=dict(language=who['name'],scripts=list(who['scripts']),source=who['source'],check=bool(who['scripts']))
             if not who['scripts']:
-                out['note']=('no script table for %s, and its own letters are in no script this census knows: the '
-                             'prompt asks for it, but a reply that drifts into another script is not detected'
-                             % who['name'])
+                per, _total = language.letters(who['name'])
+                if per:
+                    out['note']=('no script table for %s, and its own letters are split between %s with no one in '
+                                 'the majority: the prompt asks for it, but a reply that drifts into another script '
+                                 'is not detected; write the name in one script to have it checked'
+                                 % (who['name'],', '.join(sorted(per,key=lambda s:(-per[s],s)))))
+                else:
+                    out['note']=('no script table for %s, and its own letters are in no script this census knows: '
+                                 'the prompt asks for it, but a reply that drifts into another script is not detected'
+                                 % who['name'])
             elif language.census_of(who['name'])=='name':
                 out['note']=('no script table for %s: the check censuses %s, the script its name is written in, so '
                              'a reply that leaves that script is held and one that stays is not'
