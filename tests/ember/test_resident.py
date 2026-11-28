@@ -5461,6 +5461,26 @@ for line in sys.stdin:
         done=self.cmd('pause',[gid])
         self.assertEqual(done['state'],'paused','with no daemon the CLI pauses it at once')
 
+    def test_a_nested_child_run_leaves_the_parents_pauses_and_rewinds_alone(self):
+        # a delegate child runs inside the parent's tool call, so the child's loop is the place where the parent's
+        # queued /pause and /rewind used to be applied mid-call (#382 review, Opus 5.5 P2). Scoped to the target.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('Parent.');rt.store.update(parent,state='working')
+            child=rt.store.enqueue('Child.');rt.store.update(child,state='working')
+            for gid,kind in ((parent,'pause'),(parent,'rewind'),(child,'pause')):
+                rt.store.request(gid,kind,{} if kind=='pause' else dict(to=0))
+            rt._apply_pauses(child);rt._apply_rewinds(child)
+            self.assertEqual(rt.store.goal(parent)['state'],'working','the parent was not paused mid-call')
+            self.assertIsNotNone(rt.store.pending_request(parent,'pause'),'its request is still queued')
+            self.assertIsNotNone(rt.store.pending_request(parent,'rewind'),'its rewind is still queued')
+            # the child's own pause did run: scoping is not "apply nothing"
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            # and the daemon's own pass (no target) still applies the parent's
+            rt._apply_pauses()
+            self.assertEqual(rt.store.goal(parent)['state'],'paused','the next unscoped pass applies it')
+        finally:rt.mail.close();rt.store.close()
+
     def test_stop_all_writes_and_lifts_the_shared_stop(self):
         from caminus.cmd import ember as envcmd
         import contextlib, io as _io

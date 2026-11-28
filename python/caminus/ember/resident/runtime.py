@@ -1602,9 +1602,15 @@ class Runtime:
             raise out['error']
         return out['reply']
 
-    def _apply_rewinds(self):
-        """/rewind: queued like /pause and applied here, between steps, so a tool is never cut off mid-call."""
+    def _apply_rewinds(self, only=None):
+        """/rewind: queued like /pause and applied here, between steps, so a tool is never cut off mid-call.
+
+        `only` is the run's target: a delegate child runs inside the parent's tool call, so the parent's own
+        queued /rewind must wait for the parent's next between-steps point, not rewrite its history mid-call
+        (#382 review, Opus 5.5 P2)."""
         for gid in self.store.pending_requests('rewind'):
+            if only is not None and gid != only:
+                continue
             req = self.store.pending_request(gid, 'rewind')
             if req is None:
                 continue
@@ -2630,9 +2636,14 @@ class Runtime:
                 self.store.event('emergency_stop', dict(reason=reason, terminals_killed=left, processes_killed=len(killed)))
         return True
 
-    def _apply_pauses(self):
-        """/pause: queued like /compact and applied here, between steps, so a tool is never cut off mid-call."""
+    def _apply_pauses(self, only=None):
+        """/pause: queued like /compact and applied here, between steps, so a tool is never cut off mid-call.
+
+        `only` is the run's target, for the same reason as _apply_rewinds: a parent paused while its delegate
+        child runs is noticed by the child's own stop check (`parent_gone`), not by pausing it mid-call."""
         for gid in self.store.pending_requests('pause'):
+            if only is not None and gid != only:
+                continue
             req = self.store.pending_request(gid, 'pause')
             if req is None:
                 continue
@@ -3069,8 +3080,10 @@ class Runtime:
         while stop is None or not stop():
             if not target and self._maybe_update():
                 return None                   # systemd restarts the daemon on the new runtime
-            self._apply_pauses()
-            self._apply_rewinds()
+            # `target` is set only for a delegate child's nested run inside the parent's tool call; scoping the
+            # housekeeping to it keeps the parent's queued /pause and /rewind out of the child's loop (#382 review)
+            self._apply_pauses(target)
+            self._apply_rewinds(target)
             if self._emergency_stop():
                 if time.time()-last_heartbeat>=5:
                     atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='stopped',runtime=RUNTIME))
@@ -3084,6 +3097,8 @@ class Runtime:
             if not target:
                 delegate.sweep(self)          # delegate children left runnable by a run that ended
             for gid in self.store.pending_requests('compact'):
+                if target and gid != target:
+                    continue                  # a nested child run must not summarise another goal on the child's brain
                 self.compact_request(gid)
             progressed = False
             if not target:
