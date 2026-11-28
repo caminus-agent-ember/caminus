@@ -84,6 +84,23 @@ def suite_sha(suite):
     return h.hexdigest()
 
 
+def checkout_state(checkout):
+    """What identifies the code an arm runs right now: its commit, whether `python` is dirty, and the tree digest.
+
+    A function, not just `Arm.__init__`'s opening move, because the same three values are read again after the runs:
+    a checkout that moved (a commit, a rebase, an edit of the dirty tree) while the A/B ran measured other bytes than
+    the folder's arms.json names, and a record closed on that mix is permanent (#385 review P1).
+    """
+    checkout = Path(checkout).expanduser().resolve()
+    git = lambda *a: subprocess.run(['git', '-C', str(checkout), *a], capture_output=True, text=True).stdout.strip()
+    return dict(commit=git('rev-parse', '--short=12', 'HEAD') or 'unknown',
+                # a dirty tree is what a harness A/B usually runs: say so in every record
+                dirty=bool(git('status', '--porcelain', '--untracked-files=no', '--', 'python')),
+                # the content the commit and the dirty flag cannot name: a dirty tree edited between two runs keeps
+                # both identical, and `lab.py run` then skips every id and reads the previous rows (Codex P1, #385)
+                tree_sha=_tree_sha(checkout / 'python'))
+
+
 class Arm:
     def __init__(self, name, checkout, config=None, env=None):
         if not name.replace('-', '').replace('_', '').isalnum():
@@ -92,13 +109,8 @@ class Arm:
         self.config, self.env = dict(config or {}), dict(env or {})
         if not (self.checkout / 'python' / 'caminus' / 'ember' / 'resident' / 'cli.py').exists():
             raise ValueError(f'arm {name}: {self.checkout} is not a Caminus checkout')
-        git = lambda *a: subprocess.run(['git', '-C', str(self.checkout), *a], capture_output=True, text=True).stdout.strip()
-        self.commit = git('rev-parse', '--short=12', 'HEAD') or 'unknown'
-        # a dirty tree is what a harness A/B usually runs: say so in every record
-        self.dirty = bool(git('status', '--porcelain', '--untracked-files=no', '--', 'python'))
-        # the content the commit and the dirty flag cannot name: a dirty tree edited between two runs keeps both
-        # identical, and `lab.py run` then skips every id and reads the previous rows (#385 review P1)
-        self.tree_sha = _tree_sha(self.checkout / 'python')
+        self.commit, self.dirty, self.tree_sha = (checkout_state(self.checkout)[k]
+                                                  for k in ('commit', 'dirty', 'tree_sha'))
         self.runtime_sha = None           # the agent host's uploaded zipapp name, known only after prepare()
 
     def describe(self):

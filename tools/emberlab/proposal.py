@@ -164,6 +164,27 @@ def arms_mismatch(prior, spec):
     return ''
 
 
+def arms_drift(arms, spec):
+    """What an arm's checkout says now that differs from the identity the folder recorded, or ''.
+
+    `arms.json` (and `plan.json` beside it) names the commit and tree digest each arm held when the command claimed
+    the folder. The runs then take minutes to hours, and an arm checkout is usually a dirty tree: committing,
+    rebasing or editing it while the A/B runs measures other bytes than the folder names, and the record would close
+    on a mix of both - permanent, since an observed record is append-only. Read the same three values again and
+    compare them with the folder's own record, not with the in-memory `Arm`: the folder is what a reader trusts
+    (#385 review P1). The suite gets the same re-read; this is the arms' half.
+    """
+    recorded = _arms_of(spec)
+    for arm in arms:
+        was = recorded.get(arm.name) if isinstance(recorded.get(arm.name), dict) else {}
+        now = runner.checkout_state(arm.checkout)
+        for k in ('commit', 'tree_sha'):
+            if now[k] != was.get(k):
+                return (f'arm {arm.name}: {k} was {str(was.get(k))[:12]!r} when the folder was claimed and is '
+                        f'{str(now[k])[:12]!r} now ({arm.checkout})')
+    return ''
+
+
 def provenance_refusal(out, arms_file):
     """Why `out` already holds results this command did not write, or '' when it is fresh or its own.
 
@@ -464,6 +485,12 @@ def cmd_propose(a, run, run_defaults=None):
     if runner.suite_sha(suite) != suite_digest:
         raise SystemExit(f'the suite {a.suite} changed while the arms ran: the rows measured other bytes than '
                          f'{out}/arms.json names, so the record stays open (use a fresh --out for the edited suite)')
+    # the same re-read for the arms: a checkout committed, rebased or edited during the runs measured other bytes
+    # than arms.json/plan.json name, and the record would close on a mix of both (#385 review P1)
+    moved = arms_drift(arms, spec)
+    if moved:
+        raise SystemExit(f'the arms changed while they ran ({moved}): the rows measured other bytes than '
+                         f'{out}/arms.json names, so the record stays open (use a fresh --out for the moved checkout)')
     verdict = report_mod.compare(report_mod.load(out), 'base', 'arm')
     print(report_mod.compare_md(verdict), flush=True)
     measured = (f"tools/emberlab propose: suite {suite['name']}, brains "

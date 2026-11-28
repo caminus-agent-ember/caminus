@@ -450,6 +450,45 @@ except SystemExit as e:
     errm = str(e)
 check('changed while the arms ran' in errm and proposal.load_record(ph, rmid['id'])['status'] == 'proposed',
       f'propose: a suite edited while the arms ran leaves the record open ({errm[:200]})')
+# an ARM checkout that moves while the runs execute (a commit, a rebase, an edit of the dirty tree) measured other
+# bytes than arms.json names: the same re-read for the arms keeps the record open (#385 review P1). The in-memory
+# Arm cannot answer this - it read commit/tree once, before the runs - so the check reads the checkout again and
+# compares it with the folder's own record.
+co_base, co_arm = S / 'drift-base', S / 'drift-arm'
+for d in (co_base, co_arm):
+    (d / 'python/caminus/ember/resident').mkdir(parents=True, exist_ok=True)
+    (d / 'python/caminus/ember/resident/cli.py').write_text('print(1)\n')
+    (d / 'python/other.py').write_text('X = 1\n')
+rdrift = sim_record(ph, status='proposed')
+nsd = argparse.Namespace(sim_home=str(ph), record=rdrift['id'], suite='basic', brain=['scripted:solve'], repeats=1,
+                         only='read', host=None, jobs=1, parallel=None, out=str(S / 'propose-drift'),
+                         config=None, env='{"A": "1"}', base_config=None, base_env=None,
+                         arm_checkout=str(co_arm), base_checkout=str(co_base), dry_run=False, approve_paid=False,
+                         unsafe_local=False, prediction_error=None, goal=None)
+
+
+def drift_run(runs):
+    """`lab.py run` while the arm checkout is edited under it: the rows are complete, but for other bytes."""
+    rows = [dict(id='read.scripted-solve.base.r1', brain='scripted:solve', arm='base', task='read', repeat=1, check=True),
+            dict(id='read.scripted-solve.arm.r1', brain='scripted:solve', arm='arm', task='read', repeat=1, check=True)]
+    (S / 'propose-drift').mkdir(parents=True, exist_ok=True)
+    ((S / 'propose-drift') / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    (co_arm / 'python/other.py').write_text('X = 2\n')
+    return 0
+
+
+try:
+    proposal.cmd_propose(nsd, drift_run)
+    err_d = 'closed instead of refusing'
+except SystemExit as e:
+    err_d = str(e)
+check('the arms changed while they ran' in err_d and 'tree_sha' in err_d
+      and proposal.load_record(ph, rdrift['id'])['status'] == 'proposed',
+      f'propose: an arm checkout edited while the runs ran leaves the record open ({err_d[:200]})')
+# and the same function says nothing about an arm that did not move, so the guard cannot turn every run into a refusal
+fresh_arms = proposal.arms_from_proposal(dict(env={'A': '1'}), str(co_base), str(co_arm))
+check(proposal.arms_drift(fresh_arms, proposal.arms_spec(fresh_arms)) == '',
+      'propose: an arm that did not move during its run is not drift, so the guard refuses only what moved')
 # a checkout that MOVED (a commit, a rebase) is a different arm even at the same path: `lab.py run` skips every id
 # already in results.jsonl, so without this a new record would be closed with the previous rows (#385 review P1)
 moved = json.loads((shared / 'arms.json').read_text())
