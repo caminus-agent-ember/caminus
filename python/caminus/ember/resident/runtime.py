@@ -982,6 +982,10 @@ class Runtime:
             own = [t for t in TOOLS if t['function']['name'] != 'browser' or not browser.available()]
             if not sim.enabled(self):
                 own = [t for t in own if t['function']['name'] != 'sim']
+            if not delegate.switched_on(self):
+                # config `delegate: false` is the off switch, and the prompt hid only the section: the tool stayed in
+                # the list, so a spending call was reachable with the switch off (#382 review, Opus 5.5 P1-2).
+                own = [t for t in own if t['function']['name'] != 'delegate']
             self._tools = own + (self.mcp.tools() if self.mcp.servers else [])
         return self._tools
 

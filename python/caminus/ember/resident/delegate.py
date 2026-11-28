@@ -12,9 +12,13 @@ from inside another goal:
 - depth 1: a child cannot delegate, so the tree is one level deep by construction;
 - caps: a step limit, a time limit and a dollar cap. The cap is config `delegate_usd` (0.50 by default) and a
   call's `cap_usd` may lower it, never raise it; reaching it pauses the child and the parent gets a partial
-  report. Only a missing / null cap is no cap: a zero or negative one is refused, because a stored zero used to
-  read as no cap at all. Spend is usd + the OpenCode plan's allowance, because inside a Go allowance a turn costs
-  $0 of money and real allowance;
+  report. The cap is **soft**: it is checked before a turn, and one turn can overshoot it by whatever that turn's
+  output costs against what was left, because the price of a reply is only known once it arrives. Only a missing /
+  null cap is no cap: a zero or negative one is refused, because a stored zero used to read as no cap at all. Spend
+  is usd + the OpenCode plan's allowance, because inside a Go allowance a turn costs $0 of money and real allowance;
+- a budget for all of a parent's children together: config `delegate_total_usd` (2.00 by default) caps the sum of
+  every child row's spend and allowance - closed rows included - so a parent that delegates again and again cannot
+  spend without bound one small child at a time (#382 review);
 - a short structured report back: outcome (completed / capped / failed / incomplete), summary, what it
   verified, what it skipped, steps, spend, allowance and its cap. `capped` covers all three limits: the dollar
   cap, the step limit and the time limit each end a child the same way, and each writes one `delegate_capped`
@@ -44,7 +48,9 @@ import time
 
 _UNSET = object()            # (note_aux's "no snapshot given", distinct from a snapshot of None)
 ROLES = ('worker', 'reviewer')
-DEFAULTS = dict(cap_usd=0.50, max_steps=12, max_seconds=600, max_children=4)
+DEFAULTS = dict(cap_usd=0.50, max_steps=12, max_seconds=600, max_children=4, total_usd=2.00)
+# the config key -> its default's name (the key says what it caps, the default says it in DEFAULTS' own words)
+_MONEY = {'delegate_usd': 'cap_usd', 'delegate_total_usd': 'total_usd'}
 REFUSED = ('write', 'edit', 'checkpoint', 'rollback', 'ask_user', 'ask_root', 'github_handoff', 'send_message',
            'report', 'remember', 'sim', 'schedule', 'lease', 'browser', 'propose_plan', 'delegate', 'advisor')
 CHILD_PROMPT = '''[delegate child of goal {parent}] You are a read-only child goal, run by that goal's delegate tool.
@@ -79,18 +85,41 @@ def _limit(rt, key):
     # typo in the owner's config bricked the tool with a traceback instead of a refusal naming the key. A bool is an
     # int here, so `delegate_max_steps: true` would silently mean one step; it is refused like any other non-number.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError('%s is %r: a limit must be a number of steps or seconds, not %s. Set it to at least 1, or '
-                         'remove the key (the default is %s)'
-                         % (key, value, type(value).__name__, default))
+        raise ValueError('%s is %r: a limit must be a number, not %s. Set it above 0, or remove the key (the '
+                         'default is %s)' % (key, value, type(value).__name__, default))
     if not math.isfinite(value):
-        raise ValueError('%s is %s: a limit must be a finite number of steps or seconds, not something no child '
-                         'can reach (%s by default). Set it to at least 1, or remove the key'
-                         % (key, value, default))
+        raise ValueError('%s is %s: a limit must be a finite number, not something no child can reach (%s by '
+                         'default). Set it above 0, or remove the key' % (key, value, default))
     value = int(value)
     if value < 1:
         raise ValueError('%s is %s: a limit of 0 is not "no limit" and does not mean the default (%s). Set it to '
                          'at least 1, or remove the key' % (key, value, default))
     return value
+
+
+def switched_on(rt):
+    """Whether the delegate tool is offered at all: config `delegate` is not `false`.
+
+    The key is the off switch *and* the role-model dict, and it used to be read as neither where it matters:
+    `tools()` listed the tool under `false` (a spending tool the prompt says is off), and `true` reached
+    `True.get(...)` in _brain - an AttributeError `_action` does not catch, so `tick()` marked the *parent* goal
+    `error` (#382 review, Opus 5.5 P1-2)."""
+    return rt.config.get('delegate', True) is not False
+
+
+def role_models(rt):
+    """The role models: the `delegate` key when it is a dict, {} when the key is absent or null.
+
+    Anything else is a typo - `true`, a string, a list - and is refused here naming the key, rather than
+    crashing later with an AttributeError from a call on a bool (#382 review, Opus 5.5 P1-2)."""
+    cfg = rt.config.get('delegate')
+    if cfg is None:
+        return {}
+    if not isinstance(cfg, dict):
+        raise ValueError('delegate is %r: it is either false (no delegate tool at all) or an object naming the '
+                         'role models, e.g. {"worker_model": "..."}. Set it to one of those, or remove the key'
+                         % (cfg,))
+    return cfg
 
 
 def is_child(store, gid):
@@ -151,27 +180,33 @@ def _call_number(args, key):
     return value
 
 
-def _caps(rt, args):
-    """(cap_usd, max_steps, max_seconds): the config's defaults, lowered by the call, never raised.
+def _money(rt, key):
+    """A config dollar cap: a missing or null key takes the default, and zero, negative or non-finite is refused.
 
-    A cap is a positive number; a missing or null config key takes the default. Zero or less is refused rather
-    than read as "unlimited": `cap_usd=0` used to disable a child's cap altogether (#382 review), and a cap
-    nobody can reach is not a cap."""
-    cfg = rt.config
-    cap = cfg.get('delegate_usd', DEFAULTS['cap_usd'])
+    `delegate_usd` and `delegate_total_usd` are read the same way, so a typo cannot be a refusal on one and a
+    silently uncapped budget on the other. A cap of 0 used to disable a child's cap altogether (#382 review), and
+    a non-finite one (`spend < inf`) can never trip: neither is a cap, so both are refused naming the key."""
+    default = DEFAULTS[_MONEY[key]]
+    cap = rt.config.get(key)
     # the same typo as `_limit`'s ("0.5" quoted, or "abc"): `float` raised a bare ValueError or a TypeError from
     # every delegate call instead of a refusal naming the key (#382 review, rev-glm P2)
     if cap is not None and (isinstance(cap, bool) or not isinstance(cap, (int, float))):
-        raise ValueError('delegate_usd is %r: a cap must be a number of dollars, not %s. Set a positive cap (the '
-                         'default is %s)' % (cap, type(cap).__name__, DEFAULTS['cap_usd']))
-    cap = DEFAULTS['cap_usd'] if cap is None else float(cap)
+        raise ValueError('%s is %r: a cap must be a number of dollars, not %s. Set a positive cap (the default is '
+                         '%s)' % (key, cap, type(cap).__name__, default))
+    cap = float(default) if cap is None else float(cap)
     # (a NaN passed `cap <= 0` as False and `min(cap, nan)` carried it on, and a stored NaN is an IntegrityError the
     # owner reads as a crash; an infinite cap is stored and `spend < inf` never trips: a non-finite cap is no cap -
     # #382 review, rev-glm P2)
     if not math.isfinite(cap) or cap <= 0:
-        raise ValueError('delegate_usd is %s: a cap of 0 does not mean unlimited and a cap must be a finite '
-                         'number, so no child can run under it. Set a positive cap (the default is %s)'
-                         % (cfg.get('delegate_usd'), DEFAULTS['cap_usd']))
+        raise ValueError('%s is %s: a cap of 0 does not mean unlimited and a cap must be a finite number, so no '
+                         'child can run under it. Set a positive cap (the default is %s)'
+                         % (key, rt.config.get(key), default))
+    return cap
+
+
+def _caps(rt, args):
+    """(cap_usd, max_steps, max_seconds): the config's defaults, lowered by the call, never raised."""
+    cap = _money(rt, 'delegate_usd')
     if args.get('cap_usd') is not None:
         their = _call_number(args, 'cap_usd')
         if their <= 0:
@@ -202,7 +237,7 @@ def _brain(rt, args):
     name = str(args.get('model') or '').strip()
     provider = str(args.get('provider') or '').strip() or None
     if not name:
-        name = str((rt.config.get('delegate') or {}).get(role + '_model') or '').strip()
+        name = str(role_models(rt).get(role + '_model') or '').strip()
     if not name:
         # the parent's own brain. The same priceability refusal a named catalog model gets (below), because a
         # cap that reads a price of None can never trip: the child would be bounded by its steps and deadline
@@ -230,6 +265,12 @@ def _brain(rt, args):
     endpoint, api = catalog.transport(spec, entry)
     conf = dict(rt.config)
     conf.update(model=entry['id'], provider=entry['provider'], provider_kind=spec['kind'], endpoint=endpoint, api=api)
+    # the parent's key variable is not the child's key: on a direct (non-relay) provider it would send the
+    # parent's key to another provider's endpoint, and the child, not the owner, picked that provider. A provider
+    # that names its own variable in config `providers` keeps it (#382 review, Opus 5.5 P2).
+    conf.pop('api_key_env', None)
+    if spec.get('api_key_env'):
+        conf['api_key_env'] = spec['api_key_env']
     # the entry's own facts, by the same normalization /model uses (an OpenCode plan charges what its reply says, so
     # its price tables are not needed; any other paid brain must be priceable or its cap can never be read)
     catalog.apply_entry(conf, entry, spec)
@@ -249,6 +290,11 @@ def prepare(rt, args, parent=None):
     delegated spend never reaches the free-time ledger, while the child's registered brain bypasses
     Brains.choose() and its plan restrictions (#382 review). Refusing here beats propagating a second policy."""
     from .freetime import KINDS as FREE_KINDS
+    if not switched_on(rt):
+        # the off switch, checked where the call lands as well as in tools(): a model replaying an old action, or a
+        # goal whose tool list was built before the owner flipped the key, must not spend through it (#382 review).
+        raise ValueError('delegate is off in config (delegate: false): this goal cannot start a child. Ask your '
+                         'human to set delegate to a role-model object or remove the key')
     if parent:
         r = rt.store.db.execute('SELECT kind FROM goals WHERE id=?', (parent,)).fetchone()
         kind = (r['kind'] if r else '') or 'work'
@@ -267,9 +313,30 @@ def prepare(rt, args, parent=None):
     if role not in ROLES:
         raise ValueError('role must be one of ' + ', '.join(ROLES))
     cap, steps, secs = _caps(rt, args)
+    # A oneshot parent with 60 s left must not block for the child's 600: the child's deadline is the earlier of
+    # its own and the parent's, so a parent that is itself out of time does not outlive its own limit through a
+    # child (#382 review, Opus 5.5 P2).
+    if parent:
+        r = rt.store.db.execute('SELECT deadline FROM goals WHERE id=?', (parent,)).fetchone()
+        left = (r['deadline'] if r else None)
+        if left:
+            secs = max(1, min(secs, int(left - time.time())))
     model, who = _brain(rt, args)
     return dict(task=task, done=done, role=role, cap_usd=cap, max_steps=steps, max_seconds=secs,
                 model=model, who=who)
+
+
+def total(rt, parent):
+    """Every dollar this parent's children have spent or been allowed, open rows and closed ones alike.
+
+    `start()`'s running count is checked at a moment when a serial parent has no open row at all - `run_child`
+    closes the row before the call returns - so `delegate_max_children` never tripped and a parent could grow an
+    unbounded series of children, each under its own cap (#382 review, Opus 5.5 P1-1). The sum over the rows is
+    the bound that matches that shape: it is a fact in the store, so it survives a restart and a second runtime,
+    and a child whose row is closed still counts what it cost."""
+    return float(rt.store.db.execute(
+        "SELECT coalesce(sum(coalesce(spend_usd,0)+coalesce(allowance_usd,0)),0) FROM delegates WHERE parent=?",
+        (parent,)).fetchone()[0] or 0.0)
 
 
 def start(rt, parent, args, prepared=None):
@@ -284,6 +351,12 @@ def start(rt, parent, args, prepared=None):
     if used >= limit:
         raise ValueError('this goal has %d delegate children still running (delegate_max_children): their '
                          'reports arrive first; do the rest yourself, or delegate again once one finishes' % limit)
+    budget = _money(rt, 'delegate_total_usd')
+    spent = total(rt, parent)
+    if spent >= budget:
+        raise ValueError('this goal\'s delegate children have used $%.4f of delegate_total_usd $%.4f: another '
+                         'child could spend past what this goal may delegate in total. Raise delegate_total_usd, '
+                         'or do the rest yourself' % (spent, budget))
     child = rt.store._enqueue(CHILD_PROMPT.format(parent=parent[:8], task=p['task'], done=p['done']),
                               max_steps=p['max_steps'], max_seconds=p['max_seconds'], kind='delegate')
     who = p['who']

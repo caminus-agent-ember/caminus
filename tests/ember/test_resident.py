@@ -3156,6 +3156,145 @@ for line in sys.stdin:
             while isinstance(rt.store.db,Wrap): rt.store.db=rt.store.db.db
             rt.mail.close();rt.store.close()
 
+    def test_a_parents_delegate_spend_is_bounded_in_total(self):
+        # `delegate_max_children` counts rows with outcome='' and `run_child` closes its row before returning, so a
+        # serial parent never saw a running child and could delegate all day, each child under its own cap. The
+        # total over the parent's rows - closed rows included - is the bound (#382 review, Opus 5.5 P1-1).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate_total_usd']=1.0
+            parent=rt.store.enqueue('p')
+            def prep():return dict(task='t',done='d',role='worker',cap_usd=.5,max_steps=4,max_seconds=60,
+                                   model=rt.model,who={})
+            for_=prep()
+            for spent in (.6,.6):
+                child=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(child,parent,'','','worker',.5)
+                rt.store.delegate_spend(child,spent,0.0)
+                rt.store.delegate_done(child,'completed',dict(outcome='completed'))
+            self.assertAlmostEqual(delegate.total(rt,parent),1.2,msg='closed rows still count',places=6)
+            with self.assertRaises(ValueError) as caught:
+                delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=for_)
+            msg=str(caught.exception)
+            self.assertIn('delegate_total_usd',msg)
+            self.assertIn('1.2000',msg,'the refusal names what was spent')
+            rows=rt.store.db.execute('SELECT child FROM delegates WHERE parent=?',(parent,)).fetchall()
+            self.assertEqual(len(rows),2,'no third child row')
+            # the totals are per parent: another goal's children do not spend this goal's budget
+            other=rt.store.enqueue('other')
+            self.assertEqual(delegate.total(rt,other),0.0)
+            # and a raised budget lets the next child through
+            rt.config['delegate_total_usd']=2.0
+            self.assertEqual(delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['outcome'],
+                             'running')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_delegate_switch_off_removes_and_refuses_the_tool(self):
+        # config `delegate: false` is the off switch: the prompt hid its section while the tool stayed in the
+        # list, so a spending call was still reachable (#382 review, Opus 5.5 P1-2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            names=[t['function']['name'] for t in rt.tools]
+            self.assertIn('delegate',names,'the key is absent here, so the tool is offered')
+            rt.config['delegate']=False
+            rt._tools=None
+            self.assertNotIn('delegate',[t['function']['name'] for t in rt.tools],'the off switch removes it')
+            parent=rt.store.enqueue('p')
+            with self.assertRaises(ValueError) as caught:
+                delegate.prepare(rt,dict(task='t',done_check='d'),parent)
+            self.assertIn('delegate is off',str(caught.exception))
+            # `start()` goes through prepare() too, so no path reaches a child with the switch off
+            with self.assertRaises(ValueError):
+                delegate.start(rt,parent,dict(task='t',done_check='d'))
+            self.assertEqual(rt.store.db.execute("SELECT count(*) FROM goals WHERE kind='delegate'").fetchone()[0],0)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_delegate_switch_on_is_not_a_role_model_dict(self):
+        # `delegate: true` reached `True.get('worker_model')` and raised AttributeError, which _action does not
+        # catch: tick() marked the *parent* goal error (#382 review, Opus 5.5 P1-2). It reads as a refusal now.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate']=True
+            self.assertTrue(delegate.switched_on(rt),'`true` is not the off switch, so the tool stays offered')
+            with self.assertRaises(ValueError) as caught:
+                delegate.role_models(rt)
+            self.assertNotIsInstance(caught.exception,AttributeError)
+            self.assertIn('delegate is True',str(caught.exception))
+            self.assertIn('role models',str(caught.exception),'the refusal says what the key is for')
+            # any other non-object value is the same refusal, and a null key is no roles, not a crash
+            rt.config['delegate']=None
+            self.assertEqual(delegate.role_models(rt),{})
+            for typo in ('worker_model=fast',['worker_model'],0):
+                rt.config['delegate']=typo
+                with self.assertRaises(ValueError) as caught:
+                    delegate.role_models(rt)
+                self.assertIn('delegate is',str(caught.exception),'the refusal names the key: %r'%(typo,))
+            parent=rt.store.enqueue('p')
+            rt.config['delegate']=True
+            with self.assertRaises(ValueError) as caught:
+                delegate.prepare(rt,dict(task='t',done_check='d'),parent)
+            self.assertNotIsInstance(caught.exception,AttributeError)
+            self.assertIn('delegate is True',str(caught.exception))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_childs_seconds_are_clamped_to_the_parents_time(self):
+        # a oneshot parent with 30 s left delegated a 600 s child and blocked past its own deadline; the child's
+        # deadline is the earlier of its own and the parent's (#382 review, Opus 5.5 P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p',max_seconds=30)
+            p=delegate.prepare(rt,dict(task='t',done_check='d'),parent)
+            self.assertLessEqual(p['max_seconds'],30)
+            self.assertGreaterEqual(p['max_seconds'],1)
+            # a parent with no deadline leaves the configured maximum alone
+            open_ended=rt.store.enqueue('q')
+            self.assertEqual(delegate.prepare(rt,dict(task='t',done_check='d'),open_ended)['max_seconds'],600)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_catalog_child_does_not_inherit_the_parents_api_key_env(self):
+        # the parent's key variable sent a catalog child's requests to another provider's endpoint with it: the
+        # child, not the owner, picked that provider. The provider's own variable, when it names one, is kept
+        # (#382 review, Opus 5.5 P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        def catalog_of(id):
+            return dict(updated=1,providers={},models=[dict(id=id,name=id,provider='deepinfra',context=32000,
+                        max_output=None,efforts=[],thinking='',vision=False,
+                        prices=dict(input=1.0,output=2.0,cache_read=0.5))])
+        try:
+            rt.config['api_key_env']='PARENTS_OWN_KEY'
+            rt.config['providers']={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai')}
+            (self.home/'models.json').write_text(json.dumps(catalog_of('someone/priced')))
+            brain,who=delegate._brain(rt,dict(model='someone/priced'))
+            self.assertNotEqual(brain.config.get('api_key_env'),'PARENTS_OWN_KEY')
+            self.assertIsNone(brain.config.get('api_key_env'),'no inherited variable, so the default is used')
+            # a provider that names its own variable keeps it
+            rt.config['providers']={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai',
+                                                     api_key_env='DEEPINFRA_KEY')}
+            brain,who=delegate._brain(rt,dict(model='someone/priced'))
+            self.assertEqual(brain.config.get('api_key_env'),'DEEPINFRA_KEY')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_latest_goal_skips_a_delegate_child(self):
+        # a child is created by its parent's call, so it is the newest row while it runs: `pause`, `rewind`, `diff`
+        # and `compact` with no id landed on it instead of the goal the human was looking at (#382 review, P2).
+        rt=Runtime(self.home)
+        try:
+            work=rt.store.enqueue('the goal the human is watching')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,work,'','','worker',.5)
+            self.assertEqual(rt.store.latest_goal(),work)
+            # a store with nothing but a child has no goal a command may land on: it still says "no goals yet"
+            rt.store.db.execute("UPDATE goals SET kind='delegate'")
+            with self.assertRaises(ValueError) as caught:
+                rt.store.latest_goal()
+            self.assertIn('no goals yet',str(caught.exception))
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_children_limit_counts_running_children_not_every_child_ever_made(self):
         # count(*) counted every child the parent ever made, so after 4 finished children it could never delegate
         # again, while the refusal said finishing one frees a slot (#382 review). Running rows count; a child's

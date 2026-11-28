@@ -516,7 +516,13 @@ class Store:
         return rows[0]
 
     def latest_goal(self):
-        r = self.db.execute('SELECT id FROM goals ORDER BY created DESC LIMIT 1').fetchone()
+        """The newest goal a command names when it names none - never a delegate child.
+
+        A child is created by its parent's call, so it is the newest row while it runs: `pause`, `rewind`, `diff` and
+        `compact` without an id landed on it instead of on the goal the human was looking at (#382 review, Opus 5.5
+        P2). A child is reached by id, which its parent's report carries."""
+        r = self.db.execute("SELECT id FROM goals WHERE ifnull(kind,'') <> 'delegate' ORDER BY created DESC "
+                            "LIMIT 1").fetchone()
         if r is None:
             raise ValueError('no goals yet')
         return r['id']
