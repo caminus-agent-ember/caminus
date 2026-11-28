@@ -28,7 +28,61 @@ ROOT = Path(__file__).resolve().parents[2]
 LAB = [sys.executable, '-I', str(ROOT / 'tools/emberlab/lab.py')]
 TUI = [sys.executable, '-I', str(ROOT / 'tools/emberlab/tui.py')]
 ap = argparse.ArgumentParser(); ap.add_argument('--scratch', required=True)
-S = Path(ap.parse_args().scratch).resolve(); S.mkdir(parents=True, exist_ok=True)
+ap.add_argument('--prepare-only', action='store_true',
+                help='prepare --scratch and exit (the checks below test this clearing rule with it)')
+a = ap.parse_args()
+S = Path(a.scratch).resolve()
+MARK = S / '.emberlab-test-scratch'
+
+
+def _force(p):
+    """Remove one entry, even a read-only directory a killed run left behind (the 0o555 checks).
+
+    Bottom-up by hand rather than shutil.rmtree: rmtree's fd-based walk hands its error hook a bare
+    name, which cannot be chmod'ed and retried from there, and a 0o555 parent refuses its children's
+    unlinks. Setting the directory writable first, then removing what it holds, always terminates.
+    """
+    import stat
+    if p.is_symlink() or not p.is_dir():
+        try:
+            p.unlink()
+        except PermissionError:
+            p.chmod(stat.S_IRWXU)
+            p.unlink()
+        return
+    p.chmod(stat.S_IRWXU)
+    for c in p.iterdir():
+        _force(c)
+    p.rmdir()
+
+
+def prepare_scratch():
+    """A directory this test may clear: empty, or one it marked itself on an earlier run.
+
+    The checks below drive real runs into S; a previous run leaves results, plan.md digests and a
+    scratch home behind, and the next run would read them as its own (a stale digest, a KeyError on a
+    record it never wrote). So a marked scratch is cleared first. A directory holding anyone else's
+    files is REFUSED and left exactly as it is: --scratch can be a typo, and that typo must not delete.
+    """
+    if S.exists() and not S.is_dir():
+        sys.exit(f'refusing --scratch {S}: it exists and is not a directory')
+    if S.is_dir() and not MARK.exists() and any(S.iterdir()):
+        sys.exit(f'refusing --scratch {S}: it is not empty and carries no {MARK.name} marker.\n'
+                 f'That marker means "a previous run of this test made this directory and it may be '
+                 f'cleared". Pass a fresh or empty directory, or delete {S} yourself.')
+    S.mkdir(parents=True, exist_ok=True)
+    for p in list(S.iterdir()):
+        if p.name != MARK.name:
+            _force(p)
+    if MARK.exists():
+        MARK.chmod(0o644)
+    MARK.write_text('this directory is a scratch of tests/tools/test_emberlab.py; a later run clears it\n')
+    print(f'scratch {S} ready (cleared; marked {MARK.name})', flush=True)
+
+
+prepare_scratch()
+if a.prepare_only:
+    sys.exit(0)
 FAILS = []
 sys.path.insert(0, str(ROOT / 'tools/emberlab'))
 import report  # noqa: E402
@@ -999,6 +1053,43 @@ check(mech({'base_config': {'sim': True}}, [argparse.Namespace(checkout=Path('/a
 check(mech({}, [argparse.Namespace(checkout=Path('/a')), argparse.Namespace(checkout=Path('/a'))])
       == '(none: the two arms are identical)',
       'propose: a difference nothing produced says so rather than naming no flag')
+
+# ---- scratch hygiene
+# rev-muse P2 on #385: the checks drive real runs into --scratch and a previous run leaves results,
+# plan.md digests and a scratch home behind; a re-run into the same dir used to fail spuriously
+# (KeyError 'observed_by', a stale digest) instead of starting clean. What is pinned here: a marked
+# scratch is cleared and reused, and a directory holding someone else's files is refused untouched.
+foreign = S.parent / (S.name + '-foreign')
+if foreign.exists():
+    _force(foreign)
+foreign.mkdir(parents=True)
+(foreign / 'keep.txt').write_text('not mine to delete\n')
+p = subprocess.run([sys.executable, '-I', str(Path(__file__).resolve()), '--scratch', str(foreign),
+                    '--prepare-only'], capture_output=True, text=True, timeout=120)
+check(p.returncode != 0 and MARK.name in p.stdout + p.stderr and (foreign / 'keep.txt').read_text() == 'not mine to delete\n',
+      f'scratch: a non-empty directory without the marker is refused and left alone ({p.returncode}; {(p.stdout + p.stderr)[:160]})')
+reused = S.parent / (S.name + '-reuse')
+if reused.exists():
+    _force(reused)
+# a real first run: the dir starts empty, prepare marks it, then the checks leave their state behind
+p0 = subprocess.run([sys.executable, '-I', str(Path(__file__).resolve()), '--scratch', str(reused),
+                     '--prepare-only'], capture_output=True, text=True, timeout=120)
+stale = reused / 'run'
+stale.mkdir()
+(stale / 'results.jsonl').write_text('{"stale": true}\n')
+p1 = subprocess.run([sys.executable, '-I', str(Path(__file__).resolve()), '--scratch', str(reused),
+                     '--prepare-only'], capture_output=True, text=True, timeout=120)
+cleared1 = not stale.exists()
+stale.mkdir(parents=True)
+(stale / 'results.jsonl').write_text('{"stale": true, "second run": true}\n')
+p2 = subprocess.run([sys.executable, '-I', str(Path(__file__).resolve()), '--scratch', str(reused),
+                     '--prepare-only'], capture_output=True, text=True, timeout=120)
+check(p0.returncode == 0 and p1.returncode == 0 and cleared1 and p2.returncode == 0
+      and not stale.exists() and (reused / MARK.name).exists(),
+      f'scratch: a marked scratch is cleared and reused, twice ({p0.returncode}/{p1.returncode}/{p2.returncode}; '
+      f'{(p1.stdout + p2.stdout)[:160]})')
+_force(foreign)
+_force(reused)
 
 # ---- tui
 if shutil.which('tmux'):
