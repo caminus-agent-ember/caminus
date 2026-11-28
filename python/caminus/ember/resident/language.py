@@ -122,7 +122,7 @@ def _strip_quoted(text):
     """
     def one(match):
         span = match.group(0)
-        if _census(span[1:-1])[1] < QUOTE_MIN_UNITS:
+        if _census(prose(span[1:-1]))[1] < QUOTE_MIN_UNITS:
             return span
         return ' '
     return _QUOTED.sub(one, text)
@@ -158,15 +158,23 @@ def script_of(ch):
 
 
 def units(text):
-    """Units per script (see the module docstring), and their total."""
+    """Units per script of a reply (see the module docstring), and their total: prose in, one census out."""
     return _census(prose(text))
 
 
 def _census(text):
-    """Units per script of text that is already prose: the counter `units` and the quote floor share."""
+    """Units per script of text that is already prose: `units` is the one wrapper that strips code and quotations.
+
+    Counting the text it is given (not `prose(text)` again) keeps one pass per reply (rev-muse P2 on `58d39b8`):
+    `units()` used to hand `prose(text)` to a counter that applied `prose()` a second time, and the quote floor
+    reached the same counter, so the reply the checker recorded and the span the floor measured were counted by
+    two passes whose agreement nothing pinned. The floor still prose's its own span (`_strip_quoted`), because a
+    code block inside a quotation is not the citation's units; that is a sub-span, not a second pass over the
+    reply.
+    """
     per = {}
     script, run = '', 0
-    for ch in prose(text):
+    for ch in text:
         s = script_of(ch)
         if s == script:
             run += 1
@@ -218,8 +226,9 @@ def drift_detail(text, scripts):
     if not scripts:
         return None
     if any(s in SPACELESS for s in scripts):
-        text = _without_borrowed(text, scripts)
-    per, total = units(text)
+        per, total = _census(_without_borrowed(text, scripts))   # that helper returns prose: one pass, not two
+    else:
+        per, total = units(text)
     foreign = {s: n for s, n in per.items() if s not in scripts}
     other = sum(foreign.values())
     own = total - other
@@ -255,7 +264,7 @@ def _without_borrowed(text, own):
     kept = []
     for clause in _CLAUSE.split(prose(text)):
         if any(script_of(ch) in own for ch in clause):
-            per, _ = units(clause)
+            per, _ = _census(clause)          # clauses come from `prose`, so the counter takes them as they are
             borrowed = [s for s in per if s not in own]
             if sum(per[s] for s in borrowed) <= sum(per.get(s, 0) for s in own):
                 clause = ''.join(ch for ch in clause if script_of(ch) not in borrowed)

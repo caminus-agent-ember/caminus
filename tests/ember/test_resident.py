@@ -2892,6 +2892,31 @@ for line in sys.stdin:
         self.assertIsNone(language.drift(labels,('Latin',)),
                           'nor does a short curly-quoted label make English prose a drift')
 
+    def test_a_reply_is_censused_in_one_prose_pass_and_prose_is_not_idempotent(self):
+        # rev-muse P2 on `58d39b8`: `units()` handed `prose(text)` to `_census`, which applied `prose()` again, and
+        # the quote floor reached the same private counter, so the text the checker recorded and the text the floor
+        # measured were two passes whose agreement nothing pinned. Ordinary replies strip to a fixed point, so no
+        # wrong nudge was reproduced then; a quote/tick shape like this one is not a fixed point (`"`"`x开x"` reads
+        # as `" x开x"` once, `' '` twice), and the old double pass censused the whole reply as nothing at all.
+        from caminus.ember.resident import language
+        q,tick='"','`'
+        tricky=q+tick+q+tick+'x\u5f00x'+q
+        self.assertEqual(language.prose(language.prose(tricky)),' ',
+                         'the shape this pins: a second `prose()` pass empties what the first one kept')
+        self.assertEqual(language.prose(tricky),q+' x\u5f00x'+q,'one pass keeps the reply it reads')
+        self.assertEqual(language.units(tricky),({'Latin': 2, 'Han': 1}, 3),
+                         'one prose pass per reply: the old census was ({}, 0) here (the defect)')
+        # the floor is still on the span's units, and the two forms of the r23 label pin still read the same
+        labels='Flags "\u5f00" "\u5173" "\u505c" "\u8d70" set.'
+        self.assertEqual(language.units(labels),({'Latin': 2, 'Han': 4}, 6),'a short label is still a term')
+        # and the clause pass under a spaceless owner takes the clauses `prose()` already produced
+        self.assertEqual(language.drift('\u5206\u652f\u5df2\u63a8\u9001 "ok" \u73b0\u5728\u5f00 PR\u3002',('Han',)),None,
+                         'a borrowed Latin term inside a Han clause is a term, not a drift')
+        mixed='\u5df2\u63a8\u9001\u3002We pushed the branch and opened the pull request for review.\u3002'
+        hit=language.drift(mixed,('Han',))
+        self.assertEqual(hit[0],'Latin','a clause that is another script is still the reply switching')
+        self.assertAlmostEqual(hit[1],11/14,places=6,msg="the share is the sum of the foreign clause's units")
+
     def test_the_prompt_op_and_a_live_session_name_the_same_language(self):
         # review P2 (r16): `agent prompt` reads the language through `language.from_home` and a live session
         # through `language.owner`; they agree by construction (config `language`, then the same goal window
