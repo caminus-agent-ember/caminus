@@ -276,14 +276,36 @@ check(p.returncode == 0 and closed['status'] == 'observed' and 'no difference' i
 # "suite basic" is a verdict over an unknown part of the suite (#385 review P2)
 check('tasks 1/5 (read)' in (closed.get('eval_context') or ''),
       f'propose: the observation names the tasks that ran ({closed.get("eval_context", "")[-300:]})')
-# one shape for the arms: `arms.json` and the run's `plan.json` are both `Arm.describe()` (#385 review P2, Growth)
+# one shape for the arms: `arms.json` and the run's `plan.json` are both `Arm.describe()` (#385 review P2, Growth).
+# plan.json drops the env VALUES and keeps their names and a digest: `--env` carries relay keys and home paths, and
+# plan.json is a plain file beside the rows, so the values belong only in arms.json, which `load_arms` runs from
+# (#385 review P2).
 spec = json.loads((po / 'arms.json').read_text())
 plan_j = json.loads((po / 'plan.json').read_text())
-check(spec['arms'] == {x['name']: x for x in plan_j['arms']} and spec['plan']['suite'] == 'basic'
+_stripped = {x['name']: {k: v for k, v in x.items() if k not in ('env', 'env_keys', 'env_sha')} for x in plan_j['arms']}
+check(_stripped == {n: {k: v for k, v in a.items() if k != 'env'} for n, a in spec['arms'].items()}
+      and all('env' not in x and 'env_keys' in x and 'env_sha' in x for x in plan_j['arms'])
+      and spec['plan']['suite'] == 'basic'
       and spec['plan']['brains'] == ['scripted:solve'] and spec['plan']['only'] == ['read']
       and 'approvals' in spec['plan'] and plan_j.get('approvals') is None,
       f'propose: arms.json is plan.json\'s arms and the plan that reads them ({sorted(spec.get("arms", {}))}, '
       f'{spec.get("plan")})')
+# the env values stay out of plan.json, and the digest still names them exactly: a reader with arms.json can check
+# that plan.json describes the same env without plan.json ever holding the value (#385 review P2)
+se = S / 'sim-env'
+sim, store, rt = proposal._open(se)
+renv = sim.record(rt, 'g-propose', dict(change='c', predicted='p', status='proposed'))
+store.close()
+# (its own variable: the plan.md check below reads `p.stdout`, and reassigning `p` here compared another command)
+pe = S / 'propose-env'
+penv = lab('propose', '--sim-home', str(se), '--record', renv['id'], '--brain', 'scripted:solve',
+           '--config', '{"sim": false}', '--env', '{"SIM_TOKEN": "s3cret-value"}', '--only', 'read',
+           '--out', str(pe), '--dry-run')
+plain = (pe / 'plan.json').read_text() if (pe / 'plan.json').exists() else ''
+check(penv.returncode == 0 and 's3cret-value' not in penv.stdout,
+      f'propose: --env values never reach the printed plan ({penv.returncode}; {penv.stdout[-200:]})')
+check(not (pe / 'plan.json').exists() and plain == '',
+      'propose: --dry-run writes no plan.json at all')
 # the printed plan is the owner's record of what they approved; arms.json and plan.json hold the machine identity,
 # so a reader of the folder should not have to reconstruct the human-facing text (#385 review P2). The file is
 # written after the claim, and its text is the text that was printed, digest and all.

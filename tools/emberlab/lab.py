@@ -76,7 +76,7 @@ def cmd_run(a):
     # task keeps `suite`'s name and every task key, so the name alone does not say which bytes ran (#385 review P1)
     (out / 'plan.json').write_text(json.dumps(dict(suite=suite['name'], suite_sha=runner.suite_sha(suite),
                                                    host=host_kind, repeats=a.repeats,
-                                                   brains=[b.label() for b in bs], arms=[x.describe() for x in arms],
+                                                   brains=[b.label() for b in bs], arms=[x.plan_arm() for x in arms],
                                                    # the flag that unlocked the host, as given: the record says which
                                                    # permission a run held, not just that it held one (#385 review P2)
                                                    approvals=proposal_mod.approvals_granted(a),

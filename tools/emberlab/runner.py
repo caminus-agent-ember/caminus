@@ -124,6 +124,23 @@ class Arm:
                     tree_sha=self.tree_sha, config=dict(self.config), env=dict(self.env),
                     runtime_sha=self.runtime_sha)
 
+    def env_sha(self):
+        """A digest of the env the arm runs with, order-independent: the same env has the same digest anywhere."""
+        return hashlib.sha256(json.dumps(sorted(self.env.items())).encode()).hexdigest()
+
+    def plan_arm(self):
+        """`describe()` as `plan.json` records it: the env values become their names and a digest.
+
+        `--env` is how an arm gets a relay key or a home path, and `plan.json` was writing those values into a plain
+        file beside the rows. `arms.json` keeps them because `load_arms` runs the arm from that file; `plan.json`
+        needs only what makes the plan reproducible, so it names the keys and `env_sha`, and a digest can be checked
+        against `arms.json` without the value ever being written twice (#385 review P2).
+        """
+        d = self.describe()
+        d.pop('env')
+        d.update(env_keys=sorted(self.env), env_sha=self.env_sha())
+        return d
+
 
 def load_arms(specs, arms_file):
     """--arm NAME[=CHECKOUT] (repeatable) and/or --arms FILE ({"NAME": {"checkout", "config", "env"}})"""
