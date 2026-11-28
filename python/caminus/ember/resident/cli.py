@@ -733,8 +733,11 @@ def main(argv=None,stdin=None):
             # home (both read config `language`, then the same `_GOALS` window through `derive`), and
             # `test_the_prompt_op_and_a_live_session_name_the_same_language` reads one home through both (#390 review P2).
             from . import language
-            sim_on=bool(_read_config(home,missing_ok=True).get('sim',True))
-            who=language.from_home(home)
+            # One read of config.json for both: `sim` and the language must come from the same snapshot, and a
+            # second read inside `from_home` could see a different file (rev-muse P2 on `dfe53fb`).
+            cfg=_read_config(home,missing_ok=True)
+            sim_on=bool(cfg.get('sim',True))
+            who=language.from_home(home,cfg)
             value=render_prompt(home,sim=sim_on,language=who['name'],source=who['source'])
             emit(dict(prompt=value),True) if a.json else print(value)
             return 0
