@@ -511,6 +511,60 @@ check('the arms changed while they ran' in err_d and 'tree_sha' in err_d
 fresh_arms = proposal.arms_from_proposal(dict(env={'A': '1'}), str(co_base), str(co_arm))
 check(proposal.arms_drift(fresh_arms, proposal.arms_spec(fresh_arms)) == '',
       'propose: an arm that did not move during its run is not drift, so the guard refuses only what moved')
+# the runs read their config/env from the folder's arms.json (`run --arms`), not from the Arm object this command
+# holds: editing that file while the runs execute measures other bytes than the folder's identity, and the record
+# would close on a mix of both. So the re-read compares config/env too, prints digests (an `--env` may carry a relay
+# key), and a file that is gone or no longer names an arm refuses rather than passing (#385 review P1).
+import threading  # noqa: E402
+fdir = S / 'arms-drift-file'
+fdir.mkdir(parents=True, exist_ok=True)
+farms = proposal.arms_from_proposal(dict(env={'A': '1'}), str(co_base), str(co_arm))
+fspec = proposal.arms_spec(farms)
+afile = fdir / 'arms.json'
+afile.write_text(json.dumps(fspec))
+check(proposal.arms_drift(farms, fspec, arms_file=afile) == '',
+      'propose: an arms.json that still says what the folder claimed is not drift')
+ed = json.loads(json.dumps(fspec))
+ed['arms']['arm']['env'] = {'A': '2'}
+afile.write_text(json.dumps(ed))
+msg = proposal.arms_drift(farms, fspec, arms_file=afile)
+check('env' in msg and 'claimed' in msg and 'A' not in msg,
+      f'propose: an arms.json env edited during the runs is drift, and the message digests the values ({msg[:160]})')
+ed = json.loads(json.dumps(fspec))
+del ed['arms']['arm']
+afile.write_text(json.dumps(ed))
+msg = proposal.arms_drift(farms, fspec, arms_file=afile)
+check('no longer names it' in msg,
+      f'propose: an arms.json that dropped an arm towards the end of the runs refuses ({msg[:160]})')
+afile.unlink()
+msg = proposal.arms_drift(farms, fspec, arms_file=afile)
+check('cannot be read back' in msg,
+      f'propose: an arms.json gone during the runs refuses instead of passing the checkout check ({msg[:160]})')
+# on a filesystem without hard links the create fallback makes the name and fills it after, so a loser of that
+# race can read an empty file: the read is retried, so a whole spec that lands within the window compares as
+# usual instead of a refusal saying 'is not JSON' (#385 review P2)
+race = S / 'claim-race'
+race.mkdir(parents=True, exist_ok=True)
+rfile = race / 'arms.json'
+rfile.write_text('')
+rspec = proposal.arms_spec(farms, dict(suite='basic', suite_sha='x', brains=[], only=[], repeats=1, approvals=[]))
+
+
+def whole_later():
+    time.sleep(0.12)
+    rfile.write_text(json.dumps(rspec))
+
+
+th = threading.Thread(target=whole_later)
+th.start()
+res = proposal.claim_folder(rfile, rspec)
+th.join()
+check(res == '', f'propose: a loser of the create race reads the whole arms.json, not "is not JSON" ({res[:160]})')
+junk = race / 'junk.json'
+junk.write_text('not json at all')
+res = proposal.claim_folder(junk, rspec)
+check('is not JSON and was not written by this command' in res,
+      f'propose: a file that never becomes JSON is still refused, named as not this command\'s ({res[:160]})')
 # a checkout that MOVED (a commit, a rebase) is a different arm even at the same path: `lab.py run` skips every id
 # already in results.jsonl, so without this a new record would be closed with the previous rows (#385 review P1)
 moved = json.loads((shared / 'arms.json').read_text())

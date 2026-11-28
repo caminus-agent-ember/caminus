@@ -28,10 +28,12 @@ tree plus the change, and the diff between the two arms is then only that change
 """
 from pathlib import Path
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
 import sys
+import time
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -225,17 +227,42 @@ def arms_mismatch(prior, spec):
     return ''
 
 
-def arms_drift(arms, spec):
-    """What an arm's checkout says now that differs from the identity the folder recorded, or ''.
+ARM_CONTENT = ('config', 'env')
+RUN_OWNS = ('arms', 'out')       # the run fields `cmd_propose` computes; see cmd_propose
 
-    `arms.json` (and `plan.json` beside it) names the commit and tree digest each arm held when the command claimed
-    the folder. The runs then take minutes to hours, and an arm checkout is usually a dirty tree: committing,
-    rebasing or editing it while the A/B runs measures other bytes than the folder names, and the record would close
-    on a mix of both - permanent, since an observed record is append-only. Read the same three values again and
-    compare them with the folder's own record, not with the in-memory `Arm`: the folder is what a reader trusts
-    (#385 review P1). The suite gets the same re-read; this is the arms' half.
+
+def _digest(value):
+    """A short, order-independent digest of an arm's config or env: what a refusal may print about them.
+
+    `--env` carries a relay key or a home path (see `Arm.plan_arm`), so a message names the digest and never the
+    values: the owner still sees which of the two moved, and the folder's log does not repeat the secret.
+    """
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def arms_drift(arms, spec, arms_file=None):
+    """What an arm says now that differs from the identity the folder recorded, or ''.
+
+    `arms.json` (and `plan.json` beside it) names the commit, the tree digest and the config/env each arm held when
+    the command claimed the folder. The runs then take minutes to hours, and an arm checkout is usually a dirty
+    tree: committing, rebasing or editing it while the A/B runs measures other bytes than the folder names, and the
+    record would close on a mix of both - permanent, since an observed record is append-only. Read the same values
+    again and compare them with the folder's own record, not with the in-memory `Arm`: the folder is what a reader
+    trusts (#385 review P1). The suite gets the same re-read; this is the arms' half.
+
+    `config` and `env` belong to the identity too (`ARM_KEYS`, which `arms_mismatch` enforces at claim time), and
+    the runs read them from `arms_file` - `lab.py run --arms arms.json` - not from the in-memory arms, so that file
+    is re-read here and must still say what the folder claimed. A file that is gone or unreadable is a refusal, not
+    a pass: the identity cannot be confirmed from an absent record. Values are compared whole, and a refusal prints
+    digests, never the env's values (#385 review P1).
     """
     recorded = _arms_of(spec)
+    live = recorded
+    if arms_file is not None:
+        try:
+            live = _arms_of(json.loads(Path(arms_file).read_text()))
+        except (OSError, ValueError) as e:
+            return f'the folder record {arms_file} cannot be read back ({type(e).__name__}: {e})'
     for arm in arms:
         was = recorded.get(arm.name) if isinstance(recorded.get(arm.name), dict) else {}
         now = runner.checkout_state(arm.checkout)
@@ -243,6 +270,17 @@ def arms_drift(arms, spec):
             if now[k] != was.get(k):
                 return (f'arm {arm.name}: {k} was {str(was.get(k))[:12]!r} when the folder was claimed and is '
                         f'{str(now[k])[:12]!r} now ({arm.checkout})')
+        # what the runs are actually told: the file the command claims, when there is one; the in-memory arm
+        # otherwise (a caller that hands `arms_drift` no file is asking about the checkout alone)
+        said = live.get(arm.name) if isinstance(live.get(arm.name), dict) else None
+        if arms_file is not None and said is None:
+            return f'arm {arm.name}: the folder record {arms_file} no longer names it'
+        for k in ARM_CONTENT:
+            now_v = said.get(k) if said is not None else getattr(arm, k)
+            if (now_v or {}) != (was.get(k) or {}):
+                where = f'{arms_file}' if said is not None else 'the arms this command holds'
+                return (f'arm {arm.name}: {k} was {_digest(was.get(k) or {})} when the folder was claimed and is '
+                        f'{_digest(now_v or {})} now ({where})')
     return ''
 
 
@@ -319,9 +357,20 @@ def claim_folder(arms_file, spec):
     try:
         prior = json.loads(arms_file.read_text())
     except ValueError:
-        # this command writes the file whole or not at all, so a file that is not JSON was made by something else
-        return (f'{arms_file} is not JSON and was not written by this command: use a fresh --out (or fix or remove '
-                'the file)')
+        # this command writes the file whole or not at all, so a file that is not JSON was made by something else.
+        # One race is ours, though: on a filesystem without hard links the fallback creates the name first and
+        # writes the spec into it, and a loser of that race can read the name while it is still empty. Give the
+        # winner a moment before saying the file is not ours (#385 review P2).
+        for _ in range(8):
+            time.sleep(0.05)
+            try:
+                prior = json.loads(arms_file.read_text())
+                break
+            except (OSError, ValueError):
+                continue
+        else:
+            return (f'{arms_file} is not JSON and was not written by this command: use a fresh --out (or fix or '
+                    'remove the file)')
     return arms_mismatch(prior, spec)
 
 
@@ -569,10 +618,16 @@ def cmd_propose(a, run, run_defaults=None):
             import lab as lab_mod
             run_defaults = lab_mod.run_defaults
         runs = run_defaults()
-        runs.suite, runs.brain, runs.arms, runs.out = a.suite, list(a.brain), str(arms_file), str(out)
-        runs.repeats, runs.only, runs.host = a.repeats, a.only, a.host
-        runs.unsafe_local = a.unsafe_local
-        runs.jobs, runs.parallel = a.jobs, a.parallel
+        # every field both namespaces carry is copied, not listed: `run`'s defaults supply every field `cmd_run`
+        # reads, propose's own parser supplies the ones its record pins, and a flag added to both reaches the runs
+        # with no second place to edit. The two the runs must not take from a command line are RUN_OWNS: the arms
+        # come from the folder's own file, and `out` is the folder this command resolved (a bare --out may be None
+        # here and is checked against the plan's). A run flag propose does not carry keeps `run`'s default, which
+        # the coverage test in tests/tools/test_emberlab.py pins (#385 review P2).
+        for k, v in list(vars(runs).items()):
+            if k not in RUN_OWNS and hasattr(a, k):
+                setattr(runs, k, getattr(a, k))
+        runs.arms, runs.out = str(arms_file), str(out)
         if run(runs):
             raise SystemExit('a run ended in error: the record stays open (rerun the same command into the same folder)')
         # the digest the folder claimed is the digest the runs must have used, and `lab.py run` re-reads the suite: an edit
@@ -582,8 +637,10 @@ def cmd_propose(a, run, run_defaults=None):
             raise SystemExit(f'the suite {a.suite} changed while the arms ran: the rows measured other bytes than '
                              f'{out}/arms.json names, so the record stays open (use a fresh --out for the edited suite)')
         # the same re-read for the arms: a checkout committed, rebased or edited during the runs measured other bytes
-        # than arms.json/plan.json name, and the record would close on a mix of both (#385 review P1)
-        moved = arms_drift(arms, spec)
+        # than arms.json/plan.json name, and the record would close on a mix of both (#385 review P1). The runs read
+        # their config/env from arms_file itself, so that file is re-read too and must still say what was claimed
+        # (#385 review P1, this round).
+        moved = arms_drift(arms, spec, arms_file=arms_file)
         if moved:
             raise SystemExit(f'the arms changed while they ran ({moved}): the rows measured other bytes than '
                              f'{out}/arms.json names, so the record stays open (use a fresh --out for the moved checkout)')
