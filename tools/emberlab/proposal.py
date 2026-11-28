@@ -360,7 +360,7 @@ def approval_missing(a, brains):
     """
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
     missing = []
-    if paid and not a.approve_paid:
+    if paid and not getattr(a, 'approve_paid', False):
         missing.append("--approve-paid (billed through the owner's relay: " + ', '.join(paid) + ')')
     why = hosts_mod.local_refusal(a.host, brains, unsafe_local=getattr(a, 'unsafe_local', False))
     if why:

@@ -815,6 +815,13 @@ check(proposal.provenance_refusal(empty, empty / 'arms.json') == '',
 check(proposal.approvals_granted(argparse.Namespace(unsafe_local=True, approve_paid=True))
       == ['--approve-paid', '--unsafe-local'] and proposal.approvals_granted(argparse.Namespace()) is None,
       'propose: the approval flags are recorded as given, and none is None so an older folder still resumes')
+# approval_missing reads every optional flag with getattr: a namespace built by hand (a test, `lab.py run`)
+# without approve_paid asks for the approval, it does not raise AttributeError (#385 rev-muse P2)
+paid_brain = argparse.Namespace(label=lambda: 'relay:x', paid=True, real=False)
+check(proposal.approval_missing(argparse.Namespace(host='agent'), [paid_brain])
+      == ["--approve-paid (billed through the owner's relay: relay:x)"]
+      and proposal.approval_missing(argparse.Namespace(host='agent', approve_paid=True), [paid_brain]) == [],
+      'propose: a hand-built namespace without approve_paid asks for it rather than raising')
 sp = proposal.arms_spec([argparse.Namespace(name='base', describe=lambda: {'checkout': 'a', 'commit': '1'}),
                          argparse.Namespace(name='arm', describe=lambda: {'checkout': 'b', 'commit': '2'})],
                         dict(suite='basic', brains=['scripted:solve'], only=[], repeats=1,
