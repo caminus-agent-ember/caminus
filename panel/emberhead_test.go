@@ -828,3 +828,28 @@ func TestNoHintWhenTheGoalFitsTheRowsUnderTheTitle(t *testing.T) {
 		t.Fatal("Alt+G opened a goal with nothing hidden")
 	}
 }
+
+// TestWrapRawKeepsTheLineBreaksAndBreaksWhatIsWider: wrapRaw is the header's fallback (#370 P1). It keeps each line
+// the human wrote, keeps a blank line as blank, and breaks a line with no space in it (a pasted URL or path) so no row
+// it returns is wider than the terminal.
+func TestWrapRawKeepsTheLineBreaksAndBreaksWhatIsWider(t *testing.T) {
+	long := strings.Repeat("x", 60)
+	rows := strings.Split(wrapRaw("one two three\n\n"+long, 20), "\n")
+	if rows[0] != "one two three" {
+		t.Fatalf("row 0 lost the goal's own line: %q", rows)
+	}
+	if rows[1] != "" {
+		t.Fatalf("row 1 is not the blank line the goal had: %q", rows)
+	}
+	for i, ln := range rows {
+		if w := ansi.StringWidth(ln); w > 20 {
+			t.Fatalf("row %d is %d columns wide, past the terminal's 20: %q", i, w, ln)
+		}
+	}
+	if got := strings.Join(rows[2:], ""); got != long {
+		t.Fatalf("the broken line does not hold the %d characters it was given: %d %q", len(long), len(got), got)
+	}
+	if got := wrapRaw("a b c", 0); got != "a b c" {
+		t.Fatalf("a width under 1 changed the text instead of leaving it: %q", got)
+	}
+}
