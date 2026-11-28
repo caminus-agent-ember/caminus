@@ -115,10 +115,26 @@ def _open(home, write=True, observer=None):
 
 
 def load_record(home, rid):
-    """One record's newest version from a session's home, or None; the store is opened read-only."""
-    sim, store, rt = _open(home, write=False)
+    """One record's newest version from a session's home, or None; the store is opened read-only.
+
+    A store that cannot be read (locked by a live writer past the busy timeout, not a database, a file the user
+    cannot open) is refused as this module refuses everything else: one `SystemExit` naming the path and the reason,
+    not a traceback from a command that has already said it only reads (#385 review P2). `sim._get` catches
+    `OperationalError` on its first query and falls back to `_load`, which re-runs the same query unguarded, so the
+    failure can surface from either query and both are wrapped here, around the one call that reads.
+    """
     try:
-        return sim._get(rt, rid)
+        sim, store, rt = _open(home, write=False)
+    except sqlite3.Error as e:
+        raise SystemExit(f'the SIM store in {Path(home).expanduser().resolve()} could not be read ({e}): nothing was '
+                         f'changed')
+    try:
+        try:
+            return sim._get(rt, rid)
+        except sqlite3.Error as e:
+            raise SystemExit(f'the SIM store in {Path(home).expanduser().resolve()} could not be read ({e}): nothing '
+                             f'was changed (a live writer holds its lock past the busy timeout, or the file is not a '
+                             f'database)')
     finally:
         store.close()
 
@@ -453,6 +469,7 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
     """
     paid = [b.label() for b in brains if getattr(b, 'paid', False)]
     real = [b.label() for b in brains if getattr(b, 'real', False)]
+    unresolved = [b.label() for b in brains if b.label().startswith('?@')]
     runs = len(arms) * len(brains) * tasks * max(1, repeats)
     host = host or hosts_mod.kind(None, brains)
     timeout = suite.get('timeout', 1500) if timeout is None else timeout
@@ -466,7 +483,8 @@ def plan_md(prop, suite, brains, arms, repeats, out, tasks, host=None, timeout=N
              f"- timeout: {timeout}s per goal",
              '- approvals: ' + (', '.join(approvals) if approvals else
                                 'none (nothing billed, no real model runs as you)'),
-             f"- brains: {', '.join(b.label() for b in brains)}",
+             f"- brains: {', '.join(b.label() for b in brains)}"
+             + (' (?@ is asked for its model when the run starts: a dry run asks no endpoint)' if unresolved else ''),
              f"- arms: {', '.join(a.name + ' @ ' + str(a.checkout) + ' ' + a.commit for a in arms)}",
              f"- difference: {arm_mechanism(prop, arms)}",
              f"- runs: {runs} in {out}",
@@ -550,8 +568,13 @@ def cmd_propose(a, run, run_defaults=None):
         raise SystemExit(str(e))
     suite = runner.load_suite(a.suite)
     # before the plan prints and before arms_spec: an `openai:URL` brain with no `#MODEL` labels itself `?@URL`
-    # until its endpoint is asked, and that label is part of the folder's identity (#385 review P2)
-    brains = brains_mod.resolve_all([brains_mod.parse(s, a.parallel) for s in a.brain])
+    # until its endpoint is asked, and that label is part of the folder's identity (#385 review P2). A dry run asks
+    # nothing: `resolve` is a network `GET /models`, so an unreachable endpoint would fail the command whose whole
+    # promise is "print the plan and create nothing" (#385 review P2). The plan then names the label as it stands and
+    # says the endpoint is asked when the run starts; a real run resolves here, before any identity is built.
+    brains = [brains_mod.parse(s, a.parallel) for s in a.brain]
+    if not a.dry_run:
+        brains = brains_mod.resolve_all(brains)
     try:
         arms = arms_from_proposal(prop, a.base_checkout, a.arm_checkout)
     except ValueError as e:

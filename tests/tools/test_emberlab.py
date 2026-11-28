@@ -694,6 +694,42 @@ except SystemExit as e:
     err_off = str(e)
 check('SIM log is off' in err_off and proposal.load_record(off, roff['id'])['status'] == 'proposed',
       f'propose: a home with sim=false refuses the observation, as its own /sim would ({err_off[:160]!r})')
+# a store that cannot be read (not a database, a lock held past the busy timeout) is a refusal like every other in this
+# module, not a traceback: `sim._get` catches OperationalError on its first query and falls back to `_load`, which
+# re-runs it unguarded, so a locked store escaped from `load_record` as a sqlite3 traceback (#385 review P2)
+broken = S / 'sim-broken'
+broken.mkdir(parents=True, exist_ok=True)
+(broken / 'agent.sqlite3').write_text('this is not a database\n')
+try:
+    proposal.load_record(broken, 'x')
+    err_broken = 'returned instead of refusing'
+except SystemExit as e:
+    err_broken = str(e)
+except Exception as e:                      # noqa: BLE001 - the traceback this check exists to prevent
+    err_broken = f'{type(e).__name__}: {e}'
+check('could not be read' in err_broken and str(broken) in err_broken and 'nothing was changed' in err_broken,
+      f'propose: an unreadable SIM store is refused with the path, not a traceback ({err_broken[:160]!r})')
+p = lab('propose', '--sim-home', str(broken), '--record', 'x', '--brain', 'scripted:solve',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(S / 'propose-broken'), '--dry-run')
+check(p.returncode != 0 and 'Traceback' not in p.stderr and 'could not be read' in (p.stderr + p.stdout),
+      f'propose: the command line exits on an unreadable store with one message, no traceback ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-200:]})')
+# `--dry-run` promises "print the plan and create nothing", so it asks no endpoint either: `resolve_all` issues a
+# network GET /models, and an unreachable endpoint made the dry run fail instead of printing the plan (#385 review P2).
+# A real run still resolves before any identity is built (the check above on resolve_all pins that).
+r_off = sim_record(ph)
+unreach = S / 'propose-unreachable'
+p = lab('propose', '--sim-home', str(ph), '--record', r_off['id'], '--brain', 'openai:http://127.0.0.1:1/v1',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(unreach), '--dry-run', timeout=120)
+check(p.returncode == 0 and f"proposal {r_off['id']}" in p.stdout and '?@http://127.0.0.1:1/v1' in p.stdout
+      and 'asked for its model when the run starts' in p.stdout and not unreach.exists(),
+      f'propose: --dry-run prints the plan without asking an unreachable endpoint ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
+p = lab('propose', '--sim-home', str(ph), '--record', r_off['id'], '--brain', 'openai:http://127.0.0.1:1/v1',
+        '--config', '{"sim": false}', '--only', 'read', '--out', str(unreach), timeout=120)
+check(p.returncode != 0 and 'lists no model' in (p.stderr + p.stdout) and not unreach.exists(),
+      f'propose: a real run still asks the endpoint and refuses when it cannot name a model ({p.returncode}; '
+      f'{(p.stderr + p.stdout)[-300:]})')
 # the folder's identity is created once, exclusively: a concurrent command that finds arms.json compares instead of
 # rewriting it, so the last writer cannot win over the first (#385 review P2)
 cf = S / 'claim'

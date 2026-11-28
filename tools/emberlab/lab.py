@@ -193,7 +193,9 @@ def main(argv=None):
     p.add_argument('--base-env')
     p.add_argument('--arm-checkout', help='the checkout with the proposed code (default: this checkout)')
     p.add_argument('--base-checkout')
-    p.add_argument('--dry-run', action='store_true', help='print the plan and create nothing')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print the plan and create nothing (also asks no brain endpoint for its model: `?@URL` is '
+                        'named as it stands and resolved when the run starts)')
     p.add_argument('--approve-paid', action='store_true',
                    help="run a brain billed through the owner's relay (the plan names it first)")
     p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
