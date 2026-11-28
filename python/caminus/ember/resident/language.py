@@ -432,19 +432,25 @@ def from_home(home, config=None):
     return derive(prompts) or named(DEFAULT, 'default')
 
 
-def _reply_in(name, detail):
+def _reply_in(name, detail, source):
     """The nudge's text: one line, naming the owner's language and the script(s) the reply slid into.
 
     `share` is the sum of the foreign scripts, so a reply split near evenly between two of them is nudged
     naming only the larger one and reads as if the other were the owner's (review P2, r22). Name the runner-up
     too when it is at least half the winner.
+
+    A `default` source names no language, as the prompt does not (#390 review P1-2): `derive` refuses Latin
+    script because English, Spanish and French share it, so "Reply in English" told a Spanish owner who never
+    ran `--to` to answer in a language that is not theirs. The nudge describes the language instead, and the
+    brain reads it from the owner's own goals, which are in its history.
     """
     per, script = detail['scripts'], detail['script']
     runner = next((s for s in per if s != script), None)
     if runner and per[runner] * 2 >= per[script]:
         script = '%s and %s' % (script, runner)
-    return ("Reply in %s, the owner's language: your last reply came out mostly in another script (%s)."
-            % (name, script))
+    owner = ("%s, the owner's language" % name if source != 'default'
+             else "the language your human writes their goals in")
+    return "Reply in %s: your last reply came out mostly in another script (%s)." % (owner, script)
 
 
 def check(rt, gid, text, cfg=None, due=True):
@@ -525,7 +531,7 @@ def check(rt, gid, text, cfg=None, due=True):
         # writes the inbox row in its own transaction, so one failed read or insert need not cost the nudge too,
         # and an unnudged real drift is the silent failure this check exists to prevent (review P2 r18). A failure
         # that repeats nudges again: a repeated correct nudge is visible and costs a turn, a lost one costs none.
-        return _reply_in(who['name'], detail) if due else ''
+        return _reply_in(who['name'], detail, who['source']) if due else ''
     if not nudge:
         return ''
-    return _reply_in(who['name'], detail)
+    return _reply_in(who['name'], detail, who['source'])

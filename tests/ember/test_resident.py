@@ -31,6 +31,11 @@ from caminus.ember import bridge as human_bridge
 ap=argparse.ArgumentParser();ap.add_argument('--scratch',required=True);ap.add_argument('-k',action='append',default=[],metavar='PATTERN');A=ap.parse_args()
 S=Path(A.scratch).resolve();S.mkdir(parents=True,exist_ok=True)
 BOOT="import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"
+# A `default` language names no language in the prompt or the drift nudge (#390 review P1-2): `derive` refuses
+# Latin script (English, Spanish and French share it), so the fallback name English is only a label, and
+# "Your human works in English" told a Spanish owner who never ran `--to` to write in a language that is not
+# theirs. Both describe the language instead; a `config` or a derived name is still written as such.
+REPLY_LANGUAGE="the language your human writes their goals in"
 
 
 PAGE=('<!doctype html><title>Fixture</title><h1>Welcome</h1><p>Read <a href="/about.html">About us</a>.</p>'
@@ -1610,7 +1615,7 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
         rt=Runtime(self.home)
         try:
             self.assertNotIn('browser',[t['function']['name'] for t in rt.tools])
-            self.assertNotIn('use browser',prompt.render(self.home,language='English'))
+            self.assertNotIn('use browser',prompt.render(self.home,language='English',source='config'))
             with self.assertRaises(ValueError) as cm:browser.call(rt,'g',uuid.uuid4().hex,dict(action='open',url='http://x.org/'))
             self.assertIn('no Chrome',str(cm.exception))
         finally:rt.mail.close();rt.store.close()
@@ -2698,8 +2703,8 @@ for line in sys.stdin:
             cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
             atomic_json(self.home/'config.json',cfg);rt._follow_config()
             self.assertNotIn('sim',[t['function']['name'] for t in rt.tools])
-            self.assertNotIn('SIM: predict',render(self.home,sim=False,language='English'))
-            self.assertIn('SIM: predict',render(self.home,language='English'))
+            self.assertNotIn('SIM: predict',render(self.home,sim=False,language='English',source='config'))
+            self.assertIn('SIM: predict',render(self.home,language='English',source='config'))
             self.assertEqual([h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')],[])
             cfg['sim']=True;atomic_json(self.home/'config.json',cfg);rt._follow_config()
             self.assertIn('sim',[t['function']['name'] for t in rt.tools])
@@ -2751,8 +2756,9 @@ for line in sys.stdin:
         sent=[body for key,body in Endpoint.seen if key==self.key]
         body=json.dumps(sent[-1])
         self.assertIn('[nudge #',body)
-        self.assertIn('Reply in English, the owner\'s language',body)
-        self.assertIn('Your human works in English',json.dumps(sent[0]))
+        self.assertIn('Reply in '+REPLY_LANGUAGE,body,
+                      'the goal names no language (Latin script), so the nudge describes it (#390 P1-2)')
+        self.assertIn(REPLY_LANGUAGE,json.dumps(sent[0]))
         self.assertEqual([x['kind'] for x in self.steers(goal['id'])],['nudge'])
 
     def test_an_english_reply_quoting_chinese_is_not_a_drift(self):
@@ -2986,7 +2992,9 @@ for line in sys.stdin:
         self.assertEqual((out['language'],out['scripts'],out['source'],out['check']),
                          ('English',['Latin'],'default',True),'no setting and no derivation: the default')
         self.assertIn('--to LANGUAGE',out['note'],'the default says it is one, and how to name a language')
-        self.assertIn('Your human works in English',self.cmd('prompt',[])['prompt'])
+        text=self.cmd('prompt',[])['prompt']
+        self.assertNotIn('Your human works in',text,'the default names no language (#390 review P1-2)')
+        self.assertIn(REPLY_LANGUAGE,text)
         out=self.cmd('language',['--to','Chinese'])
         self.assertEqual(out,dict(language='Chinese',scripts=['Han'],source='config',check=True))
         self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
@@ -3162,7 +3170,7 @@ for line in sys.stdin:
             self.assertEqual(language.check(rt,gid,zh),'','one turn after a nudge is not due, whatever came between')
             for _ in range(2):                                  # (now DRIFT_EVERY turns have passed)
                 rt.store.event('assistant',dict(content='ok'),gid)
-            self.assertIn('Reply in English',language.check(rt,gid,zh),'the cadence counts from the real nudge')
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'the cadence counts from the real nudge')
         finally:
             rt.mail.close();rt.store.close()
 
@@ -3172,7 +3180,7 @@ for line in sys.stdin:
         # formatting pass over the rendered prompt cannot reintroduce it silently.
         from caminus.ember.resident.prompt import render
         for value in ('{notakey}', '{sim_head}', 'a{b}c}'):
-            text=render(str(self.home),sim=True,language=value)
+            text=render(str(self.home),sim=True,language=value,source='config')
             self.assertIn('works in %s.' % value,text,'the setting reaches the prompt as written')
             self.assertIn('## SIM: predict',text,'the SIM section is still filled by the one format pass')
 
@@ -3189,7 +3197,7 @@ for line in sys.stdin:
                 "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
             self.assertEqual(len(rows),1,'the drift is still an event')
             self.assertFalse(rows[0]['nudged'],'and it does not advance the cadence')
-            self.assertIn('Reply in English',language.check(rt,gid,zh),'the next turn that comes is nudged')
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'the next turn that comes is nudged')
         finally:
             rt.mail.close();rt.store.close()
 
@@ -3234,7 +3242,7 @@ for line in sys.stdin:
             self.assertEqual(len(drifts),1)
             self.assertTrue(drifts[0]['nudged'],'a plain reply that leaves a turn is nudged')
             rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))]
-            self.assertTrue(any('Reply in English' in t for t in rows),'the nudge is queued for that turn')
+            self.assertTrue(any('Reply in '+REPLY_LANGUAGE in t for t in rows),'the nudge is queued for that turn')
             self.assertNotIn(rt.store.goal(gid)['state'],('completed','paused'),'the goal kept running')
             self.assertTrue(rt._plain_dispatch(gid)[1],'the first plain reply leaves a turn behind')
             # the shapes `_plain_reply` branches on decide `due`; a separate goal so its events do not overlap
@@ -3248,6 +3256,40 @@ for line in sys.stdin:
             self.assertTrue(rt._plain_dispatch(g2)[1],'a reopened goal is prompted for one more turn')
             rt.__dict__.setdefault('_reopen_prompted',set()).add(g2)
             self.assertFalse(rt._plain_dispatch(g2)[1],'its second plain reply completes the goal: no turn')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_drifting_reply_that_schedules_is_not_nudged_awake(self):
+        # #390 Opus review P1-1: a drift nudge is an unconsumed inbox row, and `agenda.wake_due` wakes a parked
+        # goal on any such row (`early = ... inbox WHERE consumed=0`). A drifting reply that calls `schedule`
+        # therefore woke the goal on its own nudge instead of parking it: `woke {early: true}` and a paid turn
+        # where it had asked to sleep. `follows` withholds the nudge for that reply as it does for `finish`: the
+        # drift is still an event, and the nudge rides the wake-up turn it was meant to hold.
+        from caminus.ember.resident.runtime import _calls_schedule
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        for calls in ([dict(id='c6',type='function',function=dict(name='schedule',arguments='{}'))],   # OpenAI shape
+                      [dict(name='schedule',arguments='{}')],                                          # flat, hand-built
+                      None):
+            self.assertEqual(_calls_schedule(calls),bool(calls),calls)
+        self.assertFalse(_calls_schedule([dict(id='c7',function=dict(name='finish',arguments='{}'))]))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            turn=call('schedule',dict(after_minutes=10,note='check the build log'))
+            turn['content']=zh
+            self.replies(turn)
+            self.assertTrue(rt._tick(gid),'the reply was taken')
+            self.assertTrue(rt._tick(gid),'the schedule action ran')
+            self.assertIsNotNone(rt.store.goal(gid)['wake_at'],'the goal parked itself')
+            self.assertFalse(rt._tick(gid),'a parked goal takes no turn')
+            self.assertFalse(any(e['kind']=='woke' and e['data']['early'] for e in rt.store.events()),
+                             'the nudge did not wake it early')
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[],'no harness nudge waits in the inbox')
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1,'the drift is still an event')
+            self.assertFalse(drifts[0]['nudged'],'and no nudge was queued for a parked goal')
         finally:
             rt.mail.close();rt.store.close()
 
@@ -3269,14 +3311,14 @@ for line in sys.stdin:
             rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=boom)
             # a failed read or insert is still no exception, and since r18 it is no lost nudge either: the cadence
             # is unknowable, but the drift is real and the caller writes the inbox row itself
-            self.assertIn('Reply in English',language.check(rt,gid,zh),'a locked store is still a nudge')
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'a locked store is still a nudge')
             rt.store=types.SimpleNamespace(db=real.db,event=boom)   # (the queries read, the insert is refused)
-            self.assertIn('Reply in English',language.check(rt,gid,zh),'a refused insert is still a nudge')
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'a refused insert is still a nudge')
             rt.store=real
             self.assertEqual([r[0] for r in real.db.execute(
                 "SELECT COUNT(*) FROM events WHERE goal=? AND kind='language_drift'",(gid,))],[0],
                 'neither failed call wrote an event')
-            self.assertIn('Reply in English',language.check(rt,gid,zh),
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),
                           'the next turn with a working store detects the drift again')
         finally:
             rt.store=real
@@ -3302,7 +3344,7 @@ for line in sys.stdin:
         try:
             gid=real.enqueue('Open the pull request against ember-next.')
             rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=real.event)
-            self.assertIn('Reply in English',language.check(rt,gid,zh),
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),
                           'a locked store is still no exception, and no lost nudge either')
             errs=[json.loads(r[0]) for r in real.db.execute(
                 "SELECT data FROM events WHERE goal=? AND kind='drift_check_error'",(gid,))]
@@ -3370,7 +3412,7 @@ for line in sys.stdin:
             self.assertEqual(len(drifts),1)
             self.assertTrue(drifts[0]['nudged'],'the turn the dispatch named is the one nudged')
             rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(g2,))]
-            self.assertTrue(any('Reply in English' in t for t in rows),rows)
+            self.assertTrue(any('Reply in '+REPLY_LANGUAGE in t for t in rows),rows)
         finally:
             rt.mail.close();rt.store.close()
 
@@ -3393,7 +3435,7 @@ for line in sys.stdin:
             self.assertEqual(len(drifts),1,'the drift is still an event')
             self.assertFalse(drifts[0]['nudged'],'the finish call ends the goal, so no turn follows it')
             rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))]
-            self.assertFalse([t for t in rows if 'Reply in English' in t],
+            self.assertFalse([t for t in rows if 'Reply in '+REPLY_LANGUAGE in t],
                              'no nudge is left for the finish on this tick to defer: %r' % (rows,))
             # The control: the same drifting prose with a call that does NOT end the goal is still nudged,
             # so the helper reads the call's name rather than making every tool-call reply silent.
@@ -3619,13 +3661,13 @@ for line in sys.stdin:
         try:
             gid=rt.store.enqueue('Open the pull request against ember-next.')
             reply=dict(role='assistant',content=zh)
-            self.assertIn('Reply in English',language.check(rt,gid,zh),'the first drift of the goal is due')
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'the first drift of the goal is due')
             rt.store.model_reply(gid,dict(reply))
             self.assertEqual(language.check(rt,gid,zh),'','the reply that was nudged is one turn since it')
             rt.store.model_reply(gid,dict(reply))
             self.assertEqual(language.check(rt,gid,zh),'','two turns since the nudge is not DRIFT_EVERY')
             rt.store.model_reply(gid,dict(reply))
-            self.assertIn('Reply in English',language.check(rt,gid,zh),
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),
                           'the third reply after the nudge is due: the censused reply is in the count')
         finally:
             rt.mail.close();rt.store.close()
@@ -9003,6 +9045,101 @@ for line in sys.stdin:
         self.assertIn('ZZONE one',body)
         self.assertNotIn('ZZTWO',body)                # the withdrawn text never reached a turn
         self.cmd('unsend',['missing-goal'],code=1)
+
+    def test_the_language_default_names_no_language_and_a_derived_one_is_named(self):
+        # #390 review P1-2: `derive` refuses Latin script (English, Spanish and French share it), so the fallback
+        # name English is a label and nothing more; naming it in the prompt told a Spanish owner who never ran
+        # `--to` to write in a language that is not theirs. A language the owner's own goals do establish is
+        # still written as one, which is the other half of the rule.
+        self.assertIn(REPLY_LANGUAGE,self.cmd('prompt',[])['prompt'])
+        self.assertNotIn('Your human works in',self.cmd('prompt',[])['prompt'])
+        self.cmd('send',['\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00\u53d1\u3002'])   # (a goal in Chinese)
+        text=self.cmd('prompt',[])['prompt']
+        self.assertIn('Your human works in Chinese',text,'a name the goals establish is written as such')
+        self.assertIn('in Chinese',text)
+
+    def test_unsend_and_the_interrupt_hold_skip_the_harness_note_by_its_source(self):
+        # #390 review P2-a: the language nudge is a harness note with no leading `[`, so up-arrow withdrew it as
+        # if the human had written it, and a held goal lifted its hold on it. Both read `inbox.source` now, and
+        # the `[` rule stays for a note written before the column existed.
+        gid=self.cmd('send',['goal'])['id']
+        nudge='Reply in '+REPLY_LANGUAGE+'.'
+        rt=Runtime(self.home)
+        try:
+            rt.store.db.execute("INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,'harness')",(gid,nudge,'nudge'))
+            self.assertEqual(rt.store.unsend(gid),(gid,None),"a harness note is not the human's to withdraw")
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[nudge],'and it stays in the inbox')
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'please use tabs','steer'))
+            self.assertEqual(rt.store.unsend(gid),(gid,'please use tabs'),"the human's own message still withdraws")
+            # the interrupt hold: a harness note is not a message, so it does not lift the hold
+            self.replies(dict(role='assistant',content='noted'))
+            rt._held[gid]=time.time()
+            self.assertFalse(rt._tick(gid),'held: a harness note does not lift the hold')
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'go on','steer'))
+            self.assertTrue(rt._tick(gid),"the human's message lifts it")
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_compaction_restates_a_harness_note_as_the_harness_and_the_human_as_themselves(self):
+        # #390 review P2-b: the drift nudge is filed as a steer too, so `_restate_goal` restated it under "steers
+        # and nudges" as words the human had said. Each steer carries its source now: the harness's notes get
+        # their own labelled section, and the human's words are given the budget first.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            rt.store.add_steer(gid,'please use tabs')
+            rt.store.add_steer(gid,'Reply in '+REPLY_LANGUAGE+'.','nudge','harness')
+            rt.store.db.execute("INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,'harness')",
+                                (gid,'[gate] the gate fails now','nudge'))
+            out=rt._restate_goal(gid,[])[-1]['content']
+            human,_,notes=out.partition('[harness notes,')
+            self.assertIn('please use tabs',human)
+            self.assertNotIn(REPLY_LANGUAGE,human,"the nudge is not restated as the human's words")
+            self.assertNotIn('the gate fails now',human)
+            self.assertIn(REPLY_LANGUAGE,notes)
+            self.assertIn('the gate fails now',notes)
+            self.assertIn('not words your human said',notes)
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_an_old_database_migrates_under_the_write_lock(self):
+        # #390 review P2-c: `table_info` then `ALTER` is a check-then-act; two openers of the same old database
+        # both saw the column missing and the loser raised `duplicate column name` out of `Store.__init__`. The
+        # migration runs under BEGIN IMMEDIATE now, so openers serialize and every one of them finds the work done.
+        import sqlite3
+        home=self.home/'migrate';home.mkdir()
+        db=sqlite3.connect(home/'agent.sqlite3')
+        db.executescript("""
+          CREATE TABLE goals(id TEXT PRIMARY KEY, prompt TEXT NOT NULL, state TEXT NOT NULL,
+            messages TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '', steps INTEGER NOT NULL DEFAULT 0, step_limit INTEGER,
+            deadline REAL, created REAL NOT NULL, updated REAL NOT NULL);
+          CREATE TABLE inbox(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
+            text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE steers(id INTEGER PRIMARY KEY, goal TEXT, text TEXT, ts REAL);
+          CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, goal TEXT,
+            kind TEXT NOT NULL, data TEXT NOT NULL);""")
+        db.commit();db.close()
+        stores,errs=[],[]
+        start=threading.Barrier(4)
+        def open_it():
+            start.wait()
+            try:
+                s=Store(home)
+                try:
+                    # read and close in the thread that opened it: a sqlite connection is thread-affine
+                    stores.append({r['name'] for r in s.db.execute('PRAGMA table_info(steers)')})
+                finally:
+                    s.close()
+            except Exception as e:errs.append(e)
+        threads=[threading.Thread(target=open_it) for _ in range(4)]
+        for t in threads:t.start()
+        for t in threads:t.join(30)
+        self.assertEqual(errs,[],'every opener migrated it or found the work done')
+        self.assertEqual(len(stores),4)
+        for cols in stores:
+            self.assertTrue({'kind','source'}<=cols,'the columns the migration adds are there')
 
     def test_the_goal_queue_lists_moves_and_removes_queued_goals(self):
         a=self.cmd('send',['first'])['id']

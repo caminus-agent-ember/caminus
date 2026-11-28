@@ -734,7 +734,8 @@ def main(argv=None,stdin=None):
             # `test_the_prompt_op_and_a_live_session_name_the_same_language` reads one home through both (#390 review P2).
             from . import language
             sim_on=bool(_read_config(home,missing_ok=True).get('sim',True))
-            value=render_prompt(home,sim=sim_on,language=language.from_home(home)['name'])
+            who=language.from_home(home)
+            value=render_prompt(home,sim=sim_on,language=who['name'],source=who['source'])
             emit(dict(prompt=value),True) if a.json else print(value)
             return 0
         if a.op=='init':
