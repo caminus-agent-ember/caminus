@@ -29,6 +29,7 @@ tree plus the change, and the diff between the two arms is then only that change
 from pathlib import Path
 import json
 import os
+import sqlite3
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -41,24 +42,78 @@ import runner                   # noqa: E402
 RESIDENT = Path(runner.REPO) / 'python'
 
 
-def _rt(store):
-    """A runtime-shaped object for the SIM module: it needs a store, a home and a config, not a live model."""
-    return type('RT', (), {'store': store, 'home': store.home, 'config': {}})()
+def _rt(store, observer=None):
+    """A runtime-shaped object for the SIM module: it needs a store, a home and the session's config, not a model.
+
+    The config is the home's own `config.json`, so the SIM switch a resident honours is the switch this command
+    honours: a home with `sim: false` refuses an observation instead of accepting one its own `/sim` would not
+    (#385 review P2). `observer` names who appends: **emberlab**, the lab's own name in `observed_by`, since the
+    resident's brain is not the one reading the runs.
+    """
+    cfg = {}
+    try:
+        cfg = json.loads((store.home / 'config.json').read_text()) or {}
+    except FileNotFoundError:
+        pass
+    except ValueError as e:
+        raise SystemExit(f'{store.home}/config.json is not JSON ({e}): the SIM switch cannot be read')
+    if observer:
+        cfg = dict(cfg, model=observer, provider='')
+    return type('RT', (), {'store': store, 'home': store.home, 'config': cfg})()
 
 
-def _open(home):
-    """The session's store, and the resident's SIM module from this lab's own tree (one log format, one writer)."""
+class _Read:
+    """A session's `agent.sqlite3` opened read-only: no mkdir, no schema, no journal-mode change, no lock file.
+
+    `Store(home)` creates the home, its tables and its journal mode before the first query, and a command that
+    only reads a record must not do any of that to a live resident's database: `--dry-run` promises to create
+    nothing, and even a real run reads the record before it knows it will write (#385 review P2).
+
+    A WAL database with no connection open has no `-wal`/`-shm`: a live writer holds both for as long as it is
+    attached, so their absence says nobody is attached and the file alone is the whole state. Then `immutable=1`
+    reads it without a lock or a sidecar. With a writer attached, `mode=ro` joins the existing sidecars instead;
+    that reader never writes either, so the only cost is that it may wait for the writer's lock.
+    """
+    def __init__(self, path):
+        self.home = path.parent
+        attached = path.with_name(path.name + '-wal').exists() or path.with_name(path.name + '-shm').exists()
+        uri = f'{path.as_uri()}?{"mode=ro" if attached else "immutable=1"}'
+        self.db = sqlite3.connect(uri, uri=True, timeout=10, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+
+    def close(self):
+        self.db.close()
+
+
+def _open(home, write=True, observer=None):
+    """The session's store, and the resident's SIM module from this lab's own tree (one log format, one writer).
+
+    `write=False` opens the database read-only, and a home with no `agent.sqlite3` is refused rather than created:
+    a read is a read (#385 review P2).
+    """
     if str(RESIDENT) not in sys.path:
         sys.path.insert(0, str(RESIDENT))
     from caminus.ember.resident import sim
     from caminus.ember.resident.store import Store
-    store = Store(Path(home).expanduser().resolve())
-    return sim, store, _rt(store)
+    path = Path(home).expanduser().resolve() / 'agent.sqlite3'
+    if write:
+        store = Store(path.parent)
+    elif path.is_file():
+        store = _Read(path)
+    else:
+        raise SystemExit(f'no session store at {path}: `propose` reads a resident\'s SIM log and does not create a '
+                         'home (check --sim-home)')
+    try:
+        rt = _rt(store, observer)
+    except BaseException:
+        store.close()
+        raise
+    return sim, store, rt
 
 
 def load_record(home, rid):
-    """One record's newest version from a session's home, or None."""
-    sim, store, rt = _open(home)
+    """One record's newest version from a session's home, or None; the store is opened read-only."""
+    sim, store, rt = _open(home, write=False)
     try:
         return sim._get(rt, rid)
     finally:
@@ -68,16 +123,21 @@ def load_record(home, rid):
 def write_observation(home, rid, observed, eval_context='', prediction_error='', goal=None):
     """Append the outcome to the record the arms measured: one new version, status 'observed'.
 
+    It goes through `sim.tool`, the one path a resident's `/sim` takes, so the lab cannot append where the resident
+    would refuse: the `sim: false` switch that stops an A/B arm from reading the shared lessons stops this write
+    too, rather than a home with the log off accepting an observation its own tool would reject (#385 review P2).
+
     The "a closed record stays closed" rule is the resident's own, and it already holds across the race: `observe`
     reads the newest version and appends in one `_atomic` transaction (`BEGIN IMMEDIATE`), and `_record` refuses a
     version of an already-observed record. So a resident that closes the record while the arms run is not raced
     over; what the command owes is to report that refusal as one, not as a traceback (#385 review P2).
     """
-    sim, store, rt = _open(home)
+    sim, store, rt = _open(home, observer='emberlab')
     try:
         try:
-            return sim.observe(rt, goal, rid, observed, eval_context, prediction_error,
-                               cfg=dict(model='emberlab', provider='', effort=''))
+            rec = sim.tool(rt, goal, dict(action='observe', id=rid, observed=observed,
+                                          eval_context=eval_context, prediction_error=prediction_error))
+            return rec['record']
         except ValueError as e:
             # the record was closed (or removed) between the plan and the runs: say which, and leave it as it is
             raise SystemExit(f'the runs are kept but the record is not closed: {e}')

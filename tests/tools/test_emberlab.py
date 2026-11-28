@@ -520,6 +520,50 @@ check('not closed' in err9 and 'already observed' in err9 and newest['status'] =
       and newest['observed'] == 'closed by the resident while the arms ran',
       f'propose: a record closed during the runs is not observed twice, and says so ({err9[:200]}; '
       f'{newest.get("observed")!r})')
+# a read must create nothing: `Store(home)` made the home, its schema and its journal mode on every load_record, so
+# `propose --dry-run` could touch the daemon's live database, and a mistyped --sim-home was created empty and then
+# reported "no SIM record" (#385 review P2). One cleanly closed store has no -wal/-shm (a live writer holds both),
+# so the read is the file alone and even a read-only folder works.
+quiet = S / 'sim-readonly'
+sim, store, rt = proposal._open(quiet)
+rq = sim.record(rt, 'g-propose', dict(change='c', predicted='p', status='proposed'))
+store.close()
+before = {p.name: p.stat().st_mtime_ns for p in quiet.iterdir()}
+got = proposal.load_record(quiet, rq['id'])
+after = {p.name: p.stat().st_mtime_ns for p in quiet.iterdir()}
+check(got and got['id'] == rq['id'] and before == after and sorted(after) == ['agent.sqlite3'],
+      f'propose: a read leaves the home byte-identical (no -wal/-shm, no migration; {sorted(before)} -> '
+      f'{sorted(after)})')
+quiet.chmod(0o555)
+try:
+    ro = proposal.load_record(quiet, rq['id'])
+finally:
+    quiet.chmod(0o755)
+check(ro and ro['id'] == rq['id'],
+      'propose: a read works on a read-only home (immutable read: no lock file, no journal, no schema write)')
+empty = S / 'sim-no-store'
+empty.mkdir(parents=True, exist_ok=True)
+try:
+    proposal.load_record(empty, 'x')
+    err_empty = ''
+except SystemExit as e:
+    err_empty = str(e)
+check('no session store' in err_empty and not list(empty.iterdir()),
+      f'propose: a --sim-home with no agent.sqlite3 is refused and not created ({err_empty[:120]!r})')
+# the observation is appended through `sim.tool`, the one path a resident's own /sim takes, so a home whose log is
+# off refuses it instead of accepting what its own tool would reject (#385 review P2)
+off = S / 'sim-off'
+sim, store, rt = proposal._open(off)
+roff = sim.record(rt, 'g-propose', dict(change='c', predicted='p', status='proposed'))
+store.close()
+(off / 'config.json').write_text(json.dumps({'sim': False}))
+try:
+    proposal.write_observation(off, roff['id'], 'the lab measured it')
+    err_off = ''
+except SystemExit as e:
+    err_off = str(e)
+check('SIM log is off' in err_off and proposal.load_record(off, roff['id'])['status'] == 'proposed',
+      f'propose: a home with sim=false refuses the observation, as its own /sim would ({err_off[:160]!r})')
 # the folder's identity is created once, exclusively: a concurrent command that finds arms.json compares instead of
 # rewriting it, so the last writer cannot win over the first (#385 review P2)
 cf = S / 'claim'
