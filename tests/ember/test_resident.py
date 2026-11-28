@@ -3428,6 +3428,46 @@ for line in sys.stdin:
                              'a total below the ledger never lowers the report')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_sweep_close_reports_the_allowance_a_killed_child_never_ledgered(self):
+        # `_meter` prices an OpenCode plan turn as $0 of money and real allowance, and that allowance was kept on
+        # the day alone: a child killed between `_meter` and `note_spend` reported $0 spend and $0 allowance to its
+        # parent while the plan's monthly limit had really been used - the cap perimeter it enforces, understated
+        # (#382 review, rev-muse P1). `_meter` now keeps a per-goal allowance beside `goals`' usd, and the close
+        # reports the larger of it and the ledger, the rule the money half already follows.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            # the meter itself: an allowance-only turn (no money, no tokens) is kept per goal, not dropped
+            rt.model.last_usage=dict(opencode=dict(allowance=.25))
+            usd,allowance=rt._meter('plan-goal')
+            self.assertEqual((usd,allowance),(0.0,.25))
+            state=json.loads((self.home/'spend.json').read_text())
+            self.assertEqual(state['goal_allowance']['plan-goal'],.25,
+                             'an allowance-only turn is kept per goal, or the crash window cannot report it')
+            self.assertNotIn('plan-goal',state.get('goals') or {},'no money was spent, so no usd total')
+            parent=rt.store.enqueue('p')
+            def child(allowance=0.0):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                if allowance:
+                    rt.store.delegate_spend(gid,0.0,allowance)
+                return gid
+            lost=child()                     # .40 allowance priced per goal, ledger never saw it
+            kept=child(.10)                  # the ledger is larger than spend.json's allowance: the ledger wins
+            plain=child()                    # an older spend.json has no goal_allowance at all
+            (self.home/'spend.json').write_text(json.dumps(dict(goals={},goal_allowance={lost:.40,kept:.05})))
+            for gid in (lost,kept,plain):
+                rt.store.db.execute("UPDATE goals SET state='completed' WHERE id=?",(gid,))
+            delegate.sweep(rt)
+            report=json.loads(rt.store.delegate(lost)['report'])
+            self.assertEqual(report['allowance_usd'],.40,'the priced allowance is reported, not the ledger alone')
+            self.assertIn('allowance was priced but not yet in its ledger',report['summary'])
+            self.assertEqual(json.loads(rt.store.delegate(kept)['report'])['allowance_usd'],.10,
+                             'a spend.json allowance below the ledger never lowers the report')
+            self.assertEqual(json.loads(rt.store.delegate(plain)['report'])['allowance_usd'],0.0,
+                             'an absent entry leaves the ledger as the number')
+        finally:rt.mail.close();rt.store.close()
+
     def test_sweep_closes_a_paused_child_as_incomplete_and_a_capped_one_as_capped(self):
         # a child paused by a mechanism that writes no delegate_capped event (the owner's budget watchdog, a manual
         # pause) is not the work failing, and it is not a spent limit either. run_child called it `failed`, and

@@ -606,35 +606,45 @@ def _sweep_box(rt, child):
 
 
 def _priced_but_unledgered(rt, child):
-    """The money `_meter` priced for a child that its own ledger may not have seen.
+    """The money and allowance `_meter` priced for a child that its own ledger may not have seen.
 
-    `_meter` writes spend.json's per-goal total on the line before `note_spend` writes the child's ledger, so a
+    `_meter` writes spend.json's per-goal totals on the line before `note_spend` writes the child's ledger, so a
     process killed between the two leaves one priced turn in spend.json alone: the close then reported a cheaper
-    run than actually happened (#382 review). Read, never invent - a spend.json without this child, or with less
-    than the ledger (an auxiliary call is priced into the ledger only), contributes nothing."""
+    run than actually happened (#382 review). Both totals are read: an OpenCode plan turn costs $0 of money and
+    real allowance, kept in `goal_allowance` beside `goals` for exactly this window (#382 review, rev-muse).
+    Read, never invent - a spend.json without this child, or with less than the ledger (an auxiliary call is
+    priced into the ledger only), contributes nothing.
+    Returns (usd, allowance)."""
     try:
         state = json.loads((rt.home / 'spend.json').read_text())
         total = (state.get('goals') or {}).get(child)
+        plan = (state.get('goal_allowance') or {}).get(child)
     except Exception:
-        return 0.0           # sweep runs bare in the runtime loop: a bad or absent file is not an error here
-    return float(total) if isinstance(total, (int, float)) else 0.0
+        return 0.0, 0.0      # sweep runs bare in the runtime loop: a bad or absent file is not an error here
+    return (float(total) if isinstance(total, (int, float)) and not isinstance(total, bool) else 0.0,
+            float(plan) if isinstance(plan, (int, float)) and not isinstance(plan, bool) else 0.0)
 
 
 def _sweep_close(rt, r, outcome, state, summary):
     """Close a child's row at sweep in the same shape run_child reports.
 
     The close is the last thing written about this child, and a report without its spend reads as a free run
-    (#382 review), so the row's model, provider, spend and cap always ride along. The spend is the larger of the
-    ledger and spend.json's total for the child (see _priced_but_unledgered), and the summary says when the
-    difference was real money rather than a rounding."""
+    (#382 review), so the row's model, provider, spend and cap always ride along. Spend and allowance are each the
+    larger of the ledger and spend.json's total for the child (see _priced_but_unledgered), and the summary says
+    when the difference was real money rather than a rounding."""
     spent = round(r['spend_usd'] or 0.0, 6)
-    priced = round(_priced_but_unledgered(rt, r['child']), 6)
+    used = round(r['allowance_usd'] or 0.0, 6)
+    priced, priced_allowance = _priced_but_unledgered(rt, r['child'])
+    priced, priced_allowance = round(priced, 6), round(priced_allowance, 6)
     if priced > spent:
         summary = f'{summary}; ${priced:.4f} of it was priced but not yet in its ledger'
         spent = priced
+    if priced_allowance > used:
+        summary = f'{summary}; ${priced_allowance:.4f} of allowance was priced but not yet in its ledger'
+        used = priced_allowance
     rt.store.delegate_done(r['child'], outcome, dict(
         child=r['child'], role=r['role'], model=r['model'], provider=r['provider'], outcome=outcome, state=state,
-        spend_usd=spent, allowance_usd=round(r['allowance_usd'] or 0.0, 6),
+        spend_usd=spent, allowance_usd=used,
         cap_usd=r['cap_usd'] or 0.0, summary=summary))
 
 

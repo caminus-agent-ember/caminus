@@ -2498,7 +2498,7 @@ class Runtime:
         wrote = usage.get('cache_creation_input_tokens') or 0
         total_in = usage.get('prompt_tokens') if isinstance(usage.get('prompt_tokens'), int) else \
             (usage.get('input_tokens') or 0) + read + wrote
-        if not usd and not total_in:
+        if not usd and not total_in and not allowance:
             return 0.0, 0.0
         import datetime
         path = self.home / 'spend.json'
@@ -2511,6 +2511,13 @@ class Runtime:
         day['cache_read'] = day.get('cache_read', 0) + int(read or 0)
         if allowance:
             day['allowance'] = round(day.get('allowance', 0.0) + allowance, 8)
+            # per goal too, beside `goals`' usd: a child killed before its ledger saw this turn can only be
+            # reported from here, and an allowance-only turn never reaches the `goals` write below (#382 review)
+            plan = state.setdefault('goal_allowance', {})
+            plan[gid] = round(plan.get(gid, 0.0) + allowance, 8)
+            if len(plan) > 500:               # bounded like `goals`
+                for k in list(plan)[:len(plan) - 500]:
+                    plan.pop(k)
         if not usd:
             atomic_json(path, state)
             return 0.0, allowance
